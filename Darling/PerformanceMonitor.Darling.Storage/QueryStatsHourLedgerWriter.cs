@@ -91,7 +91,35 @@ public static class QueryStatsHourLedgerWriter
     /// writes nothing and costs no round trip: the rollup has no row for an hour with no counted rows. Returns the rows
     /// the statement affected (1, or 0 when it wrote nothing).
     /// </summary>
-    public static async Task<int> AddBatchAsync(
+    public static Task<int> AddBatchAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int serverId,
+        string serverName,
+        DateTime collectionTime,
+        long count,
+        int commandTimeoutSeconds,
+        CancellationToken cancellationToken) =>
+        AddBatchCoreAsync(QueryStatsHourLedger.UpsertSql, connection, transaction, serverId, serverName, collectionTime, count, commandTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// The same add for a <c>collect.procedure_stats</c> batch (#9357): <see cref="ProcedureStatsHourLedger.UpsertSql"/> on the
+    /// COPY's own transaction, with the contract <see cref="AddBatchAsync"/> states for query_stats. A fault throws out of the
+    /// batch and the transaction rolls back, so raw and the ledger commit together or not at all.
+    /// </summary>
+    public static Task<int> AddProcedureStatsBatchAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int serverId,
+        string serverName,
+        DateTime collectionTime,
+        long count,
+        int commandTimeoutSeconds,
+        CancellationToken cancellationToken) =>
+        AddBatchCoreAsync(ProcedureStatsHourLedger.UpsertSql, connection, transaction, serverId, serverName, collectionTime, count, commandTimeoutSeconds, cancellationToken);
+
+    private static async Task<int> AddBatchCoreAsync(
+        string upsertSql,
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         int serverId,
@@ -110,7 +138,7 @@ public static class QueryStatsHourLedgerWriter
             return 0;
         }
 
-        await using var command = new NpgsqlCommand(QueryStatsHourLedger.UpsertSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(upsertSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = serverName });
 

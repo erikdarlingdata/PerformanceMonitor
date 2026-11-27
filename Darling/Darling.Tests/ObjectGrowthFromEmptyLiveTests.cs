@@ -103,6 +103,7 @@ VALUES ($1, $2, $3, $4, 'db1', 1, 'dbo', $5, 'Staging', 1, $6, 0, 0)";
         cmd.Parameters.AddWithValue(serverId);
         cmd.Parameters.AddWithValue(AnomalyThresholds.ObjectGrowthMbThreshold);
         cmd.Parameters.AddWithValue(AnomalyThresholds.ObjectGrowthPctThreshold);
+        cmd.Parameters.AddWithValue(new DateTime(9999, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)); /* the window end: no bound here */
         using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {

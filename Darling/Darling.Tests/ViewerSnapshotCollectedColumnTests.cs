@@ -55,7 +55,7 @@ public sealed class ViewerSnapshotCollectedColumnTests
     public void TheCpuSchedulerLoad_WrapsItsRowsWithTheSnapshotsCollectionTime()
     {
         var source = ViewerFile("ViewerServerTab.CpuScheduler.cs");
-        Assert.Contains("CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result);", source, StringComparison.Ordinal);
+        Assert.Contains("CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result)", source, StringComparison.Ordinal);
     }
 
     [Fact]

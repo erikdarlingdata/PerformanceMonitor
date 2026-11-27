@@ -141,7 +141,7 @@ export function paintStoreServerLists(container, groups, activeParam, current) {
     const isCurrent = name === current;
     const header = el("div", { class: "sidebar-store-header" + (isCurrent ? " current" : ""), dataset: { store: name }, "aria-current": isCurrent ? "true" : null }, [
       el("span", { class: "dot " + healthBandClass(g.store.health) }),
-      el("span", { class: "sidebar-store-name", text: name }),
+      el("span", { class: "sidebar-store-name", text: name, title: g.store.service_build || null }),
       isCurrent ? currentMark() : null,
       g.store.health === "ok" ? null : el("span", { class: "sidebar-store-health", text: healthLabel(g.store.health) }),
     ]);

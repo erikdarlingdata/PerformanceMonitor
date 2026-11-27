@@ -76,5 +76,28 @@ internal static class TopFill
         }
     }
 
+    /// <summary>
+    /// #8570: the same fill with no round or candidate bound, for an existence test. It grows the candidate limit by
+    /// <see cref="Growth"/> until the page holds <paramref name="top"/> rows or a round ranks fewer candidates than
+    /// its limit (every candidate was seen), so an empty page means no showable group exists, however many WAITFOR
+    /// groups rank above one. The bounded <see cref="RunAsync{T}"/> stops after <see cref="MaxRounds"/> rounds, where
+    /// a short page can still leave showable groups unranked.
+    /// </summary>
+    public static async Task<List<T>> RunUntilExhaustedAsync<T>(int top, Func<int, Task<(List<T> Rows, int CandidateCount)>> round)
+    {
+        ArgumentNullException.ThrowIfNull(round);
+        var candidates = FirstCandidates(top);
+        while (true)
+        {
+            var (rows, candidateCount) = await round(candidates).ConfigureAwait(false);
+            if (rows.Count >= top || candidateCount < candidates || candidates == int.MaxValue)
+            {
+                return rows;
+            }
+
+            candidates = Clamp((long)candidates * Growth);
+        }
+    }
+
     private static int Clamp(long value) => (int)Math.Min(value, int.MaxValue);
 }

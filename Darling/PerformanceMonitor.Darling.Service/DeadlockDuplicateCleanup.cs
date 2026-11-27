@@ -222,7 +222,7 @@ SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates
     /// </summary>
     public static async Task<Summary> RunAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.DeadlockDedupe, cancellationToken);
 
         var currentVersion = CleanupVersion.ToString(CultureInfo.InvariantCulture);
         if (await ReadMarkerAsync(connection, cancellationToken) == currentVersion)

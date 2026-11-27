@@ -42,6 +42,18 @@ public sealed class TempDbStatsCollectorDefinitionTests
                    writers are positional, so the ceiling could only ever go last — inserting it beside
                    unallocated_mb, where it belongs semantically, would re-map every historical row. */
                 "max_size_mb",
+                /* #8881, APPENDED for the same reason: the tempdb log, then the oldest open log transaction. */
+                "log_total_mb",
+                "log_used_mb",
+                "log_used_percent",
+                "log_reuse_wait_desc",
+                "log_truncation_holdup_reason",
+                "holder_session_id",
+                "holder_login_name",
+                "holder_program_name",
+                "holder_begin_time",
+                "holder_log_bytes_used",
+                "holder_log_bytes_reserved",
             },
             names);
     }
@@ -136,6 +148,36 @@ public sealed class TempDbStatsCollectorDefinitionTests
         Assert.Equal(-1m, Assert.Single(rows).MaxSizeMb);
     }
 
+    /// <summary>
+    /// #8881: the third result set is the log, and every value in it lands on the row and in the payload in
+    /// column order. A holder is stored only when the query read one: a NULL stays NULL, never a zero.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_LogResultSet_LandsOnTheRowAndInThePayload()
+    {
+        var begin = new System.DateTime(2026, 11, 16, 12, 30, 0, System.DateTimeKind.Unspecified);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { new object[] { 1.5m, 2.5m, 3.5m, 7.5m, 10.0m, 65536.0m } },
+            new[] { new object[] { 55, 12.25m, 9L } },
+            new[] { new object[] { 1000.00m, 910.00m, 91.00m, "ACTIVE_TRANSACTION", "ACTIVE_TRANSACTION", (short)57, "etl_login", "nightly load", begin, 734003200L, 1048576000L } });
+
+        var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
+        var row = Assert.Single(await TempDbStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        Assert.Equal(1000.00m, row.LogTotalMb);
+        Assert.Equal(91.00m, row.LogUsedPercent);
+        Assert.Equal(57, row.HolderSessionId);
+        Assert.Equal("nightly load", row.HolderProgramName);
+
+        var writer = new RecordingCollectorRowWriter();
+        TempDbStatsCollector.Instance.WritePayload(row, writer, context);
+
+        Assert.Equal(TempDbStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
+        Assert.Equal(
+            new object?[] { 1000.00m, 910.00m, 91.00m, "ACTIVE_TRANSACTION", "ACTIVE_TRANSACTION", 57, "etl_login", "nightly load", begin, 734003200L, 1048576000L },
+            writer.Values.Skip(9).ToArray());
+    }
+
     [Fact]
     public async Task ReadAsync_EmptyResultSets_StillYieldsOneZeroRow()
     {
@@ -160,7 +202,7 @@ public sealed class TempDbStatsCollectorDefinitionTests
 
         TempDbStatsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(deltas));
 
-        Assert.Equal(new object?[] { 1.5m, 2.5m, 3.5m, 7.5m, 10.0m, 9L, 55, 12.25m, 65536.0m }, writer.Values);
+        Assert.Equal(new object?[] { 1.5m, 2.5m, 3.5m, 7.5m, 10.0m, 9L, 55, 12.25m, 65536.0m, null, null, null, null, null, null, null, null, null, null, null }, writer.Values);
         Assert.Empty(deltas.Calls);
     }
 
@@ -228,7 +270,7 @@ public sealed class TempDbStatsCollectorDefinitionTests
         /* Positional AND typed: 74 must arrive as int, not short, or the INTEGER column takes a
            narrowed write on the Darling COPY path. */
         Assert.Equal(TempDbStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
-        Assert.Equal(new object?[] { 5.44m, 1.81m, 0.00m, 7.25m, 54.19m, 1L, 74, 0.13m, 65536.00m }, writer.Values);
+        Assert.Equal(new object?[] { 5.44m, 1.81m, 0.00m, 7.25m, 54.19m, 1L, 74, 0.13m, 65536.00m, null, null, null, null, null, null, null, null, null, null, null }, writer.Values);
         Assert.IsType<int>(writer.Values[6]);
         Assert.IsType<long>(writer.Values[5]);
     }

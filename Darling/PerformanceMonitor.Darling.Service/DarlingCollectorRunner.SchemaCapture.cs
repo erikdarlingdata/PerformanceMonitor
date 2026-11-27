@@ -21,6 +21,7 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed partial class DarlingCollectorRunner
 {
     private ISchemaCaptureSource? _schemaSource;
+    private IColumnStatsSource? _columnStatsSource;
 
     /// <summary>The store the runner writes to.</summary>
     internal NpgsqlDataSource Store => _postgres;
@@ -34,7 +35,14 @@ public sealed partial class DarlingCollectorRunner
         set => _schemaSource = value;
     }
 
-    /// <summary>The pass budget and the per-database budget of the schema pass, replaced by a test. Null in production: five minutes and 120 seconds.</summary>
+    /// <summary>Where the <c>column_stats</c> run (#8798) opens its connections to a monitored server. Replaced by a test; the SQL Server one otherwise.</summary>
+    internal IColumnStatsSource ColumnStatsSource
+    {
+        get => _columnStatsSource ??= new SqlColumnStatsSource(this);
+        set => _columnStatsSource = value;
+    }
+
+    /// <summary>The pass budget and the per-database budget of the schema pass and of the <c>column_stats</c> run, replaced by a test. Null in production: five minutes and 120 seconds.</summary>
     internal (TimeSpan Pass, TimeSpan Database)? SchemaBudgetsForTests { get; set; }
 
     /// <summary>
@@ -75,5 +83,21 @@ public sealed partial class DarlingCollectorRunner
         };
 
         return WriteBatchAsync(pgConnection, SchemaObjectsCollector.Instance, rows, server, collectionTime, context, cancellationToken);
+    }
+
+    /// <summary>Writes the run rows of one <c>column_stats</c> run (#8798) with the same writer every collector's rows go through.</summary>
+    internal Task<int> WriteColumnStatsRunRowsAsync(
+        NpgsqlConnection pgConnection, List<ColumnStatsCollector.RunRow> rows, ServerRuntime server, DateTime collectionTime, CancellationToken cancellationToken)
+    {
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = collectionTime,
+            Deltas = _deltas,
+            Target = server.Target,
+        };
+
+        return WriteBatchAsync(pgConnection, ColumnStatsCollector.Instance, rows, server, collectionTime, context, cancellationToken);
     }
 }

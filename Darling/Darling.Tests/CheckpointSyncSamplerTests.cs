@@ -15,11 +15,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins #4823's self-alert half: the once-a-minute sample of the checkpointer's cumulative sync time and the
-/// window maximum it keeps. The Store Checkpointer Pressure alert judged only the hour's AVERAGE sync per
-/// checkpoint, so one checkpoint that synced for 23.5 s among four in the hour stayed under the 10 s bar while
-/// collection stalled. The sampler differences the cumulative <c>sync_time</c> minute by minute and keeps the
-/// largest difference, which the hourly evaluation then judges beside the average
-/// (<see cref="StoreToastAndCheckpointerTests"/> holds the evaluator half). The same class pins the two one-column
+/// window maximum it keeps. The hour's AVERAGE sync per checkpoint hides one checkpoint that synced for 23.5 s
+/// among four, the sync collection stalled inside. The sampler differences the cumulative <c>sync_time</c> minute
+/// by minute, keeps the largest difference for the hour's stored row, and keeps every sync with the minute it
+/// finished in, which is what the Store Checkpointer Pressure alert sets a suffering store read or write against
+/// (#9549; <see cref="StoreToastAndCheckpointerTests"/> holds the evaluator half). The same class pins the two one-column
 /// reads in <c>StoreSelfMetrics</c> (which statement each PostgreSQL major gets) and the worker's wiring: a one-minute
 /// gate ahead of the hourly tick, and a failed read that is a Debug line and a skipped minute.
 ///
@@ -127,6 +127,88 @@ public sealed class CheckpointSyncSamplerTests
         /* The counter still reads 5,000 as its baseline, so the next window measures 700, not 5,700. */
         sampler.Observe(T0.AddMinutes(2), 5_700);
         Assert.Equal(new CheckpointSyncMax(T0.AddMinutes(2), 700), sampler.TakeWindowMax());
+    }
+
+    /* ---- #9549: every sync of the window, with the minute it finished in ---------------------------------------- */
+
+    [Fact]
+    public void TakeWindowMax_HandsOverEverySyncOfTheWindow_WithTheSampleBeforeItAndTheOneThatSawIt()
+    {
+        var sampler = new CheckpointSyncSampler();
+        Assert.Empty(sampler.TakenSyncs());
+
+        sampler.Observe(T0, 500_000);
+        sampler.Observe(T0.AddMinutes(1), 500_400);
+        sampler.Observe(T0.AddMinutes(2), 500_400);
+        sampler.Observe(T0.AddMinutes(3), 523_942);
+
+        /* Nothing is handed over until the hourly tick takes the window. */
+        Assert.Empty(sampler.TakenSyncs());
+
+        Assert.Equal(new CheckpointSyncMax(T0.AddMinutes(3), 23_542), sampler.TakeWindowMax());
+
+        /* One sync per minute in which sync time finished, oldest first. The quiet minute is not a sync. */
+        Assert.Equal(
+            new[]
+            {
+                new CheckpointSync(T0, T0.AddMinutes(1), 400),
+                new CheckpointSync(T0.AddMinutes(2), T0.AddMinutes(3), 23_542),
+            },
+            sampler.TakenSyncs());
+
+        /* Reading them does not take them: the same window reads the same until the next take. */
+        Assert.Equal(2, sampler.TakenSyncs().Count);
+
+        /* The next window holds no sync, and the take hands over none. */
+        sampler.Observe(T0.AddMinutes(4), 523_942);
+        Assert.Equal(new CheckpointSyncMax(T0.AddMinutes(4), 0), sampler.TakeWindowMax());
+        Assert.Empty(sampler.TakenSyncs());
+    }
+
+    [Fact]
+    public void ASkippedMinute_WidensTheSyncBackToTheLastSampleThatWasRead()
+    {
+        var sampler = new CheckpointSyncSampler();
+
+        /* The samples at 12:01 and 12:02 failed, so the 9 s the counter grew by finished somewhere in three minutes. */
+        sampler.Observe(T0, 0);
+        sampler.Observe(T0.AddMinutes(3), 9_000);
+        sampler.TakeWindowMax();
+
+        var sync = Assert.Single(sampler.TakenSyncs());
+        Assert.Equal(new CheckpointSync(T0, T0.AddMinutes(3), 9_000), sync);
+        Assert.Equal(T0.AddSeconds(-9), sync.StartedUtc);
+    }
+
+    [Fact]
+    public void ACounterThatFalls_IsNotASync_AndTheNextDifferenceStartsAtTheNewBaseline()
+    {
+        var sampler = new CheckpointSyncSampler();
+
+        sampler.Observe(T0, 500_000);
+        sampler.Observe(T0.AddMinutes(1), 200);
+        sampler.Observe(T0.AddMinutes(2), 500);
+        sampler.TakeWindowMax();
+
+        Assert.Equal(new[] { new CheckpointSync(T0.AddMinutes(1), T0.AddMinutes(2), 300) }, sampler.TakenSyncs());
+    }
+
+    [Fact]
+    public void AWindow_KeepsAtMostADaysWorthOfSyncs_TheNewest()
+    {
+        var sampler = new CheckpointSyncSampler();
+        sampler.Observe(T0, 0);
+        for (var minute = 1; minute <= CheckpointSyncSampler.MaxWindowSyncs + 2; minute++)
+        {
+            sampler.Observe(T0.AddMinutes(minute), minute);
+        }
+
+        sampler.TakeWindowMax();
+
+        var syncs = sampler.TakenSyncs();
+        Assert.Equal(CheckpointSyncSampler.MaxWindowSyncs, syncs.Count);
+        Assert.Equal(T0.AddMinutes(3), syncs[0].SampledUtc);
+        Assert.Equal(T0.AddMinutes(CheckpointSyncSampler.MaxWindowSyncs + 2), syncs[^1].SampledUtc);
     }
 
     [Theory]

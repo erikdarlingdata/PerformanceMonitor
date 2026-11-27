@@ -45,13 +45,9 @@ public sealed class ExternalAlertRungTests
     [Fact]
     public void TheRungIsRegisteredOnce_AtTheTopOfTheLadder_AtTheVersionTheTablesNameThemselves()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(180, ExternalAlertTables.RungVersion);
         Assert.Equal(ExternalAlertTables.RungVersion, Rung.Version);
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Equal(ExternalAlertTables.CreateSql, Rung.Sql);
     }
 

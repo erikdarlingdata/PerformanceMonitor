@@ -62,9 +62,11 @@ public sealed class UnpooledDropConnectionCensusTests
         ["MonitoringGrantScriptLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ProcedureStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["QueryStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
+        ["QueryStatsReadWatermarkLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["RemediationLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["PlanForceToolLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
         ["QueryStoreReplicaReadsLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
+        ["QueryStoreUnicodeDatabaseNameLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanCollectorNoXmlLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ReadableSecondaryQueryStoreGateLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanVariantLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
@@ -75,10 +77,12 @@ public sealed class UnpooledDropConnectionCensusTests
         ["DropXeSessionsReadOnlyIntentTests.cs"] = "A SQL-injection session-name fixture: the text is data a validator must refuse, never run as a statement.",
         ["DropXeSessionsVerbTests.cs"] = "A SQL-injection session-name fixture and a list of forbidden verbs: text a validator must refuse, never run as a statement.",
         ["UnpooledDropConnectionCensusTests.cs"] = "This census: its own samples hold the drop text on purpose.",
+        ["CollectorSchemaLockLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]) on a SqlConnection; no PostgreSQL store at all.",
         ["SchemaCatalogLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["SchemaChangesXeSessionLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["SchemaEventLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["SchemaCaptureEndToEndLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
+        ["ColumnStatsEndToEndLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]) and a scratch login; the scratch store it also makes is dropped by ScratchPostgres.",
         ["ScratchPostgresQuiesceTests.cs"] = "The quiesce census: its samples hold the drop text on purpose, and the live test there drops through ScratchPostgres.",
     };
 
@@ -96,6 +100,8 @@ public sealed class UnpooledDropConnectionCensusTests
             "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
         ["BlockingHeadEvidenceLiveSqlTests.cs::TwoIdleHeadBlockers_ReadAsSleepingWithTheirLoginTimeOneOpenTransactionAndExactLogBytes"] =
             "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
+        ["DatabaseProtectionCollectorTests.cs::DropDatabaseAsync"] =
+            "#8865: the DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
     };
 
     /// <summary>Matches case-insensitively: T-SQL and PostgreSQL both accept <c>drop database</c>.</summary>

@@ -68,10 +68,15 @@ Only with `web.allowTokenlessLoopback` on does a loopback-only dashboard skip th
 
 The **Availability Groups** link stays hidden until the store holds AG data. The `#/ag` route works regardless.
 
-To check from a script, run:
+To check from a script, sign in first. `/api/ping` is behind the same sign-in as every other `/api` route, on every listener of the dashboard, loopback included, unless `web.allowTokenlessLoopback` is on. A call with no session cookie answers HTTP 401 with `{"error":"session expired","login":"/"}`. A script signs in with a form POST of the token, in a field named `token`, to `/auth/login`, and then presents the session cookie it gets back. For a check that needs no sign-in, use the [health port](network-endpoints.md#the-health-port) (`/livez` and `/readyz`). It is off by default, and on Docker Compose it also needs a `ports:` entry for its port in `docker-compose.yml`.
+
+On the service host, run this from an elevated PowerShell. It reads the token with `--print-web-token` and keeps the session cookie in `$session`:
 
 ```powershell
-Invoke-RestMethod http://localhost:5153/api/ping
+$token = (& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --print-web-token).Trim()
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+Invoke-WebRequest http://localhost:5153/auth/login -Method Post -Body @{ token = $token } -WebSession $session | Out-Null
+Invoke-RestMethod http://localhost:5153/api/ping -WebSession $session
 ```
 
 **Proof:** `status : ok`, and `collecting : True`.
@@ -258,8 +263,29 @@ Two gates apply, and the order matters:
 
 **Proof:** the dashboard renders in the remote browser, and the address bar shows no `?token=`.
 
-The exposure is fail-closed. Any of these sends the endpoint back to loopback: an unparseable `listen`, an invalid `allowFrom`, a missing token, or bring-your-own PostgreSQL. The service logs a critical line that says which one. The endpoint never half-exposes. With no token at all, the loopback dashboard does not start either (see [Turn it on](#turn-it-on)).
+The exposure is fail-closed. Any of these sends the endpoint back to loopback: an unparseable `listen`, an invalid `allowFrom`, a missing token, or bring-your-own PostgreSQL. The service logs a critical line that says which one. With bring-your-own PostgreSQL, the service logs a warning that names the `web.network` settings it ignores: `listen`, `allowFrom`, `tls`, `oidc` (the sign-in provider) and `trustedProxies`. The OIDC sign-in provider settings (`authority`, `clientId` and the secret) are ignored, but `oidc.tokenSignIn` still applies, and a value of `off` or an unknown value stops the loopback dashboard. The tokens (`token`, `encryptedToken` and `tokens`) still gate the loopback dashboard, and a block that holds only tokens gets no warning. The endpoint never half-exposes. With no token at all, the loopback dashboard does not start either (see [Turn it on](#turn-it-on)).
 
 TLS is opt-in. Without it, the token and the cookie travel in clear on the segment. The CIDR bounds who can route to the port. It does not protect the wire. An exposed dashboard with no certificate says so at every start. Point `web.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape), or put a TLS-terminating reverse proxy in front of the port. The certificate applies to the LAN listener only, and loopback stays plain HTTP. A missing or expired certificate keeps the dashboard loopback-only and does not fall back to cleartext.
 
 Never expose this dashboard to the internet.
+
+#### Who you are signed in as
+
+`GET /api/me` describes the calling session and nobody else. It answers `method` (`oidc`, `named_token`, `managed_group`, `shared_token` or `reads_only`), `seat` (`admin` or `read_only`) and `expires_at` (the time the session cookie ends, in UTC, or null when the request has no cookie). It adds `subject`, `display_name`, `granted_by` and `role_mapping` for an `oidc` sign-in, `token_name` for a named web token and `group_name` for a managed group. `role_mapping` is `true` when the OpenID Connect sign-in on this host has `adminRoles` or `viewerRoles` set, `false` when it has neither, and null when the session is not `oidc` (or the host has no OpenID Connect). A null `granted_by` does not mean there is no mapping: a sign-in the provider gave no `iss` or `sub` for carries no grant. Every other key is null, except `personal_tokens`: it is `true` when the service serves personal MCP tokens and the seat may use the page (an OpenID Connect sign-in, or a seat that can edit), and `false` otherwise. The account menu shows the My MCP tokens link from `personal_tokens`. The page shows the other keys for display only, and no route decides anything from them.
+
+The sidebar shows the session as one line in its top block, and at 768 px and narrower in the top bar. The line is hidden while the sidebar is collapsed. Select it to open a panel with these rows: Name (for an `oidc` sign-in that sent one), Signed in as, Seat, Signed in with and Session ends. For an `oidc` sign-in the Seat row names the value that granted it, for example `admin (granted by dba-admins)`. That value is a group or a role, whichever `roleClaim` reads. `admin (no role mapping set)` appears only when `role_mapping` is `false`: OpenID Connect is on with no `adminRoles` or `viewerRoles`, so every signed-in user is an admin. With a mapping set and no grant to name, the row is the bare seat word. A shared-token session reads `shared token · admin`, or `shared token · read-only` when its token is under the length floor or a front door lowered it for a viewer; `method` is `shared_token` for any session that has a cookie, and `reads_only` only for a request with no cookie (tokenless loopback). Sign out appears only for a session that has a sign-in cookie. Escape closes the panel.
+
+`/api/session` carries no name and no owner key, and on a store's dashboard a scoped reader can read `/api/me` as well (a front door refuses a scoped reader every `/api` path).
+
+#### My MCP tokens
+
+When the service serves [personal MCP tokens](configuration-mcp.md#personal-tokens), `/api/me` reports `personal_tokens: true` for a seat that may use the page, and the account menu links to **My MCP tokens** (`#/mcp-tokens`). On this page a person makes a token (a name, a lifetime and a role), sees the value once, and lists and revokes their own tokens. An admin seat can also list and revoke everyone's tokens, whatever method that admin signed in with.
+
+| Seat | Can make | Can list and revoke |
+|---|---|---|
+| Read-only, signed in with OpenID Connect | `reader` tokens | Their own |
+| Admin, signed in with OpenID Connect | Up to `mcp.personalTokens.adminRole` | Their own and everyone's |
+| Admin, signed in with the shared token or a named web token with edit | None (403 `oidc_only`) | Everyone's (`?all=1`) and any token's revoke; its own list is empty |
+| Any other seat | None | None: every route answers 403 |
+
+The routes are `/api/mcp-tokens` and `/api/mcp-tokens/{id}/revoke`. They are not behind `web.allowAdminWrites`: a read-only OpenID Connect seat may POST exactly these two routes, with the same Host, SameSite and JSON checks as every other write. A front door answers `/api/mcp-tokens*` itself with 404 and never forwards it, and its `/api/me` reports `personal_tokens: false`.

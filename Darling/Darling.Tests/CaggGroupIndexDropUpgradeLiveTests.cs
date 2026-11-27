@@ -293,14 +293,18 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
     /// <c>(server_id, bucket)</c> on all six, plus <c>(server_name, bucket)</c> on the two hourly views.
     /// </summary>
     private static string[] KeptFirstColumnsFor(string view) =>
-        view == TimescaleSupport.QueryStoreStatsHourlyView || view == TimescaleSupport.QueryStoreStatsCorrectedHourlyView
+        view == TimescaleSupport.QueryStoreStatsHourlyView
             ? new[] { "server_id", "server_name" }
-            : new[] { "server_id" };
+            : view == TimescaleSupport.QueryStoreStatsCorrectedHourlyView
+                ? new[] { "server_name" } /* #9215: the plain (server_id, bucket) index became the covering one. */
+                : new[] { "server_id" };
 
     private static string[] DroppedFirstColumnsFor(string view) => view switch
     {
-        _ when view == TimescaleSupport.QueryStoreStatsHourlyView || view == TimescaleSupport.QueryStoreStatsCorrectedHourlyView =>
+        _ when view == TimescaleSupport.QueryStoreStatsHourlyView =>
             new[] { "database_name", "module_name", "query_hash" },
+        _ when view == TimescaleSupport.QueryStoreStatsCorrectedHourlyView =>
+            new[] { "database_name", "module_name", "query_hash", "server_id" },
         _ when view == TimescaleSupport.QueryStoreStatsIntervalDailyView =>
             new[] { "database_name", "execution_type_desc", "first_execution_time", "module_name", "plan_id", "query_hash", "query_id", "replica_role", "runtime_stats_interval_id", "server_name" },
         _ => new[] { "database_name", "module_name", "query_hash", "server_name" },

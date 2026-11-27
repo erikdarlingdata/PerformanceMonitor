@@ -273,7 +273,7 @@ public static class DarlingPgIndexBloatReader
                    skipped_reason, collection_time
             FROM pg_index_bloat
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, index_name,
                      (skipped_reason IS NULL) DESC, collection_time DESC
@@ -394,7 +394,7 @@ WITH latest AS (
            index_bytes, skipped_reason, est_tuple_bytes
     FROM pg_index_bloat
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     ORDER BY database_name, schema_name, table_name, index_name,
              (skipped_reason IS NULL) DESC, collection_time DESC
@@ -405,7 +405,7 @@ probe AS (
         FROM collection_log
         WHERE server_id = $1
         AND   collector_name = 'pg_index_bloat'
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status IN (" + EvidenceStatusList + @")
     ) AS evidence_collector_ran

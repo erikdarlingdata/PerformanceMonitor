@@ -26,16 +26,19 @@ public static partial class DarlingCliCommands
     /// <summary>What <c>--grant-script</c> was asked for. <see cref="ServerName"/> picks a registered server; <see cref="Host"/> describes
     /// one not yet added. Exactly one of the two is set.</summary>
     internal sealed record GrantScriptArgs(
-        string? ServerName, string? Host, string? Auth, string? Username, string? ServiceAccount, bool FinOps, bool Azure, bool Rds, string? ConfigPath);
+        string? ServerName, string? Host, string? Auth, string? Username, string? ServiceAccount, bool FinOps, bool Azure, bool Rds, string? ConfigPath,
+        IReadOnlyList<string>? ColumnStatsDatabases = null);
 
     /// <summary>The grammar <c>--grant-script</c> prints when its arguments are wrong. Pure ASCII.</summary>
     public static string GrantScriptUsageText() =>
         "Usage:" + Environment.NewLine +
-        "  --grant-script <server-name> [--finops] [--azure] [--rds] [--service-account <account>] [--config <path>]" + Environment.NewLine +
+        "  --grant-script <server-name> [--finops] [--azure] [--rds] [--column-stats-databases <db>]... [--service-account <account>] [--config <path>]" + Environment.NewLine +
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
         "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--service-account <account>]" + Environment.NewLine +
-        "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
+        "      The same for a host not yet added. Connects to no monitored server. Without --auth the default is integrated on Windows or with --service-account, and sql otherwise on Linux and in a container." + Environment.NewLine +
+        "  --column-stats-databases adds database-level SELECT, only in the databases you list, for the optional column_stats collector (column selectivity)." + Environment.NewLine +
+        "      One database per option, repeated for each: the value is taken whole, so a name with a comma or a space works (quote it)." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
         "  prints the Azure SQL Database form: a contained user and database-scoped grants." + Environment.NewLine +
         "  --rds (implied by a *.rds.amazonaws.com host) prints the Amazon RDS for SQL Server form: no CONNECT ANY DATABASE, ALTER SETTINGS or" + Environment.NewLine +
@@ -57,6 +60,7 @@ public static partial class DarlingCliCommands
         parsed = null;
         errorMessage = null;
         string? name = null, host = null, auth = null, username = null, serviceAccount = null, configPath = null;
+        List<string>? columnStatsDatabases = null;
         bool finOps = false, azure = false, rds = false;
         for (var i = 0; i < rest.Length; i++)
         {
@@ -72,7 +76,7 @@ public static partial class DarlingCliCommands
                 case "--rds":
                     rds = true;
                     continue;
-                case "--host" or "--auth" or "--username" or "--service-account" or "--config":
+                case "--host" or "--auth" or "--username" or "--service-account" or "--config" or "--column-stats-databases":
                     if (i + 1 >= rest.Length || rest[i + 1].StartsWith("--", StringComparison.Ordinal))
                     {
                         errorMessage = $"{arg} needs a value.";
@@ -93,6 +97,21 @@ public static partial class DarlingCliCommands
                             break;
                         case "--service-account":
                             serviceAccount = value;
+                            break;
+                        case "--column-stats-databases":
+                            /* One name per occurrence, taken whole: a database name can hold a comma, so a list cannot be split on one. */
+                            if (string.IsNullOrWhiteSpace(value))
+                            {
+                                errorMessage = "--column-stats-databases needs a database name.";
+                                return false;
+                            }
+
+                            columnStatsDatabases ??= [];
+                            if (!columnStatsDatabases.Contains(value, StringComparer.OrdinalIgnoreCase))
+                            {
+                                columnStatsDatabases.Add(value);
+                            }
+
                             break;
                         default:
                             configPath = value;
@@ -135,7 +154,7 @@ public static partial class DarlingCliCommands
             return false;
         }
 
-        parsed = new GrantScriptArgs(name, host, auth, username, serviceAccount, finOps, azure, rds, configPath);
+        parsed = new GrantScriptArgs(name, host, auth, username, serviceAccount, finOps, azure, rds, configPath, columnStatsDatabases);
         return true;
     }
 
@@ -159,10 +178,11 @@ public static partial class DarlingCliCommands
     /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to no monitored SQL Server (the <c>server-name</c> form reads the store registry)
     /// and prints no password. The server list is the store's registry, with darling.json's own list when the store cannot be
     /// reached, as <c>--validate-config</c> resolves it. Exit 0 with the script on stdout; 1 for an argument, configuration or name problem.
+    /// <paramref name="isWindows"/> is the platform that picks the <c>--host</c> form's default <c>--auth</c> (#9844): null reads the running OS.
     /// </summary>
     public static async Task<int> GrantScriptAsync(
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken,
-        Func<string?>? readServiceAccount = null, string? machineName = null, string? domainName = null)
+        Func<string?>? readServiceAccount = null, string? machineName = null, string? domainName = null, bool? isWindows = null)
     {
         if (!TryParseGrantScriptArgs(rest, out var args, out var argError))
         {
@@ -218,7 +238,11 @@ public static partial class DarlingCliCommands
         {
             host = args.Host!;
             label = host;
-            auth = args.Auth ?? "integrated";
+            /* #9844: with no --auth, a host not yet added gets the form its platform can use. A Windows service connects with Windows
+               authentication. A Linux or Compose service has no Windows account to connect as, so its entry is a SQL login, and the script
+               names the --username login, or the placeholder login and its note when none is given. A --service-account names the Windows
+               account to grant, so it keeps integrated on every platform and the typed account is never dropped. */
+            auth = args.Auth ?? ((args.ServiceAccount is not null || (isWindows ?? OperatingSystem.IsWindows())) ? "integrated" : "sql");
             username = args.Username;
         }
 
@@ -233,7 +257,7 @@ public static partial class DarlingCliCommands
             ServiceNotOnThisMachine: serviceAccount is null);
         var azure = args.Azure || MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
         var rds = args.Rds || MonitoringGrantScript.IsAwsRdsHost(host);
-        output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label, awsRds: rds));
+        output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label, awsRds: rds, columnStatsDatabases: args.ColumnStatsDatabases));
         return 0;
     }
 }

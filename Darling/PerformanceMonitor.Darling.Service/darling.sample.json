@@ -144,7 +144,7 @@
       // server you add has no remediation login. On a server that is already registered, omitting them changes nothing.
       // Both halves are required; one alone counts as unarmed and the service says so at connect.
       // Least privilege: ALTER on each database you intend to force a plan in. ALTER SERVER STATE only if you want
-      // to evict a plan. ALTER ANY CONNECTION only if you want an agent to kill a session (it can kill ANY session).
+      // to evict a plan. ALTER ANY CONNECTION only if you want an agent to kill a session (it can kill ANY session), together with VIEW SERVER PERFORMANCE STATE (SQL Server 2022 and later) or VIEW SERVER STATE (earlier versions).
       // An agent action also needs a Level 3 route and that server's action switch, which is off until the store owner
       // turns it on (docs/darling-agent-dispatch.md).
       // An env:NAME or file:/path reference works everywhere. A DPAPI blob (--encrypt-password on THIS
@@ -251,6 +251,15 @@
     // Deliver the Server-Unreachable / Server-Restored alerts when a monitored server's reachability flips
     // (the headless twin of Lite's connection-change toasts). Default true; gated together with "enabled".
     "notifyConnectionChanges": true,
+    // The TempDB Log Space alert: fires when the tempdb LOG is at or above this percent used (default 80) for three samples in a row.
+    // The file seeds a new store only; after that the store's value governs, and the Viewer's Settings window edits it.
+    "tempDbLogSpaceEnabled": true,
+    "tempDbLogSpaceThresholdPercent": 80,
+    // TempDB Growth Won't Fit: alert when the next autogrowth of a tempdb file will not fit on its volume. Default true.
+    "tempDbGrowthFitEnabled": true,
+    // Instance Restarted and Memory Dumps: alert when the instance start time moves later, and when a new memory dump file appears. Default true. The file seeds a new store only.
+    "instanceRestartedEnabled": true,
+    "memoryDumpsEnabled": true,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
     // Blocking pages on blocked WAIT TIME, not on one event. "blockingCountThreshold" (default 3) pages when
@@ -451,6 +460,21 @@
     // cover all servers. Set false to refuse those calls. The claim-based Level 2 and 3 tools are not affected.
     // "allowAgentMuteRules": false,
 
+    // Personal MCP tokens (#8737): a person signed in to the web dashboard (web.network.oidc) mints their own short-lived MCP token.
+    // Default off. Served only with web.enabled true in darling.json, web.network.oidc configured, no front door and "allowTokenlessLoopback" off;
+    // otherwise the start logs one warning and the feature stays off. A number outside its range is clamped (1-365 days, 1-50 tokens)
+    // and an "adminRole" other than "operator" or "reader" is served as "reader", each with a warning. "dataDetail" (full, maskLiterals
+    // or metadataOnly) can only narrow "dataDetail" above; an unrecognized value leaves personal tokens off. "adminRole" "reader" (the
+    // default) keeps every personal token read-only. Set "operator" to let an admin mint an operator token: it gets the write tools whatever
+    // "allowWrites" and web.allowAdminWrites say, as a named operator token does (the server registry tools still need "allowWrites" and
+    // "allowServerAdmin"). With OIDC and no role mapping, every person who can sign in is an admin.
+    "personalTokens": {
+      "enabled": false,
+      "maxLifetimeDays": 30,
+      "maxTokensPerPerson": 5,
+      "adminRole": "reader"
+    },
+
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
     // Each token has a name (1-64 of A-Za-z0-9._:-) and a role: "operator" (the reads and the write tools, with
     // "allowWrites" off too), "agent" (the reads, the investigation tools and the Level 2 action tools, with
@@ -614,7 +638,7 @@
     //
     //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only
     //   // credential. When set, the login page adds an SSO button (authorization code + PKCE) and the shared
-    //   // token KEEPS working beside it (scripted callers / break-glass). Register this redirect URI at the
+    //   // token KEEPS working beside it (scripted callers / break-glass) unless "tokenSignIn" below is loopback or off. Register this redirect URI at the
     //   // IdP: {scheme}://{host}:{port}/auth/oidc/callback for every host browsers will use -- the "listen"
     //   // IP, localhost, and (#4220) web.publicBaseUrl's host above, because the anti-DNS-rebind Host
     //   // allowlist admits exactly those and no others.
@@ -627,6 +651,7 @@
     //     "encryptedClientSecret": "<output of --encrypt-password>", // or "clientSecret" (env:/file: reference, or plaintext for dev; omit BOTH for a public client on PKCE alone)
     //     "scopes": "openid profile email",                  // optional; openid is always forced in
     //     "subjectClaim": "preferred_username",              // optional; default chain preferred_username -> email (only when email_verified) -> sub. When SET it is required -- no fallback.
+    //     "tokenSignIn": "on",                               // optional: on | loopback | off -- where web tokens (shared, named, group) may sign in once OIDC is set; loopback = only from this machine, off = OIDC only (docs/darling/configuration-web.md)
     //
     //     // Role mapping: omit all three for parity with the shared token (every signed-in user may edit).
     //     // With them, a claim value in adminRoles => edit; else viewerRoles => read-only (the server refuses

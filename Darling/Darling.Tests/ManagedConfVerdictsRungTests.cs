@@ -41,17 +41,9 @@ public sealed class ManagedConfVerdictsRungTests
     private static PgMigrations.Migration V146 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("managed-conf-verdicts", V146.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* One below the top since V147 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to ComposeStatementTimeoutV147MigrationLiveTests with the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V146 is expected to sit below the ladder's top now that V147 has landed");
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>One idempotent CREATE, engine-plain, no ALTER of anything that already exists, keyed on

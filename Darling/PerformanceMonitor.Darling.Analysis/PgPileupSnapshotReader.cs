@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -103,7 +104,7 @@ LIMIT $3";
         var rows = new List<SameStatementPileupDetector.SnapshotRow>();
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, cancellationToken);
             using var command = new NpgsqlCommand(PileupWindowSql, connection)
             {
                 CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds,

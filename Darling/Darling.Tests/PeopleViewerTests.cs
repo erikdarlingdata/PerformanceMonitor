@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -49,12 +50,13 @@ public sealed class PeopleViewerTests
         Assert.Equal($$"""{"person_id":4,"kind":"web","external_id":"{{s_webKey}}"}""", ViewerPersonCommands.AddIdentityArgs(4, "web", s_webKey));
         Assert.Equal("""{"identity_id":9}""", ViewerPersonCommands.RemoveIdentityArgs(9));
         Assert.Equal("""{"grant_id":3}""", ViewerPersonCommands.RemoveGrantArgs(3));
+        Assert.Equal("""{"person_id":4}""", ViewerPersonCommands.DeletePersonArgs(4));
         /* The types are the ones the service executor resolves. */
         Assert.Equal(PersonDirectoryCommands.Types.OrderBy(t => t, StringComparer.Ordinal),
             new[]
             {
                 ViewerPersonCommands.AddPerson, ViewerPersonCommands.RenamePerson, ViewerPersonCommands.SetPersonEnabled, ViewerPersonCommands.AddIdentity,
-                ViewerPersonCommands.RemoveIdentity, ViewerPersonCommands.AddGrant, ViewerPersonCommands.RemoveGrant,
+                ViewerPersonCommands.RemoveIdentity, ViewerPersonCommands.AddGrant, ViewerPersonCommands.RemoveGrant, ViewerPersonCommands.DeletePerson,
             }.OrderBy(t => t, StringComparer.Ordinal));
     }
 
@@ -184,6 +186,35 @@ public sealed class PeopleViewerTests
         Assert.Equal("Approve server actions", rows[0].Grants[1].CapabilityDisplay);
     }
 
+    /// <summary>#8777: a person can be deleted with no sign-in, no grant and no history. History nobody read counts as none, and the service decides.</summary>
+    [Fact]
+    public void APerson_CanBeDeleted_OnlyWithNoSignInNoGrantAndNoHistory()
+    {
+        var at = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        PersonRow[] people =
+        [
+            new(1, "Ann", true, at, "person:alice", at, "person:alice", [new PersonIdentityRow(1, "slack", "T01:U02", at, "person:alice")], []),
+            new(2, "Bob", true, at, "person:alice", at, "person:alice", [], [new PersonGrantRow(1, null, null, null, null, "ask", [], at, "person:alice")]),
+            new(3, "Cat", true, at, "person:alice", at, "person:alice", [], []),
+            new(4, "Dee", false, at, "person:alice", at, "person:alice", [], []),
+        ];
+
+        var read = PersonViewRow.From(people, new HashSet<long> { 3 });
+        Assert.Equal([false, false, false, true], read.Select(r => r.CanDelete));
+        Assert.Equal([false, false, true, false], read.Select(r => r.HasHistory));
+
+        var unread = PersonViewRow.From(people, null);
+        Assert.Equal([false, false, true, true], unread.Select(r => r.CanDelete));
+        Assert.Equal([false, false, true, true], PersonViewRow.From(people).Select(r => r.CanDelete));
+    }
+
+    [Fact]
+    public void TheDeleteQuestion_NamesThePerson_AndSaysItCannotBeUndone()
+    {
+        Assert.Equal("Delete Dee?" + Environment.NewLine + Environment.NewLine + "This removes them from the list and cannot be undone.",
+            PeopleText.DeleteConfirmation("Dee"));
+    }
+
     [Fact]
     public void EveryCapability_HasAPlainLabel()
     {
@@ -222,6 +253,80 @@ public sealed class PeopleViewerTests
         Assert.NotNull(PersonGrantEditor.Error(null, []));
         Assert.True(PersonGrantEditor.ShowsKinds("approve"));
         Assert.False(PersonGrantEditor.ShowsKinds("ask"));
+    }
+}
+
+/// <summary>
+/// The People window's Delete button on the shared STA thread (#8777): it is there only for a person with no sign-in, no grant and no history,
+/// and a delete the administrator does not confirm sends nothing. The store listens on nothing here.
+/// </summary>
+public sealed class PeopleWindowStaTests
+{
+    private const string UnreachableStore = "Host=127.0.0.1;Port=1;Username=nobody;Database=nothing;Timeout=3;Pooling=false";
+
+    /// <summary>Selects each person in turn, as an administrator does, and names the ones the window's Delete button passes <paramref name="offered"/> for.</summary>
+    internal static List<string> OfferedDelete(PeopleWindow window, Func<UIElement, bool> offered)
+    {
+        var names = new List<string>();
+        foreach (var row in window.PeopleGrid.Items.Cast<PersonViewRow>().ToList())
+        {
+            window.PeopleGrid.SelectedItem = row;
+            StaTestThread.Settle(window);
+            if (offered(window.DeleteButton))
+                names.Add(row.DisplayName);
+        }
+
+        return names;
+    }
+
+    internal static void Select(PeopleWindow window, string name)
+    {
+        window.PeopleGrid.SelectedItem = window.PeopleGrid.Items.Cast<PersonViewRow>().Single(r => r.DisplayName == name);
+        StaTestThread.Settle(window);
+    }
+
+    [Fact]
+    public void Delete_IsThereOnlyForAPersonWithNothingAttached_AndAnUnconfirmedDeleteSendsNothing()
+    {
+        var at = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        PersonRow[] people =
+        [
+            new(1, "Ann", true, at, "person:alice", at, "person:alice", [new PersonIdentityRow(1, "slack", "T01:U02", at, "person:alice")], []),
+            new(2, "Bob", true, at, "person:alice", at, "person:alice", [], [new PersonGrantRow(1, null, null, null, null, "ask", [], at, "person:alice")]),
+            new(3, "Cat", true, at, "person:alice", at, "person:alice", [], []),
+            new(4, "Dee", true, at, "person:alice", at, "person:alice", [], []),
+        ];
+
+        StaTestThread.Run(async () =>
+        {
+            await using var viewer = new ViewerDataService(UnreachableStore);
+            var asked = new List<string>();
+            var window = new PeopleWindow(viewer, readOnly: false, "alice") { ConfirmDelete = person => { asked.Add(person.DisplayName); return false; } };
+            try
+            {
+                StaTestThread.ShowOffScreen(window);
+                window.PeopleGrid.ItemsSource = PersonViewRow.From(people, new HashSet<long> { 3 });
+                Assert.Equal(["Dee"], OfferedDelete(window, button => button.Visibility == Visibility.Visible));
+
+                /* The administrator is asked about the selected person and says no: nothing reaches the store, which would answer with a failure here. */
+                Select(window, "Dee");
+                var before = window.StatusText.Text;
+                await window.DeleteSelectedPersonAsync();
+                Assert.Equal(["Dee"], asked);
+                Assert.Equal(before, window.StatusText.Text);
+
+                window.PeopleGrid.SelectedItem = null;
+                StaTestThread.Settle(window);
+                Assert.Equal(Visibility.Collapsed, window.DeleteButton.Visibility);
+                await window.DeleteSelectedPersonAsync();
+                Assert.Equal("Select a person first.", window.StatusText.Text);
+                Assert.Equal(["Dee"], asked);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
     }
 }
 
@@ -328,6 +433,94 @@ public sealed class PeopleViewerLiveTests
                 await service;
             }
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #8777 in the rendered window on a real store: Delete shows only for a person with no sign-in, no grant and no history, a delete the
+    /// service refuses leaves the person and shows the service's sentence, a delete it runs takes the person off the list, and a read-only
+    /// seat is offered no Delete at all.
+    /// </summary>
+    [Fact]
+    public async Task TheWindow_OffersDeleteOnlyForAPersonWithNothingAttached_AndShowsTheServicesAnswer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+            const string Admin = "person:alice";
+            var ann = (await PersonDirectory.AddPersonAsync(owner, "Ann", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            Assert.True((await PersonDirectory.AddIdentityAsync(owner, ann, "slack", "T01:U02", Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            var bob = (await PersonDirectory.AddPersonAsync(owner, "Bob", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            await PersonDirectory.AddPersonAsync(owner, "Cy", Admin, ServerActionSurfaces.Viewer, ct);
+            var dee = (await PersonDirectory.AddPersonAsync(owner, "Dee", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            await PersonDirectoryLiveTests.AddHistoryRequestAsync(connection, ct);
+            await PersonDirectoryLiveTests.AddAskerAsync(connection, bob, ct);
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var service = Task.Run(() => PlayServiceAsync(owner, stop.Token), CancellationToken.None);
+            try
+            {
+                var store = scratch.ConnectionString;
+                StaTestThread.Run(async () =>
+                {
+                    await using var viewer = new ViewerDataService(store);
+                    var window = new PeopleWindow(viewer, readOnly: false, "alice") { ConfirmDelete = _ => true };
+                    var reader = new PeopleWindow(viewer, readOnly: true, "alice");
+                    try
+                    {
+                        StaTestThread.ShowOffScreen(window);
+                        await window.LoadAsync();
+                        Assert.Equal(["Cy", "Dee"], PeopleWindowStaTests.OfferedDelete(window, button => button.IsVisible));
+
+                        /* Dee gains history after the window read the list: Delete is still there, the service refuses, and the read that follows takes it away. */
+                        await PersonDirectoryLiveTests.AddAskerAsync(connection, dee, CancellationToken.None);
+                        PeopleWindowStaTests.Select(window, "Dee");
+                        await window.DeleteSelectedPersonAsync();
+                        Assert.Equal("This person has history, so disable them instead.", window.StatusText.Text);
+                        Assert.Equal(["Ann", "Bob", "Cy", "Dee"], window.PeopleGrid.Items.Cast<PersonViewRow>().Select(r => r.DisplayName));
+                        Assert.Equal(["Cy"], PeopleWindowStaTests.OfferedDelete(window, button => button.IsVisible));
+
+                        PeopleWindowStaTests.Select(window, "Cy");
+                        await window.DeleteSelectedPersonAsync();
+                        Assert.Equal("Deleted Cy.", window.StatusText.Text);
+                        Assert.Equal(["Ann", "Bob", "Dee"], window.PeopleGrid.Items.Cast<PersonViewRow>().Select(r => r.DisplayName));
+                        Assert.Empty(PeopleWindowStaTests.OfferedDelete(window, button => button.IsVisible));
+
+                        StaTestThread.ShowOffScreen(reader);
+                        await reader.LoadAsync();
+                        Assert.Equal(3, reader.PeopleGrid.Items.Count);
+                        Assert.Empty(PeopleWindowStaTests.OfferedDelete(reader, button => button.IsVisible));
+                    }
+                    finally
+                    {
+                        reader.Close();
+                        window.Close();
+                    }
+                });
+            }
+            finally
+            {
+                await stop.CancelAsync();
+                await service;
+            }
+
+            Assert.Equal(3, await ScalarAsync(connection, "SELECT count(*) FROM config.person", ct));
+            Assert.Equal(1, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'person_deleted'", ct));
+            Assert.Equal(1, await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'person_deleted' AND actor = 'person:alice' AND detail->>'surface' = 'viewer' AND detail->>'display_name' = 'Cy'", ct));
+            Assert.Equal(2, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_request_askers", ct));
+            Assert.Equal(0, await ScalarAsync(connection, "SELECT count(*) FROM config.config_command", ct));
             bodySucceeded = true;
         }
         finally

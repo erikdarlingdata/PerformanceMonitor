@@ -71,7 +71,7 @@ public static class QueryStoreStatsExporter
             // every other exported table.
             copyCommand.CommandText =
                 "COPY (SELECT source_store, * EXCLUDE (server_id, source_store) FROM query_store_dedup " +
-                "ORDER BY server_name, interval_start_time_utc) " +
+                $"ORDER BY {TotalOrder.ForTable(duckConnection, "query_store_dedup", "server_name", "interval_start_time_utc")}) " +
                 $"TO '{outputPath.Replace("'", "''")}' ({DuckDbSession.ParquetCopyOptions})";
             copyCommand.ExecuteNonQuery();
 

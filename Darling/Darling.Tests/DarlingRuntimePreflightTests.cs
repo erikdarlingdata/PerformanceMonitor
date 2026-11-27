@@ -34,6 +34,8 @@ public class DarlingRuntimePreflightTests
     /// 0x80131506 is .NET's general fatal-error code (COR_E_EXECUTIONENGINE), so only the message stops the
     /// install; the exit code alone keeps the ordinary failure path. The decision is executed as it ships.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TestCetStartFailure_DecidesOnTheOutputTextOnly_AsShipped()
     {
@@ -105,6 +107,8 @@ public class DarlingRuntimePreflightTests
     /// PowerShell 5.1 would throw on the first stderr line if the block did not relax it, so this proves the
     /// capture sees the exit code and the text, shows the line, and puts the preference back (#5651).
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Preflight_CaptureBlock_SeesTheExitCodeAndStderr_UnderErrorActionStop()
     {

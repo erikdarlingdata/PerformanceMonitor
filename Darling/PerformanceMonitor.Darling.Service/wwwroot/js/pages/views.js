@@ -30,7 +30,7 @@ import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
-import { renderComposedPanelCard } from "../compose.js";
+import { forgetStoppedCells, renderComposedPanelCard } from "../compose.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
@@ -664,6 +664,9 @@ export async function renderView(main, id, opts) {
   }
   /* A poll reads again with the view still on screen, and swaps each panel's new body in when its own read returns. */
   const hold = holdsPage(main, pageKey, opts && opts.poll === true);
+  /* #9357: the auto-refresh tick does not send a cell again that the store stopped at its statement timeout. Opening the page and
+     the Refresh button are the viewer's own asks, so they do. */
+  if (!(opts && opts.poll === true) || opts.manual === true) forgetStoppedCells();
   if (!hold) mount(main, loadingStrip("Loading view…"));
 
   const [session, catalog, res, fleetRes] = await Promise.all([
@@ -765,6 +768,7 @@ export async function renderView(main, id, opts) {
       cancelViewRefresh = null;
     }
     rememberScope(id, state);
+    forgetStoppedCells(); /* #9357: a scope change is the viewer's click, so a cell the store stopped runs again. */
     renderGrid();
   };
   const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
@@ -923,6 +927,7 @@ export async function renderNotebookDoc(main, opts) {
         cancelViewRefresh = null;
       }
       rememberScope(opts.view.id, state);
+      forgetStoppedCells(); /* #9357 */
       renderDoc();
     };
     controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;

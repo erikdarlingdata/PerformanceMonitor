@@ -52,19 +52,22 @@ public static partial class PgTargetAdvice
     {
         facts.TryGetValue(PgTargetFactKeys.ConfigStatStatementsEviction, out var fact);
         var hours = fact is null ? 0 : (int)fact.Value;
-        var max = fact is not null && fact.Metadata.TryGetValue(EvictionFinding.MaxEntriesKey, out var m)
-            ? ((long)m).ToString("#,0", System.Globalization.CultureInfo.InvariantCulture)
-            : null;
-        var stated = max is null ? "pg_stat_statements.max is not recorded" : $"pg_stat_statements.max = {max}";
+        long? maxEntries = fact is not null && fact.Metadata.TryGetValue(EvictionFinding.MaxEntriesKey, out var m) ? (long)m : null;
+        var stated = maxEntries is { } current
+            ? $"pg_stat_statements.max = {current.ToString("#,0", CultureInfo.InvariantCulture)}"
+            : "pg_stat_statements.max is not recorded";
+        var example = maxEntries is { } known && known > 0
+            ? $" (for example to {(known * 2).ToString("#,0", CultureInfo.InvariantCulture)}, double the current value)"
+            : string.Empty;
 
         return new AdviceBlock(
             Headline: $"pg_stat_statements is evicting statements ({stated})",
             Investigation:
                 $"The module dropped its least-used entries in {hours} of the last {EvictionFinding.WindowHours} hours. Each " +
                 "eviction pass removes about 5% of the entries, so rarely-run statements can be missing from Darling's " +
-                "totals, and a statement that returns counts only from its return.",
+                "totals, and a statement that is evicted and re-admitted counts only from when it came back.",
             Remediation:
-                "Raise `pg_stat_statements.max` (for example to 10,000). It is a postmaster setting, so it needs a restart. " +
+                $"Raise `pg_stat_statements.max`{example}. It is a postmaster setting, so it needs a restart. " +
                 "On Amazon RDS or Aurora it is a parameter-group change plus a reboot. Counter-objective: the module holds " +
                 "its entries in shared memory, so a larger value costs a little more of it.");
     }

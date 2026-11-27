@@ -180,16 +180,21 @@ ORDER BY lower(database_name), database_name";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #8570: the newest capture time is read once, and both counts read that one value. */
         command.CommandText = @"
+WITH newest AS (
+    SELECT MAX(h.capture_time) AS capture_time FROM v_query_store_health AS h WHERE h.server_id = $1),
+counts AS (
+    SELECT COUNT(*) AS health_databases,
+           COUNT(*) FILTER (WHERE (h.readonly_reason & 8) <> 0) AS health_secondary_databases
+    FROM v_query_store_health AS h
+    WHERE h.server_id = $1 AND h.capture_time = (SELECT n.capture_time FROM newest AS n)
+      AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')
 SELECT
     (SELECT sp.ag_replica_role FROM v_server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
-        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')";
+    counts.health_databases,
+    counts.health_secondary_databases
+FROM counts";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         using var reader = await command.ExecuteReaderAsync();

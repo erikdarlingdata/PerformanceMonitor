@@ -31,7 +31,8 @@ namespace Lite.Tests;
 /// laid out off screen at the size under test, with a server tab hosted in its tab strip the way the app places one, so the strip is
 /// exactly as wide as the window leaves it beside the sidebar. Everything is read from the rendered controls.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabStripFitTests
 {
     private const string OverflowButtonName = "PART_TabOverflowButton";

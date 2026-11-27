@@ -31,8 +31,8 @@ namespace Darling.Tests;
 /// it exists so a new read "cannot ship reachable only through MCP". This is the exact inverse, and there
 /// was no pin for it: these shipped reachable only through the WEB.</para>
 ///
-/// <para><b>Derived, not enumerated.</b> The check walks the assembly for the attribute and the host source
-/// for its registrations, so it cannot go stale the way a hand-kept list does — and it fails the moment
+/// <para><b>Derived, not enumerated.</b> The check walks the assembly for the attribute and the tool methods, and
+/// reads the host's registrations from the discovery list it registers (<see cref="DarlingMcpToolTypes"/>), so it cannot go stale the way a hand-kept list does, and it fails the moment
 /// someone adds a class, rather than whenever an agent next reaches for the tool. That is the same
 /// reasoning as the tab pin being derived from the dispatch.</para>
 ///
@@ -67,14 +67,14 @@ public sealed class McpToolTypeRegistrationTests
             "These tool classes are never registered with the MCP host, so every tool they "
             + "declare is unreachable over MCP even though its name exists and the web API dispatches it: "
             + string.Join(", ", missing)
-            + ". Add a .WithGeminiCompatibleTools<T>() line in DarlingMcpHostService.");
+            + ". Put [McpServerToolType] on the class, so the host's discovery (DarlingMcpToolTypes) registers it.");
 
         Assert.True(
             stale.Count == 0,
             "These .WithGeminiCompatibleTools<T>() registrations name classes that declare no MCP tools, "
             + "so each line registers nothing while reading as coverage: "
             + string.Join(", ", stale)
-            + ". Remove the stale line, or restore the class's [McpServerTool] members.");
+            + ". Remove the attribute, or restore the class's [McpServerTool] members.");
     }
 
     /// <summary>
@@ -103,51 +103,17 @@ public sealed class McpToolTypeRegistrationTests
     }
 
     /// <summary>
-    /// Reads the registrations out of the host SOURCE rather than by invoking the builder, because the
-    /// builder needs a host, a store and a live configuration, and this is a wiring question that should be
-    /// answerable without any of them.
+    /// The tool classes the host registers: <see cref="DarlingMcpToolTypes.All"/>, the list <c>WithDarlingTools</c> registers. It finds a
+    /// class by its <see cref="McpServerToolTypeAttribute"/>, so a class whose tool methods lost that attribute is missing here.
     /// </summary>
     private static HashSet<string> RegisteredToolTypeNames()
     {
-        var path = HostSourcePath();
-        var source = File.ReadAllText(path);
-
-        var names = Regex
-            .Matches(source, @"WithGeminiCompatibleTools<(\w+)>")
-            .Select(m => m.Groups[1].Value)
-            .ToHashSet(StringComparer.Ordinal);
+        var names = DarlingMcpToolTypes.All.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
 
         Assert.True(
             names.Count > 0,
-            $"Found no .WithGeminiCompatibleTools<T>() registrations in {path}. If the registration style "
-            + "changed, this test needs to learn the new one rather than be deleted: it is the only thing "
-            + "standing between a new tools class and shipping unreachable.");
+            "The host registers no tool classes. It is the only thing standing between a new tools class and shipping unreachable.");
 
         return names;
-    }
-
-    private static string HostSourcePath()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-
-        while (dir is not null)
-        {
-            var candidate = Path.Combine(
-                dir.FullName,
-                "Darling",
-                "PerformanceMonitor.Darling.Service",
-                "Mcp",
-                "DarlingMcpHostService.cs");
-
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException(
-            "Could not locate DarlingMcpHostService.cs by walking up from the test output directory.");
     }
 }

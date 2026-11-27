@@ -68,7 +68,7 @@ public sealed class PgTargetBufferDrillDownTests
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT(c.relation_name, $5)", sql, StringComparison.Ordinal);
         Assert.Contains("length(c.relation_name)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY c.buffers DESC, c.relation_name NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY c.buffers DESC NULLS LAST, c.relation_name NULLS LAST", sql, StringComparison.Ordinal);
 
         var last = PgTargetDrillDownCollector.PgTargetBufferLastCaptureSql;
         Assert.Contains("SELECT max(collection_time) AS last_capture", last, StringComparison.Ordinal);

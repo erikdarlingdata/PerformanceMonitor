@@ -174,7 +174,9 @@ public static class DarlingPgCpuUtilizationReader
     public const int GateBatchLimit = 32;
 
     internal const string SamplesSinceSql = """
-        SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu
+        SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu,
+               memory_total_bytes, memory_free_bytes, memory_cached_bytes, memory_buffers_bytes, memory_active_bytes,
+               configured_memory_bytes
         FROM pg_cpu_utilization
         WHERE server_id = $1
         AND   sample_time > $2
@@ -231,9 +233,9 @@ public static class DarlingPgCpuUtilizationReader
                 reader.IsDBNull(2) ? null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? null : reader.GetDouble(3),
                 reader.IsDBNull(4) ? null : reader.GetDouble(4),
-                /* The gate does not read memory: null here means "this read does not carry it", which is
-                   a different statement from a row whose memory columns were NULL (see HostMemory). */
-                Memory: null));
+                /* #9501: the "Capacity at ceiling" alert reports free plus cached memory at the start and end of a held run, so
+                   this read carries the host-memory columns the way the served read does. */
+                ReadHostMemory(reader)));
         }
 
         return samples;
@@ -243,9 +245,10 @@ public static class DarlingPgCpuUtilizationReader
     /// The served read carries the V136 host-memory columns beside the CPU row (#3809, the third between-waves
     /// batch of #3691). Until then the six columns had exactly one reader — the memory family's collector in
     /// <c>PgTargetFactCollector.Memory.cs</c> — and an operator sent to <c>get_pg_cpu_utilization</c> by the
-    /// memory facts' tool rows found no memory on it. The two ALERT reads (<see cref="LatestCpuSql"/>,
-    /// <see cref="SamplesSinceSql"/>) still select what they selected before V136: the High CPU gate is a
-    /// sub-second read on the alert path and has no memory question to answer.
+    /// memory facts' tool rows found no memory on it. The gate batch read (<see cref="SamplesSinceSql"/>) carries them
+    /// too since #9501, for the "Capacity at ceiling" alert's detail. The single-latest read
+    /// (<see cref="LatestCpuSql"/>) still selects what it selected before V136: it only answers "is the condition still
+    /// standing" and has no memory question to answer.
     /// </summary>
     internal const string HistorySql = """
         SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu,
@@ -253,7 +256,7 @@ public static class DarlingPgCpuUtilizationReader
                configured_memory_bytes
         FROM pg_cpu_utilization
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   cpu_percent IS NOT NULL
         ORDER BY sample_time
@@ -278,8 +281,8 @@ public static class DarlingPgCpuUtilizationReader
     /// Performance Insights had no capacity sample for this minute.</param>
     /// <param name="ServerlessCapacityAcu">ACU allocated at this minute, or null.</param>
     /// <param name="MaxConfiguredAcu">The configured ACU ceiling at this minute, or null.</param>
-    /// <param name="Memory">The row's V136 host-memory columns on the SERVED read (<see cref="GetHistoryAsync"/>),
-    /// and null on the alert-gate read (<see cref="GetSamplesSinceAsync"/>), whose SQL does not select them.
+    /// <param name="Memory">The row's V136 host-memory columns on the SERVED read (<see cref="GetHistoryAsync"/>) and on
+    /// the gate batch read (<see cref="GetSamplesSinceAsync"/>, #9501), and null on the single-latest read, whose SQL does not select them.
     /// Deliberately not defaulted, for the same reason the capacity trio is not: a null must mean "this read
     /// does not carry memory" by construction, never "someone forgot", and a row that WAS read with memory
     /// columns all NULL is a non-null record with null members — the two states stay distinguishable.</param>
@@ -290,6 +293,14 @@ public static class DarlingPgCpuUtilizationReader
         double? ServerlessCapacityAcu,
         double? MaxConfiguredAcu,
         HostMemory? Memory);
+
+    private static HostMemory ReadHostMemory(NpgsqlDataReader reader) => new(
+        TotalBytes: reader.IsDBNull(5) ? null : reader.GetInt64(5),
+        FreeBytes: reader.IsDBNull(6) ? null : reader.GetInt64(6),
+        CachedBytes: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+        BuffersBytes: reader.IsDBNull(8) ? null : reader.GetInt64(8),
+        ActiveBytes: reader.IsDBNull(9) ? null : reader.GetInt64(9),
+        ConfiguredBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10));
 
     /// <summary>The served-read side (#2629/#2719's own fix) — every reading in a window, for
     /// <c>get_pg_cpu_utilization</c>. Windowed on <c>collection_time</c> (the ingestor's own cycle time)
@@ -317,13 +328,7 @@ public static class DarlingPgCpuUtilizationReader
                 reader.IsDBNull(2) ? null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? null : reader.GetDouble(3),
                 reader.IsDBNull(4) ? null : reader.GetDouble(4),
-                new HostMemory(
-                    TotalBytes: reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                    FreeBytes: reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                    CachedBytes: reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                    BuffersBytes: reader.IsDBNull(8) ? null : reader.GetInt64(8),
-                    ActiveBytes: reader.IsDBNull(9) ? null : reader.GetInt64(9),
-                    ConfiguredBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10))));
+                ReadHostMemory(reader)));
         }
 
         return samples;
@@ -374,7 +379,7 @@ public static class DarlingPgCpuUtilizationReader
             COUNT(memory_total_bytes) AS memory_samples
         FROM pg_cpu_utilization
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   cpu_percent IS NOT NULL
         GROUP BY 1

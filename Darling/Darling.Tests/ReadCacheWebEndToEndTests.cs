@@ -58,7 +58,7 @@ public sealed class ReadCacheWebEndToEndTests
     /// <summary>The production web pipeline over an unreachable store, plus a test-only write route (any 2xx non-GET
     /// <c>/api/*</c> answer moves the cache's write generation) and an optional middleware ahead of everything.</summary>
     internal static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
-        Func<RequestDelegate, RequestDelegate>? first = null, Task? heldWriteEnd = null)
+        Func<RequestDelegate, RequestDelegate>? first = null, Task? heldWriteEnd = null, SlowReadLog? slowReads = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -90,7 +90,7 @@ public sealed class ReadCacheWebEndToEndTests
 
         var host = new DarlingWebHostService(
             new NullLogger<DarlingWebHostService>(), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(),
-            baselineCache: null, readLatency: readLatency, readAdmission: admission);
+            baselineCache: null, readLatency: readLatency, readAdmission: admission, slowReads: slowReads);
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null,
             allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: "read-cache-end-to-end-token-0123456789", oidcClient: null,
             requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: signingKey);
@@ -116,6 +116,32 @@ public sealed class ReadCacheWebEndToEndTests
         }
 
         Assert.True(condition(), what);
+    }
+
+    /// <summary>#9433: a web read records the size of the reply it sent, in the hourly histogram and in the slow-read row, and both equal the bytes
+    /// the client received. The answer holds multi-byte text, so a count of characters instead of bytes would not match.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task AWebRead_RecordsTheBytesTheClientReceived_InTheHistogramAndTheSlowReadRow()
+    {
+        const string route = "get_test_reply_bytes";
+        var readLatency = new ReadLatencyAccumulator();
+        var slowReads = new SlowReadLog(0);
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((route, (_, _, _) =>
+            Task.FromResult("{\"note\":\"" + new string('\u00e9', 300) + "\",\"rows\":[1,2,3]}")));
+        var (app, postgres) = await BuildServer(HeavyAdmission(2, ReadSurface.Web, "get_test_other", ReadWindowBand.None), readLatency, slowReads: slowReads);
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+
+        var received = await client.GetByteArrayAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+
+        Assert.True(received.Length > 600, "the answer holds 300 two-byte characters");
+        var sample = Assert.Single(readLatency.Drain(), d => d.Route == route && d.Outcome == ReadOutcome.Ok);
+        Assert.Equal(received.Length, sample.ReplyBytesTotal);
+        Assert.Equal(1L, sample.ReplyBytesCount);
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal(route, record!.Route);
+        Assert.Equal(received.Length, record.ReplyBytes);
     }
 
     [Fact(Timeout = 60_000)]

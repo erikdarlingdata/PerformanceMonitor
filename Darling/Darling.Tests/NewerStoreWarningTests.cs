@@ -78,19 +78,6 @@ public sealed class NewerStoreWarningTests
     }
 
     /// <summary>
-    /// The seam is only worth something if the start reaches it. Both paths that read the store's version at start
-    /// call it with this build's top rung: the locked migrate, and the lock-timeout path that skips it.
-    /// </summary>
-    [Fact]
-    public void Both_startup_version_reads_call_the_check_with_the_top_rung()
-    {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs");
-
-        Assert.Contains("WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);", source, StringComparison.Ordinal);
-        Assert.Contains("WarnIfStoreNewerThanBuild(logger, storeVersion, Scripts[^1].Version);", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The warning names a README section, so the section has to exist. Its list is bound to the ladder: every
     /// <c>- **V&lt;N&gt;**</c> bullet must name a rung this build ships (1 through <c>Scripts[^1].Version</c>), so a
     /// bullet written ahead of its migration, or with a guessed number, fails here. An empty list passes: it means no

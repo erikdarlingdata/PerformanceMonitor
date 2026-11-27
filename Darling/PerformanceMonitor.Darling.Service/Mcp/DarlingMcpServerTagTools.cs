@@ -58,6 +58,7 @@ public sealed class DarlingMcpServerTagTools
     /// <summary>The per-command deadline the write tools use, the same as the mute-rule store's.</summary>
     internal const int WriteCommandSeconds = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_server_tag"), Description(
         "Creates a fleet server tag, at the root or under parent_id. Tags organize the server list and scope custom alert rules: a rule scoped to a tag covers every server under its whole subtree. Names are trimmed, 1-100 characters, unique among siblings ignoring case; tags nest at most four levels. colour is #RRGGBB; omit it for the palette colour the Viewer assigns. Returns the stored tag, or invalid/conflict/not_found with nothing written. Find tag ids and server ids in get_fleet_overview. Answers with previous (null) and undo (delete_server_tag).")]
     public static Task<string> CreateServerTag(
@@ -68,6 +69,7 @@ public sealed class DarlingMcpServerTagTools
         CancellationToken cancellationToken = default) =>
         CreateServerTagCore(McpStore(postgres), name, parent_id, colour, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_server_tag"), Description(
         "PARTIAL edit of a fleet server tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree and its assignments, is refused on a cycle or past four levels, and changes which servers rules scoped to old or new ancestors cover: affected_rules names them. To reorder among siblings send {\"move\":\"up\"} or {\"move\":\"down\"} alone (edge = unchanged). Returns updated, unchanged, or invalid/conflict/not_found with nothing written. Carries previous and undo (a move undoes with the opposite move).")]
     public static Task<string> UpdateServerTag(
@@ -77,6 +79,7 @@ public sealed class DarlingMcpServerTagTools
         CancellationToken cancellationToken = default) =>
         UpdateServerTagCore(McpStore(postgres), tag_id, changes_json, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_server_tag"), Description(
         "Deletes a fleet server tag AND its whole subtree of child tags and their server assignments; servers and collected data are untouched. Permanent. If a custom alert rule is scoped to the tag or a descendant, that rule would match no server: the call answers confirm_required naming those rules and deletes nothing; repeat with confirm=true to proceed. Rules scoped to an ancestor are reported as losing servers. Returns deleted with the removed tag ids and assignment count. Carries previous and undo (create_server_tag for a lone tag; null with undo_note when more went with it).")]
     public static Task<string> DeleteServerTag(
@@ -86,6 +89,7 @@ public sealed class DarlingMcpServerTagTools
         CancellationToken cancellationToken = default) =>
         DeleteServerTagCore(McpStore(postgres), tag_id, confirm, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "assign_server_tag"), Description(
         "Assigns one fleet server tag to one or more servers (server_ids from get_fleet_overview) in one write; servers already carrying it are a no-op. Every server_id must be a monitored server or nothing is written. Custom alert rules scoped to the tag or an ancestor start covering the added servers: affected_rules names them. Returns assigned with added and already-assigned ids, unchanged, not_found or invalid. Carries previous and undo (unassign_server_tag for the servers added).")]
     public static Task<string> AssignServerTag(
@@ -95,6 +99,7 @@ public sealed class DarlingMcpServerTagTools
         CancellationToken cancellationToken = default) =>
         AssignServerTagCore(McpStore(postgres), tag_id, server_ids, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "unassign_server_tag"), Description(
         "Removes one fleet server tag from one or more servers (server_ids) in one write; servers not carrying it are a no-op. Custom alert rules scoped to the tag or an ancestor stop covering a removed server unless another tag under the rule's scope still holds it: affected_rules names each rule and the servers it loses. No confirm step. Returns unassigned, unchanged, not_found or invalid. Carries previous and undo (assign_server_tag).")]
     public static Task<string> UnassignServerTag(
@@ -690,9 +695,13 @@ public sealed class DarlingMcpServerTagTools
         {
             root = JsonNode.Parse(changesJson);
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        catch (JsonException ex)
         {
-            return (null, "changes_json is not valid JSON: " + ex.Message, null);
+            return (null, JsonParseError.Describe("changes_json", ex), null);
+        }
+        catch (ArgumentException)
+        {
+            return (null, "changes_json is not valid JSON.", null);
         }
 
         if (root is not JsonObject body)

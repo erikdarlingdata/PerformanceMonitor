@@ -136,8 +136,20 @@
                             <TextBlock Text="{Binding Server.Connection.DisplayNameWithIntent}"
                                        TextTrimming="CharacterEllipsis"
                                        FontSize="13"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                                       FontWeight="SemiBold">
+                                <!-- #9094: a server whose collection is off reads dimmed where a reader sees it without hovering. The trigger reads
+                                     the same DotStatus the dot beside it does, so the dimming and the grey dot are one status. -->
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Disabled">
+                                                <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
 
                             <!-- Server Details: the server name, shown only when it differs from the display name above it (#8226). -->
                             <TextBlock Text="{Binding Server.Connection.SidebarDetail}"
@@ -353,6 +365,7 @@
                                             ImportSettingsClick="ImportSettingsButton_Click"
                                             ViewLogClick="ViewLogButton_Click"
                                             OpenLogFolderClick="OpenLogFolderButton_Click"
+                                            StoreHealthClick="StoreHealthButton_Click"
                                             AboutClick="AboutButton_Click"/>
                 </Border>
             </Grid>

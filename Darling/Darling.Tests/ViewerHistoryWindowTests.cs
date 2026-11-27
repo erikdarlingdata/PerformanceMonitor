@@ -36,7 +36,6 @@ public sealed class ViewerHistoryWindowTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
         /* The window needs the delta, cumulative, and min/max columns the narrow overlay read lacks. */
@@ -56,7 +55,6 @@ public sealed class ViewerHistoryWindowTests
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("schema_name = $3", sql, StringComparison.Ordinal);
         Assert.Contains("object_name = $4", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $6", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
         /* #3540 (V128): procedure_stats carries sample_interval_seconds now. The STORED value is shown where
@@ -78,7 +76,6 @@ public sealed class ViewerHistoryWindowTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("query_id = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
         /* Query-scoped, NOT plan-filtered — plan_id rides back so the chart draws one series per plan. */

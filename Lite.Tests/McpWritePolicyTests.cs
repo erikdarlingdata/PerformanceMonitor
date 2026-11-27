@@ -41,7 +41,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class McpWritePolicyTests
 {
-    private static McpServerPrimitiveCollection<McpServerTool> RegisteredTools()
+    internal static McpServerPrimitiveCollection<McpServerTool> RegisteredTools()
     {
         var (tools, _, _) = McpToolsListBudgetTests.BuildServedTools();
         var collection = new McpServerPrimitiveCollection<McpServerTool>();
@@ -68,7 +68,7 @@ public sealed class McpWritePolicyTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             services.AddSingleton(serviceType, _ => null!);
@@ -89,7 +89,9 @@ public sealed class McpWritePolicyTests
         Assert.True(registered.Length > 80, "the registered tool set should be the full Lite surface");
 
         var readOnly = McpToolClassification.ReadOnlyTools;
+        /* #9640: the server administration tools are writes too, served by their own switch as well. */
         var writes = McpWritePolicy.WriteTools;
+        Assert.True(McpWritePolicy.ServerAdminTools.IsSubsetOf(writes), "every server admin tool is also a write tool, the shape of Darling's DarlingMcpWritePolicy");
 
         /* #5820: claim and submit are the third set, as on Darling: they change only investigation state, so they are neither
            reads nor WriteTools (which mcp_allow_writes serves). McpInvestigationPolicy serves them by name and McpWritePolicy
@@ -126,7 +128,7 @@ public sealed class McpWritePolicyTests
 
     /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
     /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
-    private static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
+    internal static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null, bool serverAdmin = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -140,13 +142,13 @@ public sealed class McpWritePolicyTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             builder.Services.AddSingleton(serviceType, _ => null!);
         }
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving, allowServerAdmin: serverAdmin);
 
         var app = builder.Build();
         McpHostService.UseJsonPostGuard(app);
@@ -155,7 +157,7 @@ public sealed class McpWritePolicyTests
         return app.GetTestServer();
     }
 
-    private static async Task<string> PostAsync(TestServer server, string json)
+    internal static async Task<string> PostAsync(TestServer server, string json)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -177,6 +179,10 @@ public sealed class McpWritePolicyTests
     [Theory]
     [InlineData("mute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
     [InlineData("unmute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
+    [InlineData("create_mute_rule", "{}")]
+    [InlineData("update_mute_rule", "{\"rule_id\":\"x\",\"changes_json\":\"{}\"}")]
+    [InlineData("delete_mute_rule", "{\"rule_id\":\"x\"}")]
+    [InlineData("set_mute_rule_enabled", "{\"rule_id\":\"x\",\"enabled\":true}")]
     public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string tool, string arguments)
     {
         using var server = await BuildServer(allowWrites: false);
@@ -218,6 +224,17 @@ public sealed class McpWritePolicyTests
         Assert.Contains("analyze_server", names);
     }
 
+    /// <summary>#9639: update_alert_settings is registered, is absent while writes are off, and is served once they are on.</summary>
+    [Fact]
+    public void UpdateAlertSettings_IsServedOnlyWhenWritesAreOn()
+    {
+        var all = RegisteredTools();
+
+        Assert.Contains("update_alert_settings", Names(all));
+        Assert.DoesNotContain("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: false)));
+        Assert.Contains("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: true)));
+    }
+
     /* #5719: Lite's instructions said "90 tools" while tools/list returned 88 with mcp_allow_writes off (the default).
        The sentence now carries the registered total, the default count and the two tools the setting adds; this pins
        them to the registered tools and the policy's write set. Lite has no bearer token, so the setting is the whole
@@ -227,7 +244,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var defaultServed = McpWritePolicy.FilterToolCollection(all, allowWrites: false);
-        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, writesServed.Count);
         Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
@@ -268,7 +285,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var catalog = McpWritePolicy.ToolNames(all);
-        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true));
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true));
 
         var text = McpInstructions.Build(catalog, served);
         Assert.Contains(
@@ -285,7 +302,7 @@ public sealed class McpWritePolicyTests
     [InlineData(true)]
     public async Task InitializeInstructions_CountTheToolsThatToolsListServes(bool allowWrites)
     {
-        using var server = await BuildServer(allowWrites);
+        using var server = await BuildServer(allowWrites, serverAdmin: allowWrites);
 
         var listBody = await PostAsync(server, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
         var initBody = await PostAsync(server,
@@ -336,7 +353,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var catalog = McpWritePolicy.ToolNames(all);
-        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites));
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites, allowWrites));
         var text = McpInstructions.Build(catalog, served);
 
         var named = System.Text.RegularExpressions.Regex.Matches(text, "`([a-z][a-z0-9_]*)`")
@@ -382,7 +399,7 @@ public sealed class McpWritePolicyTests
     public void WritesOn_ServesTheMuteAndItsUndo()
     {
         var all = RegisteredTools();
-        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, served.Count);
         Assert.Contains("mute_analysis_finding", Names(served));
@@ -405,7 +422,7 @@ public sealed class McpWritePolicyTests
         });
 
         var full = RegisteredTools();
-        McpWritePolicy.Apply(full, allowWrites: true);
+        McpWritePolicy.Apply(full, allowWrites: true, allowServerAdmin: true);
         Assert.Equal(before, full.Count);
         foreach (var tool in full.Where(t => McpWritePolicy.IsWrite(t.ProtocolTool.Name)))
         {

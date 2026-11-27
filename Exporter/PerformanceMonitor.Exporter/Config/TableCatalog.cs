@@ -11,7 +11,8 @@ public sealed record TableDescription(
     string? TimeColumn,
     IReadOnlyList<string>? KeyColumns,
     string Grain,
-    IReadOnlyList<string>? ChangeKeyColumns);
+    IReadOnlyList<string>? ChangeKeyColumns,
+    bool Blocked = false);
 
 /// <summary>Builds `describe-tables` from <see cref="CoreTableMetadata"/> (core) and the <see cref="OptionalTables"/> registry (optional).</summary>
 public static class TableCatalog
@@ -35,7 +36,8 @@ public static class TableCatalog
                 t.Name, "optional", t.Kind.ToString().ToLowerInvariant(), time,
                 t.KeyColumns.Count > 0 ? [.. t.KeyColumns] : null,
                 t.Grain.ToString().ToLowerInvariant(),
-                t.Change is { } change ? [.. change.Key] : null));
+                t.Change is { } change ? [.. change.Key] : null,
+                t.Status == OptionalTableStatus.Blocked));
         }
 
         return rows;
@@ -55,6 +57,7 @@ public static class TableCatalog
                 ["key_columns"] = r.KeyColumns is { } k ? new JsonArray([.. k.Select(x => (JsonNode?)JsonValue.Create(x))]) : null,
                 ["grain"] = r.Grain,
                 ["change_key_columns"] = r.ChangeKeyColumns is { } c ? new JsonArray([.. c.Select(x => (JsonNode?)JsonValue.Create(x))]) : null,
+                ["blocked"] = r.Blocked,
             });
         }
 
@@ -68,7 +71,7 @@ public static class TableCatalog
         foreach (var r in rows)
         {
             var keys = r.KeyColumns is { } k ? string.Join(",", k) : r.ChangeKeyColumns is { } c ? "change:" + string.Join(",", c) : "-";
-            w.AppendLine($"{r.Name} | {r.Origin} | {r.Kind} | {r.TimeColumn ?? "-"} | {r.Grain} | {keys}");
+            w.AppendLine($"{r.Name} | {r.Origin} | {r.Kind} | {r.TimeColumn ?? "-"} | {r.Grain} | {keys}{(r.Blocked ? " | blocked" : "")}");
         }
 
         return w.ToString();

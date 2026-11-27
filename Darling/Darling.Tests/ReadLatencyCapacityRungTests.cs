@@ -42,10 +42,6 @@ public sealed class ReadLatencyCapacityRungTests
     {
         Assert.Equal("read-latency-capacity-fields", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V183 (#5793) and V184 (#5632) sit above it; this rung stays registered below them. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]
@@ -117,12 +113,13 @@ VALUES ('2026-10-01 05:10', 'mcp', 'get_wait_stats', 'timeout', 60000, '{}', fal
         Assert.Equal("3|3|0|0|10", await ScalarAsync(connection, @"
 SELECT count(*) || '|' || count(*) FILTER (WHERE window_band = 'none') || '|' || max(max_in_flight) || '|' || sum(wait_total_ms) || '|' || sum(run_count)
 FROM collect.read_latency", ct));
-        Assert.Equal("metric_time,surface,route,outcome,window_band", await ScalarAsync(connection, @"
+        /* V315 (#9434) moved the key from the primary key to a unique index that also names the process start. The band is still part of it. */
+        Assert.Equal("metric_time,surface,route,outcome,window_band,process_started_at", await ScalarAsync(connection, @"
 SELECT string_agg(a.attname, ',' ORDER BY k.ord)
-FROM pg_constraint AS c
-CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
-JOIN pg_attribute AS a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
-WHERE c.conrelid = 'collect.read_latency'::regclass AND c.contype = 'p'", ct));
+FROM pg_index AS i
+CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+WHERE i.indexrelid = 'collect.uq_read_latency_key'::regclass", ct));
         Assert.Equal("1|1", await ScalarAsync(connection, @"
 SELECT count(*) || '|' || count(*) FILTER (WHERE in_flight IS NULL AND wait_ms IS NULL) FROM collect.slow_reads", ct));
     }

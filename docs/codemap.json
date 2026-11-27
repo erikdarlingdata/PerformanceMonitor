@@ -1,0 +1,3087 @@
+{
+  "areas": [
+    {
+      "description": "The Darling service is the headless process that collects data. At start it reads darling.json, bootstraps the store, and then runs each collector on its schedule. Collectors that are shared with Lite live in a separate project, and the service runs them through its collector runner. The same process hosts the MCP endpoint and the web dashboard.",
+      "folders": [
+        "Darling/PerformanceMonitor.Darling.Service",
+        "PerformanceMonitor.Collectors"
+      ],
+      "id": "darling-service",
+      "name": "Darling service (collectors, scheduler)",
+      "projects": [
+        "Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj",
+        "PerformanceMonitor.Collectors/PerformanceMonitor.Collectors.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The host. Builds the service and starts it.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Program.cs"
+        },
+        {
+          "note": "The main loop, split across the DarlingWorker.*.cs files.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"
+        },
+        {
+          "note": "How a collection pass is scheduled.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Collection.cs"
+        },
+        {
+          "note": "Runs one collector against one monitored server.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs"
+        },
+        {
+          "note": "The settings that darling.json holds.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs"
+        },
+        {
+          "note": "The command line verbs of the service exe.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs"
+        }
+      ]
+    },
+    {
+      "description": "This project owns the PostgreSQL store. It holds the numbered migrations and the schema generator. It also holds the store classes that read and write each table, and the rollups and retention tiers that keep the store small. A change to a table starts with a new migration in the list. The Darling export tool also lives here, because it reads the store and writes Parquet files.",
+      "folders": [
+        "Darling/PerformanceMonitor.Darling.Storage",
+        "Exporter/PerformanceMonitor.Exporter"
+      ],
+      "id": "darling-storage",
+      "name": "Darling storage (PostgreSQL store, migrations, rollups)",
+      "projects": [
+        "Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj",
+        "Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The numbered migration list. The newest rung is at the end of Scripts.",
+          "path": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs"
+        },
+        {
+          "note": "Builds the collector tables for migration 1 and later table changes.",
+          "path": "Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs"
+        },
+        {
+          "note": "Decides which retention tier a read or a prune uses.",
+          "path": "Darling/PerformanceMonitor.Darling.Storage/RetentionTierRouter.cs"
+        },
+        {
+          "note": "An example of a rollup and its SQL.",
+          "path": "Darling/PerformanceMonitor.Darling.Storage/QueryTagRollupSql.cs"
+        },
+        {
+          "note": "A guard that checks interval rollup counts.",
+          "path": "Darling/PerformanceMonitor.Darling.Storage/IntervalRollupCountGuard.cs"
+        },
+        {
+          "note": "The darling-export tool, which writes Parquet files from the store.",
+          "path": "Exporter/README.md"
+        }
+      ]
+    },
+    {
+      "description": "Darling answers MCP clients from the service process. Each tool is a public static method that carries the McpServerTool attribute. The web endpoints call the same methods, so the two surfaces return the same data. A write policy decides which tools can change anything, and each change is off until an operator turns it on.",
+      "folders": [
+        "Darling/PerformanceMonitor.Darling.Service/Mcp",
+        "PerformanceMonitor.Common/Mcp"
+      ],
+      "id": "darling-mcp",
+      "name": "Darling MCP",
+      "projects": [],
+      "start_here": [
+        {
+          "note": "Starts the MCP endpoint and registers the tool classes.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHostService.cs"
+        },
+        {
+          "note": "The small set of core tools.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingCoreToolProfile.cs"
+        },
+        {
+          "note": "A first tool class to read.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs"
+        },
+        {
+          "note": "The rules for tools that change things.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWritePolicy.cs"
+        },
+        {
+          "note": "Builds tool schemas that more MCP clients accept. Both products use it.",
+          "path": "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs"
+        }
+      ]
+    },
+    {
+      "description": "The web dashboard is plain JavaScript pages in wwwroot that call the service over HTTP. The endpoint files in the service answer those calls. The front door lets one Darling service route to other Darling services, so a team can use one address.",
+      "folders": [
+        "Darling/PerformanceMonitor.Darling.Service/wwwroot",
+        "Darling/PerformanceMonitor.Darling.Service/FrontDoor"
+      ],
+      "id": "darling-web",
+      "name": "Darling web UI and front door",
+      "projects": [],
+      "start_here": [
+        {
+          "note": "The /api endpoints. Other DarlingWebEndpoints.*.cs files add more.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"
+        },
+        {
+          "note": "Starts the web host.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs"
+        },
+        {
+          "note": "The page shell.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/wwwroot/index.html"
+        },
+        {
+          "note": "The browser app that loads each page.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/app.js"
+        },
+        {
+          "note": "How the front door picks a service.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/FrontDoor/DarlingFrontDoorRouting.cs"
+        },
+        {
+          "note": "The MCP tools of the front door.",
+          "path": "Darling/PerformanceMonitor.Darling.Service/FrontDoor/DarlingFrontDoorTool.cs"
+        }
+      ]
+    },
+    {
+      "description": "The Viewer is a desktop app that reads from a Darling service. It shows the fleet, the server tabs, alerts and the alert rule editors. It can run on the service host or on another machine.",
+      "folders": [
+        "Darling/PerformanceMonitor.Darling.Viewer"
+      ],
+      "id": "darling-viewer",
+      "name": "Darling Viewer (WPF)",
+      "projects": [
+        "Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The entry point.",
+          "path": "Darling/PerformanceMonitor.Darling.Viewer/Program.cs"
+        },
+        {
+          "note": "App start and shared resources.",
+          "path": "Darling/PerformanceMonitor.Darling.Viewer/App.xaml.cs"
+        },
+        {
+          "note": "The main window.",
+          "path": "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml.cs"
+        },
+        {
+          "note": "How the Viewer reads its data.",
+          "path": "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs"
+        }
+      ]
+    },
+    {
+      "description": "Lite is one WPF app that collects, stores and shows the data. A background service runs the collectors on a timer and writes to DuckDB. Older data moves to Parquet files, which a compaction step merges. A retention service deletes archive files that are past their age limit.",
+      "folders": [
+        "Lite"
+      ],
+      "id": "lite",
+      "name": "Lite (WPF, DuckDB, archive and compaction)",
+      "projects": [
+        "Lite/PerformanceMonitorLite.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The entry point, including the headless mode.",
+          "path": "Lite/Program.cs"
+        },
+        {
+          "note": "App start.",
+          "path": "Lite/App.xaml.cs"
+        },
+        {
+          "note": "The main window.",
+          "path": "Lite/MainWindow.xaml.cs"
+        },
+        {
+          "note": "The timer that runs collection, archive and retention.",
+          "path": "Lite/Services/CollectionBackgroundService.cs"
+        },
+        {
+          "note": "Moves old rows from DuckDB to Parquet.",
+          "path": "Lite/Services/ArchiveService.cs"
+        },
+        {
+          "note": "Merges small Parquet files.",
+          "path": "Lite/Services/ParquetCompaction.cs"
+        }
+      ]
+    },
+    {
+      "description": "Lite has its own MCP server with the same tool style as Darling. Each tool class sits in Lite/Mcp and reads from the local DuckDB data. Lite also has an investigation store that agents can read and write.",
+      "folders": [
+        "Lite/Mcp",
+        "Lite/Investigations"
+      ],
+      "id": "lite-mcp",
+      "name": "Lite MCP",
+      "projects": [],
+      "start_here": [
+        {
+          "note": "Starts the MCP endpoint.",
+          "path": "Lite/Mcp/McpHostService.cs"
+        },
+        {
+          "note": "A first tool class to read.",
+          "path": "Lite/Mcp/McpHealthTools.cs"
+        },
+        {
+          "note": "The rules for tools that change things.",
+          "path": "Lite/Mcp/McpWritePolicy.cs"
+        },
+        {
+          "note": "The tool that tells a client which tool to use.",
+          "path": "Lite/Mcp/McpToolGuideTools.cs"
+        }
+      ]
+    },
+    {
+      "description": "Both products use these projects. They hold the alert engine, the notification channels, the analysis engines and the plan analyzer. They also hold the charts and controls that both WPF apps use, and the types that the other projects share. A change here reaches both products.",
+      "folders": [
+        "PerformanceMonitor.Alerting",
+        "PerformanceMonitor.Analysis",
+        "PerformanceMonitor.Common",
+        "PerformanceMonitor.Notifications",
+        "PerformanceMonitor.PlanAnalysis",
+        "PerformanceMonitor.Ui",
+        "Darling/PerformanceMonitor.Darling.Analysis",
+        "Darling/PerformanceMonitor.Darling.Remediation"
+      ],
+      "id": "shared",
+      "name": "Shared code",
+      "projects": [
+        "Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj",
+        "Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj",
+        "PerformanceMonitor.Alerting/PerformanceMonitor.Alerting.csproj",
+        "PerformanceMonitor.Analysis/PerformanceMonitor.Analysis.csproj",
+        "PerformanceMonitor.Common/PerformanceMonitor.Common.csproj",
+        "PerformanceMonitor.Notifications/PerformanceMonitor.Notifications.csproj",
+        "PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj",
+        "PerformanceMonitor.Ui/PerformanceMonitor.Ui.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The alert engine that both products use.",
+          "path": "PerformanceMonitor.Alerting/AlertEngine.cs"
+        },
+        {
+          "note": "What was sent for an alert, and with what result.",
+          "path": "PerformanceMonitor.Notifications/AlertDelivery.cs"
+        },
+        {
+          "note": "Runs the plan analyzer.",
+          "path": "PerformanceMonitor.PlanAnalysis/ActualPlanExecutor.cs"
+        },
+        {
+          "note": "Darling's analysis service.",
+          "path": "Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs"
+        },
+        {
+          "note": "Runs an approved change on a PostgreSQL target.",
+          "path": "Darling/PerformanceMonitor.Darling.Remediation/PostgresRemediationExecutor.cs"
+        }
+      ]
+    },
+    {
+      "description": "Darling.Tests and Lite.Tests hold nearly all of the tests. Each test class is one file whose name ends in Tests.cs. The Exporter has its own small test project. Tests tagged Stage=Guard run first in CI.",
+      "folders": [
+        "Darling/Darling.Tests",
+        "Darling/Darling.Tests.Standin",
+        "Lite.Tests",
+        "Exporter/PerformanceMonitor.Exporter.Tests",
+        "Exporter/PerformanceMonitor.Exporter.TestChild"
+      ],
+      "id": "tests",
+      "name": "Tests",
+      "projects": [
+        "Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj",
+        "Darling/Darling.Tests/Darling.Tests.csproj",
+        "Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj",
+        "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
+        "Lite.Tests/Lite.Tests.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "The Darling test project.",
+          "path": "Darling/Darling.Tests/Darling.Tests.csproj"
+        },
+        {
+          "note": "The Lite test project.",
+          "path": "Lite.Tests/Lite.Tests.csproj"
+        },
+        {
+          "note": "Picks which test classes CI runs for a change.",
+          "path": ".github/scripts/ci-select.py"
+        },
+        {
+          "note": "Runs the first CI gates on your machine.",
+          "path": ".github/scripts/pre-push.sh"
+        }
+      ]
+    },
+    {
+      "description": "The workflows in .github/workflows run the checks and build the releases. The scripts in .github/scripts hold the rules for what each run does, so a rule lives in one place. The pull request workflow is the first one to read.",
+      "folders": [
+        ".github"
+      ],
+      "id": "ci",
+      "name": "CI and scripts (.github)",
+      "projects": [],
+      "start_here": [
+        {
+          "note": "The pull request workflow.",
+          "path": ".github/workflows/pr.yml"
+        },
+        {
+          "note": "Decides what a run does.",
+          "path": ".github/scripts/ci-plan.py"
+        },
+        {
+          "note": "Picks the test jobs.",
+          "path": ".github/scripts/ci-select.py"
+        },
+        {
+          "note": "The nightly build and checks.",
+          "path": ".github/workflows/nightly.yml"
+        },
+        {
+          "note": "The release build.",
+          "path": ".github/workflows/build.yml"
+        }
+      ]
+    },
+    {
+      "description": "The tools folder holds small programs and scripts for contributors. They include measurement repros, the web UI smoke check, the docs publisher, the changelog archiver and this code map. None of them ship in a release.",
+      "folders": [
+        "tools",
+        "Darling/tools"
+      ],
+      "id": "tools",
+      "name": "Tools",
+      "projects": [
+        "Darling/tools/generate-ladder-fixture/generate-ladder-fixture.csproj",
+        "tools/CompactionRepro/CompactionRepro.csproj",
+        "tools/SliceRepairRepro/SliceRepairRepro.csproj",
+        "tools/ui-smoke-wpf/UiSmokeWpf.csproj"
+      ],
+      "start_here": [
+        {
+          "note": "Builds this code map.",
+          "path": "tools/codemap/codemap.py"
+        },
+        {
+          "note": "The web UI smoke check.",
+          "path": "tools/ui-smoke/README.md"
+        },
+        {
+          "note": "How the Darling docs are published.",
+          "path": "tools/docs-site/README.md"
+        },
+        {
+          "note": "A PostgreSQL rig for checks.",
+          "path": "tools/pg-verification-rig/README.md"
+        },
+        {
+          "note": "The Darling install script.",
+          "path": "Darling/tools/install-darling.ps1"
+        }
+      ]
+    },
+    {
+      "description": "The Full Dashboard and the CLI installer are frozen in one zip file. Nothing builds, tests or releases them. The install and upgrades folders hold the T-SQL that the frozen installer deploys, and those scripts must stay idempotent.",
+      "folders": [
+        "deprecated",
+        "install",
+        "upgrades"
+      ],
+      "id": "deprecated",
+      "name": "The deprecated freeze",
+      "projects": [],
+      "start_here": [
+        {
+          "note": "What the zip holds and how to build it at the freeze commit.",
+          "path": "deprecated/README.md"
+        },
+        {
+          "note": "The first install script.",
+          "path": "install/01_install_database.sql"
+        }
+      ]
+    }
+  ],
+  "build_commands": [
+    "dotnet build Lite/PerformanceMonitorLite.csproj",
+    "dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj",
+    "dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj"
+  ],
+  "ci": [
+    {
+      "file": ".github/workflows/build.yml",
+      "name": "Build",
+      "triggers": [
+        "release"
+      ]
+    },
+    {
+      "file": ".github/workflows/check-pr-branch.yml",
+      "name": "Check pull request target branch",
+      "triggers": [
+        "pull_request"
+      ]
+    },
+    {
+      "file": ".github/workflows/check-version-bump.yml",
+      "name": "Check version bump",
+      "triggers": [
+        "pull_request"
+      ]
+    },
+    {
+      "file": ".github/workflows/claude-review.yml",
+      "name": "Claude Auto Review",
+      "triggers": [
+        "pull_request"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-helm-release.yml",
+      "name": "Darling Helm release",
+      "triggers": [
+        "workflow_dispatch",
+        "workflow_run"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-helm.yml",
+      "name": "Darling Helm chart",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-linux-store.yml",
+      "name": "Darling Linux store",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-linux-tests.yml",
+      "name": "Darling Linux tests",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-msi.yml",
+      "name": "Darling MSI",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-ui-smoke.yml",
+      "name": "Darling UI smoke",
+      "triggers": [
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/darling-upgrade-shapes.yml",
+      "name": "Darling upgrade shapes",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/description-drift.yml",
+      "name": "Description drift",
+      "triggers": [
+        "pull_request"
+      ]
+    },
+    {
+      "file": ".github/workflows/fork-ci-result.yml",
+      "name": "PR CI fork result",
+      "triggers": [
+        "workflow_dispatch",
+        "workflow_run"
+      ]
+    },
+    {
+      "file": ".github/workflows/nightly.yml",
+      "name": "Nightly Build",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/pr.yml",
+      "name": "PR CI",
+      "triggers": [
+        "pull_request",
+        "push",
+        "schedule",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/probe-vpk-signing.yml",
+      "name": "Probe vpk signing invocations",
+      "triggers": [
+        "pull_request",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/release-signatures.yml",
+      "name": "Release signatures",
+      "triggers": [
+        "pull_request",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/runtime-currency.yml",
+      "name": "Runtime currency",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "file": ".github/workflows/sql-validation.yml",
+      "name": "SQL Validation",
+      "triggers": [
+        "pull_request",
+        "push"
+      ]
+    },
+    {
+      "file": ".github/workflows/wpf-smoke.yml",
+      "name": "WPF smoke",
+      "triggers": [
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    }
+  ],
+  "generated_from": "ae7176e58",
+  "mcp_tools": [
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "add_alert_source",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
+      "name": "add_servers",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs",
+      "name": "analyze_now",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "analyze_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "analyze_procedure_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "analyze_query_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "analyze_query_store_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "analyze_server",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs",
+      "name": "approve_investigation_note",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "assign_query_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
+      "name": "assign_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "audit_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "backtest_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingLeanToolProfile.cs",
+      "name": "call_tool",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "claim_investigation_request",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowWriteTools.cs",
+      "name": "clear_change_window",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQuietWindowTools.cs",
+      "name": "clear_quiet_window",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs",
+      "name": "close_investigation_request",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "compare_analysis",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "create_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "create_custom_view",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpKnownPatternWriteTools.cs",
+      "name": "create_known_pattern",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "create_mute_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs",
+      "name": "create_notification_route",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.PlanGuide.cs",
+      "name": "create_plan_guide",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "create_query_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs",
+      "name": "create_query_tag_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
+      "name": "create_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "create_web_access_group",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowWriteTools.cs",
+      "name": "declare_change_window",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "delete_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "delete_custom_view",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpKnownPatternWriteTools.cs",
+      "name": "delete_known_pattern",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "delete_mute_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "delete_notification_route",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "delete_query_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs",
+      "name": "delete_query_tag_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
+      "name": "delete_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "delete_web_access_group",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "describe_custom_view_catalog",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "disable_collector",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "disable_server",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs",
+      "name": "dismiss_alert_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.PlanGuide.cs",
+      "name": "drop_plan_guide",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.Edit.cs",
+      "name": "edit_server",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "enable_collector",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "enable_server",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs",
+      "name": "evict_cached_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindDatabaseTools.cs",
+      "name": "find_database",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindQueriesByTextTools.cs",
+      "name": "find_queries_by_text",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs",
+      "name": "find_schema_objects",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpToolSearchTools.cs",
+      "name": "find_tools",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs",
+      "name": "force_query_store_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs",
+      "name": "generate_webhook_signing_key",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs",
+      "name": "get_active_queries",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_active_query_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgTools.cs",
+      "name": "get_ag_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgentAlertTools.cs",
+      "name": "get_agent_alerts",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs",
+      "name": "get_agent_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "get_alert_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "get_alert_settings",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "get_analysis_facts",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "get_analysis_findings",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_blocked_process_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_blocking",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_blocking_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_blocking_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_blocking_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWatchTools.cs",
+      "name": "get_change_watches",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowTools.cs",
+      "name": "get_change_windows",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpClientTimeoutTools.cs",
+      "name": "get_client_timeouts",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_collection_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_collection_log",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "get_collection_state",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorCostTools.cs",
+      "name": "get_collector_cost",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorReadinessTools.cs",
+      "name": "get_collector_readiness",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "get_collector_schedules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStallProbeTools.cs",
+      "name": "get_collector_stall_probes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs",
+      "name": "get_command_result",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCompilesAfterEvictTools.cs",
+      "name": "get_compiles_after_evict",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWhoDroveItTools.cs",
+      "name": "get_cpu_by_database",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCacheSchedulerTools.cs",
+      "name": "get_cpu_scheduler_pressure",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_cpu_utilization",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_current_waits_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "get_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "get_custom_view",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDailyReportTools.cs",
+      "name": "get_daily_health_report",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthTools.cs",
+      "name": "get_daily_summary",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthTools.cs",
+      "name": "get_daily_summary_range",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigTools.cs",
+      "name": "get_database_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs",
+      "name": "get_database_config_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDatabaseProtectionTools.cs",
+      "name": "get_database_protection",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs",
+      "name": "get_database_scoped_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
+      "name": "get_database_sizes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDatabaseStateTools.cs",
+      "name": "get_database_state_expectations",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_deadlock_detail",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_deadlock_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_deadlock_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_deadlocks",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDefaultTraceTools.cs",
+      "name": "get_default_trace_events",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_file_io_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_file_io_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFinOpsTools.cs",
+      "name": "get_finops",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFinOpsInventoryTools.cs",
+      "name": "get_finops_inventory",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFinOpsRecommendationsTools.cs",
+      "name": "get_finops_recommendations",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFleetTools.cs",
+      "name": "get_fleet_overview",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpForcedPlanTools.cs",
+      "name": "get_forced_plans",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_cpu_tasks",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_io_issues",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_memory_broker",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_memory_conditions",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_memory_node_oom",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_scheduler_issues",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_severe_errors",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_significant_waits",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthParserTools.cs",
+      "name": "get_health_parser_system_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIdentityCapacityTools.cs",
+      "name": "get_identity_capacity",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
+      "name": "get_index_usage",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "get_investigation_evidence",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "get_investigation_reports",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
+      "name": "get_job_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpKnownPatternTools.cs",
+      "name": "get_known_patterns",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLatchSpinlockTools.cs",
+      "name": "get_latch_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWhoDroveItTools.cs",
+      "name": "get_load_by_caller",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+      "name": "get_lock_wait_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLongQueryTools.cs",
+      "name": "get_long_query_completions",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_memory_clerks",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpMemoryGrantTools.cs",
+      "name": "get_memory_grants",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpMemoryGrantTools.cs",
+      "name": "get_memory_pressure_events",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_memory_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_memory_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "get_mute_rules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "get_notification_routes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs",
+      "name": "get_object_definition",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
+      "name": "get_object_locking",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectUsageTools.cs",
+      "name": "get_object_usage",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpOversizedPlanBacklogTools.cs",
+      "name": "get_oversized_plan_backlog",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPeopleTools.cs",
+      "name": "get_people",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_perfmon_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_perfmon_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "get_personal_tokens",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgAutovacuumTools.cs",
+      "name": "get_pg_autovacuum_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgBlockingTools.cs",
+      "name": "get_pg_blocking",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_buffer_usage",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgIndexTools.cs",
+      "name": "get_pg_column_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgCpuUtilizationTools.cs",
+      "name": "get_pg_cpu_utilization",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgDatabaseTools.cs",
+      "name": "get_pg_database_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgTrendTools.cs",
+      "name": "get_pg_database_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgDeadlockTools.cs",
+      "name": "get_pg_deadlock_detail",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgDeadlockTools.cs",
+      "name": "get_pg_deadlocks",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_extensions",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgIndexTools.cs",
+      "name": "get_pg_index_bloat",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgIndexUsageTools.cs",
+      "name": "get_pg_index_usage",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgIoTools.cs",
+      "name": "get_pg_io_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgTrendTools.cs",
+      "name": "get_pg_io_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgKernelStatsTools.cs",
+      "name": "get_pg_kernel_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_lock_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgLogEventTools.cs",
+      "name": "get_pg_log_events",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgLoggingAuditTools.cs",
+      "name": "get_pg_logging_audit",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgPlanTools.cs",
+      "name": "get_pg_plan_capture_readiness",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgPlanTools.cs",
+      "name": "get_pg_plans",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgPredicateTools.cs",
+      "name": "get_pg_predicate_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgTrendTools.cs",
+      "name": "get_pg_query_duration_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgSlotTools.cs",
+      "name": "get_pg_replication_slots",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgReplicationStatsTools.cs",
+      "name": "get_pg_replication_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_server_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_server_config_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgSessionStatesTools.cs",
+      "name": "get_pg_session_states",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgTableBloatTools.cs",
+      "name": "get_pg_table_bloat",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgStatementTools.cs",
+      "name": "get_pg_top_queries",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgWaitSamplingTools.cs",
+      "name": "get_pg_wait_sampling",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgWaitTools.cs",
+      "name": "get_pg_wait_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgTrendTools.cs",
+      "name": "get_pg_wait_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgWraparoundTools.cs",
+      "name": "get_pg_wraparound_risk",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs",
+      "name": "get_pg_write_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgXminTools.cs",
+      "name": "get_pg_xmin_horizon",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCacheSchedulerTools.cs",
+      "name": "get_plan_cache_bloat",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
+      "name": "get_plan_corrections",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForcePrecheckTools.cs",
+      "name": "get_plan_force_precheck",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_procedure_duration_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_procedure_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
+      "name": "get_pvs_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_query_duration_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryFleetSummaryTools.cs",
+      "name": "get_query_fleet_summary",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryHeatmapTools.cs",
+      "name": "get_query_heatmap",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWhoDroveItTools.cs",
+      "name": "get_query_pileups",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_query_repro_script",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryStoreAbortsTools.cs",
+      "name": "get_query_store_aborts",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryStoreClutterTools.cs",
+      "name": "get_query_store_clutter",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_query_store_duration_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs",
+      "name": "get_query_store_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpForcedPlanTools.cs",
+      "name": "get_query_store_hints",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs",
+      "name": "get_query_store_plan_xml",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryStoreHistoryTools.cs",
+      "name": "get_query_store_query_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryStoreRegressionTools.cs",
+      "name": "get_query_store_regressions",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_query_store_top",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs",
+      "name": "get_query_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpReadLatencyTools.cs",
+      "name": "get_read_latency",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpMemoryGrantTools.cs",
+      "name": "get_resource_semaphore",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRollupTools.cs",
+      "name": "get_resource_use_by_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
+      "name": "get_running_jobs",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs",
+      "name": "get_schema_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerActionTools.cs",
+      "name": "get_server_actions",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigTools.cs",
+      "name": "get_server_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs",
+      "name": "get_server_config_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_server_properties",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "get_server_settings",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHealthTools.cs",
+      "name": "get_server_summary",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTrendTools.cs",
+      "name": "get_server_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServiceStartTools.cs",
+      "name": "get_service_starts",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs",
+      "name": "get_session_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSlowReadTools.cs",
+      "name": "get_slow_reads",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLatchSpinlockTools.cs",
+      "name": "get_spinlock_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCheckpointTools.cs",
+      "name": "get_store_checkpoints",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs",
+      "name": "get_store_compression_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreConnectionsTools.cs",
+      "name": "get_store_connections",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs",
+      "name": "get_store_host",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreJobRunsTools.cs",
+      "name": "get_store_job_runs",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreLockWaitTools.cs",
+      "name": "get_store_lock_waits",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreLogTools.cs",
+      "name": "get_store_log",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMaintenanceReadinessTools.cs",
+      "name": "get_store_maintenance_readiness",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs",
+      "name": "get_store_metrics",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStorePassStepsTools.cs",
+      "name": "get_store_pass_steps",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryHistoryTools.cs",
+      "name": "get_store_query_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryStatsTools.cs",
+      "name": "get_store_query_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreSettingChangesTools.cs",
+      "name": "get_store_setting_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableHealthTools.cs",
+      "name": "get_store_table_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFleetSweepTools.cs",
+      "name": "get_sweep_reports",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
+      "name": "get_table_index_sizes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_tempdb_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpToolGuideTools.cs",
+      "name": "get_tool_guide",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_top_procedures_by_cpu",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_top_queries_by_cpu",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs",
+      "name": "get_trace_flag_changes",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigTools.cs",
+      "name": "get_trace_flags",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_wait_stats",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_wait_trend",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "get_wait_types",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs",
+      "name": "get_waiting_tasks",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "get_web_access_groups",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs",
+      "name": "kill_session",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "list_alert_sources",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "list_custom_alert_rules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "list_custom_alert_templates",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "list_custom_views",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "list_investigation_requests",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs",
+      "name": "list_query_tag_rules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "list_query_tags",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+      "name": "list_servers",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableMeasureTools.cs",
+      "name": "measure_store_table",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSignatureMergeTools.cs",
+      "name": "merge_deadlock_signatures",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "mint_personal_token",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "mute_analysis_finding",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs",
+      "name": "new_password_key",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "pause_collection",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.Chat.cs",
+      "name": "post_investigation_message",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "purge_expired_mute_rules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs",
+      "name": "purge_now",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.RecompileModule.cs",
+      "name": "recompile_module",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs",
+      "name": "record_investigation_feedback",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs",
+      "name": "reject_investigation_note",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "reload_config",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "remove_alert_source",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
+      "name": "remove_server",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs",
+      "name": "remove_webhook_signing_key",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "reset_collector_schedules",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs",
+      "name": "reset_password_key",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs",
+      "name": "restore_alert_history",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "resume_collection",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "revoke_personal_token",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "rotate_alert_source",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "rotate_web_access_group_token",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorRunTools.cs",
+      "name": "run_collectors_now",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "run_custom_view_panel",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs",
+      "name": "save_environment_profile",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDailyHealthReportTools.cs",
+      "name": "send_daily_health_report_now",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.TestNotification.cs",
+      "name": "send_test_notification",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "set_advanced_web_access",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgentChangeAdminTools.cs",
+      "name": "set_agent_actions_enabled",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpThresholdOverrideTools.cs",
+      "name": "set_alert_threshold_override",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "set_collector_databases",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "set_collector_frequency",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "set_collector_retention",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs",
+      "name": "set_collector_run_at",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDatabaseStateTools.cs",
+      "name": "set_database_state_expected",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "set_mute_rule_enabled",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "set_notification_route_enabled",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "set_notification_route_fallback",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQuietWindowTools.cs",
+      "name": "set_quiet_window",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerActionTools.cs",
+      "name": "set_server_action",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "set_server_excluded_databases",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
+      "name": "set_server_xe_session_databases",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs",
+      "name": "start_practice_request",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "submit_investigation_report",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs",
+      "name": "test_connection",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "test_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs",
+      "name": "test_query_tag_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "unassign_query_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
+      "name": "unassign_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgentChangeAdminTools.cs",
+      "name": "undo_agent_change",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanUndoTools.cs",
+      "name": "undo_plan_change",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs",
+      "name": "unforce_query_store_plan",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
+      "name": "unmute_analysis_finding",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "update_alert_settings",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "update_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "update_custom_view",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpKnownPatternWriteTools.cs",
+      "name": "update_known_pattern",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs",
+      "name": "update_mute_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.NotificationChannels.cs",
+      "name": "update_notification_channels",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs",
+      "name": "update_notification_route",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs",
+      "name": "update_query_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs",
+      "name": "update_query_tag_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
+      "name": "update_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServiceFlagTools.cs",
+      "name": "update_service_flags",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "update_web_access_group",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
+      "name": "validate_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs",
+      "name": "validate_custom_view",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs",
+      "name": "wait_for_investigation_requests",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs",
+      "name": "write_investigation_note",
+      "product": "Darling"
+    },
+    {
+      "file": "Lite/Mcp/McpServerRegistryTools.cs",
+      "name": "add_servers",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanTools.cs",
+      "name": "analyze_plan_xml",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanTools.cs",
+      "name": "analyze_procedure_plan",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanTools.cs",
+      "name": "analyze_query_plan",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanTools.cs",
+      "name": "analyze_query_store_plan",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "analyze_server",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "assign_query_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "audit_config",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpInvestigationTools.cs",
+      "name": "claim_investigation_request",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "compare_analysis",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "create_mute_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.RouteAdmin.cs",
+      "name": "create_notification_route",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "create_query_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "create_query_tag_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "delete_mute_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "delete_notification_route",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "delete_query_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "delete_query_tag_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpServerAdminTools.cs",
+      "name": "edit_server",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpDiscoveryTools.cs",
+      "name": "find_database",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpToolSearchTools.cs",
+      "name": "find_tools",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpSessionTools.cs",
+      "name": "get_active_queries",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "get_alert_history",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "get_alert_settings",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "get_analysis_facts",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "get_analysis_findings",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_blocked_process_reports",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_blocked_process_xml",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_blocking_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_blocking_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpClientTimeoutTools.cs",
+      "name": "get_client_timeouts",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_collection_health",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_collection_log",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpCollectorScheduleTools.cs",
+      "name": "get_collector_schedules",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWhoDroveItTools.cs",
+      "name": "get_cpu_by_database",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanCacheSchedulerTools.cs",
+      "name": "get_cpu_scheduler_pressure",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpCpuTools.cs",
+      "name": "get_cpu_utilization",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_current_waits_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_daily_summary",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_daily_summary_range",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigTools.cs",
+      "name": "get_database_config",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigHistoryTools.cs",
+      "name": "get_database_config_changes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigTools.cs",
+      "name": "get_database_scoped_config",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpServerInfoTools.cs",
+      "name": "get_database_sizes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_deadlock_detail",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_deadlock_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_deadlocks",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpDefaultTraceTools.cs",
+      "name": "get_default_trace_events",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpIoTools.cs",
+      "name": "get_file_io_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpIoTools.cs",
+      "name": "get_file_io_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_cpu_tasks",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_io_issues",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_memory_broker",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_memory_conditions",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_memory_node_oom",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_scheduler_issues",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_severe_errors",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_significant_waits",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthParserTools.cs",
+      "name": "get_health_parser_system_health",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpObjectStatsTools.cs",
+      "name": "get_index_usage",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpInvestigationTools.cs",
+      "name": "get_investigation_reports",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpLatchSpinlockTools.cs",
+      "name": "get_latch_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWhoDroveItTools.cs",
+      "name": "get_load_by_caller",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpBlockingTools.cs",
+      "name": "get_lock_wait_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpLongQueryTools.cs",
+      "name": "get_long_query_completions",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_memory_clerks",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_memory_grants",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_memory_pressure_events",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_memory_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_memory_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "get_mute_rules",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "get_notification_routes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpObjectStatsTools.cs",
+      "name": "get_object_locking",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpObjectUsageTools.cs",
+      "name": "get_object_usage",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPerfmonTools.cs",
+      "name": "get_perfmon_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPerfmonTools.cs",
+      "name": "get_perfmon_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanCacheSchedulerTools.cs",
+      "name": "get_plan_cache_bloat",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanCorrectionTools.cs",
+      "name": "get_plan_corrections",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPlanTools.cs",
+      "name": "get_plan_xml",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_procedure_duration_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpPvsTools.cs",
+      "name": "get_pvs_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_duration_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_heatmap",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWhoDroveItTools.cs",
+      "name": "get_query_pileups",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_store_duration_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigTools.cs",
+      "name": "get_query_store_health",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_store_regressions",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_store_top",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_query_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpMemoryTools.cs",
+      "name": "get_resource_semaphore",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagUsageTools.cs",
+      "name": "get_resource_use_by_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpJobTools.cs",
+      "name": "get_running_jobs",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigTools.cs",
+      "name": "get_server_config",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigHistoryTools.cs",
+      "name": "get_server_config_changes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpServerInfoTools.cs",
+      "name": "get_server_properties",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpHealthTools.cs",
+      "name": "get_server_summary",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpSessionTools.cs",
+      "name": "get_session_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpSlowCallTools.cs",
+      "name": "get_slow_mcp_calls",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpLatchSpinlockTools.cs",
+      "name": "get_spinlock_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpStoreHealthTools.cs",
+      "name": "get_store_health",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpObjectStatsTools.cs",
+      "name": "get_table_index_sizes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpTempDbTools.cs",
+      "name": "get_tempdb_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpToolGuideTools.cs",
+      "name": "get_tool_guide",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_top_procedures_by_cpu",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTools.cs",
+      "name": "get_top_queries_by_cpu",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigHistoryTools.cs",
+      "name": "get_trace_flag_changes",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpConfigTools.cs",
+      "name": "get_trace_flags",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWaitTools.cs",
+      "name": "get_wait_stats",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWaitTools.cs",
+      "name": "get_wait_trend",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWaitTools.cs",
+      "name": "get_wait_types",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpWaitTools.cs",
+      "name": "get_waiting_tasks",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpInvestigationTools.cs",
+      "name": "list_investigation_requests",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "list_query_tag_rules",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "list_query_tags",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpDiscoveryTools.cs",
+      "name": "list_servers",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "mute_analysis_finding",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpServerRegistryTools.cs",
+      "name": "remove_server",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpCollectorScheduleTools.cs",
+      "name": "reset_collector_schedules",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "set_mute_rule_enabled",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.cs",
+      "name": "set_notification_route_enabled",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpServerAdminTools.cs",
+      "name": "set_server_excluded_databases",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpInvestigationTools.cs",
+      "name": "submit_investigation_report",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "test_query_tag_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "unassign_query_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAnalysisTools.cs",
+      "name": "unmute_analysis_finding",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertSettingsWriteTools.cs",
+      "name": "update_alert_settings",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "update_mute_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.RouteAdmin.cs",
+      "name": "update_notification_route",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "update_query_tag",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpQueryTagTools.cs",
+      "name": "update_query_tag_rule",
+      "product": "Lite"
+    }
+  ],
+  "migrations": {
+    "count": 318,
+    "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
+    "newest_version": 319
+  },
+  "overview": [
+    "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
+    "Both products collect data from SQL Server and answer questions through an MCP server for AI tools. They share code for collectors, alerting, notifications, analysis and plan analysis.",
+    "The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in the repository builds them."
+  ],
+  "projects": [
+    {
+      "folder": "Darling/Darling.Tests.Standin",
+      "kind": "test",
+      "name": "Darling.Tests.Standin",
+      "path": "Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Darling/Darling.Tests",
+      "kind": "test",
+      "name": "Darling.Tests",
+      "path": "Darling/Darling.Tests/Darling.Tests.csproj",
+      "target_frameworks": [
+        "net10.0",
+        "net10.0-windows"
+      ]
+    },
+    {
+      "folder": "Darling/PerformanceMonitor.Darling.Analysis",
+      "kind": "library",
+      "name": "PerformanceMonitor.Darling.Analysis",
+      "path": "Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Darling/PerformanceMonitor.Darling.Remediation",
+      "kind": "library",
+      "name": "PerformanceMonitor.Darling.Remediation",
+      "path": "Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Darling/PerformanceMonitor.Darling.Service",
+      "kind": "app",
+      "name": "PerformanceMonitor.Darling.Service",
+      "path": "Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Darling/PerformanceMonitor.Darling.Storage",
+      "kind": "library",
+      "name": "PerformanceMonitor.Darling.Storage",
+      "path": "Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Darling/PerformanceMonitor.Darling.Viewer",
+      "kind": "app",
+      "name": "PerformanceMonitor.Darling.Viewer",
+      "path": "Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj",
+      "target_frameworks": [
+        "net10.0-windows"
+      ]
+    },
+    {
+      "folder": "Darling/tools/generate-ladder-fixture",
+      "kind": "tool",
+      "name": "generate-ladder-fixture",
+      "path": "Darling/tools/generate-ladder-fixture/generate-ladder-fixture.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Exporter/PerformanceMonitor.Exporter.TestChild",
+      "kind": "test",
+      "name": "PerformanceMonitor.Exporter.TestChild",
+      "path": "Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Exporter/PerformanceMonitor.Exporter.Tests",
+      "kind": "test",
+      "name": "PerformanceMonitor.Exporter.Tests",
+      "path": "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Exporter/PerformanceMonitor.Exporter",
+      "kind": "app",
+      "name": "PerformanceMonitor.Exporter",
+      "path": "Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "Lite.Tests",
+      "kind": "test",
+      "name": "Lite.Tests",
+      "path": "Lite.Tests/Lite.Tests.csproj",
+      "target_frameworks": [
+        "net10.0-windows"
+      ]
+    },
+    {
+      "folder": "Lite",
+      "kind": "app",
+      "name": "PerformanceMonitorLite",
+      "path": "Lite/PerformanceMonitorLite.csproj",
+      "target_frameworks": [
+        "net10.0-windows"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Alerting",
+      "kind": "library",
+      "name": "PerformanceMonitor.Alerting",
+      "path": "PerformanceMonitor.Alerting/PerformanceMonitor.Alerting.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Analysis",
+      "kind": "library",
+      "name": "PerformanceMonitor.Analysis",
+      "path": "PerformanceMonitor.Analysis/PerformanceMonitor.Analysis.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Collectors",
+      "kind": "library",
+      "name": "PerformanceMonitor.Collectors",
+      "path": "PerformanceMonitor.Collectors/PerformanceMonitor.Collectors.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Common",
+      "kind": "library",
+      "name": "PerformanceMonitor.Common",
+      "path": "PerformanceMonitor.Common/PerformanceMonitor.Common.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Notifications",
+      "kind": "library",
+      "name": "PerformanceMonitor.Notifications",
+      "path": "PerformanceMonitor.Notifications/PerformanceMonitor.Notifications.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.PlanAnalysis",
+      "kind": "library",
+      "name": "PerformanceMonitor.PlanAnalysis",
+      "path": "PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "PerformanceMonitor.Ui",
+      "kind": "library",
+      "name": "PerformanceMonitor.Ui",
+      "path": "PerformanceMonitor.Ui/PerformanceMonitor.Ui.csproj",
+      "target_frameworks": [
+        "net10.0-windows"
+      ]
+    },
+    {
+      "folder": "tools/CompactionRepro",
+      "kind": "tool",
+      "name": "CompactionRepro",
+      "path": "tools/CompactionRepro/CompactionRepro.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "tools/SliceRepairRepro",
+      "kind": "tool",
+      "name": "SliceRepairRepro",
+      "path": "tools/SliceRepairRepro/SliceRepairRepro.csproj",
+      "target_frameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "folder": "tools/ui-smoke-wpf",
+      "kind": "tool",
+      "name": "UiSmokeWpf",
+      "path": "tools/ui-smoke-wpf/UiSmokeWpf.csproj",
+      "target_frameworks": [
+        "net10.0-windows"
+      ]
+    }
+  ],
+  "schema": 1,
+  "tests": [
+    {
+      "name": "Darling.Tests.Standin",
+      "project": "Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj",
+      "test_classes": 0
+    },
+    {
+      "name": "Darling.Tests",
+      "project": "Darling/Darling.Tests/Darling.Tests.csproj",
+      "test_classes": 3675
+    },
+    {
+      "name": "PerformanceMonitor.Exporter.TestChild",
+      "project": "Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj",
+      "test_classes": 0
+    },
+    {
+      "name": "PerformanceMonitor.Exporter.Tests",
+      "project": "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
+      "test_classes": 75
+    },
+    {
+      "name": "Lite.Tests",
+      "project": "Lite.Tests/Lite.Tests.csproj",
+      "test_classes": 1248
+    }
+  ]
+}

@@ -171,9 +171,8 @@ public sealed class ExportRunner
             await ManifestWriter.WriteAsync(manifest, manifestPath, ct).ConfigureAwait(false);
             output.WriteLine($"Manifest written to {manifestPath}");
 
-            if (options.Upload is not null)
+            if (options.UploadTarget() is { } settings)
             {
-                var settings = UploadSettings.FromUri(options.Upload, options.AwsRegion);
                 await using var uploader = UploaderFactory.Create(settings);
                 await RunUpload.UploadRunAsync(uploader, settings.Layout, options, manifest, manifestPath, output, ct).ConfigureAwait(false);
                 output.WriteLine($"Uploaded to {settings.Display}");
@@ -262,9 +261,8 @@ public sealed class ExportRunner
         await ManifestWriter.WriteAsync(optionalManifest, optionalManifestPath, ct).ConfigureAwait(false);
         output.WriteLine($"Optional manifest written to {optionalManifestPath}");
 
-        if (options.Upload is not null && runResult.Entries.Count > 0)
+        if (runResult.Entries.Count > 0 && options.UploadTarget() is { } settings)
         {
-            var settings = UploadSettings.FromUri(options.Upload, options.AwsRegion);
             await using var uploader = createUploader is null ? UploaderFactory.Create(settings) : createUploader(settings);
             await RunUpload.UploadRunAsync(uploader, settings.Layout, options, optionalManifest, optionalManifestPath, output, ct).ConfigureAwait(false);
         }
@@ -350,7 +348,7 @@ public sealed class ExportRunner
 
             connectionStringBuilder ??= StoreConnectionFactory.Build(options);
             await using var optionalConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySql, optionalConnection);
+            await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySqlFor(table), optionalConnection);
             command.Parameters.AddWithValue("schema", table.Schema);
             command.Parameters.AddWithValue("table", table.Name);
             var columns = new List<DiscoveredColumn>();

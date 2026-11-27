@@ -982,7 +982,9 @@ public sealed class DarlingListenerTlsTests
         return new WebTlsConfig { CertPath = certPath, KeyPath = keyPath };
     }
 
-    private static readonly SecurityIdentifier s_builtinUsers = new(WellKnownSidType.BuiltinUsersSid, null);
+    /* #9686: made on first use and not when the class loads. A SecurityIdentifier cannot be made off Windows, and only the
+       Windows ACL helpers below read this one, so the tests that need no ACL run on Linux too. */
+    private static readonly Lazy<SecurityIdentifier> s_builtinUsers = new(() => new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
 
     /// <summary>
     /// Leaves <paramref name="path"/> readable by the current user alone (Windows): no inherited ACE and no Users
@@ -999,7 +1001,7 @@ public sealed class DarlingListenerTlsTests
         var info = new FileInfo(path);
         var security = info.GetAccessControl();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        security.PurgeAccessRules(s_builtinUsers);
+        security.PurgeAccessRules(s_builtinUsers.Value);
         security.AddAccessRule(new FileSystemAccessRule(
             WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Allow));
         info.SetAccessControl(security);
@@ -1010,7 +1012,7 @@ public sealed class DarlingListenerTlsTests
     {
         var info = new FileInfo(path);
         var security = info.GetAccessControl();
-        security.AddAccessRule(new FileSystemAccessRule(s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(s_builtinUsers.Value, FileSystemRights.Read, AccessControlType.Allow));
         info.SetAccessControl(security);
     }
 

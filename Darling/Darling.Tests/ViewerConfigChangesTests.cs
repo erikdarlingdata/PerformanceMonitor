@@ -215,15 +215,16 @@ public sealed class ViewerConfigChangesDiffTests
     [Fact]
     public void ServerConfigChanges_PreWindowBaseline_ChangeOnFirstInWindowSnapshot_IsDetected()
     {
-        /* T0 is BEFORE the window [T1, T3]; the value moves T0 -> T1. The change at T1 must still be detected,
-           using the pre-window T0 as the diff baseline — this is why the read is not lower-bounded. */
+        /* T0 is BEFORE the window (T0 plus 12 hours, T3]; the value moves T0 -> T1. The change at T1, the window's first
+           snapshot, must still be detected, using the pre-window T0 as the diff baseline — this is why the read is not
+           lower-bounded. */
         var snapshots = new List<Snap.ServerConfigSnapshot>
         {
             new(T0, "max degree of parallelism", 0, 0, true, true),
             new(T1, "max degree of parallelism", 8, 8, true, true),
         };
 
-        var change = Assert.Single(ConfigChangeDiff.DiffServerConfigChanges(snapshots, T1, T3));
+        var change = Assert.Single(ConfigChangeDiff.DiffServerConfigChanges(snapshots, T0.AddHours(12), T3));
         Assert.Equal(0L, change.OldValueConfigured);
         Assert.Equal(8L, change.NewValueConfigured);
         Assert.Equal(T1, change.ChangeTime);

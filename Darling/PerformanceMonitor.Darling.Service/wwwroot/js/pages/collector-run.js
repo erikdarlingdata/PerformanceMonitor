@@ -93,8 +93,10 @@ function sleep(ms) {
 /** Plain-words sentence for a refused or failed request. */
 function refusalText(res) {
   if (res.status === 0) return res.message || "The request did not reach the service.";
-  if (res.status === 403) return "This account has read-only access, so it cannot run collectors.";
   const body = res.body && typeof res.body === "object" ? res.body : {};
+  /* A 403 is a read-only seat, except when the store has no queue function: then the service's sentence names the script to run. */
+  if (res.status === 403 && body.code === "store_cannot_queue" && body.error) return body.error;
+  if (res.status === 403) return "This account has read-only access, so it cannot run collectors.";
   return body.error || "The service refused the request (HTTP " + res.status + ").";
 }
 

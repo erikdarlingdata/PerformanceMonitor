@@ -176,7 +176,7 @@ internal static class StoredEventCopies
 
         var seconds = ((long)CollectorContext.EventFallbackWindow.TotalSeconds).ToString(CultureInfo.InvariantCulture);
         return ($" AND collection_time >= CAST({collectedFrom} AS TIMESTAMP) - INTERVAL {seconds} SECOND",
-            $" AND collection_time >= {collectedFrom}");
+            $" AND collection_time > {collectedFrom}");
     }
 
     /* A parenthesized relation for a FROM clause, so a caller adds its own alias. The grouped side reads only the

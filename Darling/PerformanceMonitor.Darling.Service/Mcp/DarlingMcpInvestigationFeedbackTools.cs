@@ -35,6 +35,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpInvestigationFeedbackTools
 {
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "start_practice_request"), Description(
         "Starts a practice request: a replay of one judged case (a request that has a report and feedback on it) that an investigation agent works as if it were new, so its report can be scored against what people said of the original (the web's Start practice). Changes the monitoring store only. " +
         "<<GUIDE>>" +
@@ -93,6 +94,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "save_environment_profile"), Description(
         "Saves the environment profile of one scope: the free text every investigation brief of that scope carries about how the environment is run (the web's Save on the profile page). One profile per scope: the whole fleet, one server or one tag. A blank profile_text removes the scope's profile. Changes the monitoring store only. " +
         "<<GUIDE>>" +
@@ -140,7 +142,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
             string? serverDisplay = null;
             if (hasServer)
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
                 if (error is not null)
                 {
                     return error;
@@ -192,6 +194,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "record_investigation_feedback"), Description(
         "Records feedback on an investigation report: whether it was right, partly right or wrong, what the right verdict was and what the agent missed (the web's feedback form). Feedback is what a practice request is scored against. One feedback per author per report: recording again as the same token replaces it. Changes the monitoring store only. " +
         "<<GUIDE>>" +

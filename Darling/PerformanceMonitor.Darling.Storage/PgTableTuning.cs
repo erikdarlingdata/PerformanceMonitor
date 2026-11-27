@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -83,6 +82,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// covered by the same doctrine through <see cref="GuardedAlter"/>: its own transaction under
 /// <see cref="AlterLockTimeoutSeconds"/>. A busy table (<c>55P03</c>) is rolled back, logged once at Information as
 /// skipped until the next pass, and the sweep goes on; the settings are idempotent, so a skipped pass costs nothing.</para>
+///
+/// <para>#8949: a literal <c>ALTER TABLE ... SET (...)</c> is issued only when the catalog shows a difference
+/// (<see cref="AlterIsConvergedAsync"/>). The statement takes SHARE UPDATE EXCLUSIVE even when it changes nothing, and that
+/// cancels an autovacuum running on the table (a wraparound one excepted). On a hypertable the ALTER recurses to every chunk, so
+/// it cancels the chunk vacuums too, and a TOAST table with no reloptions of its own is vacuumed under its owner and is
+/// cancelled with it. An ALTER issued every hour keeps a multi-hour vacuum of a large table from ever finishing.</para>
 /// </summary>
 public static class PgTableTuning
 {
@@ -113,7 +118,7 @@ public static class PgTableTuning
     /// The same bound as <see cref="CreateLockTimeoutSeconds"/>, as the <c>CommandTimeout</c> (seconds) of the start-path
     /// emptiness check. That check is a bare SELECT, so it takes ACCESS SHARE on the table and queues behind an ACCESS EXCLUSIVE
     /// holder (drop_chunks, decompress_chunk, VACUUM FULL) the way a CREATE does; with <see cref="SetupTimeoutSeconds"/> it
-    /// would hold the start for 300 s. It gives up here instead and fails closed onto the one-build budget (#6460).
+    /// would hold the start for 300 s. It gives up here instead and fails closed onto the shared build budget (#6460).
     /// </summary>
     private const int EmptinessCheckTimeoutSeconds = 5;
 
@@ -156,20 +161,185 @@ public static class PgTableTuning
     }
 
     /// <summary>
-    /// The indexes whose first build reads the heap of a large hypertable. A start builds at most one of them:
-    /// once one build has been issued, the rest that are still missing wait for the next start, so each start
-    /// pauses collection for one bounded build, not for the sum of several. Statement order decides which goes first.
+    /// The <c>schema.table</c> and the <c>(key, value)</c> pairs of an <c>ALTER TABLE &lt;table&gt; SET (k = v, k = v)</c> statement,
+    /// or null when the statement is not exactly that shape. A statement that does not parse is issued on every pass. A quoted
+    /// value, a nested parenthesis or a namespaced key (<c>toast.</c>, which is stored on the TOAST table and not in the table's
+    /// own reloptions) does not parse, because none of them can be compared with <see cref="ReloptionsCarry"/>.
     /// </summary>
-    private static readonly HashSet<string> s_oneBuildPerStart = new(StringComparer.Ordinal)
+    internal static (string Table, IReadOnlyList<KeyValuePair<string, string>> Options)? ParseAlterSet(string statement)
+    {
+        const string set = " SET (";
+        if (statement is null || !statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal) || !statement.EndsWith(')'))
+        {
+            return null;
+        }
+
+        var setAt = statement.IndexOf(set, AlterTablePrefix.Length, StringComparison.Ordinal);
+        if (setAt < 0)
+        {
+            return null;
+        }
+
+        var table = statement.Substring(AlterTablePrefix.Length, setAt - AlterTablePrefix.Length);
+        var list = statement.Substring(setAt + set.Length, statement.Length - setAt - set.Length - 1);
+        if (table.Length == 0 || table.Contains(' ', StringComparison.Ordinal) || list.AsSpan().IndexOfAny("()'\"") >= 0)
+        {
+            return null;
+        }
+
+        var options = new List<KeyValuePair<string, string>>();
+        foreach (var item in list.Split(','))
+        {
+            var equalsAt = item.IndexOf('=', StringComparison.Ordinal);
+            if (equalsAt < 0)
+            {
+                return null;
+            }
+
+            var key = item.Substring(0, equalsAt).Trim();
+            var value = item.Substring(equalsAt + 1).Trim();
+            if (key.Length == 0 || value.Length == 0 || key.Contains('.', StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            options.Add(new KeyValuePair<string, string>(key, value));
+        }
+
+        return (table, options);
+    }
+
+    /// <summary>
+    /// True when <paramref name="reloptions"/> (a <c>pg_class.reloptions</c> array of <c>key=value</c> entries, null when the
+    /// relation has none) holds every option in <paramref name="wanted"/> at the wanted value. Options the relation carries
+    /// beyond those are ignored. Keys compare without case. Values compare as numbers when both are numbers, because the catalog
+    /// keeps the spelling the option was set with (<c>0.020</c> stays <c>0.020</c>), and as text without case otherwise.
+    /// </summary>
+    internal static bool ReloptionsCarry(IReadOnlyList<KeyValuePair<string, string>> wanted, IReadOnlyList<string>? reloptions)
+    {
+        if (reloptions is null)
+        {
+            return wanted.Count == 0;
+        }
+
+        foreach (var want in wanted)
+        {
+            var carried = false;
+            foreach (var entry in reloptions)
+            {
+                var equalsAt = entry?.IndexOf('=', StringComparison.Ordinal) ?? -1;
+                if (equalsAt < 0 || !string.Equals(entry!.Substring(0, equalsAt).Trim(), want.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                carried = OptionValuesEqual(want.Value, entry.Substring(equalsAt + 1).Trim());
+                break;
+            }
+
+            if (!carried)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool OptionValuesEqual(string wanted, string actual) =>
+        decimal.TryParse(wanted, NumberStyles.Float, CultureInfo.InvariantCulture, out var wantedNumber)
+        && decimal.TryParse(actual, NumberStyles.Float, CultureInfo.InvariantCulture, out var actualNumber)
+            ? wantedNumber == actualNumber
+            : string.Equals(wanted, actual, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The reloptions of a relation ($1, a <c>schema.table</c>) and of every relation that inherits from it, one row each. The
+    /// chunks of a hypertable inherit from its root; a plain table has no children. No row means the relation does not exist.
+    /// It reads <c>pg_class</c> and <c>pg_inherits</c> only, and <c>to_regclass</c> resolves the name without locking the
+    /// relation, so the read never waits on a lock held on the table itself.
+    /// </summary>
+    private const string RelationAndChildOptionsSql =
+        "SELECT c.reloptions FROM pg_class AS c WHERE c.oid = to_regclass($1) "
+        + "UNION ALL "
+        + "SELECT c.reloptions FROM pg_inherits AS i JOIN pg_class AS c ON c.oid = i.inhrelid WHERE i.inhparent = to_regclass($1)";
+
+    /// <summary>
+    /// The <c>CommandTimeout</c> (seconds) of the catalog read in <see cref="AlterIsConvergedAsync"/>. The read waits on no
+    /// table lock, so this only bounds a catalog that is itself unavailable; a read that gives up issues the ALTER.
+    /// </summary>
+    private const int ReloptionsReadTimeoutSeconds = 5;
+
+    /// <summary>
+    /// True when the table an <c>ALTER TABLE ... SET (...)</c> statement tunes, and every relation that inherits from it, already
+    /// carries every option in the statement at the statement's value, so issuing the statement would change nothing. On a
+    /// hypertable the ALTER recurses to the chunks, so a chunk that differs makes the whole statement due again.
+    /// Anything else answers false and the caller issues the ALTER: a statement that does not parse, a table that does not exist,
+    /// one option missing or different on one relation, or a catalog read that failed. The connection stays usable after a failed
+    /// read, which runs outside a transaction.
+    /// </summary>
+    internal static async Task<bool> AlterIsConvergedAsync(NpgsqlConnection connection, string statement, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var parsed = ParseAlterSet(statement);
+        if (parsed is null)
+        {
+            return false;
+        }
+
+        var (table, options) = parsed.Value;
+
+        try
+        {
+            using var command = new NpgsqlCommand(RelationAndChildOptionsSql, connection) { CommandTimeout = ReloptionsReadTimeoutSeconds };
+            command.Parameters.AddWithValue(table);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var relations = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                relations++;
+                if (!ReloptionsCarry(options, reader.IsDBNull(0) ? null : reader.GetFieldValue<string[]>(0)))
+                {
+                    return false;
+                }
+            }
+
+            return relations > 0;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "Could not read the current settings of {Table}, so its tuning setting is applied without the check: {Message}",
+                table, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #9795: the time, in seconds, the builds of the <see cref="s_startBuildBudget"/> indexes may take in one start, all of them
+    /// together. It is the limit of one build, so a start pauses collection for these builds no longer than one bounded build can.
+    /// </summary>
+    private const int StartBuildBudgetSeconds = SetupTimeoutSeconds;
+
+    /// <summary>
+    /// The indexes whose first build reads the heap of a large hypertable. They share one time budget per start
+    /// (<see cref="StartBuildBudgetSeconds"/>, #9795): a start builds every missing one, in statement order, while the builds so far
+    /// have taken less than the budget, and each build runs under the smaller of its own limit and the time left. A store whose
+    /// builds are quick, such as one upgraded across several releases with little history, has every index after one start. On a
+    /// store whose builds use the budget up, the rest wait for the next start, so each start pauses collection for no longer than
+    /// one bounded build, not for the sum of several.
+    /// </summary>
+    private static readonly HashSet<string> s_startBuildBudget = new(StringComparer.Ordinal)
     {
         LegacyRowIndexName,
         QueryStatsRestartRowIndexName,
         ProcedureStatsRestartRowIndexName,
+        ProcedureStatsNameIndex.IndexName,
         WaitStatsDailyCoverIndexName,
+        CpuWindowCoverIndexName,
+        QueryStoreServerHashIndexName,
     };
 
-    /// <summary>True for an index that shares the one-build-per-start budget.</summary>
-    internal static bool IsOneBuildPerStart(string indexName) => s_oneBuildPerStart.Contains(indexName);
+    /// <summary>True for an index whose build shares the start's build time budget.</summary>
+    internal static bool SharesStartBuildBudget(string indexName) => s_startBuildBudget.Contains(indexName);
 
     /// <summary>The index name in a <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ...</c> statement.</summary>
     private static string CreatedIndexName(string statement)
@@ -190,7 +360,7 @@ public static class PgTableTuning
     /// <summary>
     /// True when <paramref name="table"/> (a <c>schema.table</c> taken from <see cref="Statements"/>, never from input) has no
     /// row at all. A failed check, including one that gives up on a busy table after <see cref="EmptinessCheckTimeoutSeconds"/>,
-    /// answers false, so the index keeps the one-build budget; the command is cancelled on the server and the connection stays usable.
+    /// answers false, so the index stays on the shared build budget; the command is cancelled on the server and the connection stays usable.
     /// </summary>
     private static async Task<bool> TableIsEmptyAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
     {
@@ -202,7 +372,7 @@ public static class PgTableTuning
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
+                "Could not tell whether {Table} is empty, so its index build counts against this start's shared build time: {Message}",
                 table, ex.Message);
             return false;
         }
@@ -252,6 +422,20 @@ public static class PgTableTuning
     private static string GuardedDrop(string indexName) =>
         Guarded(DropLockTimeoutSeconds, "DROP INDEX IF EXISTS collect." + indexName);
 
+    /// <summary>The replacement index when <paramref name="statement"/> is the guarded drop of an index in <see cref="s_replacedBy"/>, else null.</summary>
+    private static string? ReplacedIndexOf(string statement)
+    {
+        foreach (var (old, replacement) in s_replacedBy)
+        {
+            if (statement == GuardedDrop(old))
+            {
+                return replacement;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// The #3573 covering index's name, and the columns it carries in key-then-INCLUDE order. Exposed so the
     /// pin (<c>ForcePlanFailuresAccessPathTests</c>) can hold the read's column references against THIS list
@@ -282,6 +466,34 @@ public static class PgTableTuning
 
     /// <summary>#7147: the covering index for the Daily Summary's per-day wait sums, on a store where <c>collect.wait_stats</c> is a plain table.</summary>
     public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
+
+    /// <summary>
+    /// #9223: the narrow <c>(server_id, query_hash, collection_time DESC)</c> index on <c>collect.query_store_stats</c>, the twin of
+    /// <c>idx_query_stats_server_hash_time</c>. The Query Store fleet summary's raw tail reads it, one range per server.
+    /// </summary>
+    public const string QueryStoreServerHashIndexName = "idx_query_store_stats_server_hash_time";
+
+    /// <summary>#9172: the covering index for the 24 hour CPU window, on <c>collect.cpu_utilization_stats</c> (a hypertable or a plain table).</summary>
+    public const string CpuWindowCoverIndexName = "idx_cpu_utilization_stats_window_cover";
+
+    /// <summary>
+    /// #9171: the covering index for the dropped-database read (<c>QueryStoreBackfillState.LastSeenPerDatabaseSql</c>, run by
+    /// <c>CurrentDatabaseScope.ReadDroppedAsync</c> for the top-queries reads): <c>(server_id, collection_time) INCLUDE (database_name)</c>.
+    /// </summary>
+    public const string DatabaseStatesNameCoverIndexName = "idx_database_states_server_time_cover";
+
+    /// <summary>#9171: the narrow <c>database_states</c> index the cover replaces. It was created by migration rung 49.</summary>
+    public const string DatabaseStatesNarrowIndexName = "idx_database_states_time";
+
+    /// <summary>
+    /// #9171: an index that a covering one replaces, mapped to the replacement. The drop of the old index runs only when the
+    /// replacement exists and is valid, so a build that gave up (lock timeout, a start that built another index first) never
+    /// leaves the table with neither.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_replacedBy = new(StringComparer.Ordinal)
+    {
+        [DatabaseStatesNarrowIndexName] = DatabaseStatesNameCoverIndexName,
+    };
 
     /// <summary>
     /// #7147, #7152: the indexes built only while the table they are on (the <c>ON</c> table of their statement) is a plain
@@ -518,6 +730,56 @@ public static class PgTableTuning
            start; the hourly pass never builds it. RestartRowIndexLiveTests holds the plan and the definitions. */
         "CREATE INDEX IF NOT EXISTS " + QueryStatsRestartRowIndexName + " ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0",
         "CREATE INDEX IF NOT EXISTS " + ProcedureStatsRestartRowIndexName + " ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0",
+        /* #8570: the one-procedure duration trend (DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql) fetches its
+           procedure's rows WHERE server_id = $1, the database and the procedure's full name, inside its collection_time window.
+           Every other index on the table leads on the server and the time, or on the time alone, so without this one that read
+           fetches every row the server stored in the window and keeps a few. The third key is the expression the read compares
+           (DurationTrendRouting.ProcedureFullNameSql), so the planner matches the predicate to the key. The reader runs that
+           statement only on a store where the index exists and is valid (ProcedureStatsNameIndex.IsPresentAsync); on any other
+           store it runs the FILTER statement, which needs no index and returns the same rows.
+
+           WHAT IT HOLDS: every row of the uncompressed chunks, so unlike the partial indexes above every procedure_stats insert
+           writes it. On the rig below it is 2.9 GB over 51.8 M rows and 25 GB of heap, 11% of the heap. Measured there with
+           810-row batches (full_page_writes on, wal_compression off): 2.5 -> 4.2 ms a batch, and 461 -> 918 KB of WAL a batch
+           averaged over 20 checkpoint cycles of 15 batches. Between checkpoints a batch is 664 KB; the first batch after a
+           checkpoint is 4.5 MB, because each procedure's newest entry lands on its own leaf page and logs a full page image.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe before collectors
+           start and not while they write: an insert waits for the whole build. CONCURRENTLY is refused on hypertables, so the
+           build runs only here, under SetupTimeoutSeconds, and the hourly pass never builds it (as for LegacyRowIndexName). A
+           build that runs out of time here is rolled back, logged and retried at the next start, and the store keeps working
+           without it: the read keeps the FILTER statement. A ladder rung that ran out of time would fail the start instead.
+
+           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own heap, so each
+           compressed chunk gets an empty 8 KB index and the compressed relations get none. Those chunks are still read by the
+           columnar scan; the index serves the uncompressed chunks. Compressing a chunk empties its index, decompressing one
+           refills it and a new chunk inherits it (each measured on TimescaleDB 2.30.1).
+
+           THE BUILD'S COST: one read of every uncompressed chunk's heap and a sort of its rows. Measured on a local
+           TimescaleDB 2.30.1 rig with the real schema (73 hypertables, 21,900 chunks; procedure_stats with 300 daily chunks,
+           298 of them compressed, and 51.8 M uncompressed rows in 25 GB of heap, three times the server's memory):
+           the pass built it in 43.6 s and 59.5 s with the default 2 parallel maintenance workers and in 89.4 s with none,
+           and the statement on its own took 35.1 s and 72.8 s; a pass over the converged store took 0.09 s. An insert from
+           a second session waited once, for the length of the build. With the server cancelling the build at 10 s in place
+           of SetupTimeoutSeconds, each start ran 10.5 s, logged the build's warning, left no index and no chunk index
+           behind and applied every other statement, and the start after it tried again. A store whose build cannot fit
+           the budget pauses for it at every start and keeps the FILTER statement.
+
+           SHARED BUILD TIME: the index shares the start's build time budget (s_startBuildBudget, #9795) with the other
+           large indexes. On a store where earlier ones are also missing from tables that have rows, this start builds
+           those first and this index gets the time they leave; if that runs out it waits for the next start, and until
+           then the read keeps the FILTER statement. On a plain-table store the wait_stats daily cover
+           (WaitStatsDailyCoverIndexName) is later in this list and takes what this index leaves.
+
+           THE READ, on a rig of one server with 8.0 M rows in 7 daily chunks, 5 of them compressed, warm, one procedure in
+           one database:
+             24 h:  355 ms (356,099 buffers) -> 8.2 ms (3,620 buffers)
+             72 h:  651 ms (172,271 buffers) -> 59 ms (36,949 buffers)
+             168 h: 1,217 ms (268,296 buffers) -> 189 ms (113,391 buffers)
+           Without the index the by-name statement is slower than the FILTER statement in 11 of 48 cases and reads 3.4-12x
+           the buffers, which is why the reader asks for the index first. ProcedureTrendNameIndexLiveTests holds the plan and
+           the equality of the two statements. */
+        ProcedureStatsNameIndex.CreateSql,
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
@@ -536,13 +798,101 @@ public static class PgTableTuning
            dogfood store that is ~2.4 M rows, and it showed: 1,223,777 dead tuples with the last autovacuum
            two days earlier, while its own TOAST table (which has its own thresholds against 57 M chunks) had
            been vacuumed 152 times. The parent is the half that matters here, because the dead rows a purge
-           leaves behind are precisely the idx_query_plan_dim_last_seen entries the NEXT purge has to visit
-           and test for visibility before discarding. Untuned, each purge makes the following one slower and
-           then waits days for cleanup.
+           leaves behind are precisely the index entries the NEXT purge has to visit and test for visibility
+           before discarding (from V298, #9304, those are the idx_query_plan_dim_seen_last_seen entries of the
+           narrow stamp table, which cascades with the row; the wide row's own last_seen is no longer indexed).
+           Untuned, each purge makes the following one slower and then waits days for cleanup.
 
            0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
            table's total size, so cleanup follows the work that created it. */
         "ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)",
+        /* #8790: five more plain tables that are written like queues and ran on the stock settings. None is a hypertable, so
+           each ALTER here tunes the table itself. Fillfactor only affects pages written from now on, so a table that is
+           already mostly empty space needs one rewrite before the settings show (the store health page flags it, #8787).
+
+           Each table was classified by its write path:
+           - oversized_plan_backlog: UPDATE-heavy and DELETE-heavy. A re-sighting updates last_seen_at and observed_bytes, a
+             fetch updates plan_xml, captured_at and the attempt stamps, and the trim and the retention horizon delete. Its
+             indexes lead on observed_bytes and on expired_at, so a deleted row leaves half-empty pages in the middle of the
+             index that VACUUM never merges (#8570). Fillfactor 80 lets an update that leaves those columns alone stay on its
+             page (HOT), and 0.02 + 1000 starts cleanup after about 2% of the rows are dead instead of 20%.
+           - query_stats_hour_ledger and procedure_stats_hour_ledger (#9357): UPDATE-heavy. Every collection adds its count to the current hour's row, so one row is
+             updated about once a minute per server for an hour. n is not indexed, so those updates can be HOT with room on
+             the page. The table grows with servers x 24 x the rollup's retention days, so at the stock 0.2 the dead rows of
+             a large fleet wait a long time for a vacuum; 0.02 + 1000 keeps that trigger near a few minutes of updates.
+           - collector_state: UPDATE-heavy. SaveCollectorStateAsync upserts each state key after every collection cycle, and
+             only the key is indexed. Fillfactor 80 is the whole change: the table is small, so the stock trigger (50 + 20%
+             of a few hundred rows) already fires within a cycle or two, and a lower scale factor would add nothing.
+           - query_text_dim: DELETE-heavy, the same shape as query_plan_dim above. Since V298 (#9304) the guarded last_seen refresh
+             writes the narrow collect.query_text_dim_seen row, not this one: this row is rewritten only every
+             PayloadDimensionSeen.WideRowRefreshHours, for an older build, and retention deletes it by the stamp table's
+             order. Its own last_seen is no longer indexed, but the rewrite is rare, so fillfactor would not help; only the
+             vacuum trigger matters. Its rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
+           - pg_statement_text: DELETE-heavy, with a few updates. The hourly refresh writes a statement only when its text or
+             own-entry list changed or its last_seen is more than PayloadDimensions.LastSeenRefreshGuardHours behind (#8988), so
+             an unchanged statement is no longer rewritten each hour. last_seen is indexed twice, so the updates that remain can
+             never be HOT; retention deletes the rest. Autovacuum settings only, for the reason given for query_text_dim.
+
+           Left alone on purpose: query_store_watermarks inserts one row per collection and retention deletes the oldest rows
+           in key order, so whole pages empty out and VACUUM recycles them (its upsert updates an existing row only when a
+           batch is retried). query_store_text and query_store_plan_map have had fillfactor 90 since V149 (#4250).
+           query_store_text_seen is created at fillfactor 90 (V281, #9043): its last_seen is not indexed, so the guarded
+           stamp stays heap-only where the page has room, and its rows are deleted with their text row. */
+        "ALTER TABLE collect.oversized_plan_backlog SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.query_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.procedure_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.collector_state SET (fillfactor = 80)",
+        "ALTER TABLE collect.query_text_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.pg_statement_text SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        /* #8966: twelve more plain tables with steady DELETE churn. None is a hypertable, and every one is created by a
+           migration, so it exists before the first tuning pass. The stock trigger (50 rows + 20% of the table) lets a
+           fifth of the rows sit dead before a vacuum starts, and their space is reusable only after that vacuum, so
+           these tables spend much of their life a fifth to a third empty.
+
+           Classified by write path:
+           - Delete-and-rebuild rollups: query_store_compose_stamp, query_store_compose_fleet and query_store_hash_hourly
+             clear an hour and insert it again, query_store_hash_daily, query_store_top_daily and plan_regression_daily do
+             the same for a day, and each ages out the rows below its floor. Every rebuild leaves the previous build dead.
+           - attention_events: inserts plus the time-sliced retention DELETE while it is a plain table (#8967: on a TimescaleDB store it is a
+             hypertable and retention drops chunks, and the ALTER below runs without a warning on it).
+           These seven are the largest plain tables on a busy store, so they take 0.05 + 10000 rather than 0.02: a vacuum
+           pass also scans every index on its table, and the autovacuum cost budget is shared by every worker, so a
+           tighter trigger on a table this size would hold a worker that other tables are waiting for.
+
+           - pg_io_stats_hourly: clears and rebuilds an hour, and prunes below the retention floor.
+           - analysis_findings, fleet_sweep_server_verdicts and procedure_stats_totals: inserts plus a retention DELETE of the
+             oldest rows. Whole pages empty out, but only a vacuum makes them reusable.
+           - collection_log_hourly: UPDATE-heavy. Every pass upserts the newest CollectionLogHourly.RecomputeHours hours, so a
+             row is rewritten many times. The upsert changes only value columns (the key columns, the only indexed ones,
+             never change), so every update can be HOT when the page has room; fillfactor 80 gives it that room.
+           These are smaller, so 0.02 + 1000 starts cleanup after about 2% of the rows are dead. */
+        "ALTER TABLE collect.query_store_compose_stamp SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_compose_fleet SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_hash_hourly SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_hash_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_top_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.plan_regression_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        /* #9111: the Query Store closed-day rollups. query_store_grid_daily and query_store_slicer_hourly clear a day and insert it again on every build and
+           every rebuild of a marked day, and both age out the days below the retention floor, so they follow query_store_top_daily. The built-days table and
+           the tick heartbeat are one row per (server, day) and per server, updated in place; they take the smaller trigger. */
+        "ALTER TABLE collect.query_store_grid_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_slicer_hourly SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_closed_day_built SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.query_store_closed_day_tick SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        /* #9482: the clutter plan rollups are plain tables, so the hypertable insert sweep never reaches them. They are written an hour or a
+           day at a time (a rebuild deletes and re-inserts its hour or day, and retention prunes the old ones). The fleet median's narrow reads
+           (PlanChurnP95ClosedDaysSql, PlanChurnP95ClosedHoursSql) select key columns only, so they can walk ux_query_store_clutter_plan_hourly
+           and ux_query_store_clutter_plan_daily index-only, and every row the visibility map does not cover yet is a heap fetch. At the stock
+           0.2 insert scale factor that lag runs to many hours of builds. The insert tuning bounds it to about one trigger's worth. The
+           dead-tuple knobs stay at stock on purpose: each insert-triggered vacuum also clears the deleted rows. */
+        "ALTER TABLE collect.query_store_clutter_plan_hourly SET (" + InsertTuningOptions + ")",
+        "ALTER TABLE collect.query_store_clutter_plan_daily SET (" + InsertTuningOptions + ")",
+        "ALTER TABLE collect.attention_events SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.pg_io_stats_hourly SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.analysis_findings SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.fleet_sweep_server_verdicts SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.procedure_stats_totals SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.collection_log_hourly SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         /* #3934: the store-metrics latest read (DarlingStoreMetricsReader.StoreMetricsLatestSql) took each
            object's newest row with DISTINCT ON (object_kind, object_name) ... ORDER BY object_kind,
            object_name, metric_time DESC over the WHOLE table — the only index was idx_store_metrics_time
@@ -570,6 +920,51 @@ public static class PgTableTuning
            about the newest day of the month sits in compressed chunks, where a heap btree index on the hypertable cannot serve
            the read, and the index would still cost every insert. */
         "CREATE INDEX IF NOT EXISTS " + WaitStatsDailyCoverIndexName + " ON collect.wait_stats (server_id, collection_time) INCLUDE (wait_type, delta_wait_time_ms)",
+        /* #9172: the Server Inventory's 24 hour CPU window (DarlingFinOpsInventoryReader.CpuCtes) reads three columns of every
+           row in the window: server_id and sqlserver_cpu_utilization, filtered on collection_time. With only the
+           collection_time index it was an Index Scan with a heap fetch per row (or a Seq Scan of the day's whole chunk when
+           random_page_cost is the stock 4), so a cold first call paid a disk wait for each of about 650 pages. This index is
+           covering for exactly that read, so each of the window's chunks is an Index Only Scan over its own time range.
+           Time leads, so a new row lands at the right edge of the index, and the index does not scatter page images through
+           the WAL as the #4247 random-key indexes did. On a hypertable store that is the same place as the default
+           collection_time index TimescaleDB creates; on a plain store this is the first time-leading index the table has
+           (the table's own idx_cpu_utilization_stats_time leads with server_id). Measured
+           on a rig with the store's random_page_cost of 1.1, 39 servers sampled once a minute for 30 days (1.68 M rows,
+           chunks older than a day compressed), the window is 55,700 rows: EXPLAIN (ANALYZE, BUFFERS) after a PostgreSQL
+           restart reads 654 execution pages and 104 planning pages before, 221 and 111 after, with identical rows. The
+           window only ever touches the two newest day chunks, which are uncompressed, so the compressed chunks cost the
+           index nothing (their heaps are empty). */
+        "CREATE INDEX IF NOT EXISTS " + CpuWindowCoverIndexName + " ON collect.cpu_utilization_stats (collection_time) INCLUDE (server_id, sqlserver_cpu_utilization)",
+        /* #9223: the Query Store fleet summary's raw tail (DarlingMcpQueryFleetSummaryTools.QueryStoreTailCtes) filters query_hash = one value
+           over the newest raw chunk. #4247 dropped idx_query_store_stats_query_hash (5.2-8.4% of WAL, 0 scans then), and no index with
+           query_hash in it was left on this table, so on a busy store the tail was a Parallel Seq Scan of the whole newest chunk (about
+           244k blocks for a window of about two hours). This is the mirror of the kept query_stats sibling above: server_id leads so the
+           fleet summary can run its tail once per server (a plain index range on every supported PostgreSQL, not only through PostgreSQL
+           18's skip scan), query_hash second, collection_time last. No INCLUDE list: the tail is a few hundred rows per call, so the heap
+           fetches are cheap, and a narrow index keeps the write cost down.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root for the whole build: reads proceed, every
+           INSERT queues. That is safe before collectors start and not while they write, which is also why QueryStoreBackgroundIndexes
+           builds nothing on a hypertable (CONCURRENTLY is refused, and the Query Store backfill writes backdated rows into older chunks,
+           so a per-chunk build would block it). The hourly pass never builds it: it warns once that the next start does. It shares the
+           start's build time budget (#9795), last of the budget indexes, because it is the one that sorts every row of the uncompressed chunks
+           rather than testing a filter. Compressed chunks get an empty 8 KB index. A build that outruns SetupTimeoutSeconds rolls back
+           whole and is recorded (#9289, PgIndexBuildAttempts): the next start skips it for 24 hours unless the table has fewer uncompressed
+           pages than recorded, and a successful build deletes the record. A build that ran under less than that, because earlier builds
+           used part of the start's budget, is not recorded when it runs out: the next start tries it again. The reader keeps its one-filter shape until the index is valid. */
+        "CREATE INDEX IF NOT EXISTS " + QueryStoreServerHashIndexName + " ON collect.query_store_stats (server_id, query_hash, collection_time DESC)",
+        /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
+           collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
+           index was (server_id, collection_time). With database_name INCLUDEd the read is an Index Only Scan with the same rows. Not
+           plain-table-only: the newest day of a TimescaleDB store is uncompressed and takes the same scan. The snapshots are one row per
+           database per cycle, so the write cost is small. Measured on a test store (1,500 databases, 5-minute snapshots, the read's
+           statement, EXPLAIN (ANALYZE, BUFFERS)): plain tables 24 h window 6,157 buffers before and 2,150 after, 7 days 30,159 before and
+           14,919 after (the 7-day plan takes the index at random_page_cost 1.1 and stays a sequential scan at the default 4);
+           TimescaleDB 24 h 5,818 before and 3,856 after, 7 days unchanged because the older chunks are compressed. The narrow index
+           it replaces is dropped on the next line once this one is valid: every reader of the narrow one (MAX(collection_time) probes,
+           the database-name lists) is served by the cover, which carries the same two key columns. */
+        "CREATE INDEX IF NOT EXISTS " + DatabaseStatesNameCoverIndexName + " ON collect.database_states (server_id, collection_time) INCLUDE (database_name)",
+        GuardedDrop(DatabaseStatesNarrowIndexName),
     };
 
     /// <summary>
@@ -594,23 +989,40 @@ public static class PgTableTuning
     /// <see cref="ApplyAsync(NpgsqlConnection, ILogger?, CancellationToken)"/> with a choice of pass. With
     /// <paramref name="hourly"/> set (the convergence tick, beside live collection) a missing index is NOT
     /// built: one Warning per index per process says the next service start builds it, and it is not counted
-    /// as applied. Every other statement runs as on the start path.
+    /// as applied. Every other statement runs as on the start path: an <c>ALTER TABLE ... SET</c> is issued on either
+    /// pass only when <see cref="AlterIsConvergedAsync"/> finds a setting missing or different.
     /// </summary>
-    public static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default)
+    public static Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default) =>
+        ApplyAsync(connection, logger, hourly, clock: null, SetupTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// The pass with its two test seams (#9289): the clock the build-attempt record is stamped and aged with and the builds are timed
+    /// with (#9795), and the CommandTimeout (seconds) the bounded start-path index build runs under. Production passes
+    /// <see cref="SetupTimeoutSeconds"/> and the system clock.
+    /// </summary>
+    internal static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, TimeProvider? clock, int buildTimeoutSeconds, CancellationToken cancellationToken = default)
     {
+        clock ??= TimeProvider.System;
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
         var applied = 0;
-        var buildIssued = false;
+        var budgetSpent = TimeSpan.Zero;
         var buildStartedAt = 0L;
         Dictionary<string, bool?>? hypertableByTable = null;
         foreach (var statement in Statements)
         {
             var sql = statement;
             var dropIssued = false;
+            var bounded = false;
+            var budgeted = false;
+            var shortened = false;
+            TimeSpan? buildElapsed = null;
+            PgIndexBuildAttempts.Attempt? priorAttempt = null;
+            long? buildPages = null;
+            var commandTimeout = SetupTimeoutSeconds;
             try
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
@@ -675,30 +1087,101 @@ public static class PgTableTuning
                     }
 
                     /* #6460: a table with no rows builds its index in no time and pauses nothing, so it does not use the
-                       one-build budget. Without this a brand-new store built one of the three large indexes at its first
-                       start and deferred the other two, and the first hourly pass then warned that they were missing. */
-                    var oneBuildPerStart = IsOneBuildPerStart(indexName)
+                       shared build budget. A brand-new store builds every large index at its first start. */
+                    var onBudget = SharesStartBuildBudget(indexName)
                         && !await TableIsEmptyAsync(connection, CreatedIndexTable(statement), logger, cancellationToken);
-                    if (oneBuildPerStart && buildIssued)
+
+                    /* #9795: the budget builds of one start share StartBuildBudgetSeconds. Whole seconds, because CommandTimeout is
+                       whole seconds and 0 there means no limit: with under a second left the build waits for the next start. */
+                    var budgetLeft = TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent;
+                    var secondsLeft = (int)Math.Floor(budgetLeft.TotalSeconds);
+                    if (onBudget && secondsLeft < 1)
                     {
                         logger?.LogInformation(
-                            "Index collect.{Index} on {Table} is missing and is built at the next start: this start already issued one index build, and a start builds at most one",
-                            indexName, CreatedIndexTable(statement));
+                            "Index collect.{Index} on {Table} is missing and is built at the next start: the index builds of this start have used the {BudgetSeconds} s a start gives them in total",
+                            indexName, CreatedIndexTable(statement), StartBuildBudgetSeconds);
                         continue;
                     }
 
-                    buildIssued |= oneBuildPerStart;
-                    buildStartedAt = Stopwatch.GetTimestamp();
+                    if (indexName == QueryStoreServerHashIndexName)
+                    {
+                        /* #9289: this build is bounded. A recorded timeout skips it while it would only time out again, without using the budget. */
+                        var bound = await BuildBoundAsync(connection, logger, indexName, CreatedIndexTable(statement), clock, cancellationToken);
+                        if (bound.Skip)
+                        {
+                            continue;
+                        }
+
+                        bounded = true;
+                        priorAttempt = bound.Prior;
+                        buildPages = bound.Pages;
+                        commandTimeout = buildTimeoutSeconds;
+                    }
+
+                    if (onBudget && secondsLeft < commandTimeout)
+                    {
+                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. It counts as
+                           shortened only when the time left falls short of this build's own limit by at least a whole second. A
+                           shortfall under a second is the whole-seconds floor above, a rounding artifact (299.95 s left against a
+                           300 s limit, or 119.6 s against 120 s), not a shortening, and counting it would keep a timeout of the
+                           bounded build from being recorded (#9289), so the next start would try it again for up to another limit. */
+                        shortened = TimeSpan.FromSeconds(commandTimeout) - budgetLeft >= TimeSpan.FromSeconds(1);
+                        commandTimeout = secondsLeft;
+                    }
+
+                    if (onBudget)
+                    {
+                        /* #9827: collection waits for this build, so the log says which index, on which table, and for how long at most.
+                           commandTimeout is the smaller of the build's own limit and what is left of the start's shared build time. */
+                        logger?.LogInformation(
+                            "Index collect.{Index} on {Table} is missing and is being built at this start: collection waits while it builds, for up to {LimitSeconds} s",
+                            indexName, CreatedIndexTable(statement), commandTimeout);
+                    }
+
+                    budgeted = onBudget;
+                    buildStartedAt = clock.GetTimestamp();
                     sql = GuardedCreate(statement);
+                }
+                else if (ReplacedIndexOf(statement) is { } replacement)
+                {
+                    /* #9171: a drop of an index a covering one replaces waits for the replacement to exist and be valid. */
+                    using var replacementProbe = new NpgsqlCommand(IndexValidSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    replacementProbe.Parameters.AddWithValue(replacement);
+                    if (await replacementProbe.ExecuteScalarAsync(cancellationToken) is not true)
+                    {
+                        continue;
+                    }
                 }
                 else if (statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal))
                 {
+                    if (await AlterIsConvergedAsync(connection, statement, logger, cancellationToken))
+                    {
+                        /* #8949: the table and its chunks already hold these settings. The ALTER would take SHARE UPDATE
+                           EXCLUSIVE to change nothing and cancel an autovacuum running there. Counted as applied, as a skip is. */
+                        applied++;
+                        continue;
+                    }
+
                     sql = GuardedAlter(statement);
                 }
 
-                using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeout };
                 await command.ExecuteNonQueryAsync(cancellationToken);
+                if (budgeted)
+                {
+                    buildElapsed = clock.GetElapsedTime(buildStartedAt);
+
+                    /* #9827: the build the line before it announced finished. A timeout or a busy table logs its own line instead. */
+                    logger?.LogInformation(
+                        "Index collect.{Index} on {Table} was built at this start in {ElapsedSeconds:F1} s",
+                        CreatedIndexName(statement), CreatedIndexTable(statement), buildElapsed.Value.TotalSeconds);
+                }
+
                 applied++;
+                if (bounded && priorAttempt is not null)
+                {
+                    await ClearBuildAttemptAsync(connection, logger, CreatedIndexName(statement), cancellationToken);
+                }
             }
             catch (PostgresException lockBusy) when (lockBusy.SqlState == PostgresErrorCodes.LockNotAvailable
                 && (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal)
@@ -730,11 +1213,28 @@ public static class PgTableTuning
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex))
                 {
+                    var elapsed = clock.GetElapsedTime(buildStartedAt);
+                    buildElapsed = elapsed;
+                    var recorded = false;
+
+                    /* #9795: a shortened build had less than its own limit, so running out says nothing about whether it fits the
+                       limit. No record is written for it (#9289), and the next start tries it again. */
+                    if (!shortened && bounded && buildPages is { } pages)
+                    {
+                        /* The record is written outside the aborted transaction, so the ROLLBACK comes first. */
+                        await RollbackBestEffortAsync(connection, logger, cancellationToken);
+                        recorded = await RecordBuildAttemptAsync(
+                            connection, logger, CreatedIndexName(statement),
+                            new PgIndexBuildAttempts.Attempt(clock.GetUtcNow().UtcDateTime, pages, (long)elapsed.TotalMilliseconds), cancellationToken);
+                    }
+
                     logger?.LogWarning(
                         "{Message}",
-                        BuildTimeoutMessage(
-                            CreatedIndexName(statement), CreatedIndexTable(statement),
-                            Stopwatch.GetElapsedTime(buildStartedAt).TotalSeconds));
+                        shortened
+                            ? ShortenedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout)
+                            : recorded
+                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, commandTimeout)
+                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout));
                 }
                 else
                 {
@@ -753,6 +1253,14 @@ public static class PgTableTuning
                    always safe; if it too fails the connection is unusable and every later statement's own
                    failure will say so. */
                 await RollbackBestEffortAsync(connection, logger, cancellationToken);
+            }
+            finally
+            {
+                if (budgeted)
+                {
+                    /* #9795: a budget build is charged for the time it held the start, whether it built, timed out or found the table busy. */
+                    budgetSpent += buildElapsed ?? clock.GetElapsedTime(buildStartedAt);
+                }
             }
         }
 
@@ -787,10 +1295,94 @@ public static class PgTableTuning
         return false;
     }
 
-    /// <summary>The warning for a start-path index build that timed out.</summary>
-    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
+    /// <summary>
+    /// The warning for a start-path index build that timed out. <paramref name="limitSeconds"/> is the limit the build ran under, which is
+    /// whole seconds of what is left of the start's shared build time when that falls under a second short of the build's own limit.
+    /// </summary>
+    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds, int limitSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+
+    /// <summary>
+    /// The warning for a start-path index build that ran under what earlier builds left of the start's shared build time (#9795)
+    /// and ran out of it.
+    /// </summary>
+    internal static string ShortenedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, int limitSeconds) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Index collect.{indexName} on {table} was not built at this start: the index builds of one start share {StartBuildBudgetSeconds} s, the builds before this one left it {limitSeconds} s, and it ran out of that after {elapsedSeconds:F0} s and was rolled back; the next service start tries it again");
+
+    /// <summary>
+    /// The warning for a bounded start-path index build (#9289) that timed out and was recorded. <paramref name="limitSeconds"/> is the
+    /// limit the build ran under, as for <see cref="BuildTimeoutMessage"/>.
+    /// </summary>
+    internal static string BoundedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, long heapPages, int limitSeconds) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) with {heapPages} uncompressed heap pages and was rolled back; the next start does not try it again for {PgIndexBuildAttempts.RetryAfter.TotalHours:F0} hours unless the table has fewer uncompressed pages by then, and the reader keeps its old shape until the index exists");
+
+    /// <summary>What <see cref="BuildBoundAsync"/> decided: skip the build, or build it with the prior record (if any) and the current page count.</summary>
+    private readonly record struct BuildBound(bool Skip, PgIndexBuildAttempts.Attempt? Prior, long? Pages);
+
+    /// <summary>
+    /// #9289: whether the bounded index's build is skipped this start. It is skipped while a recorded timeout is under 24 hours old and the
+    /// table's uncompressed heap pages are at least the recorded count: the build would run out of time again and hold the start for the
+    /// full timeout. A failed read answers "build", the behaviour before the bound, and returns no page count, so a timeout then records nothing.
+    /// </summary>
+    private static async Task<BuildBound> BuildBoundAsync(
+        NpgsqlConnection connection, ILogger? logger, string indexName, string table, TimeProvider clock, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var prior = await PgIndexBuildAttempts.ReadAsync(connection, indexName, EmptinessCheckTimeoutSeconds, cancellationToken);
+            var pages = await PgIndexBuildAttempts.UncompressedHeapPagesAsync(connection, table, EmptinessCheckTimeoutSeconds, cancellationToken);
+            var now = clock.GetUtcNow().UtcDateTime;
+            if (prior is not null && PgIndexBuildAttempts.Bars(prior, pages, now))
+            {
+                logger?.LogWarning(
+                    "Index collect.{Index} on {Table} is not built this start: its last build ran out of time after {ElapsedSeconds} s on {RecordedPages} uncompressed heap pages ({AttemptedAt:yyyy-MM-dd HH:mm:ss} UTC) and the table has {CurrentPages} now; the next try is at {RetryAt:yyyy-MM-dd HH:mm:ss} UTC, or earlier if the table has fewer uncompressed pages than that; the reader keeps its old shape until the index exists",
+                    indexName, table, (prior.ElapsedMs / 1000.0).ToString("F0", CultureInfo.InvariantCulture), prior.HeapPages, prior.AttemptedAtUtc, pages,
+                    prior.AttemptedAtUtc + PgIndexBuildAttempts.RetryAfter);
+                return new BuildBound(true, prior, pages);
+            }
+
+            return new BuildBound(false, prior, pages);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not read the build record or the page count of {Table}, so {Index} is built as it was before the record existed: {Message}",
+                table, indexName, ex.Message);
+            return new BuildBound(false, null, null);
+        }
+    }
+
+    /// <summary>Writes the record of a timed-out build. A failed write warns and the next start tries the build again, as before the record.</summary>
+    private static async Task<bool> RecordBuildAttemptAsync(
+        NpgsqlConnection connection, ILogger? logger, string indexName, PgIndexBuildAttempts.Attempt attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await PgIndexBuildAttempts.WriteAsync(connection, indexName, attempt, EmptinessCheckTimeoutSeconds, cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not record the timed-out build of {Index}, so the next start tries it again: {Message}", indexName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Deletes the record once the index is built. A failed delete warns; the index exists, so the stale record bars nothing.</summary>
+    private static async Task ClearBuildAttemptAsync(NpgsqlConnection connection, ILogger? logger, string indexName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await PgIndexBuildAttempts.ClearAsync(connection, indexName, EmptinessCheckTimeoutSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not delete the build record of {Index}: {Message}", indexName, ex.Message);
+        }
+    }
 
     /// <summary>Best-effort <c>ROLLBACK</c> that leaves the connection usable after a failed statement.</summary>
     private static async Task RollbackBestEffortAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)

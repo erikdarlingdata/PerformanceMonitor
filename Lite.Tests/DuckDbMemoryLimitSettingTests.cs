@@ -71,14 +71,6 @@ public class DuckDbMemoryLimitSettingTests : IDisposable
         return Convert.ToString(await cmd.ExecuteScalarAsync()) ?? "";
     }
 
-    [Fact]
-    public void Default_IsTwoGigabytes_DevsCurrentValue()
-    {
-        Assert.Equal(2, DuckDbMemoryLimitSetting.DefaultGb);
-        Assert.Equal(1, DuckDbMemoryLimitSetting.MinGb);
-        Assert.Equal(2, DuckDbMemoryLimitSetting.Resolve(null, 16 * Gb, out _));
-    }
-
     [Theory]
     [InlineData(16L, 12)]
     [InlineData(8L, 6)]

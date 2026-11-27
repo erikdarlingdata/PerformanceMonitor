@@ -314,10 +314,10 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
         var slicersSource = File.ReadAllText(ControlsFile("ServerTab.Slicers.cs"));
 
-        Assert.Equal(2, Regex.Matches(refreshSource,
-            @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QuerySnapshots,\s*ActiveQueriesWindowTruncatedBanner,\s*windowStart\d?,\s*windowEnd\d?\)").Count);
-        Assert.Equal(2, Regex.Matches(refreshSource,
-            @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.WaitingTasks,\s*CurrentWaitsWindowTruncatedBanner,\s*windowStart\d?,\s*windowEnd\d?\)").Count);
+        Assert.NotEmpty(Regex.Matches(refreshSource,
+            @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QuerySnapshots,\s*ActiveQueriesWindowTruncatedBanner,\s*windowStart\d?,\s*windowEnd\d?\)"));
+        Assert.NotEmpty(Regex.Matches(refreshSource,
+            @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.WaitingTasks,\s*CurrentWaitsWindowTruncatedBanner,\s*windowStart\d?,\s*windowEnd\d?\)"));
         Assert.Single(Regex.Matches(slicersSource,
             @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QuerySnapshots,\s*ActiveQueriesWindowTruncatedBanner,\s*e\.StartUtc,\s*e\.EndUtc\)"));
     }

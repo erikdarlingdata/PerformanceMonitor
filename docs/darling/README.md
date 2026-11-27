@@ -5,6 +5,7 @@ Audience: operators.
 Read these pages in this order. After the install, each page is complete on its own.
 
 1. [Install Darling](install.md): from a downloaded zip to a service that collects data.
+    - [Install Darling on Linux with systemd](linux.md): from a downloaded tarball to a service that collects data, on your own PostgreSQL store.
 2. [The WPF viewer](viewer.md): the desktop app, on the service host or on another machine.
 3. [The web dashboard](web-dashboard.md): the browser view that the service serves.
 4. [MCP server](../mcp-server.md#darling): the endpoint for an LLM client.

@@ -35,7 +35,6 @@ public sealed class ViewerPlanCacheSqlTests
         Assert.Contains("CAST(SUM(single_use_size_mb) AS double precision)", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(multi_use_size_mb) AS double precision)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
 

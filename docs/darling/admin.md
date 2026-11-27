@@ -4,15 +4,21 @@ Audience: operators.
 
 This page is for the person who keeps a Darling install running after the first week. Each heading below is one task, written as numbered steps. When you need to know what a setting means, follow the link to the [Darling operator guide](../../Darling/README.md).
 
+The commands on this page are written for Windows. On Linux, [Service verbs on Linux](linux.md#service-verbs-on-linux) gives the form of each one.
+
 ## Read this first: `darling.json` is only a seed for the server list
 
-The service reads the `servers` array in `darling.json` on the first start only. After that, the store holds the server list. If you edit the array later, nothing happens.
+The service reads the `servers` array in `darling.json` on the first start only. After that, the store holds the server list. If you edit the array later, the store ignores the change. At start-up the service logs one WARN line for each enabled server whose entry in the file differs from the store. The line names each differing field with the file's value and the store's value, and gives the `--edit-server` command that applies the file's values.
 
 To change the list, use one of these:
 
 - The Viewer: **Manage Servers**.
 - The `add_servers`, `edit_server`, `remove_server` and `set_server_action` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
+- The `add_alert_source`, `rotate_alert_source` and `remove_alert_source` MCP tools, which make, change and drop the login of an external alert source. They need the same two settings. `list_alert_sources` is a read.
+- The `new_password_key` and `reset_password_key` MCP tools, which change the key that seals the saved passwords. They need the same two settings.
+- The `mint_personal_token` and `revoke_personal_token` MCP tools, which make and revoke a personal MCP token for a person named in `get_people`. `mint_personal_token` makes reader tokens only: an operator token is made on the web dashboard's token page, where the person signs in. They need `mcp.allowWrites` and `mcp.allowServerAdmin`, and personal tokens on. `get_personal_tokens` lists the tokens, is served under the same two settings, and never shows a token value. A call made with a personal token is never offered any of the three.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
+- The `--edit-server` command line verb. It changes the settings of a server that is already registered, on a host that has no Viewer, web dashboard or MCP. See [`--edit-server`](cli.md#--edit-server).
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
 
@@ -22,7 +28,7 @@ Run the command line verbs on the service host, from the folder that holds `Perf
 
 ## Add a server
 
-1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
+1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. On Docker Compose, run `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host> --auth sql --username DarlingMonitor` from the compose folder, with the login that the server entry uses in place of `DarlingMonitor`. A Compose service connects with a SQL login, and on Linux a `--host` script with no `--auth` is for a SQL login too. A SQL login script has `N'<strong password>'` where the password goes. Replace it with the login's real password before you run it. On a Compose install that is the password in `secrets/sql_password.txt`. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
 2. Add the server in one of these ways:
    - In the Viewer, click **Add Server** in the sidebar, fill in the dialog and save.
    - On the command line, for a Windows-authentication server, run `.\PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows`.
@@ -116,6 +122,12 @@ Only an admin who is signed in to the dashboard sees the list, and that includes
 
 To add a person, type the name and click **Add person**. In a person's details you can rename them, disable or enable them, add or remove a sign-in, and add or remove a grant. A grant cannot be edited. Remove it and add it again instead.
 
+### Delete a person
+
+A person added by mistake can be deleted. **Delete** shows in a person's details on the web dashboard, and in the Viewer's People window, when the person has no sign-in, no grant and no history. Remove their sign-ins and grants first if they have any. Darling asks before it deletes, and the delete is recorded with your name.
+
+A person with history cannot be deleted. History is a request they asked the agent or a message they sent it. Disable that person instead, which keeps the record and stops everything they could do.
+
 ### Link a web sign-in to a person
 
 Darling keeps no list of who signs in. So a person gives their sign-in key to an administrator:
@@ -143,12 +155,15 @@ To pause one server:
 
 1. In the Viewer, open **Manage Servers**, right-click the server and click **Enable / Disable Collection**.
 2. Or call `disable_server` through MCP, and `enable_server` to bring it back.
+3. Or, on a host with neither, run `.\PerformanceMonitor.Darling.Service.exe --edit-server <server-name> --set enabled=false`. Run it with `--set enabled=true` to bring the server back.
 
 The server's definition and history stay.
 
 To turn one collector off for the whole fleet, run `.\PerformanceMonitor.Darling.Service.exe --disable-collector <collector>`. Add `--server <name>` to change one server only. Use `--enable-collector` to turn it back on. If you turn off `long_query_completions`, the service drops its Extended Events session on the monitored servers.
 
 ## Upgrade
+
+On Docker Compose, follow [Compose upgrade](#compose-upgrade). On Linux under systemd, follow [Upgrade by hand](linux.md#upgrade-by-hand). The numbered steps below are for Windows.
 
 To upgrade or uninstall without PowerShell, see [Where PowerShell is used, and installing without it](install.md#where-powershell-is-used-and-installing-without-it).
 
@@ -212,7 +227,7 @@ Everything it can name provably came out of one of our own zips, because the man
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes. An upgrade that changes the attention Extended Events session also logs one Warning for each monitored server, `The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again`. It is expected and is not a failed check. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition.
 
 #### Rolling back to an older build
 
@@ -251,6 +266,113 @@ An older build ignores what those migrations added, so it can read some newer da
 - **V263**: an older build does not know the oldest-run rollup under the Job History time range picker ([#8549](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8549)). Rolling back leaves `collect.job_history_oldest_daily` in place, a TimescaleDB continuous aggregate (a plain view on a store without TimescaleDB), with its refresh policy. The older build ignores it and reads the oldest run from `job_history` as before, so nothing is read differently and nothing needs doing before you roll back. The rollup stays small (one row per server per day) and the retention pass of a newer build is the only thing that trims it.
 - **V264**: an older build does not know the per-hour counts of dropped oversized-plan backlog rows ([#8691](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8691)). A build with V264 deletes a dropped row at once and adds it to `collect.oversized_plan_backlog_drops`. An older build never reads that table, so its dropped figures (the dropped count, the rows dropped and the rows added in the last day) read low for the first day, until its own trim has held a day of dropped rows again. Rolling back leaves the table in place and the older build ignores it. Nothing needs doing before you roll back. The counts are a few rows per server per hour and a newer build trims them after a day.
 - **V265**: an older build does not know the hourly summary of job categories under the Job History Category list ([#8549](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8549)). Rolling back leaves `collect.job_history_category_hourly` and `collect.job_history_category_coverage` in place. The older build ignores both and reads the categories from `job_history` as before, so nothing is read differently and nothing needs doing before you roll back. The summary is one row per server, run hour and category, and the retention pass of a newer build is the only thing that trims it.
+- **V274**: an older build does not know the store's trigram text index options ([#8978](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8978)). Rolling back leaves `config.config_service.query_text_trigram_index_enabled` and `query_store_text_trigram_index_enabled` in place. The older build ignores both columns and goes back to darling.json's `queryTextTrigramIndexEnabled` and `queryStoreTextTrigramIndexEnabled`, read at its start. If the store held a value that differs from the file, set the file to the value you want before you roll back. Otherwise nothing needs doing.
+- **V275**: an older build does not know personal MCP tokens ([#8737](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8737)). The rung creates `config.mcp_personal_token`, owner-only, and a build that has this rung keeps it closed to every other login. Rolling back leaves the table in place, with the rows of any tokens issued. Each time an older build starts, it grants every table in the `config` schema to the viewer, web, MCP and admin logins. After that start, those four logins can read the token rows: each person's subject and owner key, the token names, roles and times, and the SHA-256 hashes of the secrets. A hash cannot be turned back into a token. The owner triggers still refuse writes from those logins. The older build does not use the table, and a personal token stops working with it, because that build does not look it up. The narrow grants return when a build that has V274 starts again. Before you roll back past V274, delete the rows (`DELETE FROM config.mcp_personal_token` as the store owner); do not drop the table, because a newer build does not create it again. Or accept that those four logins can read the rows until a newer build starts.
+- **V276**: an older build has no Store Growth alert ([#9000](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9000)). Rolling back leaves `config.config_alert_settings.self_store_growth_enabled`, `self_store_growth_floor_gb` and `self_store_growth_object_floor_gb` in place. The older build ignores the columns, so it stops raising Store Growth and nothing else changes. Nothing needs doing before you roll back.
+- **V277**: an older build does not know that the Client Timeouts table became a TimescaleDB hypertable by swap ([#8967](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8967)). Rolling back leaves the new `collect.attention_events` table, the `collect.attention_events_legacy_copy` progress table and, while a copy is still running, `collect.attention_events_legacy` in place. The older build ignores the legacy table and reads and writes only the new one, so its Client Timeouts views show the older history only for the part that was already copied. The newer build resumes the copy where it stopped when you upgrade again.
+- **V281**: an older build does not know the Query Store text liveness table ([#9043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9043)). Rolling back leaves `collect.query_store_text_seen`, its trigger on `collect.query_store_text` (`trg_query_store_text_seen_ins`) and the trigger's function in place. The older build stamps and prunes on `collect.query_store_text.last_seen`, which a build with V281 still refreshes: for a statement Query Store keeps reporting, that column is never more than 48 hours behind (the text row is restamped once it is 36 hours behind, and the collector asks about a statement at most once every 12 hours). The older build keeps a text for the Query Store retention plus 2 days after its stamp, which is 32 days at the default and 3 days at the smallest retention the configuration allows (1 day), so it retires no text that is still in use as long as it starts within a day of the newer build stopping. Past that, at the 1-day retention only, it can retire the text of a live statement, and the collector fetches that text again the next time Query Store reports the statement. The trigger keeps adding a liveness row for every text the older build inserts and a deleted text takes its liveness row with it, so the table stays in step. The older build does not stamp the liveness rows; when you roll forward again the prune keeps a text while either stamp is fresh, and the next touch brings the liveness row up to date. Nothing needs doing before you roll back.
+- **V283**: an older build does not know the Query Store closed-day rollups ([#9111](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9111)). Rolling back leaves `collect.query_store_grid_daily`, `collect.query_store_slicer_hourly`, `collect.query_store_closed_day_built` and `collect.query_store_closed_day_tick` in place. The older build ignores all four and reads the Query Store grid and its slicer from `collect.query_store_interval_wide` as before, so nothing it reads is different. An older service builds no closed day, writes no heartbeat and does not mark a built day when a late row lands in it. A Viewer that has V283 and stays on while the service is rolled back takes built days only while the server's heartbeat is less than 2 hours old. Once the heartbeat is older than that, or the newest build is more than 36 hours old, it reads the interval table for every window. So under an older service, a late row written within 2 hours of the last tick is not seen until those 2 hours have passed. A row written with an old `collection_time` (a replayed batch or a backfill) gets no mark from a newer service later, because that service marks only the days that hold a row collected after its last heartbeat. When a current service ticks again after the gap, its first tick marks the built days that hold a row collected since the last heartbeat and rebuilds them. Roll the Viewer back with the service and nothing needs doing before you roll back. Under an older service the rollups stay as they were: the hourly pass of a newer build is the only thing that builds or trims them.
+- **V285**: an older build does not know the Query Store clutter summaries ([#9148](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9148)). Rolling back leaves `collect.query_store_clutter_plan_daily`, `collect.query_store_clutter_collections_daily` and the `clutter_built_at` column of `collect.query_store_closed_day_built` in place. The older build does not fill the two clutter tables and does not mark a late Query Store row for a rebuild. It still reads the Query Store clutter view from the raw rows, so the view stays correct while it runs. After you return to this build, it builds again the days that the older build built. The older build can write a late row into a day that was already built. The clutter view does not see that row until the day is next marked for a rebuild. To make the view see such a row at once, set `rebuild_needed` to true on that day's row in `collect.query_store_closed_day_built`.
+- **V286**: an older build does not know the query_stats summary ([#9147](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9147)). Rolling back leaves `collect.query_stats_collection` in place. The older build ignores it and reads the duration trend from the `collect.query_stats` rows as before, so nothing it reads is different. It also writes no summary rows. When you roll forward again, the first new batch finds the collections the older build wrote with no summary row. It records a floor for that server (V290), the time the summary is whole from. The duration trend then reads the rows for that server until the summary covers the whole window again (24 hours for the Past day chart). Nothing needs doing before you roll back.
+- **V287**: an older build does not know the hourly host rollup of query stats ([#9164](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9164)). Rolling back leaves `collect.query_stats_host_hourly` and `collect.query_stats_host_hourly_built` in place. The older build ignores both and reads `collect.query_stats` as before, so nothing it reads is different. An older service neither builds nor trims the rollup, so it stops growing and its newest hours go stale. A current service that starts again catches up on its first ticks. Nothing needs doing before you roll back. If you stay on the older build, you can drop both tables to free the space.
+- **V289**: an older build does not know the hourly Query Store clutter summaries ([#9173](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9173)). Rolling back leaves `collect.query_store_clutter_plan_hourly`, `collect.query_store_clutter_collections_hourly`, `collect.query_store_clutter_hour_built` and the `hour_ticked_at` column of `collect.query_store_closed_day_tick` in place. The older build does not fill them and does not mark a late Query Store row for a rebuild of its hour. It still reads the Query Store clutter view from the raw rows, so the view stays correct while it runs. This build serves hours only while `hour_ticked_at` is recent, so it reads raw until its first tick after you return, and that tick marks the built hours that hold a row collected since.
+- **V290**: an older build does not know the query_stats summary floor ([#9193](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9193)). Rolling back leaves `collect.query_stats_collection_floor` in place. A build from V286 up to V289 ignores the floor. If a server has a floor row, its summary has a gap. One of those builds can read the summary across the gap. Before you roll back to a build from V286 up to V289, run `DELETE FROM collect.query_stats_collection AS c USING collect.query_stats_collection_floor AS f WHERE c.server_id = f.server_id AND c.collection_time < f.valid_from;`. A build older than V286 does not read the summary, so nothing needs doing before you roll back past V286.
+- **V296**: an older build does not know the hourly Query Store summary ([#9280](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9280)). Rolling back leaves `collect.query_store_top_hourly` and the `top_built_seq` column of `collect.query_store_compose_stamp_built` in place. The older build neither reads nor fills them. Nothing to do before rolling back. If you roll forward again, the next hourly passes rebuild the hours the older build changed, newest first, and the next cleanup removes the rows of any hour the older build retired.
+- **V298**: an older build does not know the liveness tables of the query text and query plan stores ([#9304](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9304)). Rolling back leaves `collect.query_text_dim_seen`, `collect.query_plan_dim_seen`, their insert triggers on `collect.query_text_dim` and `collect.query_plan_dim` and the triggers' functions in place, and the upgrade dropped the `last_seen` index of each of the two stores. The older build stamps and prunes on the `last_seen` column of the store rows, which a build with V298 still refreshes: for a text or plan that collection keeps referencing, that column is never more than 36 hours behind. The older build keeps a text or plan for the retention plus 2 days after its stamp, which is never less than 2 days, so it retires nothing that is still in use. The older build has no index on `last_seen` to order by, so each of its prune batches reads the whole main table of the store, and on a large store a batch can run out of time and the store stops shrinking. Nothing needs to be done before you roll back past V298, but on a large store plan to roll forward again soon. This build's prune uses the stamp table's own index and is not affected.
+- **V303**: an older build does not know the Query Store clutter day stamp ([#9384](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9384)). Rolling back leaves `collect.query_store_clutter_day_built` in place. The older build ignores it. It serves a clutter day only when the grid built it, so a day this build built from its hours is read from the hourly rows or from the raw rows until the older build builds the day itself. The older build does not mark that stamp when a late Query Store row arrives, but this build checks the stamp against the hours when it returns: a day whose hours were rebuilt after the day was built is built again on its first tick.
+- **V304**: an older build does not know the write counters in the store's statement history ([#9410](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9410)). Rolling back leaves four extra columns on `collect.store_statement_history` and on `config.store_statement_baseline`. It also leaves the reader function `config.store_statement_stats_v2()` in place. The older build ignores both. It keeps using `config.store_statement_stats()`, which V304 does not change, so its statement statistics setup still works. Nothing to do before rolling back. When you roll forward again, the first hourly snapshot stores nothing for the new counters of statements it already tracked.
+- **V305**: an older build does not know the store's WAL figures ([#9419](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9419)). Rolling back leaves the eleven `wal_` columns of `collect.store_metrics` and the hourly `wal` rows in place. The older build neither reads nor fills them, and it lists no `wal` rows. Nothing to do before rolling back. If you roll forward again, the newer build reads the rows it kept and carries on.
+- **V306**: an older build does not know the background step history ([#9411](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9411)). Rolling back leaves `collect.store_pass_steps` in place. The older build ignores it, writes no rows to it and never deletes from it, so the rows stay as they were at the rollback. When you upgrade again, this build adds to the same table and deletes rows older than 90 days.
+- **V307**: an older build does not know the service start history ([#9415](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9415)). Rolling back leaves `collect.service_starts` and `collect.service_start_rungs` in place. The older build ignores both, so nothing needs to be done. They keep the rows they hold, and the next upgrade starts writing to them again.
+- **V308**: an older build does not know the store's per-table activity history ([#9413](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9413)). Rolling back leaves `collect.store_table_activity` and `collect.store_table_activity_baseline` in place. The older build neither reads nor fills them. Nothing to do before rolling back. If you roll forward again, the next hourly capture compares the counters with the baseline it finds, so its first hour carries the whole gap as one longer interval.
+- **V309**: an older build does not know the store checkpoint rows ([#9414](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9414)). Rolling back leaves `collect.store_checkpoints` in place. The older build ignores it and keeps no per-checkpoint rows. The rows stay until you roll forward again, and the checkpoints the older build runs under are missing from them.
+- **V310**: an older build does not know the index on the pending rows of the oversized plan backlog ([#9452](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9452)). Rolling back leaves `collect.idx_oversized_plan_backlog_pending` in place. The older build ignores it and still counts a server's pending rows through the other indexes, as it did before. The index stays correct while the older build writes rows. Nothing to do before rolling back.
+- **V311**: an older build does not know what each migration rung changed ([#9438](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9438)). Rolling back leaves `collect.service_start_rung_objects` in place. The older build ignores it, so nothing needs to be done. It keeps the rows it holds, and the next upgrade starts writing to it again.
+- **V313**: an older build does not know the record of store setting changes ([#9427](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9427)). Rolling back leaves `collect.store_setting_state` and `collect.store_setting_changes` in place. The older build ignores them and records no changes. Nothing needs doing before you roll back.
+- **V315**: an older build does not know the service start recorded on each read latency row ([#9434](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9434)). The upgrade drops the primary key of `collect.read_latency` and adds the unique index `collect.uq_read_latency_key`, which also names the new `process_started_at` column. An older build writes its hourly read latency rows against the old key. That key no longer exists, so each of those writes fails until you fix the table. The older build keeps running and loses only its own read latency history. Before you roll back, run this in the store. It keeps one row of each key, drops the new index and puts the old key back: `DELETE FROM collect.read_latency AS a USING collect.read_latency AS b WHERE a.ctid > b.ctid AND a.metric_time = b.metric_time AND a.surface = b.surface AND a.route = b.route AND a.outcome = b.outcome AND a.window_band = b.window_band; DROP INDEX collect.uq_read_latency_key; ALTER TABLE collect.read_latency ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band);` The delete removes the counts of the second process in any hour that held two. If you roll forward again, the upgrade moves the key again.
+- **V316**: an older build does not know the store's lock wait history ([#9439](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9439)). Rolling back leaves `collect.store_lock_waits` in place. The older build ignores it, writes no rows to it and never deletes from it, so the rows stay as they were at the rollback. When you upgrade again, this build adds to the same table and deletes rows past the store log retention.
+- **V317**: an older build does not know the reply size of a read ([#9433](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9433)). Rolling back leaves the column `reply_bytes` on `collect.slow_reads` and the columns `reply_bytes_total` and `reply_bytes_count` on `collect.read_latency` in place. The older build ignores all three. Nothing to do before rolling back. When you roll forward again, the rows written in between have no reply size, and `get_read_latency` leaves them out of its average.
+- **V318**: an older build does not know planned change windows ([#9485](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9485)). Rolling back leaves `config.investigation_change_windows` and the two hold columns on `config.investigation_requests` in place. The older build ignores them, so a request that opens inside a window goes to the request runner as it did before. A request already held stays held in the store, but the older build lists and hands it out like any other. Nothing to do before rolling back.
+
+#### What an upgraded store does with older Client Timeouts history
+
+On a store that uses TimescaleDB, the upgrade renames a populated `collect.attention_events` table to `collect.attention_events_legacy` and puts an empty table of the same shape in its place. The rename takes a moment. Collection writes to the new table at once. A store with no TimescaleDB, or with no Client Timeouts rows, is not changed.
+
+A background copy then moves the older rows into the new table. It starts a few minutes after the service starts. It copies a slice of the old table at a time, it spaces its disk writes out the way the daily purge does, and it never holds a lock that blocks collection. It copies only rows that are still inside the retention window. Until it ends, the Client Timeouts views and tools show the older history only as far as the copy has reached. A window that starts after the upgrade is complete.
+
+While the copy runs, the store needs about as much free disk space as the old table, because both tables exist. The old table is dropped when the copy ends and the space comes back.
+
+To see the progress, read the one row in `collect.attention_events_legacy_copy`. `next_page` is the next page of the old table to copy and `last_page` is the page count of the old table when the copy began. The copy is done when the row is gone and `collect.attention_events_legacy` no longer exists. A restart resumes at `next_page` and copies no row twice. If the final drop cannot get its lock in 5 seconds, the copy leaves the row and the old table in place and tries the drop again later.
+
+### Compose upgrade
+
+A compose upgrade replaces the folder you run `docker compose` from, and keeps the two volumes. The archive of each release carries its own `docker-compose.yml`, and the file changes between releases. From v3.13.0 to 3.14 it changes the store image tag (`latest-pg17` to a pinned `2.32.1-pg17`), the flags on the store's command line, the `POSTGRES_INITDB_ARGS` line and the `darling` image tag. `POSTGRES_INITDB_ARGS` applies to a new volume only, so an existing store keeps its collation. The release's archive also carries a new `setup.sh` and `secrets/README.md`. An upgrade that keeps the old `docker-compose.yml` runs the old images and the old store flags.
+
+The project name is `performancemonitor-darling` in every release, so the new folder takes over the same containers and the same `darling-store` and `darling-credentials` volumes. Nothing is copied out of a volume.
+
+1. Back up the store and the credentials volume, as in [The Linux compose stack](../darling-store-backup.md#the-linux-compose-stack). The backup is the way back if you roll back past a migration that an older build cannot read.
+2. Download and verify the new archive, as in the [Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). Extract it next to the old folder, and leave the old folder where it is. It is the rollback copy. In the commands below, `old` is the old folder and `new` is the folder the new archive made:
+
+   ```bash
+   tar -xzf PerformanceMonitorDarling-compose-<new-version>.tar.gz
+   cp -a old/darling.json new/darling.json
+   cp -a old/secrets/. new/secrets/
+   ```
+
+   The `/.` after `old/secrets` matters. The new archive ships `secrets/README.md`, so `new/secrets/` exists. `cp -a old/secrets new/secrets` then copies the old folder inside it, to `new/secrets/secrets/`. Compose does not find the files it mounts, stops with `bind source path does not exist: .../secrets/store_password.txt`, and exits 1. The only line it prints on screen is `Container store Recreate`, so read the whole output if an upgrade fails. `old/secrets/.` copies the files in the folder, and `-a` keeps their modes. A `password_key` file keeps its owner (user 1654) only when `cp` runs as root, so use `sudo cp` if you keep one.
+
+   `setup.sh` is not needed, because every secret file and `darling.json` is already there. The new `darling.sample.json` is for reference only.
+3. Make again in `new/docker-compose.yml` every edit you made in `old/docker-compose.yml`. The new file replaces yours, so the `mcp_token` and TLS secrets, a changed port mapping, a `mem_limit` and any added library in the store's preload list are gone until you make them again. Run `diff old/docker-compose.yml new/docker-compose.yml` to see them next to what the release changed. To have nothing to make again, keep your edits in `docker-compose.override.yml` and `.env` beside the compose file, which `docker compose` reads on top of the release's file, and copy those two files into `new` along with `darling.json` and `secrets/` in step 2.
+
+   A `ports:` list in `docker-compose.override.yml` is added to the release's list, so on a host where the release's port is taken `up -d` fails with port in use. To replace the list, write `ports: !override` (Compose 2.24 or later). Your list then replaces the release's whole list, so give every port you want published. This one moves the web dashboard to 55153 and keeps the MCP port:
+
+   ```yaml
+   services:
+     darling:
+       ports: !override
+         - "127.0.0.1:55153:5153"
+         - "127.0.0.1:5152:5152"
+   ```
+4. From the new folder, pull the images and start the stack. Use `up -d` and not `restart`. `restart` keeps each container as it was made, with the old image, the old flags and the old secrets, and only `up -d` recreates a container whose compose file changed:
+
+   ```bash
+   cd new
+   docker compose pull
+   docker compose up -d
+   ```
+
+5. Check the start. `docker compose ps` shows both services running, with the store `healthy` and `darling` `healthy` after its start period. `docker compose logs darling` has this line once the store's migrations have run:
+
+   ```text
+   Postgres store ready (schema v<version>, <count> migration(s) applied)
+   ```
+
+   `<version>` is the schema version of the new build and `<count>` is how many migrations this start applied. A first start after a long gap applies many, and a restart applies none. To read the version from the store, run:
+
+   ```bash
+   docker compose exec store psql -U darling -d darling -c "SET search_path = collect, config, public; SELECT max(version) FROM darling_schema_version"
+   ```
+
+   An upgrade that changes the attention Extended Events session logs one Warning for each monitored server, once, and it reads like a fault:
+
+   ```text
+   [<server>] The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again
+   ```
+
+   It is expected, and nothing needs doing. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition. It logs this once for each server after an upgrade that changes the session.
+
+   If the line does not appear, read `docker compose logs darling` from the start for the reason. `docker compose ps` showing `darling` as `unhealthy` means that startup stopped for good (see the container health note in the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804)).
+
+**Rolling back.** The store keeps every migration the newer build applied, and the older build runs against it, as [Rolling back to an older build](#rolling-back-to-an-older-build) says. Read that list for every version between the old build's schema and the new one before you go back, because some entries ask for a step first (for example V275 and V315). Then stop the new stack and start the old folder:
+
+```bash
+cd new
+docker compose down
+cd ../old
+docker compose up -d
+```
+
+`down` without `-v` keeps both volumes. The old folder's compose file names the old images, so `up -d` recreates both containers on them. The older build logs one warning at start that names the migrations it does not know. If the older store image will not open the store, restore the backup from step 1.
 
 ### Upgrading from a build that predates the script
 
@@ -267,6 +389,8 @@ Nothing that you must keep lives in the install directory. The managed store, th
 7. Start the service, then verify with the post-start checklist. Reaching `Running` means the process started, not that it collects.
 
 ## Uninstall
+
+On Linux under systemd, follow [Uninstall](linux.md#uninstall). The steps below are for Windows.
 
 Run these from an elevated PowerShell, from the folder that holds `uninstall-darling.ps1`. On an MSI install the script refuses. Uninstall from **Settings, Apps** instead.
 
@@ -293,6 +417,8 @@ After the store is deleted, `-PurgeData` also removes the local group `Performan
 For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeData`. It deletes without the `DELETE` prompt.
 
 ## Where everything is
+
+This table is for a Windows install. For Linux under systemd, see [Where everything is](linux.md#where-everything-is).
 
 | What | Where |
 |---|---|

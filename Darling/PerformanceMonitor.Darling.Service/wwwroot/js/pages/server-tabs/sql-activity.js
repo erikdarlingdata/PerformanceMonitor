@@ -222,7 +222,16 @@ const SESSION_TREND_SERIES = [
   { key: "sessions_waiting_for_memory", label: "Waiting for memory" },
 ];
 
-export const SESSION_TREND_SCOPE = "Counts all sessions on the server, background (system) sessions and the monitor's own included. The Sessions tile counts user sessions with an application name and leaves the monitor out, so it reads lower.";
+/** The series in draw order: Total last, so its line is drawn over the status lines and dashed. Total counts every session and Background is a
+ *  subset of Running and Sleeping, so with no dormant sessions Total sits within a few sessions of Sleeping and, drawn first, was hidden under it (#8937).
+ *  Each series keeps the color of its place in SESSION_TREND_SERIES, so the colors do not move. */
+export function sessionTrendSeries() {
+  const series = SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] }));
+  const total = series.filter((s) => s.key === "total_sessions").map((s) => ({ ...s, dashed: true }));
+  return series.filter((s) => s.key !== "total_sessions").concat(total);
+}
+
+export const SESSION_TREND_SCOPE = "Counts all sessions on the server, background (system) sessions and the monitor's own included. Total is every session. Background is part of Running and Sleeping, not added on top of them. The Sessions tile counts user sessions with an application name and leaves the monitor out, so it reads lower.";
 
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
@@ -247,7 +256,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         atTime: { server },
         points,
         xKey: "time",
-        series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
+        series: sessionTrendSeries(),
         formatValue: fmtPlain,
         unit: "sessions",
         ...windowFromHours(res.keptHours || ctx.hours),

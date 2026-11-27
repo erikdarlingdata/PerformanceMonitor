@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -44,6 +45,13 @@ public static partial class ConfigLoader
 
         using (doc)
         {
+            // JsonDocument keeps the last of two equal keys and JsonNode.Parse refuses them, so a duplicate is refused here, once, for
+            // every verb that reads the config.
+            if (FindDuplicateKey(json) is { } duplicate)
+            {
+                throw new ConfigException($"{duplicate}: duplicate key");
+            }
+
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
             {
                 throw new ConfigException("config: the top level must be a JSON object");
@@ -83,6 +91,75 @@ public static partial class ConfigLoader
             return new ExporterConfig(
                 version, store, paths, destination, families, schedule, export, memoryGuard, restartDelay, retention, postRun);
         }
+    }
+
+    /// <summary>
+    /// The dotted path of the first key that appears twice in the same object, or null. An array element is named by its index
+    /// (<c>post_run.command[0]</c>). Keys compare after unescaping, as ordinals. Only the key is returned, never a value, and
+    /// control characters in it are replaced so the message stays one line.
+    /// </summary>
+    internal static string? FindDuplicateKey(string json)
+    {
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(json));
+        var scopes = new Stack<(HashSet<string>? Keys, string Path, int Next)>();
+        string? pendingKey = null;
+
+        string ValuePath()
+        {
+            if (scopes.Count == 0)
+            {
+                return "";
+            }
+
+            var (keys, path, next) = scopes.Pop();
+            string result;
+            if (keys is null)
+            {
+                result = $"{path}[{next}]";
+                scopes.Push((keys, path, next + 1));
+            }
+            else
+            {
+                result = path.Length == 0 ? pendingKey! : $"{path}.{pendingKey}";
+                scopes.Push((keys, path, next));
+            }
+
+            pendingKey = null;
+            return result;
+        }
+
+        while (reader.Read())
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.PropertyName:
+                    var key = reader.GetString()!;
+                    var (keys, path, _) = scopes.Peek();
+                    if (!keys!.Add(key))
+                    {
+                        var full = path.Length == 0 ? key : $"{path}.{key}";
+                        return string.Concat(full.Select(c => char.IsControl(c) ? '?' : c));
+                    }
+
+                    pendingKey = key;
+                    break;
+                case JsonTokenType.StartObject:
+                    scopes.Push((new HashSet<string>(StringComparer.Ordinal), ValuePath(), 0));
+                    break;
+                case JsonTokenType.StartArray:
+                    scopes.Push((null, ValuePath(), 0));
+                    break;
+                case JsonTokenType.EndObject:
+                case JsonTokenType.EndArray:
+                    scopes.Pop();
+                    break;
+                default:
+                    ValuePath();
+                    break;
+            }
+        }
+
+        return null;
     }
 
     private static StoreConfig ReadStore(ConfigObject o, bool isWindows)

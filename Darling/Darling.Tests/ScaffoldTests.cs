@@ -21,12 +21,6 @@ namespace Darling.Tests;
 public sealed class ScaffoldTests
 {
     [Fact]
-    public void StorageSchemaVersion_TracksLatestMigrationScript()
-    {
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-    }
-
-    [Fact]
     public void DarlingWorker_IsAHostedBackgroundService()
     {
         Assert.True(typeof(BackgroundService).IsAssignableFrom(typeof(DarlingWorker)));

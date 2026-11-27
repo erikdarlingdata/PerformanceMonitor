@@ -4,7 +4,7 @@ namespace PerformanceMonitor.Exporter;
 public sealed class UsageException(string message) : ArgumentException(message);
 
 /// <summary>The parsed `export` command: the options plus the two DuckDB limits the process applies before it runs.</summary>
-public sealed record ExportInvocation(ExportOptions Options, string DuckDbMemoryLimit, int DuckDbThreads);
+public sealed record ExportInvocation(ExportOptions Options, string DuckDbMemoryLimit, int DuckDbThreads, bool Verbose = false);
 
 /// <summary>
 /// Parses `export [--config F] [flags]`. With no config, every flag and default is the one `export` has always had
@@ -19,7 +19,7 @@ public static class ExportCommand
         string? pgHost = null, pgDatabase = null, pgUser = null, upload = null, awsRegion = null, stateDir = null;
         string? applicationName = null, duckDbMemoryLimit = null, dimensionOrigin = null, also = null, procedurePlanReuse = null, queryStoreSource = null;
         int? pgPort = null, statementTimeoutSeconds = null, duckDbThreads = null, queryStoreLagHours = null, freshGuardMinutes = null;
-        bool dryRun = false, allowOpenWindow = false, ignoreState = false, allowCompressed = false, pgTextFetchAll = false, planFetchAll = false;
+        bool uploadDestination = false, verbose = false, dryRun = false, allowOpenWindow = false, ignoreState = false, allowCompressed = false, pgTextFetchAll = false, planFetchAll = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -45,6 +45,7 @@ public static class ExportCommand
                 case "--allow-open-window": allowOpenWindow = true; break;
                 case "--upload": upload = Next(); break;
                 case "--aws-region": awsRegion = Next(); break;
+                case "--upload-destination": uploadDestination = true; break;
                 case "--state-dir": stateDir = Next(); break;
                 case "--application-name": applicationName = Next(); break;
                 case "--ignore-state": ignoreState = true; break;
@@ -53,6 +54,7 @@ public static class ExportCommand
                 case "--dimension-origin": dimensionOrigin = Next(); break;
                 case "--also": also = Next(); break;
                 case "--allow-compressed": allowCompressed = true; break;
+                case "--verbose": verbose = true; break;
                 case "--pg-text-fetch-all": pgTextFetchAll = true; break;
                 case "--plan-fetch-all": planFetchAll = true; break;
                 case "--procedure-plan-reuse": procedurePlanReuse = Next(); break;
@@ -98,19 +100,38 @@ public static class ExportCommand
             credential = config.Store.Credential;
         }
 
+        // --upload-destination uploads to the config's `destination`, parsed by the code `run` and `check-config` use. It is the
+        // only way to reach an S3 endpoint, S3 keys or Azure Blob, which the --upload value cannot express.
+        Upload.UploadSettings? destination = null;
+        if (uploadDestination)
+        {
+            if (upload is not null || awsRegion is not null)
+            {
+                throw new ConfigException("--upload-destination: not allowed with --upload or --aws-region; the config's destination names the target and the region");
+            }
+
+            if (config?.Destination is not { } destinationJson)
+            {
+                throw new ConfigException("--upload-destination: needs a --config file that has a destination");
+            }
+
+            try { destination = Upload.UploadSettings.FromJson(destinationJson); }
+            catch (ArgumentException ex) { throw new ConfigException(ex.Message); }
+        }
+
         var options = ExportOptions.Validate(
             store, from, to, outDir, tables,
             pgHost ?? "127.0.0.1", pgPort ?? 5641, pgDatabase ?? "darling", pgUser ?? "darling", pgCredentialFile,
             statementTimeoutSeconds ?? 600, dryRun, allowOpenWindow, nowUtc,
             upload, awsRegion, stateDir, ignoreState, dimensionOrigin, also, allowCompressed, pgTextFetchAll,
             planFetchAll, procedurePlanReuse, queryStoreSource, queryStoreLagHours, freshGuardMinutes,
-            applicationName, credential);
+            applicationName, credential, destination);
 
         if (string.IsNullOrWhiteSpace(stateDir))
         {
             throw new ConfigException("--state-dir is required (or set paths.state in a --config file)");
         }
 
-        return new ExportInvocation(options, duckDbMemoryLimit ?? DuckDbSession.DefaultMemoryLimit, duckDbThreads ?? DuckDbSession.DefaultThreads);
+        return new ExportInvocation(options, duckDbMemoryLimit ?? DuckDbSession.DefaultMemoryLimit, duckDbThreads ?? DuckDbSession.DefaultThreads, verbose);
     }
 }

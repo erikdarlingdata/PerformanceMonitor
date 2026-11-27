@@ -600,7 +600,7 @@ public static class SystemHealthExporter
         using (var copyCommand = duckConnection.CreateCommand())
         {
             copyCommand.CommandText =
-                $"COPY (SELECT * FROM {QuoteDuckIdentifier(table)} ORDER BY server_name, collection_time) " +
+                $"COPY (SELECT * FROM {QuoteDuckIdentifier(table)} ORDER BY {TotalOrder.ForTable(duckConnection, table, "server_name", "collection_time")}) " +
                 $"TO '{outputPath.Replace("'", "''")}' ({DuckDbSession.ParquetCopyOptions})";
             copyCommand.ExecuteNonQuery();
         }

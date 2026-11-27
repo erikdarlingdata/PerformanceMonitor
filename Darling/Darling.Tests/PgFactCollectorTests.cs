@@ -84,6 +84,7 @@ public sealed class PgFactCollectorTests
         "CollectServerPropertiesFactsAsync",
         "CollectSessionFactsAsync",
         "CollectTempDbFactsAsync",
+        "CollectTempDbFileSetupFactsAsync",
         "CollectTraceFlagFactsAsync",
         "CollectWaitStatsFactsAsync"
     };
@@ -109,19 +110,20 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_CoversEveryQuery_OnePerCollectMethodPlusTheDmvFallback()
     {
-        /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
+        /* 33 collect methods (32 fact readers plus the #3538 coverage witness), one query each, plus
            the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
            PLAN_REGRESSION's #3953 table twin and #5448 daily-totals twin: the plan-regression method runs one of
            three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
            latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
            it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot, plus #6640's
-           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 5, PgFactCollector.AllSql.Count);
+           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills, plus
+           #8883's SchedulerCountSql: the tempdb file setup method reads the file list first and the scheduler count second. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 6, PgFactCollector.AllSql.Count);
         Assert.Contains(PgFactCollector.QuerySpillsRankedSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionDailySql, PgFactCollector.AllSql);
-        Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
+        Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
     }
 
@@ -298,9 +300,14 @@ public sealed class PgFactCollectorTests
             /* Block comments are the same case as the `--` ones: prose that says "join to" is not a relation. */
             scanSql = Regex.Replace(scanSql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
             scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
+            /* JOIN LATERAL (subquery) names no relation; the subquery's own FROM is scanned in its place (as the
+               drill-down guard does, #5794). */
+            scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
+            /* #9492: EXTRACT(epoch FROM col) is a function's argument syntax, so its FROM names a column, not a relation. */
+            scanSql = Regex.Replace(scanSql, @"\bEXTRACT\s*\(\s*\w+\s+FROM\b", "EXTRACT(", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
-            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
+            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(", RegexOptions.Singleline)
                 .Select(m => m.Groups[1].Value)
                 .ToHashSet(StringComparer.Ordinal);
 
@@ -333,7 +340,7 @@ public sealed class PgFactCollectorTests
     {
         /* The SPID-0 phantom-root filter and the pair cap are behavior, not style — see
            PgBlockingPairRowQuery (Lite's BlockingPairRowQuery carried verbatim). */
-        foreach (var sql in new[] { PgFactCollector.BlockingChainSql, PgBlockingPairRowQuery.DmvSnapshotSql })
+        foreach (var sql in new[] { PgFactCollector.BlockingChainSql, PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql })
         {
             Assert.Contains("blocking_spid IS NOT NULL", sql, StringComparison.Ordinal);
             Assert.Contains("blocking_spid <> 0", sql, StringComparison.Ordinal);

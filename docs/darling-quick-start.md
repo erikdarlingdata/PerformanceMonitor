@@ -23,13 +23,13 @@ For a PostgreSQL server as a monitored target, set `"engine": "postgres"` on its
 
 ## Turn on the web dashboard or MCP
 
-Both surfaces are off by default. After the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [MCP server](mcp-server.md#darling).
+Both surfaces are off by default. On Windows, after the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. On Linux, set `web.enabled` or `mcp.enabled` in `darling.json` before the first start, or change the store's switch after it, as [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) says for MCP on Docker Compose. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [MCP server](mcp-server.md#darling).
 
 ## Install on Linux
 
 On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run, version 16 or later. The bundled store is Windows-only.
 
-On Linux, the service keeps a key pair and seals secrets to it, so it can save and use them. The secrets are a SQL login password, the SMTP password, webhook URLs, the PagerDuty key, and generic webhook headers. `--reset-password-key` makes a new key. See [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) in the operator guide.
+On Linux, the service keeps a key pair and seals secrets to it, so it can save and use them. The secrets are a SQL login password, the SMTP password, webhook URLs, the PagerDuty key, and generic webhook headers. `--reset-password-key` makes a new key. The Docker Compose steps are in [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) below. The systemd steps have their own page, [Install Darling on Linux with systemd](darling/linux.md).
 
 Configuration is a single JSON file with no schedule knobs. One exception: a collector that runs once a day or less often can have a run time. That is a time of day on the monitored server's own clock. Set it in the viewer's Collector Schedules window (the **Run at** column) or with `--set-collector-run-at`. See the **[Darling operator guide](../Darling/README.md)** for the configuration reference, permissions, and operations.
 
@@ -38,11 +38,15 @@ Configuration is a single JSON file with no schedule knobs. One exception: a col
 
 The service is cross-platform .NET; only the **bundled zero-admin store** and DPAPI are Windows-specific. On Linux you pair the service with the official TimescaleDB image (compose, the recommended shape) or point it at PostgreSQL you already run (systemd), keeping `postgres.managed = false` either way. The Viewer stays a Windows desktop app — Linux hosts read the **web dashboard**, which the container exposes.
 
-Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
+Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums. It lists both Linux archives. After you download one of them, check it with `sha256sum -c --ignore-missing SHA256SUMS-linux.txt`.
 
 - **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
 - **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 - **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
+
+The Docker Compose shape needs Docker Engine with the Compose plugin, so that `docker compose` works. The older `docker-compose` command is not enough. On Ubuntu 24.04 the `docker.io` package has no Compose plugin, and `docker compose` fails with `unknown command`. Install it with `sudo apt-get install -y docker-compose-v2`. The systemd shape needs no Docker.
+
+To upgrade a compose install, follow [Compose upgrade](darling/admin.md#compose-upgrade).
 
 **Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](../Darling/compose) of a source checkout:
 
@@ -56,11 +60,30 @@ docker compose up -d
 
 `setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
 
-The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. The monitoring login must exist on each SQL Server before Darling can collect from it. With the stack up, `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host> --auth sql --username DarlingMonitor` prints the T-SQL that creates it (use the login that the server entry in `darling.json` uses in place of `DarlingMonitor`), and [Permissions](permissions.md#lite--darling-on-premises) has the grants. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+
+The printed `CREATE LOGIN` has `N'<strong password>'` where the password goes. Before you run the script, replace it with the password in `secrets/sql_password.txt`, the one `setup.sh` asked for. Run as printed, the login gets the placeholder as its password and the service's connections keep failing. Until the login exists, the service logs this as a warning: `Connect failed, retrying in 59s: Login failed for user '<login>'`. The delay in that line starts near 60 seconds and doubles to about 240, and the same line is not repeated for each retry. That warning is expected on a first start, and it adds to the start's warning count. Collection begins at the first retry after the login exists. There is nothing to restart.
 
 The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off step before the new image starts; the steps, the rollback and a Kubernetes example are in [Container user](darling/security.md#container-user).
 
-MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
+MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, do both of these:
+
+1. Uncomment `mcp_token` in the two places in `docker-compose.yml`, then run `docker compose up -d`. A `docker compose restart` does not mount a secret that the container was made without, so MCP does not start. `up -d` recreates the container. Run `docker compose up -d` after every edit to `docker-compose.yml`.
+2. Turn the switch on. Where it lives depends on whether the service has started before:
+   - **Before the first start**, set `mcp.enabled` to `true` in `darling.json`. The first start copies the value into the store.
+   - **After the first start**, the store holds the switch, and `mcp.enabled` in `darling.json` does nothing. The service logs `MCP configuration disagrees across the two planes and the CONTROL PLANE WINS` at start. Set the switch in the store, through psql in the store container:
+
+     ```bash
+     docker compose exec store psql -U darling -d darling -c "UPDATE config.config_service SET mcp_enabled = true WHERE id = 1"
+     ```
+
+     No restart is needed. The service reads the store's switch on each collection sweep and starts the MCP listener when it changes. Wait for the next sweep before you test the port.
+
+`--enable-web` and `--enable-mcp` are Windows only, so they do not run in the container. The same `UPDATE` with `web_enabled` turns the web dashboard on after the first start.
+
+To restart the service on compose, run `docker compose restart darling`. Do not restart the store with it. A plain `docker compose restart` stops both services at once, and the service logs warnings because the store goes away under it. To restart both in order, run `docker compose down` and then `docker compose up -d`. A restart does not change the container's image, its mounted secrets or its command line. Only `up -d` does.
+
+To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
 The compose file in the compose archive names the image tag of its own release, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0`. Always write the full `ghcr.io/erikdarlingdata/` name. Without it, Docker looks on Docker Hub and the pull fails.
 
@@ -72,7 +95,8 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 - **Nothing secret goes in darling.json.** Every secret slot — the whole `postgres.connectionString`, server `password`s, `smtp.password`, the tokens — takes an `env:NAME` or `file:/run/secrets/<name>` reference. The compose file mounts each secret from `secrets/`.
 - **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
-- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation. Keep `secrets/` at `chmod 700` with its files at `644`: the container reads them as user 1654 through compose's bind mounts, and the folder's 700 is what keeps other users on the host out. `darling.json` is `644` too, so every user on the host can read it: never put a secret inline in it. The systemd shape should keep `darling.json` readable by the service's user only.
+- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation. Keep `secrets/` at `chmod 700` with its files at `644`: the container reads them as user 1654 through compose's bind mounts, and the folder's 700 is what keeps other users on the host out. `darling.json` is `644` too, so every user on the host can read it: never put a secret inline in it. The systemd shape should keep `darling.json` readable by the service's user only. The commands, and where the `file:` secret files go, are in [Install Darling on Linux with systemd](darling/linux.md#step-5-extract-and-create-the-user-and-folders).
+- **A new store is created with the C collation.** The `store` service passes `POSTGRES_INITDB_ARGS` (`--encoding=UTF8 --locale=C`), the same encoding and locale as the managed Windows store. `initdb` runs once, so this applies to a new volume only. A volume made before this keeps the collation it was made with, which is the image's `en_US.utf8`, and the Darling service works on it as before. The Darling Exporter needs the C collation: on any other store it exits 2 with a one-line message. See "The store collation" in the [Exporter README](../Exporter/README.md#the-store-collation) for how to move to a C store.
 - **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
 
 **Reaching the compose store from a Windows Viewer.** The `store` service publishes no port, so a Windows Viewer cannot connect to it as shipped. The supported seat for a compose deployment is the web dashboard. `--export-viewer-config` does not help here, because it is for the managed store on Windows. To connect a Viewer anyway, do these steps:
@@ -83,18 +107,36 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 The compose file sets no TLS on the store, so this connection is not encrypted. Set up TLS on the store yourself and use `SSL Mode=VerifyFull` with a `Root Certificate`, or keep the link on a network that you trust.
 
-**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
+**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` for a signed-in session when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
 
-**systemd + bring-your-own PostgreSQL.** The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. The container image carries both already.
+**The store keeps its own log files** ([#9333](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9333)). PostgreSQL's own log is in the `log` folder of the store volume, one file for each weekday, and `docker compose logs` for the PostgreSQL container shows only its startup lines. The first second of the log of a fresh store has `FATAL` and `ERROR` lines from the image's temporary init server (`terminating background worker "TimescaleDB Background Worker ..." due to administrator command` and `trying to connect to template database, exiting`) and `column type "timestamp" ... does not follow best practices` WARNINGs from the migrations, and all of them are expected. On a fresh store, `docker compose logs store` also shows one `WARNING:  no usable system locales were found` from that init server, and it is expected too.
 
-Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
+**systemd + bring-your-own PostgreSQL.** The full procedure for this shape is on its own page: [Install Darling on Linux with systemd](darling/linux.md). It has the store setup, a `darling.json` example for Linux, the proof lines, the Linux form of each service verb, the upgrade and the uninstall. The tarball's `install-darling.sh` and `upgrade-darling.sh` do the install and the upgrade below and check them: see [Install and upgrade with the scripts](darling/linux.md#install-and-upgrade-with-the-scripts). The rest of this section is the short form, by hand. The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. On Ubuntu 24.04, `sudo apt-get install -y dotnet-runtime-10.0 aspnetcore-runtime-10.0` installs both from Ubuntu's own repositories. The container image carries both already.
+
+Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under the unit below. Create the service user and the folders it writes first, because the unit runs as that user and it cannot create them under `/usr/share` or `/etc` itself:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin darling
+sudo mkdir -p /etc/darling/darling-keys
+sudo mkdir -p /usr/share/PerformanceMonitorDarling/logs
+sudo chown darling:darling /etc/darling/darling-keys
+sudo chown darling:darling /usr/share/PerformanceMonitorDarling/logs
+sudo chmod 700 /etc/darling/darling-keys
+sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
+```
+
+`darling-keys` is where the service keeps its secret key pair (the `password-key` file) and its log-hash key (the `log-hash-key` file). It sits beside `darling.json`, so if your config is not in `/etc/darling`, create the folder next to it. The service checks that the folder is owner-only and that the user owns the files in it, and it keeps its keys there across restarts, so back it up (see [Security](darling/security.md)). The file log goes to `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. It is the log to read. `journalctl -u darling` carries the same events in a two-line console format. Without that folder the service still runs, but it writes no log file and says `File logging is disabled` at start.
+
+The unit:
 
 ```ini
 [Unit]
 Description=PerformanceMonitor Darling
-After=network-online.target
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
+Type=notify
 ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
 Environment=DARLING_CONFIG=/etc/darling/darling.json
 User=darling
@@ -105,3 +147,7 @@ WantedBy=multi-user.target
 ```
 
 Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
+
+systemd reports `active (running)` when the host process starts, before the store is ready. The readiness signal is the `Postgres store ready` line in the log, followed by `PerformanceMonitor Darling collection loop started`. With the web dashboard off there is no port to probe, so check `collect.collection_log` as [Watching the service from outside](darling/operations.md#watching-the-service-from-outside) says.
+
+On a bring-your-own store the custom alert evaluator stays off until `tools/provision-roles.sql` has run and `postgres.webConnectionString` is set. The service says so at start with `Custom alert evaluator not started`. The steps are in [The least-privilege roles](darling/linux.md#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on) on the Linux page.

@@ -860,7 +860,7 @@ public sealed class DarlingAgReaderTests
         Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG1");
         Assert.DoesNotContain(result.AvailabilityGroups, g => g.AgName == "AG2");
         Assert.True(result.GroupsTruncated);
-        Assert.Contains("No view of 1 availability group fit: AG2", result.GroupsTruncatedNote);
+        Assert.Contains("No view of 1 availability group fit: NODE004A (AG2)", result.GroupsTruncatedNote, StringComparison.Ordinal);
         Assert.DoesNotContain("at least one view of each availability group", result.GroupsTruncatedNote);
     }
 
@@ -875,6 +875,23 @@ public sealed class DarlingAgReaderTests
         Assert.True(result.GroupsTruncated);
         Assert.Contains(", and 2 more.", result.GroupsTruncatedNote, StringComparison.Ordinal);
         Assert.DoesNotContain("…", result.GroupsTruncatedNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Build_EveryGroupHasTheSameName_TheNoteNamesTheLeftOutViewsByTheirServer()
+    {
+        /* #8816: Amazon RDS Multi-AZ calls every group RDSAG0. The note must name the servers, or it lists one name over and over. */
+        var views = Enumerable.Range(1, 8).Select(i => AgView(i, "RDSAG0", $"g{i}", true, 1)).ToArray();
+
+        var result = BuildViews(1, views);
+
+        Assert.True(result.GroupsTruncated);
+        var note = result.GroupsTruncatedNote!;
+        var named = Enumerable.Range(1, 8).Select(i => $"NODE{i:D3}A (RDSAG0)").Where(n => note.Contains(n, StringComparison.Ordinal)).ToList();
+        Assert.Equal(5, named.Count);
+        Assert.DoesNotContain("RDSAG0, RDSAG0", note, StringComparison.Ordinal);
+        Assert.Contains("No view of 7 availability groups fit: ", note, StringComparison.Ordinal);
+        Assert.Contains(", and 2 more.", note, StringComparison.Ordinal);
     }
 
     [Fact]

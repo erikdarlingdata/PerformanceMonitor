@@ -178,6 +178,8 @@ function bodyFor(method, url) {
   if (path === "/api/fleet") return fleet;
   if (path === "/api/server-data-start") return { data_start_utc: "2026-01-01T00:00:00Z" };
   if (path === "/api/session") return { front_door: false, can_edit: true };
+  if (path === "/api/me") return { method: "oidc", seat: "admin", subject: "a@b.c", personal_tokens: true };
+  if (path === "/api/mcp-tokens") return { tokens: [], max_lifetime_days: 90, allowed_roles: ["reader"] };
   if (path === "/api/catalog") return catalog;
   if (path === "/api/views") return [dashboardView];
   if (path.startsWith("/api/views/")) return drawing.startsWith("#/notebook") ? notebookView : dashboardView;
@@ -223,11 +225,11 @@ await settle();
 /* One sample address per renderer, plus one per server tab (SQL Server and PostgreSQL), FinOps tab and Admin tab. The tab
    lists come from the pages' own tables, so a new tab is drawn without an edit here. */
 const samples = [
-  "#/fleet", "#/server/" + SERVER, "#/finops/" + SERVER, "#/ag", "#/sweeps", "#/alerts", "#/investigations", "#/investigations?request=1",
+  "#/fleet", "#/server/" + SERVER, "#/finops/" + SERVER, "#/ag", "#/sweeps", "#/store-health", "#/alerts", "#/investigations", "#/investigations?request=1",
   "#/proposals", "#/proposals?proposal=1", "#/alert-rules", "#/alert-rule/1", "#/alert-rule/new", "#/alert-rule/new/cpu", "#/admin",
   "#/triage?server=" + SERVER + "&metric=cpu&at=2026-01-01T00:00:00Z", "#/views", "#/view/1", "#/view/1/edit", "#/view/new", "#/notebook/1",
   "#/notebook/1/edit", "#/notebook/new", "#/notebook/new/blank", "#/mute-rules", "#/mute-rules?server_name=" + SERVER + "&metric_name=cpu",
-  "#/known-patterns", "#/manage-tags", "#/manage-query-tags", "#/query-tag-usage", "#/job-history",
+  "#/known-patterns", "#/manage-tags", "#/manage-query-tags", "#/query-tag-usage", "#/job-history", "#/mcp-tokens",
   ...serverTabs.SERVER_TABS.map((t) => "#/server/" + SERVER + "/" + t.id),
   ...serverTabs.POSTGRES_TABS.map((t) => "#/server/" + POSTGRES + "/" + t.id),
   ...finops.FINOPS_TABS.map((t) => "#/finops/" + SERVER + "/" + t.id),

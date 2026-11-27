@@ -73,7 +73,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NullIfBlank(databaseName) ?? "" });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (!await reader.ReadAsync(cancellationToken))
             {
                 return null;

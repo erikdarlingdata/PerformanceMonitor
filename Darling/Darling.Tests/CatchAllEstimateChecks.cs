@@ -101,20 +101,23 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
            about three runs in four) and moves the estimate past the seeded relation's own bytes. Turn autovacuum off for it so
            its relpages stay at the VACUUM below. It is the only relation a sweep writes. */
         await ExecAsync(connection, "ALTER TABLE collect.store_metrics SET (autovacuum_enabled = false)", ct);
-        /* Bring every relation's relpages current first, so autovacuum has nothing pending that could move another catch-all
-           relation's relpages between the two sweeps and break the exact comparison below. */
+        /* #9707: turn autovacuum off on every relation the catch-all can count, so nothing rewrites a relpages value between
+           the test's read and the sweep's estimate statement. A snapshot would not close that window: VACUUM and ANALYZE
+           (autovacuum's too) write relpages, reltuples and relallvisible into pg_class with an in-place update, which every
+           snapshot sees at once. Nothing else in this database runs a VACUUM or ANALYZE once the one below is done. */
+        await DisableAutovacuumOnCatchAllRelationsAsync(connection, timescale, ct);
+        /* Bring every relation's relpages current first, so the relations below start from their recorded page counts. */
         await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
         /* #7303: a second catch-all relation that the test grows between the two sweeps on purpose, so the comparison below is
            shown to take another relation's relpages change out of the figure (what an autovacuum on any other table does on
            its own, rarely). One row now, about sixty pages after the seed. */
-        await ExecAsync(connection, $"CREATE TABLE {GrowerTable} (id integer NOT NULL, pad text NOT NULL)", ct);
+        await ExecAsync(connection, $"CREATE TABLE {GrowerTable} (id integer NOT NULL, pad text NOT NULL) WITH ({AutovacuumOff})", ct);
         await ExecAsync(connection, $"INSERT INTO {GrowerTable} VALUES (0, 'x')", ct);
         await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
-        var pagesBefore = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
-        await StoreSelfMetrics.SweepAsync(connection, timescale, baselineTime, null, null, null, ct);
+        var pagesBefore = await ReadPagesAndSweepAsync(connection, timescale, baselineTime, ct);
         var before = await ReadAsync(connection, baselineTime, ct);
 
-        await ExecAsync(connection, $"CREATE TABLE {SeedTable} (id integer PRIMARY KEY, payload text NOT NULL)", ct);
+        await ExecAsync(connection, $"CREATE TABLE {SeedTable} (id integer PRIMARY KEY, payload text NOT NULL) WITH ({AutovacuumOff})", ct);
         await ExecAsync(connection, $"ALTER TABLE {SeedTable} ALTER COLUMN payload SET STORAGE EXTERNAL", ct);
         await ExecAsync(connection,
             $"INSERT INTO {SeedTable} SELECT g, repeat(md5(g::text), 256) FROM generate_series(1, 2000) AS g", ct);
@@ -157,8 +160,7 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
         await ExecAsync(connection,
             $"INSERT INTO {GrowerTable} SELECT g, repeat('x', 200) FROM generate_series(1, 2000) AS g", ct);
         await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
-        var pagesAfter = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
-        await StoreSelfMetrics.SweepAsync(connection, timescale, next, null, null, null, ct);
+        var pagesAfter = await ReadPagesAndSweepAsync(connection, timescale, next, ct);
         var after = await ReadAsync(connection, next, ct);
 
         var other = StoreSelfMetrics.OtherObjectKind;
@@ -167,7 +169,7 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
         var delta = after[other].TotalBytes - before[other].TotalBytes;
         /* #7303: the estimate is the whole bucket, so it also moves when any OTHER relation in it gains or loses a page of
            relpages between the two sweeps (an autovacuum or autoanalyze on a table the test does not control: CI saw exactly
-           one 8192-byte page over). Measure those relations right before each sweep and take their change out, so the
+           one 8192-byte page over). Measure those relations in each sweep's own snapshot and take their change out, so the
            comparison stays exact for the seeded relation instead of allowing a band around it. */
         var blockSize = await ReadBlockSizeAsync(connection, ct);
         var otherChanges = new List<string>();
@@ -203,10 +205,53 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
     }
 
     /// <summary>
+    /// Reads the catch-all relations' <c>relpages</c>, then runs the sweep. Autovacuum is off on every one of those relations
+    /// (<see cref="DisableAutovacuumOnCatchAllRelationsAsync"/>), so no <c>relpages</c> changes between the two reads.
+    /// </summary>
+    private static async Task<Dictionary<long, RelationPages>> ReadPagesAndSweepAsync(
+        NpgsqlConnection connection, bool timescale, DateTime metricTime, CancellationToken ct)
+    {
+        var pages = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescale, metricTime, null, null, null, ct);
+        return pages;
+    }
+
+    private const string AutovacuumOff = "autovacuum_enabled = false, toast.autovacuum_enabled = false";
+
+    /// <summary>
+    /// #9707: <c>ALTER ... SET (autovacuum_enabled = false, toast.autovacuum_enabled = false)</c> on every table and
+    /// materialized view the non-system catch-all estimate counts (the census by the product's own predicates), so neither an
+    /// autovacuum nor an autoanalyze runs on them or on their TOAST tables. The catch-all's other arms are indexes of these
+    /// and of their TOAST tables, which autovacuum only visits with the table. The two relations the check creates are
+    /// created with the same setting.
+    /// </summary>
+    private static async Task DisableAutovacuumOnCatchAllRelationsAsync(NpgsqlConnection connection, bool timescale, CancellationToken ct)
+    {
+        await ExecAsync(connection, $@"
+DO $do$
+DECLARE r record;
+BEGIN
+    FOR r IN
+        SELECT format('ALTER %s %I.%I SET ({AutovacuumOff})',
+                      CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END, n.nspname, c.relname) AS ddl
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+        AND   c.relkind IN ('r', 'm')
+        AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+        {(timescale ? "AND   " + StoreSelfMetrics.TimescaleInventoriedPredicateSql : "")}
+        AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+    LOOP
+        EXECUTE r.ddl;
+    END LOOP;
+END
+$do$", ct);
+    }
+
+    /// <summary>
     /// The relations the catch-all estimate adds up for the non-system row, with their <c>relpages</c> as the estimate reads
     /// them: the census relations by the product's own predicates, their TOAST tables, and the indexes of both (the same
-    /// four arms <c>UnenumeratedEstimateInsertSql</c> unions). Read in one statement right before a sweep so the two
-    /// reads differ only by what changed between the sweeps.
+    /// four arms <c>UnenumeratedEstimateInsertSql</c> unions). Read in one statement.
     /// </summary>
     private static async Task<Dictionary<long, RelationPages>> ReadCatchAllRelationPagesAsync(
         NpgsqlConnection connection, bool timescale, CancellationToken ct)

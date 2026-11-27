@@ -40,10 +40,13 @@ public class SensitiveStatementRawCleanTests
     private static string? Walk(string xml) =>
         SensitiveStatements.XmlCore(xml, Named, static () => false, SensitiveStatements.PlaceholderText);
 
+    /// <summary>What the filter answers, and whether it took the raw-text shortcut. The budget is
+    /// <see cref="FrozenClockBudget"/>, so a starved runner cannot spend it mid-walk and turn the walk's answer into the
+    /// placeholder (#8852); the shortcut still runs, because the judge is the shared one.</summary>
     private static string? Filtered(string xml, out bool tookTheShortcut)
     {
         var before = SensitiveStatements.RawCleanClears;
-        var result = SensitiveStatements.Xml(xml, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
+        var result = SensitiveStatements.Xml(xml, FrozenClockBudget.Create());
         tookTheShortcut = SensitiveStatements.RawCleanClears != before;
         return result;
     }

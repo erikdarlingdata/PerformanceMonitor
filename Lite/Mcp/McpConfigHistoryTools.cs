@@ -126,7 +126,7 @@ public sealed class McpConfigHistoryTools
             var rows = allRows.Where(r => ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
             var statusRows = allRows.Where(r => !ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
             if (allRows.Count == 0)
-                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None), database)
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "database_config"), database)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         $"No database configuration changes detected {McpHelpers.InTheLast($"{hours_back} hours")}{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         database,

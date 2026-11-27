@@ -83,10 +83,27 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
         /* The card reads its own server's clock (#8645), never the last-opened tab's, so a different active clock must change nothing. */
         ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-09-25 05:56:40 (UTC-04:00)", card.LastCollectionDisplay);
+        /* #9094: the joiner that keeps the label whole is not part of what the card says, so it is dropped before comparing. */
+        Assert.Equal("2026-09-25 05:56:40 (UTC-04:00)", card.LastCollectionDisplay.Replace("\u2060", ""));
 
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
         Assert.Equal("2026-09-25 09:56:40", card.LastCollectionDisplay);
+    }
+
+    /// <summary>#9094: the card's Last Collect line wraps in a narrow card. Between "UTC" and the offset's sign is a word joiner, for a
+    /// clock behind UTC and a clock ahead of it, so the label is never broken in two.</summary>
+    [Theory]
+    [InlineData(-300)]
+    [InlineData(120)]
+    public void LastCollect_InServerTime_KeepsItsOffsetLabelWhole(int offsetMinutes)
+    {
+        var card = new ServerSummaryItem { LastCollectionTime = Utc(2026, 9, 25, 9, 56, 40), Clock = ServerClock.FixedOffset(offsetMinutes) };
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+
+        var sign = offsetMinutes < 0 ? "-" : "+";
+        /* Ordinal: a culture compare skips the joiner, so it would find "UTC-" inside "UTC<joiner>-". */
+        Assert.Contains("UTC\u2060" + sign, card.LastCollectionDisplay, StringComparison.Ordinal);
+        Assert.DoesNotContain("UTC" + sign, card.LastCollectionDisplay, StringComparison.Ordinal);
     }
 
     // ── D5: one named clock on the time columns ─────────────────────────────────────────────────────

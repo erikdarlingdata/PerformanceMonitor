@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,6 +42,7 @@ public class CollectionBackgroundService : BackgroundService
     private readonly RetentionService? _retentionService;
     private readonly AnalysisNotificationService? _notificationService;
     private readonly ILogger<CollectionBackgroundService>? _logger;
+    private readonly UsedDataReadRunLog _usedDataReadRun;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
     /* Archival starts at UtcNow so it does not fire on the very first cycle. */
@@ -162,11 +164,13 @@ public class CollectionBackgroundService : BackgroundService
     /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
     internal static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
-    /* Size-based trigger — when the database exceeds this size, archive ALL data
+    /* Size-based trigger — when the database reaches the reset point, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
        large tables (33x slower at 667MB in testing). Data remains fully queryable
-       through the archive views (hot UNION parquet). */
-    private const double ArchiveSizeThresholdMb = 512;
+       through the archive views (hot UNION parquet). The reset point is 512 MB unless
+       settings.json sets hot_store_reset_mb (#9238), and every reader takes it from
+       HotStoreResetLimit.Current so the check, the log line and Store Health agree. */
+    internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -215,6 +219,7 @@ public class CollectionBackgroundService : BackgroundService
         _retentionService = retentionService;
         _notificationService = notificationService;
         _logger = logger;
+        _usedDataReadRun = new UsedDataReadRunLog(logger);
     }
 
     /// <summary>
@@ -502,6 +507,12 @@ public class CollectionBackgroundService : BackgroundService
         [
             new HousekeepingStep("analysis", token => RunAnalysisIfDueAsync(token)),
         ]),
+        /* #9596: the object usage chain get_object_usage reads. Its own loop, because a backfill of a large database is minutes of short
+           steps and must not hold archival, analysis or the evidence capture back. It reads Lite's own database only. */
+        new HousekeepingLoop("object_usage_chain",
+        [
+            new HousekeepingStep("object_usage_chain", token => RunObjectUsageChainIfDueAsync(token)),
+        ]),
     ];
 
     /// <summary>
@@ -782,7 +793,20 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
-        var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
+        /* #9238: the data in the store (used blocks) counts, not the file length, because the file keeps its freed blocks. The data
+           cannot exceed the file, so the used read (a connection under the read lock) is made only once the file has reached the
+           reset point. The read waits only the UI's 100 ms budget, so a collection checkpoint can make it return null. A null read
+           leaves only the file's own ceiling (twice the reset point) to decide, and the next tick reads again. */
+        var fileMb = _duckDb?.GetDatabaseSizeMb() ?? 0;
+        double? usedMb = null;
+        if (_duckDb != null && fileMb >= HotStoreReset.Mb)
+        {
+            /* #9250: a failed read leaves a trace: the first of a run, a periodic count, and the recovery. */
+            var read = _duckDb.ReadUsedDataSize();
+            _usedDataReadRun.Record(read, fileMb, HotStoreReset);
+            usedMb = read.Mb;
+        }
+        var sizeDue = _duckDb != null && HotStoreReset.IsReached(usedMb, fileMb);
 
         if (!timeDue && !sizeDue)
         {
@@ -794,9 +818,22 @@ public class CollectionBackgroundService : BackgroundService
             var complete = true;
             if (sizeDue)
             {
-                _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
-                    _duckDb!.GetDatabaseSizeMb(), ArchiveSizeThresholdMb);
-                await _archiveService.ArchiveAllAndResetAsync();
+                if (usedMb is { } used && used >= HotStoreReset.Mb)
+                {
+                    _logger?.LogInformation("Store data ({UsedMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}), file {FileMb:F0} MB. Archiving all data and resetting the database",
+                        used, HotStoreReset.Mb, HotStoreReset.Source, fileMb);
+                }
+                else
+                {
+                    _logger?.LogInformation("Store file ({FileMb:F0} MB) reached twice the {Threshold:F0} MB reset point ({Source}), data {UsedMb} MB or not read. Archiving all data and resetting the database",
+                        fileMb, HotStoreReset.Mb, HotStoreReset.Source, usedMb is { } u ? u.ToString("F0", CultureInfo.InvariantCulture) : "not read");
+                }
+                /* #9250: the run ends only when the store was really reset. A deferred or failed reset leaves the
+                   same failing reads in place, so their run (and its count) continues on the next tick. */
+                if (await _archiveService.ArchiveAllAndResetAsync(cancellationToken))
+                {
+                    _usedDataReadRun.EndRunAfterReset();
+                }
             }
             else
             {
@@ -809,6 +846,10 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Archival cycle failed");
+            /* #8788: a pass that threw before it could record itself (the services record their own handled outcomes). */
+            _archiveService.History?.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, sizeDue ? StoreHousekeepingHistory.KindSizeReset : StoreHousekeepingHistory.KindArchive,
+                StoreHousekeepingHistory.OutcomeFailed, Message: ex.Message));
         }
     }
 
@@ -849,6 +890,9 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Retention cleanup failed");
+            /* #8788: a cleanup that threw before it could record itself. */
+            _retentionService.History?.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, StoreHousekeepingHistory.KindRetention, StoreHousekeepingHistory.OutcomeFailed, Message: ex.Message));
         }
     }
 
@@ -880,6 +924,46 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Findings cleanup failed");
+        }
+    }
+
+    /// <summary>#9596: how often the object usage chain pass looks for databases whose newest <c>index_object_stats</c> snapshot is ahead of their chain.
+    /// The collector runs daily, so a pass within minutes of a collection leaves the chain behind for only that long, and a pass that finds nothing
+    /// is one grouped read of the hot table.</summary>
+    internal static readonly TimeSpan ObjectUsageChainInterval = TimeSpan.FromMinutes(5);
+
+    private DateTime _lastObjectUsageChainTime = DateTime.MinValue;
+    private ObjectUsageChainBuilder? _objectUsageChainBuilder;
+
+    /// <summary>
+    /// #9596: builds the chain of every database that is behind (a store from an earlier version backfills each database from its oldest stored
+    /// snapshot here, in the background, while <c>get_object_usage</c> folds), then purges chain rows past their horizon. Never throws: a
+    /// failed pass is logged and the next one retries.
+    /// </summary>
+    private async Task RunObjectUsageChainIfDueAsync(CancellationToken stoppingToken)
+    {
+        if (_duckDb == null || !HousekeepingIsDue(_lastObjectUsageChainTime, ObjectUsageChainInterval, DateTime.UtcNow))
+        {
+            return;
+        }
+
+        try
+        {
+            _objectUsageChainBuilder ??= new ObjectUsageChainBuilder(_duckDb);
+            var built = await _objectUsageChainBuilder.BuildPassAsync(ObjectUsageChainBuilder.MaxStepsPerPass, stoppingToken);
+            _lastObjectUsageChainTime = DateTime.UtcNow;
+            if (built > 0)
+            {
+                _logger?.LogInformation("Object usage chain: built {Snapshots} snapshots", built);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Object usage chain pass failed; the next pass retries");
         }
     }
 
@@ -951,7 +1035,7 @@ public class CollectionBackgroundService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Dismissed-archive-alert cleanup failed");
+            LogPurgeFailure(logger, ex, "Dismissed-archive-alert cleanup", "nothing was purged and the next housekeeping tick retries");
         }
 
         /* #5989: the query-tag sightings age out on the same daily tick; only they are aged, the tags, assignments and rules are configuration. */
@@ -961,8 +1045,24 @@ public class CollectionBackgroundService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Query-tag sightings cleanup failed");
+            LogPurgeFailure(logger, ex, "Query-tag sightings cleanup", "nothing was purged and the next daily sweep retries");
         }
+    }
+
+    /// <summary>
+    /// A failed daily purge. A write-lock timeout (#9196) is the routine outcome of a burst of reads holding the store, not a fault:
+    /// one Warning line that names the holder, as the neighbouring passes write it, with no stack and no Error. Anything else keeps
+    /// its Error with the exception.
+    /// </summary>
+    private static void LogPurgeFailure(ILogger? logger, Exception ex, string pass, string outcome)
+    {
+        if (ex is StoreLockTimeoutException timeout)
+        {
+            logger?.LogWarning("{Line}", StoreBusyReport.LogLine(pass, timeout, outcome));
+            return;
+        }
+
+        logger?.LogError(ex, "{Pass} failed", pass);
     }
 
     /// <summary>

@@ -2101,6 +2101,7 @@ public static class MeasureCatalog
             Archetype = MeasureArchetype.Gauge, Column = "dirty_buffers",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+            Note = "A run over the pool-size cap (2,097,152 buffers, 16 GB on an 8 kB build) skips the per-relation scan and stores one pool-wide totals row, so from then on this figure is the whole pool's, not one relation's.",
         },
         new ComposeMeasure
         {
@@ -2115,6 +2116,7 @@ public static class MeasureCatalog
             Archetype = MeasureArchetype.Gauge, Column = "avg_usage_count",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+            Note = "A run over the pool-size cap (2,097,152 buffers, 16 GB on an 8 kB build) skips the per-relation scan and stores one pool-wide totals row, so from then on this figure is the whole pool's, not one relation's.",
         },
 
         /* ── pg_kernel_stats (pg_stat_kcache; per-query OS CPU + device I/O) - cumulative per-query counters ── */

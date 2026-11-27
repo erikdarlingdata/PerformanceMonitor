@@ -77,10 +77,12 @@ internal static class DiagnosticsBundle
     internal static readonly string[] ConfigShapeProjected =
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
-        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.QueryTextTrigramIndexEnabled", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
+        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.QueryTextTrigramIndexEnabled", "DarlingConfig.QueryStoreTextTrigramIndexEnabled", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "McpConfig.PersonalTokens", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
         /* #8184: the health port is projected as its on/off flag, like mcp_enabled; its port and address stay out, like McpConfig.Port. */
         "DarlingConfig.Health", "HealthConfig.Enabled",
+        /* #9013: the metrics port is projected as its on/off flag only; its port, address, token and allowFrom stay out. */
+        "DarlingConfig.Metrics", "MetricsConfig.Enabled",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -97,6 +99,7 @@ internal static class DiagnosticsBundle
         "DarlingConfig.CollectSchemaChangeEvents",
         "DarlingConfig.RawChunkIntervalReconcileEnabled", "DarlingConfig.DailySummaryWarmerEnabled",
         "DarlingConfig.ProcedureStatsPlanCycleInterval",
+        "DarlingConfig.StoreHealthSizesIntervalMinutes",
         "DarlingConfig.XeRingBufferMaxEvents",
         "DarlingConfig.Alerts",
         "DarlingConfig.Smtp",
@@ -121,6 +124,10 @@ internal static class DiagnosticsBundle
         "WebConfig.Port",
         "HealthConfig.Port",
         "HealthConfig.Listen",
+        "MetricsConfig.Port",
+        "MetricsConfig.Listen",
+        "MetricsConfig.Token",
+        "MetricsConfig.AllowFrom",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",
         "MonitoredServer.Host",
@@ -197,9 +204,12 @@ internal static class DiagnosticsBundle
             ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["mcp_allow_tokenless_loopback"] = config.Mcp?.AllowTokenlessLoopback ?? false,
             // The PARSED level word, never the raw text; an unknown value runs as metadataOnly, so it reports that.
+            /* #8737: the personal-token block holds no name or secret; the shape carries its on/off flag. */
+            ["mcp_personal_tokens_enabled"] = config.Mcp?.PersonalTokens?.Enabled ?? false,
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["health_enabled"] = config.Health?.Enabled ?? false,
+            ["metrics_enabled"] = config.Metrics?.Enabled ?? false,
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
             ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
@@ -209,8 +219,17 @@ internal static class DiagnosticsBundle
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
             ["capture_plans"] = config.CapturePlans,
             ["query_stats_deferred_plan_fetch"] = config.QueryStatsDeferredPlanFetch,
-            /* #7674: the opt-in trigram index on the plan-cache text; a plain bool, and what get_store_metrics query_text_index is read beside. */
+            /* #7674: the opt-in trigram index on the plan-cache text; what get_store_metrics query_text_index is read beside. #8978: the
+               darling.json value, the store's value (null while config_service.query_text_trigram_index_enabled is NULL, so the file
+               governs) and the resolved value the index pass acts on. */
             ["query_text_trigram_index_enabled"] = config.QueryTextTrigramIndexEnabled,
+            ["query_text_trigram_index_store_value"] = config.QueryTextTrigramIndexStoreValue,
+            ["query_text_trigram_index_resolved"] = config.QueryTextTrigramIndexResolved,
+            /* #8570: the opt-in trigram index on the Query Store text; what get_store_metrics query_store_text_index is read beside.
+               #8978: file, store and resolved values, as above. */
+            ["query_store_text_trigram_index_enabled"] = config.QueryStoreTextTrigramIndexEnabled,
+            ["query_store_text_trigram_index_store_value"] = config.QueryStoreTextTrigramIndexStoreValue,
+            ["query_store_text_trigram_index_resolved"] = config.QueryStoreTextTrigramIndexResolved,
             // The PARSED mode word, never the raw text (free config text); an unknown value runs as off, so it reports off.
             ["procedure_stats_deferred_plan_fetch"] = ProcedureStatsPlanFetchModes.TryParse(config.ProcedureStatsDeferredPlanFetch, out var psMode)
                 ? psMode.ToString().ToLowerInvariant() : "off",

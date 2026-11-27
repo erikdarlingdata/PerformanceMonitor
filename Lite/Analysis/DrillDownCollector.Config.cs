@@ -17,15 +17,18 @@ namespace PerformanceMonitorLite.Analysis;
 public partial class DrillDownCollector
 {
     /* #7448: master, msdb, model and tempdb are left out, like the DB_CONFIG fact's own read. SQL Server does not
-       allow READ_COMMITTED_SNAPSHOT on tempdb, master or msdb, so a row for one is not something to act on. */
+       allow READ_COMMITTED_SNAPSHOT on tempdb, master or msdb, so a row for one is not something to act on.
+       #9587: rdsadmin is left out too. It is the platform's own database on Amazon RDS for SQL Server, which the
+       customer cannot change, so a row for it is not something to act on either, and it is never an RCSI target.
+       The capture read is the newest at or before $2, the analysis window's end, the capture the fact reads. */
     internal const string ConfigIssuesSql = @"
 SELECT database_name, recovery_model, is_auto_shrink_on, is_auto_close_on,
        is_read_committed_snapshot_on, page_verify_option, is_query_store_on
 FROM v_database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time <= $2)
 /*SEC*/
-AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb', 'rdsadmin')
 AND   (is_auto_shrink_on = true OR is_auto_close_on = true
        OR is_read_committed_snapshot_on = false OR page_verify_option != 'CHECKSUM')
 ORDER BY database_name";
@@ -40,8 +43,9 @@ ORDER BY database_name";
         cmd.CommandText = ConfigIssuesSql;
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         /* #5558: the same databases the fact skipped. */
-        cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 2);
+        cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 3);
 
         /* Read the rows first: the RCSI figures need the RCSI-off set before any row is written. */
         var rows = new List<ConfigIssueRow>();

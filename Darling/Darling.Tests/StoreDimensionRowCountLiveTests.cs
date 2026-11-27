@@ -60,7 +60,7 @@ public sealed class StoreDimensionRowCountLiveTests
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(connection, $"TRUNCATE collect.{PayloadDimensions.QueryTextDimTable}, collect.{PayloadDimensions.QueryPlanDimTable}", ct);
+            await ExecAsync(connection, $"TRUNCATE collect.{PayloadDimensions.QueryTextDimTable}, collect.{PayloadDimensions.QueryPlanDimTable} CASCADE", ct);
             for (var i = 0; i < 5; i++)
             {
                 await ExecAsync(connection,

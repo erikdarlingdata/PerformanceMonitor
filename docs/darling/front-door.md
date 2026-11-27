@@ -193,6 +193,8 @@ A person with a read-only role gets, through the front door, the answers a store
 
 If the front door uses OpenID Connect with no role mapping (`web.network.oidc.roleClaim`), every person who signs in has the edit seat. The front door logs a warning at start. Set `roleClaim` with `adminRoles` and `viewerRoles` to limit who can edit.
 
+A store behind a front door keeps `web.network.oidc.tokenSignIn` at `on`. The front door signs in to the store with the store's shared token, over the network, and `loopback` or `off` refuses that sign-in. The store then goes on hold, and the front door says: `store '<name>' has web.network.oidc.tokenSignIn set to loopback or off, which refuses the web token sign-in the front door makes over the network (a store behind a front door keeps it on)`. See [Token sign-in mode](configuration-web.md#token-sign-in-mode).
+
 The browser never holds a store's session. For each store, the front door signs in with that store's `webToken` and keeps the store's session cookie in memory. It reuses the cookie for a little less than the store's 12-hour session. If a store answers 401, the front door signs in again once and retries once. If the sign-in fails, the front door holds the store for 60 seconds (or for the store's `Retry-After` when that is longer) and answers 502.
 
 ### The store picker and addresses
@@ -207,18 +209,41 @@ The top bar has a store picker. The page works inside one store at a time. The p
 
 ### Local routes
 
-The front door answers four routes itself. They need a signed-in browser like every other route.
+The front door answers these routes itself, and sends none of them to a store. They need a signed-in browser like every other route.
 
 | Route | Answer |
 |---|---|
 | `GET /api/ping` | `{"status":"ok","front_door":true}`. It answers 503 `stopped` with the problems when the worker refused `darling.json`, and 503 `degraded` when every store has been tried and none can be used. |
 | `GET /api/session` | The front door's own role, with `front_door` `true` and `can_own` `false`. |
+| `GET /api/me` | The calling session's own sign-in method, seat, identity and expiry, from the seat the front door gave the request, with `personal_tokens` `false`. No store is asked. |
 | `GET /api/front-door` | Each store's `name`, `health`, `server_count`, `last_ok_utc` and, when the store said so, `admin_writes_off` and `managed_store`. |
 | `GET /api/front-door/locate?server=NAME` | 200 with the `store` and the matched `server_name`. 409 with `ambiguous` and the `stores` that match. 404 with `not_found`. |
+| Every `/api/mcp-tokens` path, any method | 404 with `personal_tokens_unavailable`. A front door serves no personal MCP tokens ([#8737](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8737)), so it never forwards these to a store. |
 
-These routes accept `GET` only.
+The first five accept `GET` only.
 
 `admin_writes_off` and `managed_store` are the flags that a store's own `/api/session` reports. A store runs with Admin writes off when `web.allowAdminWrites` is off on a managed store. The front door reads both from each store through the sign-in it already holds, keeps the answer for 30 seconds, and leaves them out for a store that is down, has no `webUrl`, or runs a build that does not report them. The front door's own `/api/session` always says `false` for both, because one flag cannot speak for several stores. The page takes the flags of the store in use, so a store with Admin writes off shows no Admin write controls, the same as when you open that store directly.
+
+### Check the build and the stores: `/version`
+
+`GET /version` on the web address needs no sign-in and no `health` block. It works on a front door with default settings. It still follows the Host check and `web.network.allowFrom`, so an address outside the list is refused as it is on every other route. It answers 200 with JSON:
+
+```json
+{"build":"Version 3.13.0 (commit 0993a1441)","commit":"0993a1441...","started_utc":"2026-11-24T06:00:00Z","upstreams_total":2,"upstreams_up":1}
+```
+
+- `build` is the same line the web footer shows. `commit` is the full commit the build was made from, read from the build's `SourceCommit` assembly metadata (#9591), or null for a build made with no source revision, such as one outside a git checkout.
+- `started_utc` is when the service process started, so a restart after an upgrade shows.
+- `upstreams_total` is how many stores the front door has. `upstreams_up` is how many of them it can use: a store counts when its last refresh worked. A store that was never reached, refused the token or answered last time but not this time does not count. The answer has no store name, no address and no error text, because anyone who can reach the address can read it.
+- The answer comes from the front door's last result for each store. A request to `/version` sends nothing to any store.
+
+Read the body of the answer, not only the status code. A front door built before this endpoint answers 200 with the sign-in page for any path, so a 200 alone does not show that `/version` exists. Check that the body is JSON with a `build` key:
+
+```bash
+curl -s https://front-door.example/version
+```
+
+When the [health port](network-endpoints.md#the-health-port) is on, a front door's `/readyz` sends its usual word on the first line and the same JSON on the second line.
 
 ### Which store gets a forwarded call
 

@@ -1,0 +1,177 @@
+{
+  "overview": [
+    "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
+    "Both products collect data from SQL Server and answer questions through an MCP server for AI tools. They share code for collectors, alerting, notifications, analysis and plan analysis.",
+    "The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in the repository builds them."
+  ],
+  "build_commands": [
+    "dotnet build Lite/PerformanceMonitorLite.csproj",
+    "dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj",
+    "dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj"
+  ],
+  "areas": [
+    {
+      "id": "darling-service",
+      "name": "Darling service (collectors, scheduler)",
+      "description": "The Darling service is the headless process that collects data. At start it reads darling.json, bootstraps the store, and then runs each collector on its schedule. Collectors that are shared with Lite live in a separate project, and the service runs them through its collector runner. The same process hosts the MCP endpoint and the web dashboard.",
+      "folders": ["Darling/PerformanceMonitor.Darling.Service", "PerformanceMonitor.Collectors"],
+      "start_here": [
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Program.cs", "note": "The host. Builds the service and starts it."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "note": "The main loop, split across the DarlingWorker.*.cs files."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Collection.cs", "note": "How a collection pass is scheduled."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "note": "Runs one collector against one monitored server."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs", "note": "The settings that darling.json holds."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs", "note": "The command line verbs of the service exe."}
+      ]
+    },
+    {
+      "id": "darling-storage",
+      "name": "Darling storage (PostgreSQL store, migrations, rollups)",
+      "description": "This project owns the PostgreSQL store. It holds the numbered migrations and the schema generator. It also holds the store classes that read and write each table, and the rollups and retention tiers that keep the store small. A change to a table starts with a new migration in the list. The Darling export tool also lives here, because it reads the store and writes Parquet files.",
+      "folders": ["Darling/PerformanceMonitor.Darling.Storage", "Exporter/PerformanceMonitor.Exporter"],
+      "start_here": [
+        {"path": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs", "note": "The numbered migration list. The newest rung is at the end of Scripts."},
+        {"path": "Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs", "note": "Builds the collector tables for migration 1 and later table changes."},
+        {"path": "Darling/PerformanceMonitor.Darling.Storage/RetentionTierRouter.cs", "note": "Decides which retention tier a read or a prune uses."},
+        {"path": "Darling/PerformanceMonitor.Darling.Storage/QueryTagRollupSql.cs", "note": "An example of a rollup and its SQL."},
+        {"path": "Darling/PerformanceMonitor.Darling.Storage/IntervalRollupCountGuard.cs", "note": "A guard that checks interval rollup counts."},
+        {"path": "Exporter/README.md", "note": "The darling-export tool, which writes Parquet files from the store."}
+      ]
+    },
+    {
+      "id": "darling-mcp",
+      "name": "Darling MCP",
+      "description": "Darling answers MCP clients from the service process. Each tool is a public static method that carries the McpServerTool attribute. The web endpoints call the same methods, so the two surfaces return the same data. A write policy decides which tools can change anything, and each change is off until an operator turns it on.",
+      "folders": ["Darling/PerformanceMonitor.Darling.Service/Mcp", "PerformanceMonitor.Common/Mcp"],
+      "start_here": [
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHostService.cs", "note": "Starts the MCP endpoint and registers the tool classes."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingCoreToolProfile.cs", "note": "The small set of core tools."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs", "note": "A first tool class to read."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWritePolicy.cs", "note": "The rules for tools that change things."},
+        {"path": "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs", "note": "Builds tool schemas that more MCP clients accept. Both products use it."}
+      ]
+    },
+    {
+      "id": "darling-web",
+      "name": "Darling web UI and front door",
+      "description": "The web dashboard is plain JavaScript pages in wwwroot that call the service over HTTP. The endpoint files in the service answer those calls. The front door lets one Darling service route to other Darling services, so a team can use one address.",
+      "folders": ["Darling/PerformanceMonitor.Darling.Service/wwwroot", "Darling/PerformanceMonitor.Darling.Service/FrontDoor"],
+      "start_here": [
+        {"path": "Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs", "note": "The /api endpoints. Other DarlingWebEndpoints.*.cs files add more."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs", "note": "Starts the web host."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/wwwroot/index.html", "note": "The page shell."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/app.js", "note": "The browser app that loads each page."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/FrontDoor/DarlingFrontDoorRouting.cs", "note": "How the front door picks a service."},
+        {"path": "Darling/PerformanceMonitor.Darling.Service/FrontDoor/DarlingFrontDoorTool.cs", "note": "The MCP tools of the front door."}
+      ]
+    },
+    {
+      "id": "darling-viewer",
+      "name": "Darling Viewer (WPF)",
+      "description": "The Viewer is a desktop app that reads from a Darling service. It shows the fleet, the server tabs, alerts and the alert rule editors. It can run on the service host or on another machine.",
+      "folders": ["Darling/PerformanceMonitor.Darling.Viewer"],
+      "start_here": [
+        {"path": "Darling/PerformanceMonitor.Darling.Viewer/Program.cs", "note": "The entry point."},
+        {"path": "Darling/PerformanceMonitor.Darling.Viewer/App.xaml.cs", "note": "App start and shared resources."},
+        {"path": "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml.cs", "note": "The main window."},
+        {"path": "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs", "note": "How the Viewer reads its data."}
+      ]
+    },
+    {
+      "id": "lite",
+      "name": "Lite (WPF, DuckDB, archive and compaction)",
+      "description": "Lite is one WPF app that collects, stores and shows the data. A background service runs the collectors on a timer and writes to DuckDB. Older data moves to Parquet files, which a compaction step merges. A retention service deletes archive files that are past their age limit.",
+      "folders": ["Lite"],
+      "start_here": [
+        {"path": "Lite/Program.cs", "note": "The entry point, including the headless mode."},
+        {"path": "Lite/App.xaml.cs", "note": "App start."},
+        {"path": "Lite/MainWindow.xaml.cs", "note": "The main window."},
+        {"path": "Lite/Services/CollectionBackgroundService.cs", "note": "The timer that runs collection, archive and retention."},
+        {"path": "Lite/Services/ArchiveService.cs", "note": "Moves old rows from DuckDB to Parquet."},
+        {"path": "Lite/Services/ParquetCompaction.cs", "note": "Merges small Parquet files."}
+      ]
+    },
+    {
+      "id": "lite-mcp",
+      "name": "Lite MCP",
+      "description": "Lite has its own MCP server with the same tool style as Darling. Each tool class sits in Lite/Mcp and reads from the local DuckDB data. Lite also has an investigation store that agents can read and write.",
+      "folders": ["Lite/Mcp", "Lite/Investigations"],
+      "start_here": [
+        {"path": "Lite/Mcp/McpHostService.cs", "note": "Starts the MCP endpoint."},
+        {"path": "Lite/Mcp/McpHealthTools.cs", "note": "A first tool class to read."},
+        {"path": "Lite/Mcp/McpWritePolicy.cs", "note": "The rules for tools that change things."},
+        {"path": "Lite/Mcp/McpToolGuideTools.cs", "note": "The tool that tells a client which tool to use."}
+      ]
+    },
+    {
+      "id": "shared",
+      "name": "Shared code",
+      "description": "Both products use these projects. They hold the alert engine, the notification channels, the analysis engines and the plan analyzer. They also hold the charts and controls that both WPF apps use, and the types that the other projects share. A change here reaches both products.",
+      "folders": [
+        "PerformanceMonitor.Alerting",
+        "PerformanceMonitor.Analysis",
+        "PerformanceMonitor.Common",
+        "PerformanceMonitor.Notifications",
+        "PerformanceMonitor.PlanAnalysis",
+        "PerformanceMonitor.Ui",
+        "Darling/PerformanceMonitor.Darling.Analysis",
+        "Darling/PerformanceMonitor.Darling.Remediation"
+      ],
+      "start_here": [
+        {"path": "PerformanceMonitor.Alerting/AlertEngine.cs", "note": "The alert engine that both products use."},
+        {"path": "PerformanceMonitor.Notifications/AlertDelivery.cs", "note": "What was sent for an alert, and with what result."},
+        {"path": "PerformanceMonitor.PlanAnalysis/ActualPlanExecutor.cs", "note": "Runs the plan analyzer."},
+        {"path": "Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", "note": "Darling's analysis service."},
+        {"path": "Darling/PerformanceMonitor.Darling.Remediation/PostgresRemediationExecutor.cs", "note": "Runs an approved change on a PostgreSQL target."}
+      ]
+    },
+    {
+      "id": "tests",
+      "name": "Tests",
+      "description": "Darling.Tests and Lite.Tests hold nearly all of the tests. Each test class is one file whose name ends in Tests.cs. The Exporter has its own small test project. Tests tagged Stage=Guard run first in CI.",
+      "folders": ["Darling/Darling.Tests", "Darling/Darling.Tests.Standin", "Lite.Tests", "Exporter/PerformanceMonitor.Exporter.Tests", "Exporter/PerformanceMonitor.Exporter.TestChild"],
+      "start_here": [
+        {"path": "Darling/Darling.Tests/Darling.Tests.csproj", "note": "The Darling test project."},
+        {"path": "Lite.Tests/Lite.Tests.csproj", "note": "The Lite test project."},
+        {"path": ".github/scripts/ci-select.py", "note": "Picks which test classes CI runs for a change."},
+        {"path": ".github/scripts/pre-push.sh", "note": "Runs the first CI gates on your machine."}
+      ]
+    },
+    {
+      "id": "ci",
+      "name": "CI and scripts (.github)",
+      "description": "The workflows in .github/workflows run the checks and build the releases. The scripts in .github/scripts hold the rules for what each run does, so a rule lives in one place. The pull request workflow is the first one to read.",
+      "folders": [".github"],
+      "start_here": [
+        {"path": ".github/workflows/pr.yml", "note": "The pull request workflow."},
+        {"path": ".github/scripts/ci-plan.py", "note": "Decides what a run does."},
+        {"path": ".github/scripts/ci-select.py", "note": "Picks the test jobs."},
+        {"path": ".github/workflows/nightly.yml", "note": "The nightly build and checks."},
+        {"path": ".github/workflows/build.yml", "note": "The release build."}
+      ]
+    },
+    {
+      "id": "tools",
+      "name": "Tools",
+      "description": "The tools folder holds small programs and scripts for contributors. They include measurement repros, the web UI smoke check, the docs publisher, the changelog archiver and this code map. None of them ship in a release.",
+      "folders": ["tools", "Darling/tools"],
+      "start_here": [
+        {"path": "tools/codemap/codemap.py", "note": "Builds this code map."},
+        {"path": "tools/ui-smoke/README.md", "note": "The web UI smoke check."},
+        {"path": "tools/docs-site/README.md", "note": "How the Darling docs are published."},
+        {"path": "tools/pg-verification-rig/README.md", "note": "A PostgreSQL rig for checks."},
+        {"path": "Darling/tools/install-darling.ps1", "note": "The Darling install script."}
+      ]
+    },
+    {
+      "id": "deprecated",
+      "name": "The deprecated freeze",
+      "description": "The Full Dashboard and the CLI installer are frozen in one zip file. Nothing builds, tests or releases them. The install and upgrades folders hold the T-SQL that the frozen installer deploys, and those scripts must stay idempotent.",
+      "folders": ["deprecated", "install", "upgrades"],
+      "start_here": [
+        {"path": "deprecated/README.md", "note": "What the zip holds and how to build it at the freeze commit."},
+        {"path": "install/01_install_database.sql", "note": "The first install script."}
+      ]
+    }
+  ]
+}

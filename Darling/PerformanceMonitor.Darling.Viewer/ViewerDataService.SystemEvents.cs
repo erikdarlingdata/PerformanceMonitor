@@ -320,7 +320,7 @@ public sealed partial class ViewerDataService
             event_xml
         FROM v_system_health_events
         WHERE server_id = $1
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   event_type = $4
         AND   event_xml IS NOT NULL
@@ -348,7 +348,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(SystemHealthEventsByTypeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddSystemEventParameters(command, serverId, startUtc, endUtc, eventType);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
             xmls.Add(reader.GetString(0));
 
@@ -609,7 +609,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(HostOsVersionSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
-        return await command.ExecuteScalarAsync(cancellationToken) as string;
+        return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) as string;
     }
 
     private const string HostOsVersionSql = """
@@ -700,7 +700,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await ReadDefaultTraceEventsAsync(reader, clock, startUtc, endUtc, cancellationToken);
     }
 

@@ -1,0 +1,272 @@
+relation,kind,export,note
+ag_database_replica_states,collected,yes,
+ag_replica_states,collected,yes,
+agent_alerts,collected,yes,
+agent_status,collected,yes,
+aggregate_compression_order_history,internal,no,aggregate compression order changes
+analysis_collection_caveats,internal,no,caveats noted on analysis runs
+analysis_findings,internal,no,analysis findings
+analysis_state,internal,no,analysis progress
+attention_events,collected,yes,
+attention_events_legacy_copy,internal,no,progress of the one-time copy of the swapped-out table
+blocked_process_baseline,derived,derived,rollup view
+blocked_process_reports,collected,yes,
+collection_health_hourly,derived,derived,rollup view
+collection_log,internal,no,collector run log
+collection_log_hourly,derived,derived,hourly rollup of collection_log
+collector_cost,internal,no,collector cost telemetry
+collector_stall_probes,internal,no,collector stall telemetry
+collector_state,internal,no,collector progress and schedule
+column_stats,collected,yes,current column statistics density rows
+column_stats_runs,collected,yes,
+column_stats_state,internal,no,column statistics progress
+cpu_scheduler_stats,collected,yes,
+cpu_utilization_stats,collected,yes,
+darling_schema_version,internal,no,store migration versions
+database_config,collected,yes,
+database_protection,collected,yes,
+database_scoped_config,collected,yes,
+database_size_stats,collected,yes,
+database_states,collected,yes,
+deadlock_baseline,derived,derived,rollup view
+deadlocks,collected,yes,
+default_trace_events,collected,yes,
+dmv_blocking_baseline,derived,derived,plain view over the raw table
+dmv_blocking_snapshots,collected,yes,
+file_io_stats,collected,yes,
+fleet_sweep_runs,internal,no,fleet sweep runs
+fleet_sweep_server_verdicts,internal,no,fleet sweep verdicts
+fleet_sweep_watch_items,internal,no,fleet sweep watch items
+fleet_sweep_would_have_paged,internal,no,fleet sweep dry-run pages
+identity_capacity,collected,yes,
+index_object_stats,collected,yes,
+job_history,collected,yes,
+job_history_category_coverage,internal,no,coverage of the job history rollup
+job_history_category_hourly,derived,derived,hourly job history by category
+job_history_oldest_daily,derived,derived,rollup view
+job_outcome_daily,derived,derived,daily successful job outcomes by job
+job_outcome_daily_days,internal,no,newest collection time added to each day of the job outcome rollup
+job_outcome_daily_watermark,internal,no,how far the job outcome rollup has read job history for each server and the first day its retention pass keeps
+latch_stats,collected,yes,
+long_query_completions,collected,yes,
+managed_conf_verdicts,internal,no,managed settings check results
+memory_baseline,derived,derived,rollup view
+memory_clerks,collected,yes,
+memory_grant_stats,collected,yes,
+memory_pressure_events,collected,yes,
+memory_stats,collected,yes,
+module_map,derived,derived,module names kept past procedure_stats retention
+module_map_state,internal,no,module map watermark
+object_dependencies,collected,yes,
+object_executions_daily,derived,derived,per-day module executions
+object_executions_daily_built,internal,no,which days are built
+object_executions_daily_databases,derived,derived,days on which Query Store held rows per database
+object_executions_daily_retention,internal,no,retention in effect for the daily table
+object_inventory,collected,yes,
+object_references_daily,derived,derived,per-day names Query Store statements referenced
+object_references_daily_built,internal,no,which days are built
+object_references_daily_databases,derived,derived,statements looked at per database per day
+object_usage_deltas,derived,derived,per-snapshot index counts that get_object_usage reads
+object_usage_runs,derived,derived,spans over which each index was present
+object_usage_snapshots,derived,derived,per-snapshot facts that get_object_usage reads
+oversized_plan_backlog,internal,no,queue of oversized plans
+oversized_plan_backlog_drops,internal,no,plans dropped from the queue
+perfmon_interval_baseline,derived,derived,rollup view
+perfmon_stats,collected,yes,
+pg_autovacuum_stats,collected,yes,
+pg_blocking_edges,collected,yes,
+pg_buffer_usage,collected,yes,
+pg_column_stats,collected,yes,
+pg_cpu_utilization,collected,yes,
+pg_database_size_stats,collected,yes,
+pg_database_stats,collected,yes,
+pg_deadlocks,collected,yes,
+pg_extension_availability,collected,yes,
+pg_index_bloat,collected,yes,
+pg_index_usage_stats,collected,yes,
+pg_io_stats,collected,yes,
+pg_io_stats_hourly,derived,derived,hourly rollup of pg_io_stats
+pg_io_stats_hourly_state,internal,no,rollup progress
+pg_kernel_stats,collected,yes,
+pg_lock_stats,collected,yes,
+pg_log_events,collected,yes,
+pg_plan_capture,collected,yes,
+pg_plan_capture_readiness,collected,yes,
+pg_predicate_stats,collected,yes,
+pg_replication_slot_stats,collected,yes,
+pg_replication_stats,collected,yes,
+pg_server_config,collected,yes,
+pg_session_states,collected,yes,
+pg_statement_stats,collected,yes,
+pg_statement_text,collected,yes,statement text for pg_statement_stats
+pg_table_bloat_stats,collected,yes,
+pg_wait_sampling,collected,yes,
+pg_wait_stats,collected,yes,
+pg_wraparound_stats,collected,yes,
+pg_write_stats,collected,yes,
+pg_xmin_horizon,collected,yes,
+plan_cache_stats,collected,yes,
+plan_correction,collected,yes,
+plan_force_actions,internal,no,plan forcing audit trail
+plan_regression_block,derived,derived,per-block plan regression sums
+plan_regression_block_built,internal,no,which blocks are built
+plan_regression_daily,derived,derived,per-day plan regression summary
+plan_regression_daily_built,internal,no,which days are built
+procedure_stats,collected,yes,
+procedure_stats_daily,derived,derived,rollup view
+procedure_stats_hour_ledger,internal,no,hours already folded into the rollup
+procedure_stats_hour_ledger_state,internal,no,ledger progress
+procedure_stats_hourly,derived,derived,rollup view
+procedure_stats_interval_daily,derived,derived,rollup view
+procedure_stats_interval_hourly,derived,derived,rollup view
+procedure_stats_io_hourly,derived,derived,rollup view
+procedure_stats_totals,derived,derived,per-collection totals of procedure_stats
+pvs_stats,collected,yes,
+query_plan_dim,collected,yes,query plan text shared by the Query Store rows
+query_plan_dim_seen,internal,no,liveness stamp of each stored query plan
+query_snapshots,collected,yes,
+query_stats,collected,yes,
+query_stats_baseline,derived,derived,rollup view
+query_stats_collection,derived,derived,per-collection sums of query_stats for the duration trend
+query_stats_collection_floor,internal,no,from when the query_stats summary is whole for each server
+query_stats_daily,derived,derived,rollup view
+query_stats_db_daily,derived,derived,rollup view
+query_stats_db_hourly,derived,derived,rollup view
+query_stats_db_interval_daily,derived,derived,rollup view
+query_stats_db_interval_hourly,derived,derived,rollup view
+query_stats_host_hourly,derived,derived,hourly query stats by host object
+query_stats_host_hourly_built,internal,no,which hours are built
+query_stats_hour_ledger,internal,no,hours already folded into the rollup
+query_stats_hour_ledger_state,internal,no,ledger progress
+query_stats_hourly,derived,derived,rollup view
+query_stats_interval_daily,derived,derived,rollup view
+query_stats_interval_hourly,derived,derived,rollup view
+query_stats_io_hourly,derived,derived,rollup view
+query_store_closed_day_built,internal,no,which days of the Query Store closed-day rollups are built
+query_store_closed_day_tick,internal,no,when the closed-day rollups last looked for new rows
+query_store_clutter_collections_daily,derived,derived,daily count of Query Store collections by database
+query_store_clutter_collections_hourly,derived,derived,hourly count of Query Store collections by database
+query_store_clutter_day_built,internal,no,which Query Store clutter days are built from their hours
+query_store_clutter_hour_built,internal,no,which hours are built
+query_store_clutter_plan_daily,derived,derived,daily first and last sighting of each Query Store plan
+query_store_clutter_plan_hourly,derived,derived,hourly first and last sighting of each Query Store plan
+query_store_compose_fleet,derived,derived,fleet rollup of the compose stamp
+query_store_compose_stamp,derived,derived,rollup of the Query Store interval rows by stamp
+query_store_compose_stamp_built,internal,no,which stamps are built
+query_store_compose_stamp_failures,internal,no,failed stamp builds
+query_store_compose_stamp_hours,internal,no,hours covered by stamps
+query_store_forced_plans,collected,yes,
+query_store_grid_daily,derived,derived,daily Query Store grid rows by plan
+query_store_hash_daily,derived,derived,daily Query Store hash rollup
+query_store_hash_daily_built,internal,no,which days are built
+query_store_hash_daily_failures,internal,no,failed daily builds
+query_store_hash_hourly,derived,derived,hourly Query Store hash rollup
+query_store_health,collected,yes,
+query_store_hints,collected,yes,
+query_store_interval_latest,collected,yes,Query Store interval rows (newest per key)
+query_store_interval_latest_coverage,internal,no,coverage of the latest table
+query_store_interval_latest_pending,internal,no,rows waiting to be applied
+query_store_interval_wide,collected,yes,Query Store interval rows (every interval)
+query_store_interval_wide_coverage,internal,no,coverage of the wide table
+query_store_interval_wide_pending,internal,no,rows waiting to be applied
+query_store_plan_map,internal,no,plan key cache
+query_store_self_keys,internal,no,keys of the monitor own Query Store statements
+query_store_self_keys_state,internal,no,progress
+query_store_slicer_hourly,derived,derived,hourly Query Store slicer sums by query
+query_store_stats,collected,yes,
+query_store_stats_corrected_daily,derived,derived,rollup view
+query_store_stats_corrected_hourly,derived,derived,rollup view
+query_store_stats_daily,derived,derived,rollup view
+query_store_stats_daygrain_daily,derived,derived,rollup view
+query_store_stats_hourly,derived,derived,rollup view
+query_store_stats_interval_daily,derived,derived,rollup view
+query_store_stats_interval_hourly,derived,derived,rollup view
+query_store_text,collected,yes,Query Store statement text
+query_store_text_seen,internal,no,liveness stamp of each Query Store statement text
+query_store_top_daily,derived,derived,per-day top Query Store statements
+query_store_top_daily_built,internal,no,which days are built
+query_store_top_hourly,derived,derived,per-hour top Query Store statements
+query_store_watermarks,internal,no,Query Store read progress
+query_store_watermarks_coverage,internal,no,Query Store read coverage
+query_tag_sightings,derived,derived,tag map built from collected rows
+query_text_dim,collected,yes,query text shared by the Query Store rows
+query_text_dim_seen,internal,no,liveness stamp of each stored query text
+raw_chunk_interval_reconcile_runs,internal,no,chunk interval migration history
+raw_chunk_interval_rung_history,internal,no,chunk interval migration history
+read_latency,internal,no,read latency telemetry
+running_jobs,collected,yes,
+schema_capture_passes,collected,yes,
+schema_capture_state,internal,no,schema capture progress
+schema_columns,collected,yes,captured column definitions
+schema_constraints,collected,yes,captured constraint definitions
+schema_indexes,collected,yes,captured index definitions
+schema_objects,collected,yes,captured object definitions
+schema_triggers,collected,yes,captured trigger definitions
+server_config,collected,yes,
+server_properties,collected,yes,
+servers,internal,yes,server registry mapping server_id to a name
+service_start_rung_objects,internal,no,objects each migration rung created or changed or dropped
+service_start_rungs,internal,no,migration rungs each service start tried
+service_starts,internal,no,service start history
+session_stats,collected,yes,
+session_stats_baseline,derived,derived,rollup view
+session_summary_stats,collected,yes,
+slow_reads,internal,no,slow read telemetry
+spinlock_stats,collected,yes,
+store_checkpoints,internal,no,one row per checkpoint of the store's own server
+store_connection_samples,internal,no,store connections by role and state
+store_connection_slots,internal,no,store connection slot headroom
+store_lock_waits,internal,no,store lock waits from the store log
+store_log_captures,internal,no,store log capture progress
+store_log_events,internal,no,store log events
+store_metrics,internal,no,store size telemetry
+store_pass_steps,internal,no,background pass step history
+store_relation_sizes_latest,derived,derived,newest measured size of each relation
+store_relation_sizes_measured,internal,no,when the relation sizes were measured
+store_setting_changes,internal,no,changes to the store settings between captures
+store_setting_state,internal,no,the last captured reading of each store setting
+store_statement_captures,internal,no,store statement capture progress
+store_statement_history,internal,no,store own statement history
+store_table_activity,internal,no,hourly activity of each store table
+store_table_activity_baseline,internal,no,counters the next activity capture compares with
+system_health_events,collected,yes,
+tempdb_stats,collected,yes,
+trace_flags,collected,yes,
+upgrade_runs,internal,no,upgrade run record
+v_blocked_process_reports,derived,derived,read view over blocked_process_reports
+v_collection_log,derived,derived,read view over collection_log
+v_cpu_scheduler_stats,derived,derived,read view over cpu_scheduler_stats
+v_cpu_utilization_stats,derived,derived,read view over cpu_utilization_stats
+v_database_config,derived,derived,read view over database_config
+v_database_scoped_config,derived,derived,read view over database_scoped_config
+v_database_size_stats,derived,derived,read view over database_size_stats
+v_deadlocks,derived,derived,read view over deadlocks
+v_dmv_blocking_snapshots,derived,derived,read view over dmv_blocking_snapshots
+v_file_io_stats,derived,derived,read view over file_io_stats
+v_index_object_stats,derived,derived,read view over index_object_stats
+v_latch_stats,derived,derived,read view over latch_stats
+v_memory_clerks,derived,derived,read view over memory_clerks
+v_memory_grant_stats,derived,derived,read view over memory_grant_stats
+v_memory_pressure_events,derived,derived,read view over memory_pressure_events
+v_memory_stats,derived,derived,read view over memory_stats
+v_perfmon_stats,derived,derived,read view over perfmon_stats
+v_plan_cache_stats,derived,derived,read view over plan_cache_stats
+v_pvs_stats,derived,derived,read view over pvs_stats
+v_query_snapshots,derived,derived,read view over query_snapshots
+v_query_stats,derived,derived,read view over query_stats
+v_query_store_health,derived,derived,read view over query_store_health
+v_query_store_stats,derived,derived,read view over query_store_stats
+v_running_jobs,derived,derived,read view over running_jobs
+v_server_config,derived,derived,read view over server_config
+v_session_stats,derived,derived,read view over session_stats
+v_session_summary_stats,derived,derived,read view over session_summary_stats
+v_spinlock_stats,derived,derived,read view over spinlock_stats
+v_system_health_events,derived,derived,read view over system_health_events
+v_tempdb_stats,derived,derived,read view over tempdb_stats
+v_trace_flags,derived,derived,read view over trace_flags
+v_wait_stats,derived,derived,read view over wait_stats
+wait_stats,collected,yes,
+wait_stats_cadence_baseline,derived,derived,rollup view
+wait_stats_daily,derived,derived,rollup view
+wait_stats_hourly,derived,derived,rollup view
+waiting_tasks,collected,yes,

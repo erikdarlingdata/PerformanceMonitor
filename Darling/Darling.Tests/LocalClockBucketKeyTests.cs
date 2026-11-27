@@ -282,7 +282,8 @@ public sealed class LocalClockBucketKeyTests
                close — never the scaffold alone (that would be one member's series served for the whole set). */
             var endsInScaffold = sql.EndsWith(
                 keyed ? PgBaselineProvider.RobustTierScaffold + PgBaselineProvider.PerMemberScaffoldClose : PgBaselineProvider.RobustTierScaffold,
-                StringComparison.Ordinal);
+                StringComparison.Ordinal)
+                || (!keyed && sql.EndsWith(PgBaselineProvider.RobustTierScaffoldWide, StringComparison.Ordinal));
             var extractsLocal = sql.Contains("EXTRACT(HOUR FROM " + PgBaselineProvider.LocalCollectionTime + ")", StringComparison.Ordinal)
                              && sql.Contains("EXTRACT(DOW FROM " + PgBaselineProvider.LocalCollectionTime + ")", StringComparison.Ordinal);
 
@@ -371,10 +372,11 @@ public sealed class LocalClockBucketKeyTests
         Assert.DoesNotMatch(new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase), lite);
         Assert.DoesNotMatch(new Regex(@"(?<![\w.])collection_time::DATE"), lite);
         /* #4731: the two event arms share ONE helper (EventBaselineSql) with two source CTEs, each extracting (hour, dow,
-           date) = 6 hand references, plus the scaffold's 3 = 9, in both providers. Exact, not a floor: a tenth is a
-           new place that must be looked at, and both sides are pinned to the same number. */
+           date) = 6 hand references, plus the scaffold's 3 = 9, in both providers. Darling has one more (#8570): the wide-window
+           scaffold writes the clock once, in its local_clock CTE, and reads hour, day of week and date from that
+           value. Exact, not a floor: another is a new place that must be looked at. */
         Assert.Equal(9, Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count);
-        Assert.Equal(9, Regex.Matches(darlingSource, @"\+ LocalCollectionTime \+").Count);
+        Assert.Equal(10, Regex.Matches(darlingSource, @"\+ LocalCollectionTime \+").Count);
 
         /* And both providers bind the three clock parameters after the window bounds, in the same order. */
         var darling = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");

@@ -137,6 +137,124 @@ internal static class ComposeStoreAvailability
             : (answer.Rollups, answer.Coverage);
     }
 
+    /// <summary>#8824: how long the daily-summary reader may use a store's measured gate after its own <see cref="ReprobeInterval"/>
+    /// ran out, while one background probe replaces it. It spans the warm pass's refresh interval with room to spare, so a visitor
+    /// who comes any time after a pass has the pass's answer to route on and waits for no probe.</summary>
+    internal static readonly TimeSpan StaleServeLimit = TimeSpan.FromHours(1);
+
+    internal sealed class StoreEntry
+    {
+        public (RollupAvailability Rollups, RollupCoverage Coverage) Answer;
+        public bool Has;
+        public DateTime AtUtc;
+        public Task? Refresh;
+    }
+
+    /// <summary>The store-keyed gates a set of reads share. The service has one, <see cref="s_sharedGates"/>. A test that counts probes
+    /// over a store key of its own passes a set of its own, so a <see cref="ResetStoreGatesForTests"/> from another class running
+    /// beside it cannot forget the gate it is counting on.</summary>
+    internal sealed class StoreGates
+    {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<object, StoreEntry> _entries = new();
+
+        internal StoreEntry For(object storeKey) => _entries.GetOrAdd(storeKey, static _ => new StoreEntry());
+
+        internal void Clear() => _entries.Clear();
+    }
+
+    private static readonly StoreGates s_sharedGates = new();
+
+    /// <summary>Test-only. Forgets every store's shared gate, so a test that changed a store's shape reads it fresh. Gates a test
+    /// owns (<see cref="StoreGates"/>) are not reached.</summary>
+    internal static void ResetStoreGatesForTests() => s_sharedGates.Clear();
+
+    /// <summary>
+    /// #8824: <see cref="GetMeasuredRollupsAsync(NpgsqlDataSource, CancellationToken)"/> for the daily-summary reader, kept per
+    /// STORE (<paramref name="storeKey"/>, from <see cref="DailySummaryRangeCache.StoreKeyFor"/>) instead of per data source.
+    /// The service reads one store through three pools, and the warm pass runs through the worker's: a probe it made never served
+    /// the web host's first read of a server, and the coverage probe is the longest statement of that read on a large store
+    /// (#3905: 1.7 s and more). It also ages differently from the per-data-source gate. A measured answer older than
+    /// <see cref="ReprobeInterval"/> and younger than <see cref="StaleServeLimit"/> is returned at once and one background probe
+    /// (through the pool of the call that found it old, on no caller's token) replaces it, so a first visit after a warm pass waits
+    /// for no probe. The reader's own argument covers it: a cached floor moves a window to another tier for at most the age of the
+    /// answer and never changes a count. An answer older than the limit, or none, is awaited as before, and a failed probe is
+    /// never cached or served (<see cref="GetMeasuredRollupsAsync(NpgsqlDataSource, CancellationToken)"/> probes again).
+    /// </summary>
+    internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetMeasuredRollupsForStoreAsync(
+        object storeKey, NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        => await GetMeasuredRollupsForStoreAsync(storeKey, postgres, ProbeAsync, cancellationToken);
+
+    /// <summary><see cref="GetMeasuredRollupsForStoreAsync(object, NpgsqlDataSource, CancellationToken)"/> with the probe, the clock and
+    /// the gates substitutable (<paramref name="gates"/> null is the service's shared set).</summary>
+    internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetMeasuredRollupsForStoreAsync(
+        object storeKey,
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
+        CancellationToken cancellationToken,
+        Func<DateTime>? clock = null,
+        StoreGates? gates = null)
+    {
+        ArgumentNullException.ThrowIfNull(storeKey);
+        clock ??= static () => DateTime.UtcNow;
+        var entry = (gates ?? s_sharedGates).For(storeKey);
+        var now = clock();
+
+        lock (entry)
+        {
+            if (entry.Has)
+            {
+                var age = now - entry.AtUtc;
+                if (age < ReprobeInterval)
+                {
+                    return entry.Answer;
+                }
+
+                if (age < StaleServeLimit)
+                {
+                    if (entry.Refresh is not { IsCompleted: false })
+                    {
+                        entry.Refresh = RefreshStoreAsync(entry, postgres, probe, clock);
+                    }
+
+                    return entry.Answer;
+                }
+            }
+        }
+
+        var measured = await GetMeasuredRollupsAsync(postgres, probe, cancellationToken);
+        lock (entry)
+        {
+            entry.Answer = measured;
+            entry.Has = true;
+            entry.AtUtc = now;
+        }
+
+        return measured;
+    }
+
+    private static async Task RefreshStoreAsync(
+        StoreEntry entry,
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
+        Func<DateTime> clock)
+    {
+        try
+        {
+            await Task.Yield();
+            var measured = await GetMeasuredRollupsAsync(postgres, probe, CancellationToken.None);
+            var at = clock();
+            lock (entry)
+            {
+                entry.Answer = measured;
+                entry.AtUtc = at;
+            }
+        }
+        catch (Exception)
+        {
+            /* The stale answer keeps serving until it passes the limit; the next call that finds it old starts another refresh. */
+        }
+    }
+
     private static async ValueTask<ProbeAnswer> GetAnswerAsync(
         NpgsqlDataSource postgres,
         Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
@@ -267,7 +385,7 @@ internal static class ComposeStoreAvailability
         var cagg = ComposeCaggCatalog.For(sourceTable);
         /* #8549: wait_stats_daily is a plain view on a store without TimescaleDB, and the probe finds it there, so that flag alone
            does not make a rollup tier: a plain store has no tier to fall back from and gets no retention notice. */
-        if ((rollups with { WaitStatsDaily = false }) == RollupAvailability.None || cagg is null)
+        if ((rollups with { WaitStatsDaily = false, WaitStatsHourly = false }) == RollupAvailability.None || cagg is null)
         {
             return null;
         }

@@ -64,7 +64,7 @@ public partial class DuckDbInitializer
     ///
     /// <para><b>Cost.</b> Both steps run on every open, a clean one included, because damage from an earlier
     /// session cannot be told from a healthy index without reading it. The size-triggered archive and reset at
-    /// 512 MB (<c>CollectionBackgroundService.ArchiveSizeThresholdMb</c>) keeps the file near that size, and the
+    /// 512 MB of data by default (<c>HotStoreResetSetting</c>) keeps the file under twice that, and the
     /// rebuild measured 622 to 637 ms for 45 indexes on a 402 MB copy of a field database, so it stays at about a
     /// second at most.</para>
     ///

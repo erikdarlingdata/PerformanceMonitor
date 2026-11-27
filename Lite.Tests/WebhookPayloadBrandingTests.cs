@@ -25,10 +25,14 @@ public class WebhookPayloadBrandingTests
         var payload = WebhookAlertService.BuildTeamsPayload(
             "High CPU", "TestServer", "95%", "90%", branding);
 
-        Assert.Contains("Performance Monitor Lite", payload);
+        var card = TeamsCard.Parse(payload);
+        Assert.Equal("Performance Monitor Lite — TestServer", card.Subtitle);
         Assert.DoesNotContain("Performance Monitor Dashboard", payload);
-        // ASCII tail of the snooze hint — robust to System.Text.Json escaping the "→" chars.
-        Assert.Contains("Manage Mute Rules", payload);
+        /* The snooze hint is the card's last section, and Lite has no triage page, so the card has no button. */
+        Assert.Equal([branding.SnoozeHint], card.Sections[^1].Texts);
+        Assert.Contains("Manage Mute Rules", card.Sections[^1].Texts[0]);
+        Assert.Null(card.Action);
+        Assert.False(card.Content.TryGetProperty("actions", out _));
     }
 
     [Fact]
@@ -65,7 +69,7 @@ public class WebhookPayloadBrandingTests
     /// <summary>
     /// #3297: <c>WebhookAlertService</c> held ZERO references to the alert's detail text across all of its
     /// channels, so a Teams card carried a metric name, a value and a threshold with the remedy discarded —
-    /// the same defect #3296 reported by email. A MessageCard section with <c>text</c> rather than a fact,
+    /// the same defect #3296 reported by email. A card section with a text block rather than a fact,
     /// because a multi-paragraph remedy in a label/value fact renders as an unreadable column.
     /// </summary>
     [Fact]
@@ -75,14 +79,11 @@ public class WebhookPayloadBrandingTests
             "Retention Held", "Monitor Store", "9.6x its 4 days horizon", "2.0x",
             EmailAlertService.Branding, detailText: Prose);
 
-        using var doc = JsonDocument.Parse(payload);
-        var section = Assert.Single(
-            doc.RootElement.GetProperty("sections").EnumerateArray().ToList(),
-            s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Details");
+        var section = TeamsCard.Parse(payload).Section("Details");
 
         /* #5654: the card text is markdown, so the prose's square brackets are backslash-escaped (they could otherwise
            open a link); the word-internal underscore of query_stats is left alone. */
-        Assert.Equal(Prose.Replace("[1072]", @"\[1072\]", StringComparison.Ordinal), section.GetProperty("text").GetString());
+        Assert.Equal([Prose.Replace("[1072]", @"\[1072\]", StringComparison.Ordinal)], section.Texts);
     }
 
     /// <summary>
@@ -117,9 +118,7 @@ public class WebhookPayloadBrandingTests
     {
         var teams = WebhookAlertService.BuildTeamsPayload(
             "High CPU", "SRV", "97%", "90%", EmailAlertService.Branding);
-        Assert.DoesNotContain(
-            JsonDocument.Parse(teams).RootElement.GetProperty("sections").EnumerateArray().ToList(),
-            s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Details");
+        Assert.DoesNotContain(TeamsCard.Parse(teams).Sections, s => s.Heading == "Details");
 
         var slack = WebhookAlertService.BuildSlackPayload(
             "High CPU", "SRV", "97%", "90%", EmailAlertService.Branding);

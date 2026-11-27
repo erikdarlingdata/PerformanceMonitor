@@ -127,7 +127,13 @@ public static class PgStatementTextExporter
         ReadKeySetGated(duckDb, statsTable, fetchAll: true).Keys;
 
     /// <summary>One fetched `pg_statement_text` row.</summary>
-    public sealed record TextRow(int ServerId, long QueryId, string QueryText, DateTime FirstSeen, DateTime LastSeen);
+    /// <remarks>
+    /// <c>OwnEntries</c> is the store's JSON array of <c>{"u": user_id, "d": database_id}</c> pairs naming which entries of the
+    /// queryid are the monitoring service's own statements, or null when none is. It lets a reader of
+    /// `pg_statement_stats_hourly` (keyed by user_id, database_id) leave the monitor's own load out. Like first_seen and
+    /// last_seen it is the value at the time of the fetch: the dimension is fetched once per key.
+    /// </remarks>
+    public sealed record TextRow(int ServerId, long QueryId, string QueryText, DateTime FirstSeen, DateTime LastSeen, string? OwnEntries);
 
     /// <summary>
     /// Fetches content for <paramref name="unknownKeys"/> in batches of <see cref="KeyBatchSize"/>, paced by <paramref
@@ -169,7 +175,8 @@ public static class PgStatementTextExporter
                         reader.GetInt64(1),
                         reader.GetString(2),
                         reader.GetDateTime(3),
-                        reader.GetDateTime(4)));
+                        reader.GetDateTime(4),
+                        reader.IsDBNull(5) ? null : reader.GetString(5)));
                 }
 
                 return result;

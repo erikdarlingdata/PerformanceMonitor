@@ -80,9 +80,23 @@ public class AlertMetricClassifierTests
     [InlineData("Web TLS Certificate Expiring")]
     /* #5288: and so does the MCP endpoint's twin. */
     [InlineData("MCP TLS Certificate Expiring")]
+    /* #9583: a Warning fire whose name carries the word "Restarted" that "Agent Restarted" (a recovery, in the list above) needs. */
+    [InlineData("Instance Restarted")]
     public void IsResolution_False_ForActionableAlerts(string metric)
     {
         Assert.False(AlertMetricClassifier.IsResolution(metric));
+    }
+
+    /// <summary>#9583: the Instance Restarted fire is a warning, not a recovery, and "Agent Restarted" stays one.</summary>
+    [Fact]
+    public void InstanceRestarted_IsAWarning_AndAgentRestartedStaysAResolution()
+    {
+        Assert.False(AlertMetricClassifier.IsResolution("Instance Restarted"));
+        Assert.True(AlertMetricClassifier.IsWarning("Instance Restarted"));
+        Assert.True(AlertMetricClassifier.IsResolution("Agent Restarted"));
+        Assert.False(AlertMetricClassifier.IsWarning("Agent Restarted"));
+        /* It stores the 0 sentinel, so the grids keep showing a dash for it. */
+        Assert.True(AlertMetricClassifier.IsStateOnly("Instance Restarted"));
     }
 
     [Theory]
@@ -137,5 +151,13 @@ public class AlertMetricClassifierTests
         // matching the long-standing display behavior this classifier replaced.
         Assert.True(AlertMetricClassifier.IsWarning(null));
         Assert.True(AlertMetricClassifier.IsWarning(""));
+    }
+
+    [Fact]
+    public void FormatHistoryValue_TempDbGrowthFit_RendersMegabytes_NotAPercentage()
+    {
+        /* Review of #8887: the alert stores the growth the volume cannot hold and the volume's free space, both in MB. */
+        Assert.Equal("4096 MB", AlertMetricClassifier.FormatHistoryValue("tempdb Growth Fit", 4096));
+        Assert.Equal("1000 MB", AlertMetricClassifier.FormatHistoryValue("tempdb Growth Fit", 1000));
     }
 }

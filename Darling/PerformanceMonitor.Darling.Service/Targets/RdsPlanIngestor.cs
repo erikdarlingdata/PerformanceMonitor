@@ -68,10 +68,16 @@ public sealed class RdsPlanIngestor
     /// </summary>
     internal Func<IReadOnlyList<PgPlanCaptureCollector.Row>, CancellationToken, Task<int>>? RowWriter { get; init; }
 
-    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
+    /// <summary>
+    /// The tick source for the store time this ingestor reports on <see cref="RdsIngestOutcome.StoreMs"/> (#9523): null
+    /// is the process stopwatch. A test sets it so a duration is a stated number. Nothing in the service sets it.
+    /// </summary>
+    internal Func<long>? StoreClock { get; init; }
+
+    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null, RdsLookupCache? lookups = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles, lookups: lookups);
         _logger = logger;
         _resume = resume;
     }
@@ -99,15 +105,21 @@ public sealed class RdsPlanIngestor
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
            restart resumes from the saved file and marker instead of the newest file's last lines. */
+        var store = new RdsStorePhase(StoreClock);
+
         if (_resume is not null)
         {
-            await _resume.RestoreAsync(_logs, serverId, cancellationToken);
+            await store.TimeAsync(() => _resume.RestoreAsync(_logs, serverId, cancellationToken));
         }
 
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
-        return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, pgLogUsesCsvlog, loginConnectionString, role, cancellationToken));
+        var outcome = await RdsLogSource.RunPassesAsync(
+            () => IngestPassAsync(serverId, storageName, host, pgLogUsesCsvlog, loginConnectionString, role, store, cancellationToken));
+
+        /* #9523: the store time of the whole cycle (the restore above, each pass's COPY and position save) goes out
+           with the outcome, so the runner books it as storage time and the AWS calls and the parse as the fetch. */
+        return outcome with { StoreMs = store.ElapsedMs };
     }
 
     /// <summary>
@@ -122,6 +134,7 @@ public sealed class RdsPlanIngestor
         bool pgLogUsesCsvlog,
         string? loginConnectionString,
         AwsRoleKey? role,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -206,7 +219,7 @@ public sealed class RdsPlanIngestor
 
         var (written, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, pgLogUsesCsvlog, carry, chunk.Value.MoreAvailable,
-            heldPlan, moreCanArrive, cancellationToken);
+            heldPlan, moreCanArrive, store, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE — the same order, and for the same reason, as
            RdsDeadlockIngestor (#3008). Reaching this line means everything the chunk held is either in the
@@ -242,7 +255,7 @@ public sealed class RdsPlanIngestor
            read hours of portions again. The held plan lives in memory only, so a restart loses at most that one plan. */
         if (_resume is not null)
         {
-            await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
+            await store.TimeAsync(() => _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken));
         }
 
         return (RdsIngestOutcome.Read(written, csvRecordsDiscarded: csvRecordsDiscarded, forgedCaptures: forgedCaptures,
@@ -264,6 +277,7 @@ public sealed class RdsPlanIngestor
         bool additionalDataPending,
         string heldPlan,
         bool moreCanArrive,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         var csvRecordsDiscarded = 0;
@@ -292,7 +306,7 @@ public sealed class RdsPlanIngestor
                 return (0, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
             }
 
-            var written = await WriteAsync(serverId, storageName, rows, cancellationToken);
+            var written = await store.TimeAsync(() => WriteAsync(serverId, storageName, rows, cancellationToken));
             return (written, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
         }
 
@@ -336,7 +350,7 @@ public sealed class RdsPlanIngestor
                 PlanJson: plan.PlanJson));
         }
 
-        var stderrWritten = await WriteAsync(serverId, storageName, rows, cancellationToken);
+        var stderrWritten = await store.TimeAsync(() => WriteAsync(serverId, storageName, rows, cancellationToken));
         return (stderrWritten, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
     }
 

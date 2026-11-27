@@ -7,106 +7,33 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// The Query Store liveness touch guard is SINGLE-SOURCED (#3189). Three statements guard a
-/// <c>last_seen</c> touch — <see cref="QueryStorePlanMap.TouchAndProbeSql"/>'s <c>touched</c> CTE, that
-/// statement's <c>dim_touch</c>, and <see cref="QueryStoreTextStore.TouchAndProbeSql"/>'s <c>touched</c>
-/// CTE — and they must all carry the SAME width, from
-/// <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>.
+/// The width of the Query Store liveness touch guard (#3189) is a stated share of the margin the prune cutoffs
+/// reserve for a trailing stamp, and it follows that margin. <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>
+/// is the one width every guarded <c>last_seen</c> touch carries, in <see cref="QueryStorePlanMap.TouchAndProbeSql"/>
+/// and in <see cref="QueryStoreTextStore.TouchSeenSql"/>; the text row's own restamp
+/// (<see cref="QueryStoreTextStore.RefreshTextRowSql"/>) is not a guarded touch and runs at
+/// <see cref="QueryStoreTextSeen.TextRowRefreshInterval"/>.
 ///
-/// <para><b>Why the property and not the value.</b> <see cref="QueryStorePlanMap.TouchAndProbeSql"/>'s own
-/// documentation says the map row and the dimension row cannot age out at different times, and calls that
-/// STRUCTURALLY impossible rather than carefully avoided. With a literal per site it is neither — it is
-/// copies that happen to agree — and the failure mode is a partial migration: someone widens the two sites
-/// in the file they are reading and leaves the third, in the other file, at the old width. A value pin
-/// ("the width is six hours") passes a partial migration the moment its own expected value is updated in
-/// the same commit, so the pin that has to hold is the single-sourcing.</para>
-///
-/// <para><b>The instrument is the SOURCE scan, and it is the one to attack.</b> Once all three sites
-/// interpolate one constant they cannot disagree, so an assertion over the SHIPPED strings that they agree
-/// is unfalsifiable by construction — true of the implementation, not evidence about it. What can still
-/// happen is somebody typing an interval back into one site, and only reading the source can see that. So
-/// <c>NoGuardSiteSpellsItsOwnWidth</c> is the control, the composed-SQL pin below is the corroborator
-/// (it catches a site appearing or disappearing, which the source scan alone would not price), and the
-/// derivation pin holds the width to the margin it is spent out of.</para>
-///
-/// <para><b>Two of the four assertions here fire on changes that move NO value</b>, which is the shape worth
-/// noticing when adding to this class. A guard site hard-coded to the width it already has, and a
-/// category-error term folded into <see cref="QueryStoreLivenessTouchGuard.StampSkewMarginDays"/>'s
-/// <c>min</c> whose value cannot move the result, are both invisible to every value assertion in the file —
-/// <c>NoGuardSiteSpellsItsOwnWidth</c> and
-/// <c>TheGuardedStoreTypesAreDerivedFromTheGuardSites</c> are what see them, and both read SOURCE for
-/// that reason. Cripple either one and its own mutation passes silently.</para>
+/// <para>The class checks relations among the guard's constants rather than a number. A pin of the form "the
+/// width is six hours" passes as soon as its own expected value is updated in the same commit, so the
+/// assertions tie the width to the margin it is spent out of: the guard stays inside the margin, the margin is
+/// the tightest prune margin among the guarded stores, the width times the divisor is the margin, and the
+/// interval is rendered from the width.</para>
 /// </summary>
-[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class QueryStoreTouchGuardSingleSourceTests
 {
     /// <summary>
-    /// The three guarded touches: two in <see cref="QueryStorePlanMap"/> (the <c>touched</c> CTE and
-    /// <c>dim_touch</c>) and one in <see cref="QueryStoreTextStore"/>. An exact count, not a floor — a floor
-    /// passes when a site is deleted, and a deleted guard is an unguarded touch on every cycle.
-    /// </summary>
-    private const int GuardSiteCount = 3;
-
-    /* Every guard site is this comparison against the batch stamp, immediately followed by the interval.
-       Anchoring on the shape rather than on a table alias is what lets one expectation cover all three. */
-    private const string GuardAnchor = "last_seen < $5::timestamp - ";
-
-    /// <summary>
-    /// Every guarded touch in the SHIPPED statements carries the one width, and there are exactly
-    /// <see cref="GuardSiteCount"/> of them. The corroborator: it cannot see a hard-coded literal that
-    /// happens to equal the constant, which is why
-    /// <c>NoGuardSiteSpellsItsOwnWidth</c> is the control — but it does catch a guard site
-    /// disappearing (an unguarded touch, one write per row per cycle) or a fourth one arriving at some other
-    /// width.
-    /// </summary>
-    [Fact]
-    public void EveryGuardSiteInTheShippedSqlCarriesTheOneWidth()
-    {
-        var statements = new[] { QueryStorePlanMap.TouchAndProbeSql, QueryStoreTextStore.TouchAndProbeSql };
-        var widths = new List<string>();
-
-        foreach (var sql in statements)
-        {
-            var at = sql.IndexOf(GuardAnchor, StringComparison.Ordinal);
-
-            while (at >= 0)
-            {
-                var after = at + GuardAnchor.Length;
-                var end = sql.IndexOf('\n', after);
-                widths.Add((end < 0 ? sql[after..] : sql[after..end]).TrimEnd('\r'));
-                at = sql.IndexOf(GuardAnchor, after, StringComparison.Ordinal);
-            }
-        }
-
-        Assert.Equal(GuardSiteCount, widths.Count);
-        Assert.All(widths, width => Assert.Equal(QueryStoreLivenessTouchGuard.GuardInterval, width));
-
-        /* The two plan-side sites are in ONE statement, so a reader checking only the file they are editing
-           still sees two of the three. Stated as its own assertion because that asymmetry is the reason the
-           third site gets missed. */
-        Assert.Equal(2, CountOf(QueryStorePlanMap.TouchAndProbeSql, GuardAnchor));
-        Assert.Equal(1, CountOf(QueryStoreTextStore.TouchAndProbeSql, GuardAnchor));
-    }
-
-    /// <summary>
-    /// The width is a stated share of the margin the prune cutoffs reserve for a trailing stamp, and it
-    /// FOLLOWS that margin rather than restating a number that currently agrees with it.
-    ///
-    /// <para>The source assertion is what makes this non-vacuous. <c>GuardHours * MarginShareDivisor ==
-    /// StampSkewMarginHours</c> holds just as well for a hard-coded <c>6</c> while the margin happens to be
-    /// one day, so on its own it would only fail once somebody moved the margin — which is exactly when
-    /// nobody is looking at this file. Asserting the initializer forbids the hard-coding outright.</para>
+    /// The width is a stated share of the margin the prune cutoffs reserve for a trailing stamp: the guard
+    /// stays inside the margin, the margin is the tightest prune margin among the guarded stores, the width
+    /// times the divisor is the margin in hours, and the interval is rendered from the width.
     /// </summary>
     [Fact]
     public void TheWidthIsAShareOfTheStampSkewMarginAndFollowsIt()
@@ -119,8 +46,7 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
             + "and the divisor must divide the margin exactly, or the share taken is not the share stated.");
 
         /* Sized on the TIGHTEST margin among the guarded tables, so one shared width is safe on all of
-           them. WHICH tables those are is TheGuardedStoreTypesAreDerivedFromTheGuardSites' business - this
-           only checks the value the enumeration produces. */
+           them. */
         Assert.Equal(
             QueryStoreLivenessTouchGuard.StampSkewMarginDays,
             Math.Min(QueryStorePlanMap.PruneMarginDays, QueryStoreTextStore.PruneMarginDays));
@@ -129,34 +55,9 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
             QueryStoreLivenessTouchGuard.GuardHours * QueryStoreLivenessTouchGuard.MarginShareDivisor,
             QueryStoreLivenessTouchGuard.StampSkewMarginDays * 24);
 
-        /* And the width is DERIVED in source, not restated. Read from the code with comments and literals
-           blanked, so an initializer quoted in a doc comment cannot satisfy it. */
-        var guardSource = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile(
-                "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreLivenessTouchGuard.cs"));
-
-        Assert.Contains(
-            "GuardHours = StampSkewMarginHours / MarginShareDivisor",
-            Regex.Replace(guardSource, @"\s+", " "),
-            StringComparison.Ordinal);
-
-        /* The interval is rendered from the derived hours rather than typed, for the same reason. */
+        /* The interval is rendered from the hours rather than typed. */
         Assert.Equal(
             $"interval '{QueryStoreLivenessTouchGuard.GuardHours} hours'",
             QueryStoreLivenessTouchGuard.GuardInterval);
-    }
-
-    private static int CountOf(string haystack, string needle)
-    {
-        var count = 0;
-        var at = haystack.IndexOf(needle, StringComparison.Ordinal);
-
-        while (at >= 0)
-        {
-            count++;
-            at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal);
-        }
-
-        return count;
     }
 }

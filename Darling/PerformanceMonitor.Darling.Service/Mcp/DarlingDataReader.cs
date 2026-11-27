@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// #1767 payload dimensions — the base table's inline columns are NULL on every row written since.
 /// </para>
 /// </summary>
-internal static class DarlingDataReader
+internal static partial class DarlingDataReader
 {
     /* ─────────────────────────── result records ─────────────────────────── */
 
@@ -300,7 +300,8 @@ internal static class DarlingDataReader
         decimal MonthlyCostUsd = 0m,
         DateTime? ConnectDownSince = null,
         string? LastConnectError = null,
-        bool Attempted = false);
+        bool Attempted = false,
+        bool IsEnabled = true);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -347,7 +348,7 @@ internal static class DarlingDataReader
             other_process_cpu_utilization
         FROM cpu_utilization_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY sample_time
         """;
@@ -446,7 +447,7 @@ internal static class DarlingDataReader
             AVG(sqlserver_cpu_utilization)::double precision
         FROM cpu_utilization_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         """;
 
@@ -506,7 +507,7 @@ internal static class DarlingDataReader
                 SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY wait_type
         ) AS per_spelling
@@ -553,7 +554,7 @@ internal static class DarlingDataReader
                 SUM(delta_wait_time_ms) AS total_delta
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY wait_type
         ) AS per_spelling
@@ -624,6 +625,7 @@ internal static class DarlingDataReader
             CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
         FROM raw
+        WHERE collection_time > $3
         ORDER BY collection_time
         """;
 
@@ -648,6 +650,8 @@ internal static class DarlingDataReader
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type IN ($2, $2 || ' ')
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $3 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($3, $4]. */
             AND   collection_time >= $3
             AND   collection_time <= $4
         )
@@ -673,6 +677,7 @@ internal static class DarlingDataReader
                 CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
                 CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
             FROM raw
+            WHERE collection_time > $3
         )
         SELECT
             GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
@@ -931,10 +936,17 @@ internal static class DarlingDataReader
             CAST(unallocated_mb AS double precision),
             total_sessions_using_tempdb,
             top_session_id,
-            CAST(top_session_tempdb_mb AS double precision)
+            CAST(top_session_tempdb_mb AS double precision),
+            CAST(log_total_mb AS double precision) AS log_total_mb,
+            CAST(log_used_percent AS double precision) AS log_used_percent,
+            log_reuse_wait_desc,
+            log_truncation_holdup_reason,
+            holder_session_id,
+            holder_login_name,
+            CAST(log_used_mb AS double precision) AS log_used_mb
         FROM v_tempdb_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -985,7 +997,9 @@ internal static class DarlingDataReader
             MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
             MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
             (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
-            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb,
+            MAX(log_used_percent) AS peak_log_used_percent,
+            MAX(log_used_mb) AS peak_log_used_mb
         FROM (
         {TempDbTrendSql}
         ) AS samples
@@ -1018,10 +1032,63 @@ internal static class DarlingDataReader
                 Convert.ToDouble(reader.GetValue(7)),
                 Convert.ToInt64(reader.GetValue(8)),
                 Convert.ToInt32(reader.GetValue(9)),
-                Convert.ToDouble(reader.GetValue(10))));
+                Convert.ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12))));
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The newest tempdb collection in the window, as far as the log's holder goes (#8881): the row the chart's last point comes from, so the
+    /// web page can say who holds the oldest open tempdb transaction. The holder columns are NULL below 50 percent of the log used. $1 server_id,
+    /// $2/$3 the window (naive UTC).
+    /// </summary>
+    public const string TempDbLogHolderSql = """
+        SELECT
+            collection_time,
+            holder_session_id,
+            holder_login_name,
+            holder_program_name,
+            holder_begin_time,
+            holder_log_bytes_used,
+            log_truncation_holdup_reason,
+            log_total_mb,
+            log_reuse_wait_desc
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        AND   collection_time > $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbLogHolderSql"/>; null when the window has no collection.</summary>
+    public static async Task<TempDbLogHolder?> GetNewestTempDbLogHolderAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TempDbLogHolderSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new TempDbLogHolder(
+            DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     /* ─────────────────────────── perfmon ─────────────────────────── */
@@ -1109,7 +1176,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
            {DatabaseFilter.ExcludeClause("database_name", 8)}
@@ -1213,10 +1280,9 @@ internal static class DarlingDataReader
                    when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
                    the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view gives
                    a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays partial and
-                   parallel where the planner wants it; an ordered array aggregate loses both. */
-                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
-                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
-                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
+                   parallel where the planner wants it; an ordered array aggregate loses both. ByteaMaxSql writes the MAX in the
+                   form PostgreSQL 16 and 17 run too, which have no max(bytea) (#9802). */
+                {ByteaMaxSql.LatestTextKey("q.")} AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
             FROM (
@@ -1229,14 +1295,14 @@ internal static class DarlingDataReader
                    the exact NULL-safe match, so the groups and every figure are unchanged. */
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IN (SELECT win_query_hash FROM winners)
                 UNION ALL
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IS NULL
@@ -1310,7 +1376,7 @@ internal static class DarlingDataReader
                     AND q.query_hash IS NOT DISTINCT FROM o.query_hash
                     AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                 WHERE q.server_id = $1
-                AND   q.collection_time >= $2
+                AND   q.collection_time > $2
                 AND   q.collection_time <= $3
                 AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
@@ -1435,7 +1501,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
            {DatabaseFilter.ExcludeClause("database_name", 8)}
@@ -1521,9 +1587,7 @@ internal static class DarlingDataReader
                    text of ANY of its fragments and an ad-hoc group's the newest of its own hash. The pick sits inside
                    this pass's tag filter (#5984), so under a tag it is the newest text of the group's TAGGED fragments,
                    the rows the row's measures come from; fallback_text below carries the same token. */
-                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
-                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
-                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
+                {ByteaMaxSql.LatestTextKey("q.")} AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
             FROM query_stats AS q
@@ -1534,7 +1598,7 @@ internal static class DarlingDataReader
                 AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
                 AND CASE WHEN host_object_name IS NULL THEN query_hash END IS NOT DISTINCT FROM w.win_group_hash
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /*TAG:hash:query_hash*/
@@ -1598,7 +1662,7 @@ internal static class DarlingDataReader
                     AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                     AND CASE WHEN q.host_object_name IS NULL THEN q.query_hash END IS NOT DISTINCT FROM o.group_hash
                 WHERE q.server_id = $1
-                AND   q.collection_time >= $2
+                AND   q.collection_time > $2
                 AND   q.collection_time <= $3
                 /*TAG:hash:q.query_hash*/
                 AND   EXISTS (SELECT 1 FROM orphans)
@@ -1958,7 +2022,13 @@ internal static class DarlingDataReader
         /* #5329: true only when the reads ranking itself sent the read to raw, because the io rollup was absent, empty or
            reached no further back than raw. A raw read forced by parallel_only / min_dop / host_object grouping leaves it
            false: those filters are the reason, and the io rollup was never consulted. */
-        bool ReadsForcedRaw = false);
+        bool ReadsForcedRaw = false)
+    {
+        /// <summary>#9164: true when the raw-tier page was served by the hourly host rollup plus the raw edges, false when the raw statement
+        /// served it (no whole hours, a hole in the rollup, or a store below V287). Internal: a test reads it, and neither the MCP tool nor
+        /// the web mirror carries it in a reply.</summary>
+        internal bool ServedByHostHourly { get; init; }
+    }
 
     /// <summary>
     /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
@@ -1986,7 +2056,7 @@ internal static class DarlingDataReader
     public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default,
-        QueryTagFilter? tags = null)
+        QueryTagFilter? tags = null, DateTime? nowUtc = null)
     {
     #pragma warning restore CA1068
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
@@ -2053,13 +2123,71 @@ internal static class DarlingDataReader
         /* #5984: the query tag filter sits in the ranking pass (and, rolled up, in the wide pass), ahead of the cap. */
         var rawSql = QueryTagReadJoin.Apply(
             TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false), serverId, tags);
+        /* #9164: a window with whole hours the hourly host rollup holds ranks them from the rollup and reads raw only for the edges.
+           The answer is the raw answer, row for row; a hole in the rollup (or a store below V287) reads the raw statement below. */
+        var hostMid = PlanTopQueriesHostHourlyMid(startUtc, endUtc, nowUtc ?? DateTime.UtcNow);
+        if (hostMid is not null)
+        {
+            var hostHourlySql = QueryTagReadJoin.Apply(
+                TopRankings.ApplyHostHourly(rollUpByHostObject ? TopQueriesByHostObjectHostHourlySql : TopQueriesHostHourlySql, ranking), serverId, tags);
+            var routedRows = await TryReadTopQueriesHostHourlyAsync(
+                postgres, hostMid, hostHourlySql, serverId, startUtc, endUtc, top, databases, minMaxDop, clock, cancellationToken);
+            if (routedRows is not null)
+            {
+                return new TopQueriesReadResult(routedRows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw) { ServedByHostHourly = true };
+            }
+        }
+
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($7)
            while more candidates exist, under its bound. */
         var rows = await TopFill.RunAsync(top, async candidates =>
         {
-        var page = new List<TopQueryRow>();
-        var candidateCount = 0;
         await using var command = postgres.CreateCommand(rawSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        BindTopQueriesParameters(command, serverId, startUtc, endUtc, top, databases, minMaxDop, candidates);
+        return await ReadTopQueryPageAsync(command, clock, cancellationToken);
+        });
+
+        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw);
+    }
+
+    /// <summary>
+    /// #5329: <see cref="TopRankings.ChooseHourlyRoute"/> over what the store measured. The io floor counts only when
+    /// <paramref name="rollups"/> says the relation exists (an absent relation has no floor, and is never named in
+    /// SQL); an empty one answers a null floor, which never covers.
+    /// </summary>
+    public static HourlyRoute ChooseQueriesHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
+    {
+        var ioFloor = rollups.Has(TimescaleSupport.QueryStatsIoHourlyView)
+            ? coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView)
+            : null;
+        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.QueryStatsHourlyView) is string rawTable
+            ? coverage.RawOldestOf(rawTable)
+            : null;
+        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
+    }
+
+    /// <summary>
+    /// #5329: <see cref="ChooseQueriesHourlyRoute"/>'s procedure_stats twin. The same route table
+    /// (<see cref="TopRankings.ChooseHourlyRoute"/>) over <c>procedure_stats_io_hourly</c>'s floor and
+    /// <c>procedure_stats</c>'s oldest row.
+    /// </summary>
+    public static HourlyRoute ChooseProceduresHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
+    {
+        var ioFloor = rollups.Has(TimescaleSupport.ProcedureStatsIoHourlyView)
+            ? coverage.FloorOf(TimescaleSupport.ProcedureStatsIoHourlyView)
+            : null;
+        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.ProcedureStatsHourlyView) is string rawTable
+            ? coverage.RawOldestOf(rawTable)
+            : null;
+        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
+    }
+
+    /// <summary>Binds the eight parameters the raw top-queries statements share: $1 to $3 the window, $4 the page size, $5 the databases,
+    /// $6 the parallelism floor, $7 the candidate limit and $8 the databases left out (#7725).</summary>
+    private static void BindTopQueriesParameters(
+        NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases, int minMaxDop, int candidates)
+    {
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
@@ -2068,6 +2196,13 @@ internal static class DarlingDataReader
         AddInt(command, candidates);
         /* #7725: $8, the databases this ranking leaves out (NULL = none), in the ranking pass of both raw statements. */
         command.Parameters.Add(databases.ExcludeParameter());
+    }
+
+    /// <summary>Runs a top-queries statement (raw or host-hourly: the same columns) and reads its page and its candidate count.</summary>
+    private static async Task<(List<TopQueryRow> Page, int CandidateCount)> ReadTopQueryPageAsync(NpgsqlCommand command, ServerClock clock, CancellationToken cancellationToken)
+    {
+        var page = new List<TopQueryRow>();
+        var candidateCount = 0;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2106,41 +2241,6 @@ internal static class DarlingDataReader
         }
 
         return (page, candidateCount);
-        });
-
-        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw);
-    }
-
-    /// <summary>
-    /// #5329: <see cref="TopRankings.ChooseHourlyRoute"/> over what the store measured. The io floor counts only when
-    /// <paramref name="rollups"/> says the relation exists (an absent relation has no floor, and is never named in
-    /// SQL); an empty one answers a null floor, which never covers.
-    /// </summary>
-    public static HourlyRoute ChooseQueriesHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
-    {
-        var ioFloor = rollups.Has(TimescaleSupport.QueryStatsIoHourlyView)
-            ? coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView)
-            : null;
-        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.QueryStatsHourlyView) is string rawTable
-            ? coverage.RawOldestOf(rawTable)
-            : null;
-        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
-    }
-
-    /// <summary>
-    /// #5329: <see cref="ChooseQueriesHourlyRoute"/>'s procedure_stats twin. The same route table
-    /// (<see cref="TopRankings.ChooseHourlyRoute"/>) over <c>procedure_stats_io_hourly</c>'s floor and
-    /// <c>procedure_stats</c>'s oldest row.
-    /// </summary>
-    public static HourlyRoute ChooseProceduresHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
-    {
-        var ioFloor = rollups.Has(TimescaleSupport.ProcedureStatsIoHourlyView)
-            ? coverage.FloorOf(TimescaleSupport.ProcedureStatsIoHourlyView)
-            : null;
-        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.ProcedureStatsHourlyView) is string rawTable
-            ? coverage.RawOldestOf(rawTable)
-            : null;
-        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
     }
 
     /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21
@@ -2264,7 +2364,10 @@ internal static class DarlingDataReader
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database list (NULL = all), $6 databases to leave out (NULL = none;
     /// #5633 review: the ones the server dropped, see CurrentDatabaseScope.NarrowAsync).
     /// </summary>
-    public const string TopProceduresSql = $"""
+    public const string TopProceduresSql = TopProceduresRawWinnersSql + "\n" + TopProceduresWideSql;
+
+    /// <summary>Pass 1 of <see cref="TopProceduresSql"/>: the winners ranked over raw <c>procedure_stats</c>.</summary>
+    private const string TopProceduresRawWinnersSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -2284,7 +2387,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM procedure_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
@@ -2296,6 +2399,97 @@ internal static class DarlingDataReader
             ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_schema_name, win_object_name, win_object_type
             LIMIT $4
         )
+        """;
+
+    /// <summary>
+    /// #9147: pass 1 of <see cref="TopProceduresSql"/> with the window's settled whole hours read from the interval-honest hourly
+    /// rollup and only the two edges from raw. <c>$HOURLY$</c> is the FROM item <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// returned (the successor alone, see <see cref="PlanProceduresHourlyMid"/>). $7/$8 are the mid's whole hours <c>[$7, $8)</c>:
+    /// raw keeps <c>($2, $7)</c> and <c>[$8, $3]</c>, so the three parts split the raw window <c>($2, $3]</c> with no overlap.
+    /// The rollup sums the same deltas under the same interval filter, so each part's sums add up to the raw sums.
+    /// The rollup has no <c>object_type</c>, so this ranks (database, schema, object). Pass 2 then groups the winners' raw rows by
+    /// the full key: when a winner holds two object types the caller reads the raw statement instead
+    /// (<see cref="GetTopProceduresByCpuRoutedAsync(NpgsqlDataSource,int,DateTime,DateTime,int,DatabaseFilter,TopRanking,CancellationToken,QueryTagFilter)"/>).
+    /// </summary>
+    internal const string TopProceduresMidWinnersSql = $"""
+        WITH parts AS (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                worker_time_sum,
+                elapsed_time_sum,
+                execution_count_sum
+            FROM $HOURLY$
+            WHERE server_id = $1
+            AND   f.bucket >= $7
+            AND   f.bucket < $8
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                delta_worker_time,
+                delta_elapsed_time,
+                delta_execution_count
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   ((collection_time > $2 AND collection_time < $7) OR (collection_time >= $8 AND collection_time <= $3))
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+        ),
+        winners AS MATERIALIZED (
+            SELECT
+                database_name AS win_database_name,
+                schema_name AS win_schema_name,
+                object_name AS win_object_name,
+                $RANK$ AS rank_metric,
+                SUM(worker_time_sum) AS rank_cpu
+            FROM parts
+            GROUP BY database_name, schema_name, object_name
+            HAVING SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_schema_name, win_object_name
+            LIMIT $4
+        )
+        """;
+
+    /// <summary>#9280: the wide row's aggregate columns after the four group keys, shared by the one-statement wide pass and the per-winner seek.</summary>
+    private const string TopProceduresWideAggregates = """
+        MAX(sql_handle) AS sql_handle,
+        MAX(plan_handle) AS plan_handle,
+        CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+        CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+        CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+        CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+        CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+        CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+        CAST(SUM(delta_spills) AS bigint) AS total_spills,
+        MIN(min_worker_time) AS min_worker_time,
+        MAX(max_worker_time) AS max_worker_time,
+        MIN(min_elapsed_time) AS min_elapsed_time,
+        MAX(max_elapsed_time) AS max_elapsed_time,
+        MAX(last_execution_time) AS last_execution_time,
+        MAX(cached_time) AS cached_time,
+        MIN(min_logical_reads) AS min_logical_reads,
+        MAX(max_logical_reads) AS max_logical_reads,
+        MIN(min_physical_reads) AS min_physical_reads,
+        MAX(max_physical_reads) AS max_physical_reads,
+        MIN(min_logical_writes) AS min_logical_writes,
+        MAX(max_logical_writes) AS max_logical_writes,
+        MIN(min_spills) AS min_spills,
+        MAX(max_spills) AS max_spills
+        """;
+
+    /// <summary>Pass 2 of <see cref="TopProceduresSql"/> and of <see cref="TopProceduresMidWinnersSql"/>: the wide row for the
+    /// winners, from raw. On the mid route <c>win_object_type</c> does not exist, so the caller drops that one match line
+    /// (<see cref="MidObjectTypeMatch"/>).</summary>
+    private const string MidObjectTypeMatch = "AND object_type IS NOT DISTINCT FROM w.win_object_type";
+    private const string TopProceduresWideSql = $"""
         /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
            full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). The
            COALESCE equality is only the hashable pre-filter (see TopQueriesSql); IS NOT DISTINCT FROM makes the
@@ -2305,15 +2499,52 @@ internal static class DarlingDataReader
             schema_name,
             object_name,
             object_type,
+            {TopProceduresWideAggregates}
+        FROM procedure_stats
+        JOIN winners AS w
+            ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+            AND database_name IS NOT DISTINCT FROM w.win_database_name
+            AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+            AND object_name IS NOT DISTINCT FROM w.win_object_name
+            AND object_type IS NOT DISTINCT FROM w.win_object_type
+        WHERE server_id = $1
+        AND   collection_time > $2
+        AND   collection_time <= $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+        AND   {TimescaleSupport.IntervalHonestSourceFilter}
+        GROUP BY database_name, schema_name, object_name, object_type
+        ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        """;
+
+    /// <summary>The seek arm's name match: the expression <see cref="ProcedureStatsNameIndex"/> keys, so each winner's rows are an index range.</summary>
+    internal const string MidSeekNameMatch = "AND " + DurationTrendRouting.ProcedureFullNameSql + " = COALESCE(NULLIF(w.win_schema_name, '') || '.', '') || w.win_object_name";
+
+    /// <summary>
+    /// #9280: <see cref="TopProceduresWideSql"/> for the mid route on a store that has <see cref="ProcedureStatsNameIndex"/>. The
+    /// one-statement wide pass joins the winners to every raw row of the server in the window and keeps the winners' rows, so on the
+    /// uncompressed chunks (a bitmap scan of the heap, which holds every server's rows) its cost follows the server's row count. $9 splits
+    /// the window: rows before it (the compressed chunks, which hold no B-tree) keep today's join; rows from it on (the uncompressed
+    /// chunks, <see cref="SeekBoundary"/>) are read per winner through the index (a LATERAL, so each winner is an index range), and
+    /// a winner with a NULL database or object keeps the NULL-safe join there. The three arms are partial sums of disjoint rows, so the
+    /// outer group adds them up to the one-statement pass's own row: same sums, same extremes, same order.
+    /// </summary>
+    internal const string TopProceduresMidSeekWideSql = $"""
+        /* #9280: the winners' wide rows, the uncompressed part by index seek (see TopProceduresWideSql for the columns). */
+        SELECT
+            database_name,
+            schema_name,
+            object_name,
+            object_type,
             MAX(sql_handle) AS sql_handle,
             MAX(plan_handle) AS plan_handle,
-            CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-            CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-            CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-            CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-            CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-            CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-            CAST(SUM(delta_spills) AS bigint) AS total_spills,
+            CAST(SUM(total_executions) AS bigint) AS total_executions,
+            CAST(SUM(total_cpu_us) AS bigint) AS total_cpu_us,
+            CAST(SUM(total_elapsed_us) AS bigint) AS total_elapsed_us,
+            CAST(SUM(total_reads) AS bigint) AS total_reads,
+            CAST(SUM(total_writes) AS bigint) AS total_writes,
+            CAST(SUM(total_physical_reads) AS bigint) AS total_physical_reads,
+            CAST(SUM(total_spills) AS bigint) AS total_spills,
             MIN(min_worker_time) AS min_worker_time,
             MAX(max_worker_time) AS max_worker_time,
             MIN(min_elapsed_time) AS min_elapsed_time,
@@ -2328,22 +2559,90 @@ internal static class DarlingDataReader
             MAX(max_logical_writes) AS max_logical_writes,
             MIN(min_spills) AS min_spills,
             MAX(max_spills) AS max_spills
-        FROM procedure_stats
-        JOIN winners AS w
-            ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
-            AND database_name IS NOT DISTINCT FROM w.win_database_name
-            AND schema_name IS NOT DISTINCT FROM w.win_schema_name
-            AND object_name IS NOT DISTINCT FROM w.win_object_name
-            AND object_type IS NOT DISTINCT FROM w.win_object_type
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
-        AND   {TimescaleSupport.IntervalHonestSourceFilter}
+        FROM (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN winners AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time < $9
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+            UNION ALL
+            SELECT s.*, w.rank_metric AS seek_rank_metric, w.rank_cpu AS seek_rank_cpu
+            FROM winners AS w
+            CROSS JOIN LATERAL (
+                SELECT
+                    database_name,
+                    schema_name,
+                    object_name,
+                    object_type,
+                    {TopProceduresWideAggregates}
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   database_name = w.win_database_name
+                {MidSeekNameMatch}
+                AND   schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND   object_name = w.win_object_name
+                AND   collection_time > $2
+                AND   collection_time <= $3
+                AND   collection_time >= $9
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+                AND   {TimescaleSupport.IntervalHonestSourceFilter}
+                GROUP BY database_name, schema_name, object_name, object_type
+            ) AS s
+            WHERE w.win_database_name IS NOT NULL
+            AND   w.win_object_name IS NOT NULL
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN (SELECT * FROM winners WHERE win_database_name IS NULL OR win_object_name IS NULL) AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time >= $9
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+        ) AS u
         GROUP BY database_name, schema_name, object_name, object_type
-        ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        ORDER BY MAX(seek_rank_metric) DESC NULLS LAST, MAX(seek_rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
+
+    /// <summary>
+    /// #9280: the time from which the rows of <c>procedure_stats</c> are surely in uncompressed chunks: the compression policy's own
+    /// delay (<see cref="TimescaleSupport.CompressAfterFor"/>) before <paramref name="nowUtc"/>. A chunk is compressed only once its whole
+    /// range is older than that, so every row at or after the boundary has a B-tree to seek; a row before it may be in either kind.
+    /// </summary>
+    internal static DateTime SeekBoundary(DateTime nowUtc) =>
+        DateTime.SpecifyKind(nowUtc.AddDays(-TimescaleSupport.CompressAfterDays).AddHours(-TimescaleSupport.HeavyOffsetHoursFor("procedure_stats")), DateTimeKind.Unspecified);
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
     /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
@@ -2416,7 +2715,13 @@ internal static class DarlingDataReader
     /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(
         List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null, bool RawForced = false,
-        string? RetentionNotice = null, bool IoRoute = false);
+        string? RetentionNotice = null, bool IoRoute = false)
+    {
+        /// <summary>#9147: true when the raw-tier page was served by the hourly mid statement, false when the raw statement served it
+        /// (no mid planned, a hole in the mid, or a winner with two object types). Internal: a test reads it, and neither the MCP tool
+        /// nor the web mirror carries it in a reply.</summary>
+        internal bool ServedByHourlyMid { get; init; }
+    }
 
     public static Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
@@ -2496,16 +2801,127 @@ internal static class DarlingDataReader
             return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling, IoRoute: ioRoute);
         }
 
-        var rows = new List<TopProcedureRow>();
         /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(QueryTagReadJoin.Apply(TopRankings.Apply(TopProceduresSql, ranking, hourly: false), serverId, tags));
+
+        /* #9147: a raw window whose whole hours the interval-honest hourly rollup has settled ranks those hours from the rollup
+           and reads raw only for the edges, then builds the winners' rows from raw as before. The totals are the raw totals:
+           the rollup sums the same deltas under the same interval filter. A winner that holds two object types (the rollup ranks
+           without object_type) reads the raw statement instead, so the page is the raw page. */
+        var mid = tier == RetentionTier.Raw ? PlanProceduresHourlyMid(rollups, coverage, ranking, startUtc, endUtc) : null;
+        if (mid is not null && await ProceduresMidHasNoHoleAsync(postgres, mid, cancellationToken))
+        {
+            var (chosenSql, seekFrom) = await ChooseProceduresMidSqlAsync(postgres, ranking, mid, DateTime.UtcNow, cancellationToken);
+            var midSql = QueryTagReadJoin.Apply(chosenSql, serverId, tags);
+            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken, seekFrom);
+            if (midRows.Select(r => (r.DatabaseName, r.SchemaName, r.ObjectName)).Distinct().Count() == midRows.Count)
+            {
+                return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice) { ServedByHourlyMid = true };
+            }
+        }
+
+        var rows = await ReadTopProcedureRowsAsync(
+            postgres, QueryTagReadJoin.Apply(TopRankings.Apply(TopProceduresSql, ranking, hourly: false), serverId, tags),
+            serverId, startUtc, endUtc, top, databases, mid: null, clock, cancellationToken);
+        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+    }
+
+    /// <summary>The FROM-item placeholder of <see cref="TopProceduresMidWinnersSql"/>.</summary>
+    internal const string HourlyMidRelationPlaceholder = "$HOURLY$";
+
+    /// <summary>#9147: the mid route's statement: <see cref="TopProceduresMidWinnersSql"/> over the mid's relation, then the raw
+    /// wide pass matched on (database, schema, object), the key the rollup ranks. The query tag token is still in it.</summary>
+    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid, bool seek = false) =>
+        TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
+        + "\n" + (seek ? TopProceduresMidSeekWideSql : TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal));
+
+    /// <summary>#9280: the mid route's statement for this store, and the boundary it binds at $9 (null for today's statement, which has no $9): the per-winner
+    /// seek when <see cref="ProcedureStatsNameIndex"/> is present and valid, today's one-statement wide pass when it is not (a store whose
+    /// start has not built it yet, or a probe that failed).</summary>
+    internal static async Task<(string Sql, DateTime? SeekFrom)> ChooseProceduresMidSqlAsync(
+        NpgsqlDataSource postgres, TopRanking ranking, HourlyMid mid, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var seek = await ProcedureStatsNameIndex.IsPresentAsync(postgres, cancellationToken);
+        return (BuildProceduresMidSql(ranking, mid, seek), seek ? SeekBoundary(nowUtc) : null);
+    }
+
+    /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
+    internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
+
+    /// <summary>#9147: the fewest whole hours worth reading from the rollup. A shorter mid saves little.</summary>
+    internal static readonly TimeSpan MinHourlyMid = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// #9147: the rollup mid of a raw top-procedures window, or null to read raw alone. The mid is the whole hours that start after
+    /// <paramref name="startUtc"/> (a bucket stamped at the window's start would hold a row the raw bound excludes) and end at or
+    /// before both <paramref name="endUtc"/> and the rollup's materialization ceiling. Only the interval-honest successor serves it:
+    /// the legacy rollup keeps the first-collection rows raw leaves out, so a stitch that names it, or a successor floor after the
+    /// mid's start, reads raw. Reads has no column in that rollup, so a reads ranking reads raw as before.
+    /// </summary>
+    internal static HourlyMid? PlanProceduresHourlyMid(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc, DateTime endUtc)
+    {
+        const string view = TimescaleSupport.ProcedureStatsIntervalHourlyView;
+        if (ranking == TopRanking.Reads || !rollups.ProcedureGrainIntervalHourly
+            || coverage.FloorOf(view) is not DateTime floor || coverage.CeilingOf(view) is not DateTime ceiling)
+        {
+            return null;
+        }
+
+        var midStart = new DateTime(startUtc.Year, startUtc.Month, startUtc.Day, startUtc.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
+        var limit = endUtc < ceiling ? endUtc : ceiling;
+        var midEnd = new DateTime(limit.Year, limit.Month, limit.Day, limit.Hour, 0, 0, DateTimeKind.Unspecified);
+        if (floor > midStart || midEnd - midStart < MinHourlyMid)
+        {
+            return null;
+        }
+
+        var relation = coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsHourlyView, "f", midStart, RollupCoverage.StitchTier.Hourly);
+        return string.Equals(relation, $"collect.{view} AS f", StringComparison.Ordinal)
+            ? new HourlyMid(relation, view, midStart, midEnd)
+            : null;
+    }
+
+    /// <summary>#9147: true when every whole hour of the mid that raw holds rows for has a rollup bucket: the repair pass's own hole
+    /// scan, as the fleet summary's daily mid checks its days (#8570). A hole (a refresh that never ran over an hour raw holds)
+    /// would drop that hour's work, so the read takes raw instead.</summary>
+    private static async Task<bool> ProceduresMidHasNoHoleAsync(NpgsqlDataSource postgres, HourlyMid mid, CancellationToken cancellationToken)
+    {
+        var targets = TimescaleSupport.RollupCoverageProbeTargets.Where(t => string.Equals(t.View, mid.View, StringComparison.Ordinal)).ToArray();
+        if (targets.Length != 1)
+        {
+            return false;
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        return await TimescaleSupport.HoleFreeThroughAsync(
+            connection, targets[0],("collect", mid.View), mid.MidStart, mid.MidEnd, Array.Empty<(DateTime Start, DateTime End)>(), cancellationToken);
+    }
+
+    /// <summary>Runs a top-procedures statement (<see cref="TopProceduresSql"/>, or the mid route's) and reads its rows. The mid's
+    /// two hours bind at $7 and $8, and the seek statement's boundary (#9280) at $9.</summary>
+    private static async Task<List<TopProcedureRow>> ReadTopProcedureRowsAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
+        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken, DateTime? seekFrom = null)
+    {
+        var rows = new List<TopProcedureRow>();
+        await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddDatabases(command, databases);
         command.Parameters.Add(databases.ExcludeParameter());
+        if (mid is not null)
+        {
+            AddTimestamp(command, mid.MidStart);
+            AddTimestamp(command, mid.MidEnd);
+        }
+
+        if (seekFrom is not null)
+        {
+            AddTimestamp(command, seekFrom.Value);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2530,7 +2946,7 @@ internal static class DarlingDataReader
                 ReadTopProcedureDetail(reader, 17, clock)));
         }
 
-        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+        return rows;
     }
 
     /// <summary>The detail columns of <see cref="TopProceduresSql"/>, ten consecutive fields from
@@ -2677,7 +3093,7 @@ internal static class DarlingDataReader
         var sql = $"""
             SELECT
                 (SELECT COUNT(*) FROM query_stats
-                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+                 WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
                  AND   ($4::text[] IS NULL OR database_name = ANY($4))) AS snapshots,
                 (SELECT MAX(collection_time) FROM query_stats
                  WHERE server_id = $1 AND collection_time <= $3
@@ -2758,19 +3174,46 @@ internal static class DarlingDataReader
                was returned with no bar, and the window's last interval, collected after its end, was missing. Legacy rows have no
                interval start and keep collection_time. The collection_time bounds below are chunk exclusion, not filters, as in the
                Viewer's read (#7776): the floor is implied by the predicate (an interval is collected after it starts; the hour is
-               clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
+               clock-skew slack) and the ceiling is the longest a row's collection trails its interval's start
+               (QueryStoreIntervalWide.CollectionCeiling). They keep
                idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
                residual filter on the rows they bring back. */
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
-            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
-            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopRawWindowSql}}
             /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
                so dropping the other outcomes first cannot change which row wins any partition, and the window
                sort then sees only the outcome asked for. */
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
+        """;
+
+    /// <summary>
+    /// The raw read's window, collection-time and database predicates, shared by <see cref="QueryStoreTopRawPrefix"/> and
+    /// <see cref="QueryStoreWindowProbeRawRowsSql"/>, so the existence probe reads the rows the top read ranks. Each line
+    /// carries the indentation it renders with inside the top read, which interpolates it at its literal's left margin.
+    /// $2/$3 window (naive UTC), $5 databases (NULL = all). The window is the half-open range <c>[$2, $3)</c> by the interval's
+    /// start: the interval that starts at $3 belongs to the next window, so back-to-back windows share no interval.
+    /// </summary>
+    private const string QueryStoreTopRawWindowSql = $$"""
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// The interval-table read's window, <c>first_execution_time</c> range and database predicates, shared by
+    /// <see cref="QueryStoreTopTablePrefix"/> and <see cref="QueryStoreWindowProbeTableRowsSql"/>. The floor carries
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>, which <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>
+    /// narrows in both. Indented as <see cref="QueryStoreTopRawWindowSql"/> is. $2 the gate's <c>ReadStart</c>, $3 window
+    /// end (exclusive, as the raw read's is), $5 databases. A static readonly declared above its users: static initializers run in textual order.
+    /// </summary>
+    private static readonly string QueryStoreTopTableWindowSql = $$"""
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
         """;
 
     /// <summary>
@@ -2814,14 +3257,38 @@ internal static class DarlingDataReader
             /* #7814: placed by the interval's start, as the raw read is (QueryStoreTopRawPrefix). The first_execution_time range
                below is what ix_query_store_interval_wide_server_first_exec serves; this is a residual filter, and no collection_time
                bound is added because none could drop a row here (an interval is collected after it starts). */
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopTableWindowSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         """;
+
+    /// <summary>The select list both arms of <see cref="QueryStoreTopTableSplitPrefix"/> project: every column, and the literal <c>rn</c> of <see cref="QueryStoreTopTablePrefix"/>.</summary>
+    private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
+
+    /// <summary>The predicates both arms repeat: the database list ($5) and the execution outcome ($6).</summary>
+    private const string QueryStoreTopTableSplitTrailing =
+        "            AND   ($5::text[] IS NULL OR database_name = ANY($5))\n"
+        + "            AND   ($6::text IS NULL OR execution_type_desc = $6)";
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9276), for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built: rows with an interval start take the one hour
+    /// <c>first_execution_time</c> floor, rows without one keep the <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor
+    /// and read through the partial index (<see cref="QueryStoreIntervalWide.IntervalStartSplitSql"/>). One floor for both was the
+    /// 26 hours, because a row placed by <c>collection_time</c> needs it, and half the heap pages a first call read were rows the
+    /// window dropped. The same rows, columns and parameters as <see cref="QueryStoreTopTablePrefix"/>.
+    /// </summary>
+    private static readonly string QueryStoreTopTableSplitPrefix = $$"""
+        WITH deduped AS (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(QueryStoreTopTableSplitSelect, QueryStoreTopTableSplitTrailing)}}
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTableSql"/> over <see cref="QueryStoreTopTableSplitPrefix"/>, chosen per call when
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built (#9276); same parameters, rows and order.
+    /// </summary>
+    public static readonly string QueryStoreTopTableSplitSql = QueryStoreTopTableSplitPrefix + QueryStoreTopSuffix;
 
     /// <summary>
     /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reads
@@ -2922,12 +3389,43 @@ internal static class DarlingDataReader
                 FROM ranked AS k
                 ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role
             ) AS r
-            /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
-               both keep reading one t.query_text. First arm is collect.query_store_text (one row per
+            /* #2150: resolve the text inside the lateral so the projection and the WAITFOR and self-statement tests
+               below all read one t.query_text. First arm is collect.query_store_text (one row per
                query_id, where the collector lands text once the separate fetch is on); second arm is the
                newest inline query_text, which is where text lived before the cutover and is what keeps
-               existing history readable. */
+               existing history readable. OFFSET 0 keeps the lookup a subquery of its own, run once for each
+               candidate the LIMIT reaches. Without it the planner copies the lookup into the projection and into
+               each text test, and runs every copy. */
             LEFT JOIN LATERAL (
+        {{QueryStoreTopTextLookupSql}}
+            OFFSET 0
+            ) AS t ON TRUE
+            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
+               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
+               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+        {{QueryStoreTopShowableTextSql}}
+            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
+            LIMIT $4
+        ) AS p
+        ORDER BY page_ord
+        )
+        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
+           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
+        """;
+
+    /// <summary>
+    /// The text lookup inside <see cref="QueryStoreTopTail"/>'s lateral, keyed on <c>r</c> (database, query id): the
+    /// <c>query_store_text</c> row by key, else the newest inline text collected inside <c>$2</c> through <c>$3</c>. Shared
+    /// with <see cref="QueryStoreWindowProbeTextTestSql"/>, so the existence probe resolves each statement's text as the top
+    /// read does. Each line carries the indentation it renders with inside the tail, which interpolates it at its literal's
+    /// left margin.
+    /// </summary>
+    private const string QueryStoreTopTextLookupSql = $$"""
                 SELECT COALESCE(
                            (
                                SELECT x.query_sql_text
@@ -2947,31 +3445,24 @@ internal static class DarlingDataReader
                                   retained chunk of query_store_stats on the time index looking for one. A query whose
                                   only inline text is older than the window now shows none, as a query with no text
                                   at all already did. Twins the other copy of this tail; keep them matching. */
-                               AND   s.collection_time >= $2
+                               AND   s.collection_time > $2
                                AND   s.collection_time <= $3
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
                                LIMIT 1
                            )
                        ) AS query_text
-            ) AS t ON TRUE
-            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
-               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
-               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+        """;
+
+    /// <summary>
+    /// The two text tests over the lateral's <c>t.query_text</c>, shared by <see cref="QueryStoreTopTail"/> and
+    /// <see cref="QueryStoreWindowProbeTextTestSql"/>: a statement with no known text passes, one whose text starts with
+    /// WAITFOR or carries the monitor's marker (<see cref="QueryStoreSelfStatement.NotSelfOfLateralText"/>) does not.
+    /// Indented as <see cref="QueryStoreTopTextLookupSql"/> is.
+    /// </summary>
+    private const string QueryStoreTopShowableTextSql = $$"""
             WHERE (t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%')
             AND   {{QueryStoreSelfStatement.NotSelfOfLateralText}}
-            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
-            LIMIT $4
-        ) AS p
-        ORDER BY page_ord
-        )
-        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
-           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
-           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
-        SELECT p.*, c.candidate_count
-        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
-        LEFT JOIN page AS p ON TRUE
-        ORDER BY p.page_ord
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
@@ -2979,12 +3470,54 @@ internal static class DarlingDataReader
     private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
 
     /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s leading edge, <c>[$2, S)</c> of the wide table by <c>collection_time</c>
+    /// with the <c>first_execution_time</c> range, through the database predicate. Shared with
+    /// <see cref="QueryStoreWindowProbeDailyRowsSql"/>. Indented as <see cref="QueryStoreTopRawWindowSql"/> is.
+    /// $1 server_id, $2 the gate's <c>ReadStart</c>, $5 databases, $8 <c>S</c>. A static readonly declared above its users.
+    /// </summary>
+    internal static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time < $8::date
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time < $8::date + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3)</c> of the wide table, as
+    /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading one. $3 window end, $9 <c>E</c>.
+    /// </summary>
+    internal static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $9::date
+            AND   collection_time < $3
+            AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s days, <c>[S, E)</c> of <c>query_store_top_daily</c>, as
+    /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading edge. $8 <c>S</c>, $9 <c>E</c>.
+    /// </summary>
+    private const string QueryStoreTopDailyDaysSql = """
+            FROM query_store_top_daily
+            WHERE server_id = $1
+            AND   day >= $8::date
+            AND   day < $9::date
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
     /// The long-window read (#5094): <see cref="QueryStoreTopTableSql"/>'s answer, with a run of whole UTC days taken
     /// from <c>collect.query_store_top_daily</c> instead of the wide table. $1 server_id, $2 the gate's
-    /// <c>ReadStart</c>, $3 the window end (inclusive, as in the table read), $4 top, $5 database, $6 execution
+    /// <c>ReadStart</c>, $3 the window end (exclusive, as in the table read), $4 top, $5 database, $6 execution
     /// outcome, $7 module, $8 <c>S</c> and $9 <c>E</c> (dates): the days <c>[S, E)</c> come from the summary, and the
-    /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table with exactly the table read's predicates (the
-    /// inclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
+    /// edges <c>[$2, S)</c> and <c>[E, $3)</c> from the wide table by <c>collection_time</c> with the table read's
+    /// predicates (the exclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
     /// upper bound too (#5523): each edge range ends at its own window end plus
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
     /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
@@ -3022,13 +3555,7 @@ internal static class DarlingDataReader
                 CAST(avg_physical_io_reads AS numeric) * execution_count AS physical_wsum,
                 CAST(avg_rowcount AS numeric) * execution_count AS rowcount_wsum,
                 last_execution_time, query_plan_hash
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time < $8::date
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time < $8::date + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyLeadingEdgeSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
             SELECT
@@ -3041,13 +3568,7 @@ internal static class DarlingDataReader
                 CAST(avg_physical_io_reads AS numeric) * execution_count,
                 CAST(avg_rowcount AS numeric) * execution_count,
                 last_execution_time, query_plan_hash
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $9::date
-            AND   collection_time <= $3
-            AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyTrailingEdgeSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
             SELECT
@@ -3060,11 +3581,7 @@ internal static class DarlingDataReader
                 avg_physical_io_reads_wsum,
                 avg_rowcount_wsum,
                 last_execution_time_max, query_plan_hash_max
-            FROM query_store_top_daily
-            WHERE server_id = $1
-            AND   day >= $8::date
-            AND   day < $9::date
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyDaysSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         ranked AS (
@@ -3187,13 +3704,30 @@ internal static class DarlingDataReader
     internal static bool QueryStoreTopMayReadTable(DateTime startUtc, DateTime endUtc) =>
         StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow;
 
+    /// <summary>
+    /// The first half of the tier choice of <c>get_query_store_top</c> and its window probe (#8570): for every database it is
+    /// <see cref="QueryStoreTopMayReadTable"/>, and for a read that names its databases it is the schema version alone, at any
+    /// window length (<see cref="QueryStoreTopTableMinWindow"/>). The interval table holds one row per interval and its key leads
+    /// with the server and the database, so a named read finds its rows there directly, where raw reads every snapshot the
+    /// window's batches hold for the server. An exclusion list counts as every database (<see cref="DatabaseFilter.IsAll"/>): it
+    /// leaves nearly the whole server in the read, and over a short window of the whole server raw reads fewer buffers.
+    /// </summary>
+    internal static bool QueryStoreTopMayReadTableFor(DateTime startUtc, DateTime endUtc, DatabaseFilter databases) =>
+        databases.IsAll ? QueryStoreTopMayReadTable(startUtc, endUtc) : StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion;
+
+    /// <summary>The shortest window the gate lets <see cref="QueryStoreTopMayReadTableFor"/>'s reads take from the interval
+    /// table: <see cref="QueryStoreTopMinWindow"/> for every database, none for a read that names its databases.</summary>
+    internal static TimeSpan QueryStoreTopTableMinWindow(DatabaseFilter databases) =>
+        databases.IsAll ? QueryStoreTopMinWindow : TimeSpan.Zero;
+
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, DatabaseFilter.One(databaseName), executionType: null, moduleName: null, cancellationToken);
 
-    /// <summary>#5245: the unfiltered-by-outcome top rows over a SET of databases (the one read the tool uses to tell a
-    /// measured zero from missing data).</summary>
+    /// <summary>#5245: the unfiltered-by-outcome top rows over a SET of databases. The tools tell a measured zero from
+    /// missing data with <see cref="QueryStoreWindowHasRowsAsync"/>, which answers whether this read returns a row at an
+    /// unlimited candidate limit.</summary>
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         CancellationToken cancellationToken = default) =>
@@ -3214,12 +3748,12 @@ internal static class DarlingDataReader
         (DateOnly Start, DateOnly EndExclusive)? DailySpan = null);
 
     /// <summary>
-    /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
-    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged,
-    /// exactly as before this table existed. <paramref name="endUtc"/> doubles as the gate's clause-4 literal
-    /// end: every caller of this MCP surface (the tool and its <c>/api/read</c> mirror) already resolves
-    /// <c>as_of</c> to a concrete instant before calling in, so there is no "open end" case to thread through
-    /// the way the viewer's WPF presets have.
+    /// #3953: reads <c>query_store_interval_wide</c> when the gate (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>)
+    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/>. The gate is asked with
+    /// no literal end, whatever <c>as_of</c> resolved <paramref name="endUtc"/> to: raw places the window by the interval's
+    /// start and reads every snapshot up to the collection ceiling, so for an end before <c>applied_through</c> raw and the
+    /// table give the same newest snapshot of each interval. A read that names its databases has no minimum window
+    /// (<see cref="QueryStoreTopMayReadTableFor"/>).
     /// </summary>
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
@@ -3254,18 +3788,19 @@ internal static class DarlingDataReader
         string? executionType, string? moduleName, CancellationToken cancellationToken = default, QueryTagFilter? tags = null)
     {
     #pragma warning restore CA1068
-        /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
-           has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
-           call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
-           pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
-           land on raw (UseTable's clause 5). */
-        if (QueryStoreTopMayReadTable(startUtc, endUtc))
+        /* Review D4R H1: the window check first, before the gate's own round trips even open: a read over every database
+           under QueryStoreTopMinWindow can only land on raw (UseTable's clause 5), so it skips the second connection, the
+           transaction, ReadSourceInputsSql and PlainTableFloorSql. A read that names its databases has no minimum window
+           (QueryStoreTopMayReadTableFor), so it always asks the gate. */
+        if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databases, executionType, moduleName, tags, cancellationToken);
-            if (table is var (tableRows, tablePlan, dailyDays, dailySpan))
+            if (table is var (tableRows, tablePlan, dailyDays, dailySpan, tableSource))
             {
-                ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+                /* #9310: the statement that answered, so a slow read names its SQL (the hourly-edges and the whole-window
+                   statements both open WITH parts AS). */
+                ReadScope.NoteSource(tableSource.Source, tableSource.Reason);
                 ReadScope.NoteRows(tableRows.Count);
                 return new QueryStoreTopRead(tableRows, tablePlan, dailyDays, dailySpan);
             }
@@ -3333,7 +3868,7 @@ internal static class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan)?> TryGetQueryStoreTopFromTableAsync(
+    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan, (string Source, string Reason) Statement)?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         string? executionType, string? moduleName, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
@@ -3348,8 +3883,11 @@ internal static class DarlingDataReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* No literal end (UseTable's clause 4 is skipped): this read places its window by the interval's start and reads
+               every snapshot up to the collection ceiling, so for an end before applied_through it already shows each
+               interval's newest snapshot, the row the table holds. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, QueryStoreTopTableMinWindow(databases),
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
@@ -3367,29 +3905,25 @@ internal static class DarlingDataReader
                 throw injectFault();
             }
 
-            /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. No built day
-               keeps the interval-table read exactly as it was (same text, same parameters). */
-            var (firstDay, endDay) = WholeDays(plan.ReadStart, endUtc);
-            (DateOnly Start, DateOnly EndExclusive)? dailySpan = null;
-            if (firstDay < endDay)
-            {
-                var builtDays = new List<DateOnly>();
-                await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
-                {
-                    AddInt(built, serverId);
-                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
-                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
-                    await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
-                    while (await builtReader.ReadAsync(cancellationToken))
-                    {
-                        builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
-                    }
-                }
+            /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. With no built day
+               the interval-table statement reads the whole window. */
+            var (dailySpan, validHours) = await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, plan.ReadStart, endUtc, withHours: true, cancellationToken);
 
-                dailySpan = LongestBuiltRun(builtDays);
+            /* #9280: the whole hours of the two edges that the ledger says the hourly table holds exactly are read from it, the rest from the
+               wide table. No valid hour leaves the daily statement as it is. */
+            var hourly = dailySpan is var (hourlyStart, hourlyEnd)
+                ? QueryStoreTopHourlyEdges.Segment(plan.ReadStart, endUtc, hourlyStart, hourlyEnd, validHours)
+                : null;
+            if (hourly is { UsesSummary: false })
+            {
+                hourly = null;
             }
 
-            var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+            /* #9276: the window as two arms, each with the floor that holds for its rows, once the partial index for the NULL-start
+               arm is built. The daily read is placed by collection_time and keeps its statement. */
+            var splitBuilt = dailySpan is null && await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var topSql = hourly is not null ? QueryStoreTopHourlyEdges.BuildSql(hourly) : dailySpan is not null ? QueryStoreTopDailyTableSql : splitBuilt ? QueryStoreTopTableSplitSql : QueryStoreTopTableSql;
 
             /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
                because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what
@@ -3430,15 +3964,326 @@ internal static class DarlingDataReader
                 }
 
                 AddInt(command, TopFill.FinalCandidates(top));
+                if (hourly is not null)
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = QueryStoreTopHourlyEdges.HourValues(hourly) });
+                    foreach (var bound in QueryStoreTopHourlyEdges.RangeValues(hourly))
+                    {
+                        AddTimestamp(command, bound);
+                    }
+                }
+
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
 
-            return (rows, plan, dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0, dailySpan);
+            var spanDays = dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0;
+            var statement = hourly is not null
+                ? (ReadScope.SourceHourlyEdges, $"{hourly.SummaryHours.Count} summary hours, {spanDays} days")
+                : dailySpan is not null ? (ReadScope.SourceIntervalTable, $"daily table, {spanDays} days")
+                : splitBuilt ? (ReadScope.SourceIntervalTable, "split arms")
+                : (ReadScope.SourceIntervalTable, "whole window");
+            return (rows, plan, spanDays, dailySpan, statement);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#3953 MCP top-queries table read", ex);
+            return null;
+        }
+    }
+
+    /// <summary>The longest run of built whole days inside <c>[readStart, endUtc)</c> (<see cref="QueryStoreTopBuiltDaysSql"/>,
+    /// <see cref="LongestBuiltRun"/>), read in the caller's snapshot. Null when the window holds no whole day or none of its
+    /// days is built. The top read and <see cref="QueryStoreWindowHasRowsAsync"/> both take their daily span from here, so
+    /// they choose the same tier.</summary>
+    private static async Task<(DateOnly Start, DateOnly EndExclusive)?> ReadQueryStoreTopDailySpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken) =>
+        (await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, readStart, endUtc, withHours: false, cancellationToken)).Span;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopBuiltDaysSql"/> and, in the same statement and round trip, the whole hours of <c>[ceil(readStart), floor(endUtc))</c>
+    /// the hourly table holds exactly (#9280): an hour the builder has done whose pair for server $1 has a <c>top_built_seq</c> level with its
+    /// <c>late_seq</c>. A pair that does not exist is valid with no rows, as in <see cref="QueryTagRollupHashRoute"/>: any later write
+    /// would have created it, stale. At most the retained hours, a few hundred small rows. Read in the caller's snapshot, so a late write
+    /// committed before it has its <c>late_seq</c> bump committed with it and that hour reads raw.
+    /// </summary>
+    private const string QueryStoreTopBuiltDaysAndHoursSql = """
+        SELECT 0 AS kind, w.day::timestamp AS t
+        FROM (
+        """ + QueryStoreTopBuiltDaysSql + """
+
+        ) AS w
+        UNION ALL
+        SELECT 1 AS kind, h.hour AS t
+        FROM collect.query_store_compose_stamp_hours AS h
+        WHERE h.hour >= $4::timestamp
+        AND   h.hour < $5::timestamp
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM collect.query_store_compose_stamp_built AS b
+                  WHERE b.server_id = $1
+                  AND   b.hour = h.hour
+                  AND   b.top_built_seq IS DISTINCT FROM b.late_seq
+              )
+        ORDER BY 1, 2
+        """;
+
+    private static async Task<((DateOnly Start, DateOnly EndExclusive)? Span, List<DateTime> ValidHours)> ReadQueryStoreTopDailyBuiltAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, bool withHours, CancellationToken cancellationToken)
+    {
+        var validHours = new List<DateTime>();
+        var (firstDay, endDay) = WholeDays(readStart, endUtc);
+        if (firstDay >= endDay)
+        {
+            return (null, validHours);
+        }
+
+        var builtDays = new List<DateOnly>();
+        var builtSql = withHours ? QueryStoreTopBuiltDaysAndHoursSql : QueryStoreTopBuiltDaysSql;
+        await using (var built = new NpgsqlCommand(builtSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            AddInt(built, serverId);
+            built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
+            built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
+            if (withHours)
+            {
+                AddTimestamp(built, QueryStoreTopHourlyEdges.CeilHour(readStart));
+                AddTimestamp(built, QueryStoreTopHourlyEdges.FloorHour(endUtc));
+            }
+
+            await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
+            while (await builtReader.ReadAsync(cancellationToken))
+            {
+                if (!withHours)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                }
+                else if (builtReader.GetInt32(0) == 0)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(1)));
+                }
+                else
+                {
+                    validHours.Add(builtReader.GetDateTime(1));
+                }
+            }
+        }
+
+        return (LongestBuiltRun(builtDays), validHours);
+    }
+
+    /// <summary>How many of the window's rows <see cref="QueryStoreWindowProbeSql"/> tests one by one before it tests the
+    /// window's distinct statements. A window with ordinary activity answers from these rows without reading the rest, and a
+    /// window that holds fewer rows than this is answered by them alone.</summary>
+    internal const int QueryStoreWindowProbeSampleRows = 64;
+
+    /// <summary>
+    /// The raw tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: <see cref="QueryStoreTopRawWindowSql"/>, the
+    /// predicates of <see cref="QueryStoreTopRawPrefix"/>, as the statement key (database, query id) of each row. No interval
+    /// dedupe: a re-collected interval has a newest row exactly when it has any row. The parameters are the top read's:
+    /// $1 server_id, $2/$3 window (naive UTC), $4 the sample size, $5 databases (NULL = all).
+    /// </summary>
+    internal const string QueryStoreWindowProbeRawRowsSql = $$"""
+        SELECT database_name, query_id
+        FROM query_store_stats
+        WHERE server_id = $1
+        {{QueryStoreTopRawWindowSql}}
+        """;
+
+    /// <summary>
+    /// The interval-table tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: <see cref="QueryStoreTopTableWindowSql"/>,
+    /// the predicates of <see cref="QueryStoreTopTablePrefix"/>. $1 server_id, $2 the gate's <c>ReadStart</c>, $3 window end,
+    /// $4 the sample size, $5 databases. The <c>first_execution_time</c> floor carries
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>, which <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>
+    /// narrows as it does for the top read.
+    /// </summary>
+    internal static readonly string QueryStoreWindowProbeTableRowsSql = $$"""
+        SELECT database_name, query_id
+        FROM query_store_interval_wide
+        WHERE server_id = $1
+        {{QueryStoreTopTableWindowSql}}
+        """;
+
+    /// <summary>
+    /// The daily tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: the three arms of
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s <c>parts</c> (<see cref="QueryStoreTopDailyLeadingEdgeSql"/>,
+    /// <see cref="QueryStoreTopDailyTrailingEdgeSql"/> and <see cref="QueryStoreTopDailyDaysSql"/>). $1 server_id, $2 the
+    /// gate's <c>ReadStart</c>, $3 window end, $4 the sample size, $5 databases, $6 and $7 unused (the top read's outcome and
+    /// module, bound as NULL text), $8 <c>S</c> and $9 <c>E</c> (dates).
+    /// </summary>
+    internal static readonly string QueryStoreWindowProbeDailyRowsSql = $$"""
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyLeadingEdgeSql}}
+        UNION ALL
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyTrailingEdgeSql}}
+        UNION ALL
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyDaysSql}}
+        """;
+
+    /// <summary>
+    /// The showable test of one statement key <c>r</c> (database, query id): <see cref="QueryStoreTopTextLookupSql"/> and
+    /// <see cref="QueryStoreTopShowableTextSql"/>, the text lookup and the two text tests of <see cref="QueryStoreTopTail"/>.
+    /// <para><c>OFFSET 0</c> keeps the lookup a subquery of its own, run once for each key. Without it the planner copies the
+    /// lookup into every test that reads the text and runs it once for each.</para>
+    /// </summary>
+    private const string QueryStoreWindowProbeTextTestSql = $$"""
+        LEFT JOIN LATERAL (
+        {{QueryStoreTopTextLookupSql}}
+            OFFSET 0
+        ) AS t ON TRUE
+        {{QueryStoreTopShowableTextSql}}
+        """;
+
+    /// <summary>
+    /// The statement <see cref="QueryStoreWindowHasRowsAsync"/> runs over one tier's rows (<paramref name="rowsSql"/>, a
+    /// SELECT of <c>database_name, query_id</c>): TRUE when any statement of the window is showable. A statement is
+    /// showable when it passes <see cref="QueryStoreWindowProbeTextTestSql"/> and, when <paramref name="selfKeysReady"/>,
+    /// the key-table test of <see cref="QueryStoreSelfStatement.NotSelfOfKey"/>. The key-table test filters the window's
+    /// rows ahead of either text test, so a statement of the monitor's own costs no text lookup.
+    /// <para>One CASE, which stops at its first true WHEN, over three steps:</para>
+    /// <para>1. <c>sample</c> holds the first <c>$4</c> (<see cref="QueryStoreWindowProbeSampleRows"/>) rows of the window as the scan
+    /// produces them (rows of the monitor's own by key left out), and each is tested. A window with ordinary activity
+    /// answers TRUE after a few rows.</para>
+    /// <para>2. A sample of fewer rows than that holds every such row of the window, so the answer is FALSE with no second
+    /// read. An empty window is read once.</para>
+    /// <para>3. Otherwise every sampled row is a WAITFOR or a statement of the monitor's own that only its text shows, and
+    /// each DISTINCT statement key of the window is tested once: one pass over the window's rows and one text lookup for
+    /// each statement, not one for each interval row.</para>
+    /// </summary>
+    internal static string QueryStoreWindowProbeSql(string rowsSql, bool selfKeysReady)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowsSql);
+        var rows = "FROM (\n" + rowsSql + "\n) AS r"
+            + (selfKeysReady ? "\nWHERE " + QueryStoreSelfStatement.NotSelfOfKey("$1", "r.database_name", "r.query_id") : "");
+        string AnyShowable(string keysSql) =>
+            "EXISTS (\nSELECT 1\nFROM " + keysSql + " AS r\n" + QueryStoreWindowProbeTextTestSql + "\n)";
+        return "WITH sample AS MATERIALIZED (\nSELECT r.database_name, r.query_id\n" + rows + "\nLIMIT $4\n)\n"
+            + "SELECT CASE\nWHEN " + AnyShowable("sample") + " THEN TRUE\n"
+            + "WHEN (SELECT count(*) FROM sample) < $4 THEN FALSE\n"
+            + "ELSE " + AnyShowable("(\nSELECT DISTINCT r.database_name, r.query_id\n" + rows + "\n)") + "\nEND";
+    }
+
+    /// <summary>
+    /// Whether the window holds any row <c>get_query_store_top</c> can show, with no ranking cut. It answers for the tier the
+    /// top read serves the window from: the same tier choice (<see cref="QueryStoreTopMayReadTableFor"/>, then
+    /// <see cref="QueryStoreIntervalWide.ResolveReadAsync"/> and the built-days span in one read-only REPEATABLE READ
+    /// transaction, raw when the gate says raw or the table path faults), the same window bounds, edge margin and database
+    /// list, and the same exclusions (the monitor's own statements by the key table once
+    /// <see cref="QueryStoreSelfKeys.ReadyAsync"/> says it is filled and by the marker in the text in every case, and
+    /// statements whose text starts with WAITFOR).
+    /// <para>It is true exactly when the top read returns a row at an unlimited candidate limit. The top read ranks before it
+    /// trims, and keeps <see cref="TopFill.FinalCandidates"/> candidates, so a window whose highest-duration groups are all
+    /// WAITFOR or the monitor's own, more of them than candidates, gives the top read an empty page while this answers true:
+    /// the window holds other runs. It is never false where the top read returns a row.</para>
+    /// <para>It builds no aggregate and no ranking (<see cref="QueryStoreWindowProbeSql"/>), which is why a caller that only
+    /// needs "does the window hold anything" asks here and not for a top-1 page. No execution-outcome, module or tag filter.</para>
+    /// </summary>
+    public static async Task<bool> QueryStoreWindowHasRowsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
+    {
+        if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases)
+            && await TryQueryStoreWindowHasRowsFromTableAsync(postgres, serverId, startUtc, endUtc, databases, cancellationToken) is { } fromTable)
+        {
+            ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+            return fromTable;
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            await readOnly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var selfKeysReady = await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var probeSql = QueryStoreWindowProbeSql(QueryStoreWindowProbeRawRowsSql, selfKeysReady);
+        await using var command = new NpgsqlCommand(probeSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, QueryStoreWindowProbeSampleRows);
+        AddDatabases(command, databases);
+        var any = await command.ExecuteScalarAsync(cancellationToken) is true;
+        ReadScope.NoteSource(ReadScope.SourceRaw);
+        return any;
+    }
+
+    /// <summary>
+    /// <see cref="QueryStoreWindowHasRowsAsync"/>'s gate and table tiers, the steps of
+    /// <see cref="TryGetQueryStoreTopFromTableAsync"/> in its order on one connection in one read-only REPEATABLE READ
+    /// transaction: the gate, the built-days span, the edge margin, the self-key readiness, then the probe over the interval
+    /// table alone or over the daily summary with the interval table's edges. Null when the gate says raw or anything but a
+    /// cancellation faults, so the caller reads raw, as the top read does.
+    /// </summary>
+    private static async Task<bool?> TryQueryStoreWindowHasRowsFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        var gateDecided = false;
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            /* No literal end (UseTable's clause 4 is skipped): this read places its window by the interval's start and reads
+               every snapshot up to the collection ceiling, so for an end before applied_through it already shows each
+               interval's newest snapshot, the row the table holds. */
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, QueryStoreTopTableMinWindow(databases),
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
+            if (!plan.UseTable)
+            {
+                if (plan.DecisionFailed)
+                {
+                    ReadScope.Note(ReadFallback.GateFailed);
+                }
+
+                return null;
+            }
+
+            gateDecided = true;
+            if (TestOnlyTableReadFault.Value is { } injectFault)
+            {
+                throw injectFault();
+            }
+
+            var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
+            var rowsSql = dailySpan is null ? QueryStoreWindowProbeTableRowsSql : QueryStoreWindowProbeDailyRowsSql;
+
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                rowsSql = QueryStoreIntervalWide.WithEdgeMargin(rowsSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
+            var selfKeysReady = await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var probeSql = QueryStoreWindowProbeSql(rowsSql, selfKeysReady);
+            await using var command = new NpgsqlCommand(probeSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            AddInt(command, serverId);
+            AddTimestamp(command, plan.ReadStart);
+            AddTimestamp(command, endUtc);
+            AddInt(command, QueryStoreWindowProbeSampleRows);
+            AddDatabases(command, databases);
+            if (dailySpan is var (spanStart, spanEnd))
+            {
+                AddNullableText(command, null);
+                AddNullableText(command, null);
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanStart, NpgsqlDbType = NpgsqlDbType.Date });
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
+            }
+
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#8570 MCP Query Store window probe table read", ex);
             return null;
         }
     }
@@ -3485,7 +4330,8 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// Every enabled server plus its newest successful collection instant — the list_servers read. #8464: only a
+    /// Every configured server plus its newest successful collection instant — the list_servers read. #9087: a server whose collection is
+    /// turned off is a row too (<c>is_enabled</c> false), which the tool lists as Disabled; the read used to leave it out without saying so. #8464: only a
     /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a
     /// failed one included, so a read over every row moved a dark server's <c>last_collection</c> forward on each failed
     /// attempt, and the freshness-derived status with it. Drives the
@@ -3531,7 +4377,8 @@ internal static class DarlingDataReader
             COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
             {ConnectDownSinceSql.Healed} AS connect_down_since,
             s.last_connect_error,
-            {CollectionAttemptSql.Attempted} AS attempted
+            {CollectionAttemptSql.Attempted} AS attempted,
+            c.is_enabled
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3543,7 +4390,6 @@ internal static class DarlingDataReader
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
-        WHERE c.is_enabled
         ORDER BY s.server_name
         """;
 
@@ -3570,7 +4416,8 @@ internal static class DarlingDataReader
                 reader.GetDecimal(10),
                 reader.IsDBNull(11) ? null : reader.GetDateTime(11),
                 reader.IsDBNull(12) ? null : reader.GetString(12),
-                reader.GetBoolean(13)));
+                reader.GetBoolean(13),
+                reader.GetBoolean(14)));
         }
 
         return rows;
@@ -4051,11 +4898,11 @@ LIMIT 1";
     /// <summary>
     /// #4999: this server's collector schedule overrides, its own rows and the fleet-wide ones, the two levels
     /// the worker layers over the shipped defaults. The table is sparse (an absent row is the default), so this
-    /// is usually empty. Only the frequency matters here: the retention and enabled columns ride along because
-    /// <see cref="ScheduleOverride"/> carries them, and a collector's database scope is not read.
+    /// is usually empty. Only the frequency matters here: the retention, enabled and databases columns ride along because
+    /// <see cref="ScheduleOverride"/> carries them (column selectivity's status reads the enabled switches and the database scopes, #8798).
     /// </summary>
     internal const string ScheduleOverridesSql = @"
-SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases
 FROM config.config_collector_schedules
 WHERE server_id = $1
 OR    server_id IS NULL";
@@ -4066,7 +4913,7 @@ OR    server_id IS NULL";
     /// needs each server's rows. The same columns as <see cref="ScheduleOverridesSql"/>, read the same way.
     /// </summary>
     internal const string AllScheduleOverridesSql = @"
-SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases
 FROM config.config_collector_schedules";
 
     /// <summary>
@@ -4074,10 +4921,11 @@ FROM config.config_collector_schedules";
     /// <paramref name="serverId"/> is null. A failure to read costs the roll-up nothing but the
     /// overrides: every row then keeps the shipped cadence it was judged by before, and the health read still
     /// answers. The warning goes through <see cref="ReadScope"/>: the recorder's logger when a scope is open,
-    /// Trace otherwise. A cancellation is not swallowed.
+    /// Trace otherwise. A cancellation is not swallowed. <paramref name="throwOnFailure"/> (#8798) lets a caller for whom an empty list would
+    /// be a wrong answer, not a degraded one, see the failure instead.
     /// </summary>
     internal static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
-        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken, bool throwOnFailure = false)
     {
         var overrides = new List<ScheduleOverride>();
         try
@@ -4097,10 +4945,11 @@ FROM config.config_collector_schedules";
                     reader.GetString(1),
                     reader.IsDBNull(2) ? null : reader.GetInt32(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                    reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
+                    reader.IsDBNull(4) ? null : reader.GetBoolean(4),
+                    reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException && !throwOnFailure)
         {
             ReadScope.Warn($"Collection health could not read the collector schedule overrides for server {serverId}, so its collectors are judged by their shipped cadences. The cause is logged with this entry.", ex);
             return Array.Empty<ScheduleOverride>();
@@ -4570,7 +5419,7 @@ FROM config.config_collector_schedules";
             read_source
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR collector_name = $5::text)
         AND   ($6::double precision IS NULL OR duration_ms >= $6::double precision)
@@ -4674,7 +5523,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(*)
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text IS NULL OR collector_name = $4::text)
         AND   ($5::double precision IS NULL OR duration_ms >= $5::double precision)
@@ -4853,7 +5702,7 @@ FROM config.config_collector_schedules";
             cl.read_source
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
-        WHERE cl.collection_time >= $1
+        WHERE cl.collection_time > $1
         AND   cl.collection_time <= $2
         AND   ($4::text IS NULL OR cl.collector_name = $4::text)
         AND   ($5::double precision IS NULL OR cl.duration_ms >= $5::double precision)
@@ -4885,7 +5734,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(*)
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
-        WHERE cl.collection_time >= $1
+        WHERE cl.collection_time > $1
         AND   cl.collection_time <= $2
         AND   ($3::text IS NULL OR cl.collector_name = $3::text)
         AND   ($4::double precision IS NULL OR cl.duration_ms >= $4::double precision)
@@ -4987,7 +5836,7 @@ FROM config.config_collector_schedules";
                 CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
             FROM waiting_tasks
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   wait_type IS NOT NULL
             GROUP BY
@@ -5015,7 +5864,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   collector_name = 'waiting_tasks'
             AND   status = 'SUCCESS'
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY
                 1
@@ -5039,7 +5888,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(DISTINCT rtrim(wait_type))
         FROM waiting_tasks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         """;
@@ -5131,7 +5980,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   blocking_session_id > 0
             AND   blocking_session_id <> session_id
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   database_name IS NOT NULL
             {{DatabaseFilter.All.Clause("database_name", 4)}}
@@ -5160,7 +6009,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   collector_name = 'waiting_tasks'
             AND   status = 'SUCCESS'
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY
                 1
@@ -5186,7 +6035,7 @@ FROM config.config_collector_schedules";
         WHERE server_id = $1
         AND   blocking_session_id > 0
         AND   blocking_session_id <> session_id
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 4)}}
@@ -5265,7 +6114,7 @@ FROM config.config_collector_schedules";
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'blocked-process-report' AS source
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -5280,7 +6129,7 @@ FROM config.config_collector_schedules";
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -5345,7 +6194,7 @@ FROM config.config_collector_schedules";
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         ORDER BY deadlock_time
@@ -5640,7 +6489,7 @@ internal sealed class CollectorHealth
     /// <summary>#5666: whether the newest-runs streak could move this row's band
     /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), over the same inputs <see cref="HealthStatus"/> reads.</summary>
     internal bool RecoveryCouldChangeBand => CollectorHealthClassifier.RecoveryCouldChangeBand(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
 
     /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
@@ -5844,6 +6693,14 @@ internal sealed class CollectorHealth
     internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
+    /// #9101: the success count the ladder reads (<see cref="CollectorHealthClassifier.SuccessCountForLadder"/>):
+    /// zero when the window's successes all stored nothing and every run since is EXTENSION_MISSING, so the row
+    /// bands EXTENSION_MISSING, and <see cref="SuccessCount"/> otherwise.
+    /// </summary>
+    internal long LadderSuccessCount => CollectorHealthClassifier.SuccessCountForLadder(
+        TotalRuns, SuccessCount, ExtensionMissingCount, LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else.
@@ -5858,7 +6715,7 @@ internal sealed class CollectorHealth
     /// </summary>
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
-            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and

@@ -331,7 +331,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             sections.Add((await DiagnosticsBundle.RunSectionAsync("collection",
                 c => CollectionSectionAsync(postgres, scopeServerName, hours, days, c), ct)) with { AfterAlias = CutHealthTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("stall_probes",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStallProbeTools.GetCollectorStallProbes(postgres, scopeServerName, days, 50, c)), ct));
+                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStallProbeTools.GetCollectorStallProbes(postgres, scopeServerName, days, 50, null, c)), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("slow_reads",
                 async c => DropStatementSummaries(DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c))), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("read_latency",
@@ -339,7 +339,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
                 c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, full_text: true, offset: 0, responseByteBudget: null, c)), ct));
+                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, full_text: true, offset: 0, query_id: null, responseByteBudget: null, c)), ct));
         }
 
         var logDirectory = options.LogDirectory ?? DarlingFileLoggerProvider.DefaultLogDirectory();
@@ -549,7 +549,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
            payload, so it carries size_as_of (when the sweep recorded the figure), size_age_seconds and
            size_unavailable_reason / uncompressed_unavailable_reason, and says why a figure is missing. */
         var host = DiagnosticsBundle.ParseReader(
-            await DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ct));
+            await DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), cancellationToken: ct));
         return new JsonObject
         {
             ["schema_version_stored"] = stored,

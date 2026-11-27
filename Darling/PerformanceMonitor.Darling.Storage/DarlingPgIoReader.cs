@@ -21,6 +21,21 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingPgIoReader
 {
+    /// <summary>#6206: the first PostgreSQL major with <c>pg_stat_io</c>.</summary>
+    public const int PgStatIoFirstMajor = 16;
+
+    /// <summary>
+    /// #6206, #8918: why <c>pg_io_stats</c> is not collected on this target when its probed major is below
+    /// <see cref="PgStatIoFirstMajor"/>, or null when the major is unknown (no claim is made) or new enough. The one copy: the MCP reads
+    /// and the Viewer's I/O tab both ask it, so a PostgreSQL 15 server is called not collected everywhere and idle nowhere.
+    /// </summary>
+    public static string? NotCollectedForVersionMessage(string serverName, int? postgresMajorVersion) =>
+        postgresMajorVersion is > 0 and < PgStatIoFirstMajor
+            ? $"{serverName} runs PostgreSQL {postgresMajorVersion}, which has no pg_stat_io (it arrived in PostgreSQL {PgStatIoFirstMajor}), "
+              + "so I/O by backend type, object and context is not collected for this server. There is no setup step "
+              + "that changes this on the monitored server short of upgrading it."
+            : null;
+
     public sealed record PgIoRow(
         string? BackendType,
         string? ObjectType,

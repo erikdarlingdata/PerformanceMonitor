@@ -7,10 +7,13 @@
  */
 
 using System;
+using System.IO;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.FrontDoor;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -48,6 +51,32 @@ internal static class DarlingProcessServices
 
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
+
+    /* #9644: the startup config's password key facts, published by the worker once and read by the password key MCP tools. */
+    services.AddSingleton<PerformanceMonitor.Darling.Service.Mcp.PasswordKeyStartupFacts>();
+
+    /* #8737: every personal MCP token row, refreshed over the owner connection; the MCP bearer gate checks it. */
+    services.AddSingleton<DarlingPersonalTokenSnapshot>(provider => new DarlingPersonalTokenSnapshot
+    {
+        Pending = provider.GetRequiredService<PersonalTokenPendingRevokes>(),
+    });
+
+    /* #9325: the sign-in revokes the store has not taken yet. One queue for the process: the snapshot's token check refuses the owners in it at
+       once, the web supervisor drains it, and it is saved in the folder that holds the service's keys so a restart keeps it. Built before either
+       host serves, because the snapshot takes it. A config that cannot be loaded leaves it in memory only, with one warning. */
+    services.AddSingleton(provider =>
+    {
+        var logger = provider.GetService<ILoggerFactory>()?.CreateLogger<PersonalTokenPendingRevokes>();
+        try
+        {
+            return PersonalTokenPendingRevokes.ForConfig(DarlingConfig.Load(), DarlingConfig.ResolveConfigPath(), logger);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "The MCP personal token revoke queue is kept in memory only, so a restart would lose it: darling.json could not be loaded.");
+            return new PersonalTokenPendingRevokes(logger: logger);
+        }
+    });
 
     /* #7041: the worker publishes its alert evaluator here for the MCP host's send_daily_health_report_now. */
     services.AddSingleton<DailyHealthReportHub>();
@@ -94,6 +123,16 @@ internal static class DarlingProcessServices
 
     services.AddHostedService<DarlingWorker>();
 
+    /* #9013: the opt-in Prometheus port (/metrics). Registered AFTER the worker because its snapshot is a store read: the worker
+       migrates the store and provisions the login it uses, and a scrape answers the meta series only until the worker collects. The
+       config loader is passed in so the host's own source never loads darling.json itself. Self-gating on metrics.enabled (default OFF). */
+    services.AddHostedService(provider => new PerformanceMonitor.Darling.Service.Hosting.DarlingMetricsHostService(
+        provider.GetRequiredService<CollectorRuntimeState>(),
+        provider.GetRequiredService<ReadAdmission>(),
+        provider.GetRequiredService<MonitoredServerRegistryState>(),
+        provider.GetRequiredService<ILogger<PerformanceMonitor.Darling.Service.Hosting.DarlingMetricsHostService>>(),
+        loadConfig: () => DarlingConfig.Load()));
+
     /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
        darling.json's mcp.enabled (default OFF), so Program.cs stays config-free like the worker. */
     services.AddHostedService<DarlingMcpHostService>();
@@ -136,4 +175,21 @@ internal static class DarlingProcessServices
         () => provider.GetRequiredService<IFrontDoorDirectory>(),
         provider.GetRequiredService<ILogger<DarlingFrontDoorMcpPeers>>()));
     }
+
+    /// <summary>
+    /// The process host's builder (#9837), on <see cref="DarlingHostBinding.ContentRoot"/> and not on the working folder, so building it
+    /// never walks the tree under the folder the service was started in. A test builds it the way <c>Program.cs</c> does.
+    /// </summary>
+    internal static HostApplicationBuilder CreateHostBuilder(string[] args) =>
+        Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, ContentRootPath = DarlingHostBinding.ContentRoot });
+
+    /// <summary>
+    /// Puts the rolling file log on the host's loggers (#9747). The provider buffers lines for up to five seconds and writes them on a timer,
+    /// and its Dispose writes what is left. The container disposes what a factory returns and never an instance it was handed, so the
+    /// provider is registered through a factory: an instance registration would lose the lines logged in the last seconds before an exit,
+    /// the <c>collection loop stopped</c> line among them. The container is disposed after the hosted services have stopped, so their
+    /// last lines are in the buffer by then.
+    /// </summary>
+    internal static void AddFileLog(ILoggingBuilder logging, DarlingFileLoggerProvider provider) =>
+        logging.Services.AddSingleton<ILoggerProvider>(_ => provider);
 }

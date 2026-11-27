@@ -85,6 +85,9 @@ public class StoreLogClassifierTests
         "2026-09-05 14:02:11.104 UTC [4120] LOG:  checkpoint starting: time",
         "2026-09-05 14:02:19.882 UTC [4120] LOG:  checkpoint complete: wrote 812 buffers (1.2%); 0 WAL file(s) added",
 
+        /* lock_wait (#9439) - a log_lock_waits line. */
+        "2026-09-05 14:02:55.100 UTC [5301] LOG:  process 5301 still waiting for ShareLock on transaction 777 after 1000.100 ms",
+
         /* user_request_cancel — the ~1,100/day floor, with its STATEMENT continuation. */
         "2026-09-05 14:03:02.551 UTC [5288] ERROR:  canceling statement due to user request",
         "2026-09-05 14:03:02.551 UTC [5288] STATEMENT:  SELECT count(*) FROM collect.query_stats",
@@ -104,6 +107,21 @@ public class StoreLogClassifierTests
         /* ADVERSARIAL 2: the SAME benign text at ERROR severity. The exclusion is LOG-scoped and anchored at
            the start of the message, so this must NOT be excluded - it lands in the retained residue. */
         "2026-09-05 14:04:22.000 UTC [1188] ERROR:  could not reserve shared memory region while re-attaching a backend",
+
+        /* shutdown_in_progress (#8814) - a client that reached the store while it was stopping. */
+        "2026-09-05 14:05:30.639 UTC [5300] FATAL:  the database system is shutting down",
+
+        /* startup_in_progress (#9577) - a client that reached the store while it was starting. */
+        "2026-09-05 14:05:32.410 UTC [5301] FATAL:  the database system is starting up",
+
+        /* timescale_timestamp_column (#9515) - the hypertable-creation warning for a plain timestamp column, with its HINT. */
+        "2026-09-05 14:05:35.100 UTC [5301] WARNING:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices",
+        "2026-09-05 14:05:35.100 UTC [5301] HINT:  Use datatype TIMESTAMPTZ instead.",
+
+        /* autovacuum_cancel (#8814) - an autovacuum cancelled by a conflicting lock, with the relation it names. */
+        "2026-09-05 14:05:40.132 UTC [5302] ERROR:  canceling autovacuum task",
+        "2026-09-05 14:05:40.132 UTC [5302] CONTEXT:  while scanning block 117439 of relation \"pg_toast.pg_toast_17428\"",
+        "\tautomatic vacuum of table \"darling.pg_toast.pg_toast_17428\"",
 
         /* client_connection_lost — the convoy signature. */
         "2026-09-05 14:05:55.222 UTC [5301] FATAL:  connection to client lost",
@@ -1162,7 +1180,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(16, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(21, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(
@@ -1303,6 +1321,124 @@ public class StoreLogClassifierTests
 
         var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  poor compression ratio detected for chunk \"x\"\n");
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #8814: the FATAL a client reads when it connects while the store is stopping is the expected floor of every
+    /// service restart. It is counted under its own class and keeps no text, and it is FATAL-scoped, so the same words
+    /// at another severity are still a shape nobody anticipated.
+    /// </summary>
+    [Fact]
+    public void TheShuttingDownFatal_IsCountedNotRetained_AndOnlyAtFatal()
+    {
+        var census = StoreLogClassifier.Classify(DefaultPrefix + "FATAL:  the database system is shutting down\n");
+
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("shutdown_in_progress", group.EventClass);
+        Assert.False(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Null(group.MessageText);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  the database system is shutting down\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #9577: the startup twin of the shutting-down FATAL. A client that connects while the store is starting reads it on
+    /// every managed store restart. It is counted under its own class and keeps no text, and it is FATAL-scoped, so the same
+    /// words at another severity are still a shape nobody anticipated.
+    /// </summary>
+    [Fact]
+    public void TheStartingUpFatal_IsCountedNotRetained_AndOnlyAtFatal()
+    {
+        var census = StoreLogClassifier.Classify(DefaultPrefix + "FATAL:  the database system is starting up\n");
+
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("startup_in_progress", group.EventClass);
+        Assert.False(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Null(group.MessageText);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  the database system is starting up\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #9515: TimescaleDB's warning that a hypertable time column is a plain <c>timestamp</c> is expected, because the
+    /// store keeps UTC without a zone on purpose. It is counted under its own class and keeps no text, its HINT line is
+    /// part of the same entry and so is not a second unclassified entry, and any other WARNING is still unclassified.
+    /// </summary>
+    [Fact]
+    public void TheTimestampColumnWarning_IsCountedNotRetained_AndItsHintStaysWithIt()
+    {
+        var slab =
+            DefaultPrefix + "WARNING:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices\n"
+            + DefaultPrefix + "HINT:  Use datatype TIMESTAMPTZ instead.\n";
+
+        var census = StoreLogClassifier.Classify(slab);
+
+        Assert.Equal(1, census.EntriesRead);
+        Assert.Equal(1, census.ContinuationLines);
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("timescale_timestamp_column", group.EventClass);
+        Assert.False(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Null(group.MessageText);
+
+        var other = StoreLogClassifier.Classify(DefaultPrefix + "WARNING:  column type \"money\" used for \"amount\" is something else\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(other.Groups).EventClass);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #8814: an autovacuum PostgreSQL cancelled for a conflicting lock is its own retained class, because the
+    /// relation its CONTEXT names is the part worth reading. The TOAST relation comes out of the stored entry by name.
+    /// </summary>
+    [Fact]
+    public void TheAutovacuumCancel_IsItsOwnRetainedClass_WithTheRelationItNames()
+    {
+        var slab =
+            DefaultPrefix + "ERROR:  canceling autovacuum task\n"
+            + DefaultPrefix + "CONTEXT:  while scanning block 117439 of relation \"pg_toast.pg_toast_17428\"\n"
+            + "\tautomatic vacuum of table \"darling.pg_toast.pg_toast_17428\"\n";
+
+        var census = StoreLogClassifier.Classify(slab);
+
+        Assert.Equal(1, census.EntriesRead);
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("autovacuum_cancel", group.EventClass);
+        Assert.True(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Equal("canceling autovacuum task: darling.pg_toast.pg_toast_17428", group.MessageText);
+        var relation = StoreLogClassifier.ToastRelationOf(group.SampleLine);
+        Assert.Equal(new StoreLogClassifier.ToastRelationRef("darling", "pg_toast_17428"), relation);
+        Assert.Equal("darling.pg_toast.pg_toast_17428", relation!.Value.Qualified);
+
+        Assert.Null(StoreLogClassifier.ToastRelationOf(DefaultPrefix + "ERROR:  canceling autovacuum task\n"));
+        Assert.Null(StoreLogClassifier.ToastRelationOf(null));
+    }
+
+    /// <summary>
+    /// #8822: an autovacuum cancel is keyed on the relation its CONTEXT names, so two relations in one capture are two
+    /// rows with their own counts. A row an older build stored under the bare message keeps that key.
+    /// </summary>
+    [Fact]
+    public void TheAutovacuumCancel_IsOneRowPerRelation_AndAnOlderStoredRowKeepsItsKey()
+    {
+        static string Cancel(string table) =>
+            DefaultPrefix + "ERROR:  canceling autovacuum task\n"
+            + DefaultPrefix + "CONTEXT:  while scanning block 117439 of relation \"pg_toast." + table + "\"\n"
+            + "\tautomatic vacuum of table \"darling.pg_toast." + table + "\"\n";
+
+        var census = StoreLogClassifier.Classify(Cancel("pg_toast_1") + string.Concat(Enumerable.Range(0, 30).Select(_ => Cancel("pg_toast_2"))));
+
+        Assert.Equal(2, census.Groups.Count);
+        Assert.Equal(1, census.Groups.Single(g => g.MessageText == "canceling autovacuum task: darling.pg_toast.pg_toast_1").Occurrences);
+        Assert.Equal(30, census.Groups.Single(g => g.MessageText == "canceling autovacuum task: darling.pg_toast.pg_toast_2").Occurrences);
+
+        var sample = census.Groups[0].SampleLine!;
+        var (key, _) = StoreLogClassifier.MaskStoredEvent("autovacuum_cancel", "canceling autovacuum task", sample);
+        Assert.Equal("canceling autovacuum task", key);
+        (key, _) = StoreLogClassifier.MaskStoredEvent("autovacuum_cancel", census.Groups[0].MessageText, sample);
+        Assert.Equal(census.Groups[0].MessageText, key);
     }
 
     /// <summary>
@@ -1988,7 +2124,7 @@ public class StoreLogClassifierTests
         var sweep = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreLogSweep.cs");
 
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(sweep, "SHOW lc_messages"));
-        Assert.Contains("StoreLogClassifier.Classify(slab.Text, detailInEnglish)", sweep, StringComparison.Ordinal);
+        Assert.Contains("StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget, lastLineCut: slab.Cut)", sweep, StringComparison.Ordinal);
         Assert.Contains("StoreLogClassifier.IsEnglishLcMessages(value as string)", sweep, StringComparison.Ordinal);
         Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", sweep[sweep.IndexOf("SHOW lc_messages", StringComparison.Ordinal)..], StringComparison.Ordinal);
     }

@@ -92,7 +92,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             (SELECT x.query_sql_text FROM query_store_text AS x WHERE x.server_id = $1 AND x.database_name = $2 AND x.query_id = $3),
             (SELECT s.query_text FROM query_store_stats AS s
               WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3
-              AND s.collection_time >= $4 AND s.collection_time <= $5 AND s.query_text IS NOT NULL
+              AND s.collection_time > $4 AND s.collection_time <= $5 AND s.query_text IS NOT NULL
               ORDER BY s.collection_time DESC, s.collection_id DESC LIMIT 1))
         """;
 
@@ -117,7 +117,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
     internal const string JobNamesSql = """
         SELECT DISTINCT job_name, step_name
         FROM job_history
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
         AND (job_name ~* '\mforc(e|es|ed|ing)\M' OR step_name ~* '\mforc(e|es|ed|ing)\M')
         ORDER BY job_name, step_name
         LIMIT 20
@@ -229,6 +229,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
 
     private static string Unbracket(string? name) => (name ?? "").Trim().TrimStart('[').TrimEnd(']');
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_plan_force_precheck"), Description(
         "Reads one Query Store plan before anyone forces it. This read blocks only a force that cannot work: verdict blocked when the plan is not among the query's Query Store rows (plan_not_found) or is already the query's forced plan (plan_already_forced), else not_blocked, which never means the force is safe or will help. " +
         "Everything else that fired is a warning, never a block: the agent's own instructions decide what to do with it. Each warning carries a stable code, one sentence and the evidence. <<GUIDE>> " +

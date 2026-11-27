@@ -18,6 +18,11 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="PercentUsed"><c>Used / Total * 100</c>, 0 to 100, to four decimals.</param>
 public readonly record struct IdentityCapacity(BigInteger Used, BigInteger Total, BigInteger Remaining, double PercentUsed);
 
+/// <summary>The graded band of one column and the bar that set it (#8818).</summary>
+/// <param name="Band">ok, warning or critical.</param>
+/// <param name="Reason">"percent" or "days", the grade that set the band. Null when the band is ok.</param>
+public readonly record struct IdentityBand(string Band, string? Reason);
+
 /// <summary>
 /// How fast a column is filling, from two stored samples of its last value: <see cref="StepsPerDay"/> identity values issued per day
 /// (one step is one increment, so it is in the same unit as <see cref="IdentityCapacity.Remaining"/>) and <see cref="DaysLeft"/>, the days
@@ -65,6 +70,48 @@ public static class IdentityCapacityMath
     /// <summary>The band against bars other than the defaults: the Identity Capacity alert uses the bars that apply to a column's server and database (a threshold override). Critical from <paramref name="criticalPercent"/> up, warning from <paramref name="warningPercent"/>.</summary>
     public static string Band(double percentUsed, double warningPercent, double criticalPercent) =>
         percentUsed >= criticalPercent ? BandCritical : percentUsed >= warningPercent ? BandWarning : BandOk;
+
+    /// <summary>The days left under which a column reads as warning (#8818). Fixed: the days bars are not settings.</summary>
+    public const double WarningDays = 30.0;
+
+    /// <summary>The days left under which a column reads as critical (#8818). Fixed: the days bars are not settings.</summary>
+    public const double CriticalDays = 7.0;
+
+    /// <summary><see cref="IdentityBand.Reason"/> when the percent used set the band.</summary>
+    public const string ReasonPercent = "percent";
+
+    /// <summary><see cref="IdentityBand.Reason"/> when the days left set the band.</summary>
+    public const string ReasonDays = "days";
+
+    /// <summary>
+    /// The band of a column from BOTH grades, the worse one winning (#8818): the percent used against <paramref name="warningPercent"/> and
+    /// <paramref name="criticalPercent"/>, and the days left against <see cref="WarningDays"/> and <see cref="CriticalDays"/>. A column filling fast
+    /// is near the end whatever its percent: a 67 percent column with 16 days left is warning. A null <paramref name="daysLeft"/> (one sample, no
+    /// movement, a reseed) grades the percent alone. The reason is "percent" or "days", whichever set the band (percent when both did), and null
+    /// when the band is ok.
+    /// </summary>
+    public static IdentityBand Grade(double percentUsed, double? daysLeft, double warningPercent = WarningPercent, double criticalPercent = CriticalPercent)
+    {
+        var byPercent = Band(percentUsed, warningPercent, criticalPercent);
+        var byDays = daysLeft is double days
+            ? days < CriticalDays ? BandCritical : days < WarningDays ? BandWarning : BandOk
+            : BandOk;
+
+        if (Rank(byDays) > Rank(byPercent))
+        {
+            return new IdentityBand(byDays, ReasonDays);
+        }
+
+        return new IdentityBand(byPercent, byPercent == BandOk ? null : ReasonPercent);
+    }
+
+    /// <summary>How bad a band word is: ok 0, warning 1, critical 2. For comparing columns, never shown.</summary>
+    public static int Rank(string? band) => band switch
+    {
+        BandCritical => 2,
+        BandWarning => 1,
+        _ => 0,
+    };
 
     /// <summary>The most columns kept per database per pass.</summary>
     public const int MaxColumnsPerDatabase = 20;

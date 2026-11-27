@@ -108,6 +108,22 @@ WITH latest AS (
 SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
+    /// <summary>The database-size read as shipped before #5516, and the fallback of the newest-snapshot read until #9049: the newest row per
+    /// file over every row of the lookback. An oracle, never run by the product.</summary>
+    internal const string FullLookbackDatabaseSizeSql = @"
+WITH latest AS (
+    SELECT database_name, file_name, size_mb,
+           ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+)
+SELECT SUM(size_mb) AS total_size_mb
+FROM latest
+WHERE rn = 1";
+
     private static readonly string[] s_counters = ["Batch Requests/sec", "SQL Compilations/sec", "SQL Re-Compilations/sec"];
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -179,7 +195,7 @@ VALUES ($1, $2, $3, 'newest-snapshot-e2e', 'SQLServer:SQL Statistics', $4, '', $
     /// <summary>The oracle: the pre-#5516 full read, over the same bounds the product binds.</summary>
     private static async Task<double?> OldDatabaseSizeAsync(NpgsqlConnection c, AnalysisContext context, CancellationToken ct)
     {
-        using var cmd = new NpgsqlCommand(PgFactCollector.DatabaseSizeSql, c);
+        using var cmd = new NpgsqlCommand(FullLookbackDatabaseSizeSql, c);
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(Naive(context.LatestValueStartFor("file_io_stats")));
         cmd.Parameters.AddWithValue(Naive(context.TimeRangeEnd));
@@ -330,9 +346,9 @@ VALUES ($1, $2, $3, 'newest-snapshot-e2e', 'SQLServer:SQL Statistics', $4, '', $
     }
 
     /// <summary>
-    /// The one accepted difference from the full read (#5516): a file seen only in snapshots strictly between the
+    /// An accepted difference from a read of the whole lookback (#5516): a file seen only in snapshots strictly between the
     /// two probed ones (the oldest in the lookback and the one just before the newest) is not carried by the cheap
-    /// path, where the full read carried it as a ghost for up to 24 hours. Pinned so a change to it is deliberate:
+    /// path, where a read of the whole lookback carries it as a ghost for up to 24 hours. Pinned so a change to it is deliberate:
     /// if the probe ever closes the gap the cheap total will include the file and this test will say so.
     /// </summary>
     [Fact]
@@ -369,8 +385,84 @@ VALUES ($1, $2, $3, 'newest-snapshot-e2e', 'SQLServer:SQL Statistics', $4, '', $
 
         Assert.Equal(5000 + 100, old);
         Assert.Equal(100, cheap);
-        Assert.False(droppedOut, "the probe sees neither snapshot with the file, so the full read is not asked");
+        Assert.False(droppedOut, "the probe sees neither snapshot with the file, so the fallback is not asked");
         Assert.Equal(100, await ShippedDatabaseSizeFactAsync(postgres, context));
+    }
+
+    /// <summary>
+    /// #9049: when a file has dropped out of the newest snapshot, the fact takes each file's row from the newest of
+    /// three snapshots that holds it: the newest, the one just before it, and the oldest in the lookback. A read of
+    /// every row of the lookback to find a dropped file's last row sorts them all: 6.4 million rows for a server
+    /// with 4,471 files sampled each minute. Two differences from that full read are accepted and pinned here by value: a dropped
+    /// file last seen strictly between the oldest snapshot and the one before the newest counts at the oldest
+    /// snapshot's size, and a file seen only strictly between those two is not counted.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeFact_TakesADroppedFilesSizeFromTheProbedSnapshots_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live newest-snapshot size test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var end = Now();
+        DateTime At(int minutesAgo) => end.AddMinutes(-minutesAgo);
+        int[] every = [1380, 900, 600, 30, 0];
+
+        /* 1: file G is in the oldest snapshot (500) and in the one before the newest (800), and not in the newest:
+           the snapshot before the newest wins, which is the full read's answer too. */
+        const int inBoth = -904_901;
+        foreach (var m in every)
+        {
+            await FileIoAsync(c, inBoth, At(m), "Db", "A", 100, ct);
+        }
+
+        await FileIoAsync(c, inBoth, At(1380), "Gone", "G", 500, ct);
+        await FileIoAsync(c, inBoth, At(30), "Gone", "G", 800, ct);
+
+        /* 2: file G is in the oldest snapshot (500) and was last seen 15 hours ago (700), between the two probed
+           snapshots: the full read answers 700, the fact answers with the oldest snapshot's 500. */
+        const int lastSeenBetween = -904_902;
+        foreach (var m in every)
+        {
+            await FileIoAsync(c, lastSeenBetween, At(m), "Db", "A", 100, ct);
+        }
+
+        await FileIoAsync(c, lastSeenBetween, At(1380), "Gone", "G", 500, ct);
+        await FileIoAsync(c, lastSeenBetween, At(900), "Gone", "G", 700, ct);
+
+        /* 3: file C dropped out of the newest snapshot (so the fallback runs), and file X was seen only 15 hours ago,
+           in neither probed snapshot: the full read carries X, the fact does not. */
+        const int onlyBetween = -904_903;
+        foreach (var m in every)
+        {
+            await FileIoAsync(c, onlyBetween, At(m), "Db", "A", 100, ct);
+        }
+
+        foreach (var m in new[] { 1380, 900, 600, 30 })
+        {
+            await FileIoAsync(c, onlyBetween, At(m), "Db", "C", 300, ct);
+        }
+
+        await FileIoAsync(c, onlyBetween, At(900), "Staging", "X", 5000, ct);
+
+        foreach (var serverId in new[] { inBoth, lastSeenBetween, onlyBetween })
+        {
+            var (_, droppedOut) = await NewestDatabaseSizeAsync(c, Context(serverId, end), ct);
+            Assert.True(droppedOut, $"server {serverId}: a file of a probed snapshot is missing from the newest one");
+        }
+
+        Assert.Equal(100 + 800, await OldDatabaseSizeAsync(c, Context(inBoth, end), ct));
+        Assert.Equal(100 + 800, await ShippedDatabaseSizeFactAsync(postgres, Context(inBoth, end)));
+
+        Assert.Equal(100 + 700, await OldDatabaseSizeAsync(c, Context(lastSeenBetween, end), ct));
+        Assert.Equal(100 + 500, await ShippedDatabaseSizeFactAsync(postgres, Context(lastSeenBetween, end)));
+
+        Assert.Equal(100 + 300 + 5000, await OldDatabaseSizeAsync(c, Context(onlyBetween, end), ct));
+        Assert.Equal(100 + 300, await ShippedDatabaseSizeFactAsync(postgres, Context(onlyBetween, end)));
     }
 
     /// <summary>
@@ -506,7 +598,7 @@ FROM generate_series($2::timestamp, $3::timestamp, interval '1 minute') AS t CRO
         var context = Context(serverId, end);
         var lookback = context.LatestValueStartFor("file_io_stats");
 
-        var oldSize = await BlocksAsync(c, PgFactCollector.DatabaseSizeSql, [serverId, lookback, end], ct);
+        var oldSize = await BlocksAsync(c, FullLookbackDatabaseSizeSql, [serverId, lookback, end], ct);
         var newSize = await BlocksAsync(c, PgFactCollector.DatabaseSizeNewestSql, [serverId, lookback, end], ct);
         var oldPerfmon = await BlocksAsync(c, WindowFunctionPerfmonSql, [serverId, context.TimeRangeStart, end], ct);
         var newPerfmon = await BlocksAsync(c, PgFactCollector.PerfmonSql, [serverId, context.TimeRangeStart, end], ct);

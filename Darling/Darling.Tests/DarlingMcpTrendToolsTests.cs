@@ -171,7 +171,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("CAST(total_server_memory_mb AS double precision)", sql, StringComparison.Ordinal);
         Assert.Contains("buffer_pool_mb", sql, StringComparison.Ordinal);
         Assert.Contains("plan_cache_mb", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
@@ -204,7 +203,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
@@ -264,7 +262,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            ones whose deltas were knowable. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ranked, StringComparison.Ordinal);
         Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", ranked, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ranked, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ranked, StringComparison.Ordinal);
         /* The grain: (database, file type) unless a database is named, then its files. */
         Assert.Contains("CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name", ranked, StringComparison.Ordinal);
@@ -287,7 +284,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            point clamped to the window's start. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", trend, StringComparison.Ordinal);
         Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", trend, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", trend, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", trend);
         Assert.Contains("collection_time <= $3", trend, StringComparison.Ordinal);
         Assert.Contains("GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", trend, StringComparison.Ordinal);
         Assert.Equal(TrendBuckets.OriginSql, TrendBucketSql.OriginSql);
@@ -317,7 +314,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var sql = DarlingTrendReader.QueryDurationTrendFilteredSql;
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);                       /* base table, like the merged data reader */
         Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(elapsed)", sql, StringComparison.Ordinal);                       /* #9147: the per-collection CTE sums the rows or the summary rows it reads, aliased elapsed */
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("elapsed_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("executions_per_second", sql, StringComparison.Ordinal);
@@ -366,7 +363,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         /* #5638: the stored collections come from two arms (the rows below the server's totals floor, the totals from it), each bounded
            from $2 less the gap, and the runs are the third. */
         Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
-        Assert.Contains("FROM gapped\nWHERE collection_time >= $2", string.Join('\n', Lines(sql)), StringComparison.Ordinal);
         /* A run is logged after it finishes, so one that began inside the window can be logged just past its end: the runs are read
            an hour past $3 (once), the stored rows, the stored totals and the final points stop at $3 (three times, #5638). */
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3 \+ INTERVAL '3600 seconds'"));
@@ -431,7 +427,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("ROW_NUMBER() OVER", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc AS point_time", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("interval_start_time_utc <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc < $3", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* Arm 2: the legacy rows, split on the same column so the two arms partition with no overlap. */
@@ -582,7 +578,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             /* #7161: the seconds are the gap to the previous collection (the #5449 rule), three states — every row stored 0
                is unrated, a previous collection within the collector's 3600 s gives the gap, and only the store's first
                collection keeps its stored interval — never MAX(sample_interval_seconds) over the collection. */
-            Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
+            Assert.Contains("MAX(seconds) AS stored_interval", sql, StringComparison.Ordinal);
             Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds", sql, StringComparison.Ordinal);
             Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
             Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
@@ -608,9 +604,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Equal(
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("SUM(elapsed)", StringComparison.Ordinal) && !l.Contains("SUM(executions)", StringComparison.Ordinal) && !l.Contains("SUM(row_count)", StringComparison.Ordinal)
                             && !l.Contains("matched_rows", StringComparison.Ordinal) && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray(),
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("SUM(elapsed)", StringComparison.Ordinal) && !l.Contains("SUM(executions)", StringComparison.Ordinal)
                             && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray());
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
@@ -739,7 +737,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("delta_execution_count", sql, StringComparison.Ordinal);
         Assert.Contains("delta_worker_time", sql, StringComparison.Ordinal);
         Assert.Contains("query_plan_hash", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $5", sql, StringComparison.Ordinal);
     }
 

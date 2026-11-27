@@ -105,6 +105,28 @@ public sealed record OptionalTable(
     /// <summary>True adds a constant <c>darling_schema_version</c> column to every row, the way <c>snapshot_time</c>
     /// is added for D tables.</summary>
     public bool StampSchemaVersion { get; init; }
+
+    /// <summary>
+    /// True for a table that carries <c>server_id</c> but no <c>server_name</c> of its own. Column discovery never
+    /// reads <c>server_id</c> (it is local to one store), so without this the rows would leave the store with no server
+    /// identity. The read adds <c>server_name</c>, looked up by primary key in <c>collect.servers</c>. A row whose
+    /// <c>server_id</c> is NULL, or names a server no longer in <c>collect.servers</c>, gets a NULL <c>server_name</c>.
+    /// </summary>
+    public bool ResolveServerName { get; init; }
+
+    /// <summary>
+    /// True for a table whose identity or serial columns are real keys that other exported rows point at (for example
+    /// <c>config.query_tags.id</c>, which <c>query_tag_map.tag_id</c> names). Column discovery normally leaves those
+    /// out as store-local row numbers; here it keeps them.
+    /// </summary>
+    public bool KeepIdentityColumns { get; init; }
+
+    /// <summary>
+    /// True when <see cref="TimeColumn"/> is <c>timestamptz</c>. The window bounds are sent as timestamps with no zone,
+    /// and a <c>timestamptz</c> column compared to one is read in the session's TimeZone setting. This flag makes the
+    /// read take the bounds as UTC instead, so the window does not move with a store's TimeZone.
+    /// </summary>
+    public bool TimeColumnHasTimeZone { get; init; }
 }
 
 /// <summary>
@@ -130,10 +152,11 @@ public static class OptionalTables
     private const string Group7c = "7c";
 
     /// <summary>
-    /// The newest schema rung that the <c>pg_log_events</c> parsing rewrite lands in. Not yet known, so it is pinned to
-    /// <c>int.MaxValue</c> and the table is always skipped by the schema gate until this constant is updated.
+    /// The oldest store schema whose <c>pg_log_events</c> rows the export trusts. The parsing rewrite (#4501) merged at
+    /// rung 152, a named <c>log_timezone</c> fix (#6866) at rung 221, and the RDS stderr portion carry (#7186) at rung
+    /// 239, the newest change to how the collector parses a log line. A store below 239 is skipped by the schema gate.
     /// </summary>
-    public const int PgLogEventsMinSchema = int.MaxValue;
+    public const int PgLogEventsMinSchema = 239;
 
     public static readonly IReadOnlyList<OptionalTable> All =
     [
@@ -144,8 +167,12 @@ public static class OptionalTables
             Change = new ChangeSpec(["server_name", "database_name", "recommendation_name"],
                 ["last_refresh", "score", "estimated_gain_seconds"]),
         },
-        new("default_trace_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Blocked,
-            "Blocked(LATER): text-heavy, carries text_data."),
+        new("default_trace_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Text-heavy: every column is exported, including text_data, in clear (owner approval 2026-11-26). " +
+            "Index idx_default_trace_events_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 21,
+        },
         new("memory_grant_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
             "Numeric only, small.")
         {
@@ -162,10 +189,18 @@ public static class OptionalTables
             Grain = ExportGrain.Hourly,
             RollupName = "session_summary_stats_hourly",
         },
-        new("waiting_tasks", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Blocked,
-            "Blocked(OUT): 7-day retention; tiny row rate."),
-        new("dmv_blocking_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Blocked,
-            "Blocked(OUT): text-heavy blocked/blocking SQL text; row count is usually zero."),
+        new("waiting_tasks", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Waiting-task samples; every column is exported (owner approval 2026-11-26). 7-day retention, tiny row rate. " +
+            "Index idx_waiting_tasks_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 243,
+        },
+        new("dmv_blocking_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Text-heavy: every column is exported, including the blocked and blocking SQL text, in clear. The owner ruled on 2026-11-19 to keep statement text, the same as the deadlock and blocked-process reports, and approved this table on 2026-11-26. " +
+            "Row count is usually zero. Index idx_dmv_blocking_snapshots_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 199,
+        },
         new("memory_clerks", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
             "numeric only, small."),
         new("memory_pressure_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
@@ -268,8 +303,110 @@ public static class OptionalTables
         },
         new("servers", Collect, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
             "Daily snapshot: the exporter stamps snapshot_time and exports it only in the 00:00Z fresh window."),
-        new("query_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7b, OptionalTableStatus.Blocked,
-            "Blocked(LATER): inline query_plan/live_query_plan handled specially; live_query_plan is never selected, query_plan is parsed and dropped from the fact row."),
+        new("attention_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Client-timeout events. All columns are exported, including statement_text and client_hostname, in clear: the owner ruled on 2026-11-19 to keep them, the same as the deadlock and blocked-process reports. " +
+            "Index (server_id, collection_time) serves the window read. #8967 makes it a hypertable on a store with the extension, outside the compression grid (CompressionOffGrid), with a compression policy of its own (#9216), so a window read of an older day decompresses only the batches whose collection_time range overlaps the window, not the whole chunk. " +
+            "The swapped-out attention_events_legacy and attention_events_legacy_copy tables are never read.")
+        {
+            MinDarlingSchemaVersion = 179,
+        },
+        new("column_stats", Collect, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Blocked,
+            "Blocked(LATER): current-state rows replaced in place, no collection_time (read_at), so it would be a daily whole-table snapshot like servers. " +
+            "Its columns text[] has no DuckDbTypeMapper entry and the exporter has no array path, so a read would fail on that column.")
+        {
+            MinDarlingSchemaVersion = 272,
+        },
+        new("column_stats_runs", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Run log, one row per database per run, plain table. Index (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 272,
+        },
+        new("query_store_hints", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Query Store hints per database; every column is exported, including query_hint_text. Index idx_query_store_hints_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 217,
+        },
+        new("query_store_forced_plans", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Forced plans per database; every column is exported. Index idx_query_store_forced_plans_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 201,
+        },
+        new("object_inventory", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Object inventory per database; every column is exported. Index idx_object_inventory_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 268,
+        },
+        new("object_dependencies", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Object dependencies per database; every column is exported. Index idx_object_dependencies_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 297,
+        },
+        new("identity_capacity", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Identity-column capacity per table; every column is exported. Index idx_identity_capacity_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 224,
+        },
+        new("database_protection", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Backup and CHECKDB state per database, with the error-log columns; every column is exported. Index idx_database_protection_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 278,
+        },
+        new("object_usage_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "One row per snapshot of a database in the object-usage chain; every column is exported. The table has no server_name, so the read adds it from collect.servers (ResolveServerName). " +
+            "NO USABLE INDEX for a window read: the only index is the primary key (server_id, database_name, collection_time), which does not lead with the time column. " +
+            "Needs an index on (collection_time) or (server_id, collection_time) before the EXPLAIN gate can pass.")
+        {
+            MinDarlingSchemaVersion = 299,
+            ResolveServerName = true,
+        },
+        new("object_usage_deltas", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "One row per index a chain step contributed to or moved; every column is exported. The table has no server_name, so the read adds it from collect.servers (ResolveServerName). " +
+            "NO USABLE INDEX for a window read: the only index is the primary key (server_id, database_name, collection_time, object_id, index_id), which does not lead with the time column. " +
+            "Needs an index on (collection_time) or (server_id, collection_time) before the EXPLAIN gate can pass.")
+        {
+            MinDarlingSchemaVersion = 299,
+            ResolveServerName = true,
+        },
+        new("query_tag_sightings", Collect, "last_seen", OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Upserted state table with no collection_time: it is filtered on last_seen, so each window exports the rows touched in that hour (first_seen and seen_count come with the row). " +
+            "last_seen is timestamptz, so the read takes the window bounds as UTC (TimeColumnHasTimeZone). The table has no server_name, so the read adds it from collect.servers (ResolveServerName). " +
+            "Column policy drops text_sample (up to 4,000 characters of query text); every other column is exported. " +
+            "Index idx_query_tag_sightings_last_seen (last_seen) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 192,
+            ResolveServerName = true,
+            TimeColumnHasTimeZone = true,
+        },
+        new("query_tags", Config, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
+            "Daily snapshot of the query tag set (config schema, small, no time column); every column is exported. Its id is kept, because query_tag_assignments, query_tag_rules and query_tag_map name a tag by it. Read whole, so a Seq Scan is accepted.")
+        {
+            MinDarlingSchemaVersion = 192,
+            KeepIdentityColumns = true,
+        },
+        new("query_tag_assignments", Config, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
+            "Daily snapshot of hand assignments of a tag to a query hash or an object (config schema, small); every column is exported. Its id is kept. The table has no server_name, so the read adds it from collect.servers; NULL means the assignment applies to every server. Read whole, so a Seq Scan is accepted.")
+        {
+            MinDarlingSchemaVersion = 192,
+            KeepIdentityColumns = true,
+            ResolveServerName = true,
+        },
+        new("query_tag_rules", Config, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
+            "Daily snapshot of the query tag rules (config schema, small); every column is exported. Its id is kept, because query_tag_map.rule_id names a rule by it. The table has no server_name, so the read adds it from collect.servers; NULL means the rule applies to every server. Read whole, so a Seq Scan is accepted.")
+        {
+            MinDarlingSchemaVersion = 192,
+            KeepIdentityColumns = true,
+            ResolveServerName = true,
+        },
+        new("query_tag_map", Config, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
+            "Daily snapshot of the materialised tag map, one tag per (server, key kind, key) (config schema, small); every column is exported. The table has no server_name, so the read adds it from collect.servers. Read whole, so a Seq Scan is accepted.")
+        {
+            MinDarlingSchemaVersion = 192,
+            ResolveServerName = true,
+        },
+        new("query_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7b, OptionalTableStatus.Candidate,
+            "Column policy drops query_plan and live_query_plan from the fact row, on purpose: plan XML reaches the export through plan_shape, plan_features, plan_warnings and plan_missing_indexes, not inline. " +
+            "live_query_plan is never selected. query_plan is read once per row only to build those plan tables. Every other column is exported. " +
+            "Index idx_query_snapshots_time (server_id, collection_time) serves the window read."),
 
         // 7c: the Postgres store's pg_* tables. Only the Postgres store has rows in these; they exist but are empty on
         // a large store. Time column pinned as collection_time for every one, from the Postgres store schema
@@ -280,8 +417,15 @@ public static class OptionalTables
             Grain = ExportGrain.Daily,
             DailyLookbackHours = 2,
         },
-        new("pg_blocking_edges", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(LATER): text-heavy blocked_query/blocking_query SQL text."),
+        new("pg_blocking_edges", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Text-heavy: every column is exported, including blocked_query and blocking_query, in clear (owner approval 2026-11-26). " +
+            "Index idx_pg_blocking_edges_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 71,
+        },
+        new("pg_buffer_usage", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Shared-buffer residency per relation (pg_buffercache); numbers and catalog names only. A pool over 16 GB "
+            + "writes one totals row per run with buffers NULL."),
         new("pg_column_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Planner column statistics; numeric/state only.")
         {
@@ -308,8 +452,12 @@ public static class OptionalTables
         },
         new("pg_deadlocks", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Text-heavy: victim_statement, graph_text."),
-        new("pg_extension_availability", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(OUT): numeric/state only, small."),
+        new("pg_extension_availability", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "State only, small; every column is exported (owner approval 2026-11-26). " +
+            "Index idx_pg_extension_availability_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 95,
+        },
         new("pg_index_bloat", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Numeric only.")
         {
@@ -328,8 +476,8 @@ public static class OptionalTables
             Grain = ExportGrain.Hourly,
             RollupName = "pg_io_stats_hourly",
         },
-        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(LATER): numeric/state only, small."),
+        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Numeric/state only, small. A one-hour read uses the collection_time index."),
         new("pg_log_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Text-heavy: message/detail/context from the Postgres log; keep-only column list.")
         {
@@ -355,8 +503,12 @@ public static class OptionalTables
             Grain = ExportGrain.Change,
             Change = new ChangeSpec(["server_name", "name", "database_name", "role_name"], ["short_desc"]),
         },
-        new("pg_session_states", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(OUT): session snapshot rows; mildly text-heavy (query text is not carried, only ids/state)."),
+        new("pg_session_states", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Session snapshot rows; every column is exported, including username and client_addr (owner approval 2026-11-26). No query text is carried, only ids and state. " +
+            "Index idx_pg_session_states_time (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 86,
+        },
         new("pg_statement_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Very large; needs its index-range read proven by EXPLAIN before it is offered.")
         {
@@ -476,6 +628,11 @@ public static class OptionalTables
             if (entry.Kind == OptionalTableKind.Dimension && entry.Grain != ExportGrain.Event)
             {
                 throw new InvalidOperationException($"'{entry.Name}' is a Dimension but Grain is not Event.");
+            }
+
+            if (entry.TimeColumnHasTimeZone && (entry.Kind != OptionalTableKind.Window || entry.TimeColumn is null))
+            {
+                throw new InvalidOperationException($"'{entry.Name}' sets TimeColumnHasTimeZone but is not a Window table with a time column.");
             }
         }
     }

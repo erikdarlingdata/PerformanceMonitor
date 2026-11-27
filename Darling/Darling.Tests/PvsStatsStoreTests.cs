@@ -40,15 +40,6 @@ public sealed class PvsStatsStoreTests
         var v47 = PgMigrations.Scripts.Single(m => m.Version == 47);
 
         Assert.Equal("pvs-stats", v47.Name);
-        /* V48 (#1984, the PVS-pressure alert knobs), then V49 (#1986, the database-state alert), then V50
-           (#2008 2a, the server-tag colour), then V51 (#2012 stage 2, the query-stats host object), then V52
-           (#2060, the persisted finding drill-down), then V53 (#2068, the store self-metrics table) followed
-           this migration — the newest-rung pins track the newest, the V47 identity pins below are
-           unchanged. */
-        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
-           the newest registered rung. Three in-flight branches bumping versions made the literal form a
-           recurring multi-test failure (#2210 round, again here at V62). */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);

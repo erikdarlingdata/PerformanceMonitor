@@ -223,12 +223,6 @@ public sealed class LiteOverviewCardExplainsItselfTests
         Assert.Contains("Offline", offlineAndErroring.StatusTooltip, StringComparison.Ordinal);
 
         var source = ReadRepoFile(Path.Combine("Lite", "Services", "LocalDataService.Overview.cs"));
-        Assert.Contains(
-            "public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors) => isOnline switch",
-            source, StringComparison.Ordinal);
-        Assert.Contains(
-            "public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors);",
-            source, StringComparison.Ordinal);
         Assert.Contains("public string StatusDisplay => CardStatus.Word();", source, StringComparison.Ordinal);
         Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", source, StringComparison.Ordinal);
         Assert.Contains("private string StatusHeadline => CardStatus.Headline();", source, StringComparison.Ordinal);

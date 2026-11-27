@@ -1131,7 +1131,7 @@ LIMIT 1";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, cancellationToken);
 
             /* The successor/legacy supply swap is the SQL Server pair's (#3653) and compares the text against this
                class's own unkeyed successor arm; a keyed arm's text never matches it, so the swap is inert for a keyed
@@ -1153,6 +1153,20 @@ LIMIT 1";
                 && supplyFloor > windowStart)
             {
                 windowStart = supplyFloor;
+            }
+
+            /* #9152: a replay whose analysis time falls between now minus the retention and the oldest row the store keeps
+               has no window left once the two floors above move the start up: the start lands at or after the end. That
+               is the expected answer for such a replay (nothing is kept for the metric that far back), not a fault: it is
+               "no baseline for this metric", the way a metric with no arm answers, and it must not reach
+               BaselineLocalClock.Resolve (which throws on an end before the start) or the catch below (which logs a
+               failed baseline). Not Faulted, so the answer is cached like any other empty one. */
+            if (windowStart >= windowEnd)
+            {
+                _logger?.LogDebug(
+                    "[PgBaselineProvider] No baseline for {MetricName}: the retained history starts at {WindowStart:o}, at or after the window end {WindowEnd:o}",
+                    metricName, windowStart, windowEnd);
+                return (null, clock, null, null, false);
             }
 
 
@@ -1339,6 +1353,80 @@ tier_mads AS (
     JOIN tier_stats AS t
       ON t.hour_of_day = k.hour_of_day
      AND t.day_of_week = k.day_of_week
+    GROUP BY t.hour_of_day, t.day_of_week
+)
+SELECT t.hour_of_day, t.day_of_week, t.mean_val, t.stddev_val, t.sample_count, t.distinct_days,
+       t.median_val, m.mad_val
+FROM tier_stats AS t
+JOIN tier_mads AS m
+  ON m.hour_of_day = t.hour_of_day
+ AND m.day_of_week = t.day_of_week";
+
+    /// <summary>
+    /// #8570: <see cref="RobustTierScaffold"/> for the two arms that read a raw hypertable at per-file-row grain over the
+    /// 30-day window (<see cref="MetricNames.IoLatency"/> and <see cref="MetricNames.IoWriteLatency"/>), where a busy server
+    /// puts about a million rows through it. It returns the same eight columns for the same rows. Three things differ, all in
+    /// how much it sorts and spills:
+    /// <list type="bullet">
+    /// <item>The MAD pass joins each tier's median to the rows once per tier and aggregates the three joins separately, then
+    /// stacks the three results. The scaffold's form expands every row three times, sorts the 3.4 million rows by tier key and
+    /// merge joins them, which is the largest sort and temp file of the statement. Each row belongs to exactly three tiers, so
+    /// both forms feed the same values to the same <c>percentile_cont</c> per tier.</item>
+    /// <item>The local clock is written once and the hour, day of week and date are read from it. PostgreSQL may still
+    /// evaluate it for each use. The saving is <c>date_part</c> in place of <c>EXTRACT</c>, which builds a <c>numeric</c>.</item>
+    /// <item>hour and day of week are <c>SMALLINT</c>, so the rows the sorts and the materialized rows carry are narrower,
+    /// and each tier joins on its own keys in the MAD pass.</item>
+    /// </list>
+    /// A row's hour and day of week are never NULL here (the clock expression of a non-NULL <c>collection_time</c>), so the
+    /// <c>-1</c> tier keys come from GROUPING SETS exactly as in the scaffold. An arm using this ends in the same
+    /// <c>clean(collection_time, v)</c> CTE, and the statement binds <c>$4</c> to <c>$6</c> like every other arm.
+    /// </summary>
+    internal const string RobustTierScaffoldWide = @"
+local_clock AS (
+    SELECT v, " + LocalCollectionTime + @" AS lt
+    FROM clean
+),
+keyed AS (
+    SELECT v,
+           date_part('hour', lt)::SMALLINT AS hh,
+           date_part('dow', lt)::SMALLINT AS dw,
+           lt::DATE AS d
+    FROM local_clock
+),
+tier_stats AS (
+    SELECT COALESCE(hh, -1)::INT AS hour_of_day,
+           COALESCE(dw, -1)::INT AS day_of_week,
+           AVG(v) AS mean_val,
+           STDDEV_SAMP(v) AS stddev_val,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS median_val,
+           COUNT(*) AS sample_count,
+           COUNT(DISTINCT d) AS distinct_days
+    FROM keyed
+    GROUP BY GROUPING SETS ((hh, dw), (hh), ())
+),
+tier_mads AS (
+    SELECT t.hour_of_day, t.day_of_week,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(k.v - t.median_val)) AS mad_val
+    FROM keyed AS k
+    JOIN tier_stats AS t
+      ON t.hour_of_day = k.hh
+     AND t.day_of_week = k.dw
+    GROUP BY t.hour_of_day, t.day_of_week
+    UNION ALL
+    SELECT t.hour_of_day, t.day_of_week,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(k.v - t.median_val))
+    FROM keyed AS k
+    JOIN tier_stats AS t
+      ON t.hour_of_day = k.hh
+     AND t.day_of_week = -1
+    GROUP BY t.hour_of_day, t.day_of_week
+    UNION ALL
+    SELECT t.hour_of_day, t.day_of_week,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(k.v - t.median_val))
+    FROM keyed AS k
+    CROSS JOIN tier_stats AS t
+    WHERE t.hour_of_day = -1
+    AND   t.day_of_week = -1
     GROUP BY t.hour_of_day, t.day_of_week
 )
 SELECT t.hour_of_day, t.day_of_week, t.mean_val, t.stddev_val, t.sample_count, t.distinct_days,
@@ -1669,7 +1757,7 @@ WITH clean AS (
     FROM file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   (delta_reads > 0 OR delta_writes > 0)
-)," + RobustTierScaffold,
+)," + RobustTierScaffoldWide,
 
             /* #7644: the Overview strip's unit. The arm above judges each FILE ROW, so a file with ten slow reads weighs as much as the
                busy file with ten thousand fast ones, and the band sat far from the line the strip draws (reads-weighted per collection:
@@ -1700,7 +1788,7 @@ WITH clean AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
     AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
-)," + RobustTierScaffold,
+)," + RobustTierScaffoldWide,
 
             // Event-based (#4731) — mean = events per COVERED day for this bucket, sample_count = covered days: the days
             // on which the event's own collector logged a SUCCESS run in the hour, or that hold events in it. A covered

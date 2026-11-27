@@ -127,6 +127,9 @@ internal sealed class FakeWebPeer : IAsyncDisposable
     /// always a managed store).</summary>
     internal bool AdminWritesOff;
 
+    /// <summary>#9203: the <c>build</c> this store's <c>/api/session</c> reports. Null is a store on an older build, which says none.</summary>
+    internal string? Build;
+
     /// <summary>Forgets every session, as a restart would.</summary>
     internal void ForgetSessions()
     {
@@ -242,7 +245,8 @@ internal sealed class FakeWebPeer : IAsyncDisposable
         if (context.Request.Path.Value == "/api/session")
         {
             await context.Response.WriteAsync(
-                "{\"can_edit\":true,\"managed_store\":" + (AdminWritesOff ? "true" : "false") + ",\"admin_writes_off\":" + (AdminWritesOff ? "true" : "false") + "}");
+                "{\"can_edit\":true,\"managed_store\":" + (AdminWritesOff ? "true" : "false") + ",\"admin_writes_off\":" + (AdminWritesOff ? "true" : "false")
+                + (Build is null ? "" : ",\"build\":\"" + Build + "\"") + "}");
             return;
         }
 

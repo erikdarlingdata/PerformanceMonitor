@@ -703,7 +703,8 @@ namespace PerformanceMonitor.Common
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
 
-        /// <summary>Available worker threads = ceiling - in-use, or null with no scheduler snapshot.</summary>
+        /// <summary>Worker threads the ceiling leaves after the current workers, never below 0, or null with no scheduler
+        /// snapshot. Shown, not banded: current workers include idle pooled workers (#8778).</summary>
         public int? AvailableThreads { get; init; }
 
         /// <summary>Runnable tasks waiting for a CPU (total_runnable_tasks_count).</summary>
@@ -925,6 +926,13 @@ namespace PerformanceMonitor.Common
             var text = "Server unreachable since " + sinceUtc.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
             return string.IsNullOrWhiteSpace(lastError) ? text : text + ": " + lastError.Trim();
         }
+
+        /// <summary>The <c>status</c> word of a <c>list_servers</c> row for a server whose data collection is turned off (#9087). It is the word
+        /// Lite's window shows for the same setting (<c>ServerCardStatus.Disabled</c>).</summary>
+        public const string DisabledServerStatus = "Disabled";
+
+        /// <summary>The <c>reason</c> of that row (#9087): collection is off, and the tools that read collected data answer only for the servers listed with another status.</summary>
+        public const string DisabledServerReason = "Data collection is turned off for this server, so the tools that read collected data answer only for the servers listed with another status.";
 
         /// <summary>
         /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
@@ -1455,10 +1463,12 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// Threads band: work-queue starvation Critical; >= 20 runnable-waiting or under 10% workers available
-        /// Warning. Unknown when there is no scheduler snapshot.
+        /// Threads band: a task waiting for a worker (work-queue starvation) Critical; >= 20 runnable tasks waiting for a CPU
+        /// Warning. Unknown when there is no scheduler snapshot. How many workers exist is not a band input (#8778): the pool
+        /// keeps idle workers after a burst and the workers of system tasks fall outside <c>max_workers_count</c>, so the
+        /// worker count can pass the ceiling on a server where nothing waits.
         /// </summary>
-        public static HealthSeverity ThreadsSeverity(int? totalThreads, int? availableThreads, int threadsWaitingForCpu, long requestsWaitingForThreads)
+        public static HealthSeverity ThreadsSeverity(int? totalThreads, int threadsWaitingForCpu, long requestsWaitingForThreads)
         {
             if (!totalThreads.HasValue)
             {
@@ -1471,11 +1481,6 @@ namespace PerformanceMonitor.Common
             }
 
             if (threadsWaitingForCpu >= 20)
-            {
-                return HealthSeverity.Warning;
-            }
-
-            if (totalThreads.Value > 0 && availableThreads < totalThreads.Value * 0.10)
             {
                 return HealthSeverity.Warning;
             }
@@ -1563,7 +1568,7 @@ namespace PerformanceMonitor.Common
         public static IEnumerable<HealthSeverity> MetricSeverities(ServerHealthMetrics m)
         {
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
-            yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
+            yield return ThreadsSeverity(m.TotalThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
             yield return m.BlockingCapturesTaken.HasValue
                 ? PostgresBlockingSeverity(m.BlockingCount, m.BlockingCapturesTaken.Value, m.BlockingBandThresholds)
@@ -1660,20 +1665,36 @@ namespace PerformanceMonitor.Common
             return tiles;
         }
 
-        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. A column at the
-        /// critical bar is at its limit and a column at the warning bar is near it, and each count is its own, so one critical and four warning columns read
-        /// "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/> counts both kinds.</summary>
-        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns)
+        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. Only a column with
+        /// no values left is at its limit (#8928: a column at the critical bar with values left is near it, like a column at the warning bar), and each count is its
+        /// own, so one exhausted column and four near ones read "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/>
+        /// counts every column at either bar, <paramref name="criticalColumns"/> those at the critical bar, and <paramref name="exhaustedColumns"/> those with no
+        /// values left (a subset of the critical ones).</summary>
+        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns, int exhaustedColumns)
         {
             var critical = Math.Clamp(criticalColumns, 0, columnsAtBar);
-            var warning = columnsAtBar - critical;
             if (critical == 0)
             {
-                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {warning} column{(warning == 1 ? "" : "s")} at the warning bar");
+                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {columnsAtBar} column{(columnsAtBar == 1 ? "" : "s")} at the warning bar");
             }
 
-            var text = string.Create(CultureInfo.InvariantCulture, $"Identity capacity critical ({critical} column{(critical == 1 ? " at its" : "s at their")} limit");
-            return warning == 0 ? text + ")" : string.Create(CultureInfo.InvariantCulture, $"{text}, {warning} near it)");
+            var atLimit = Math.Clamp(exhaustedColumns, 0, critical);
+            var near = columnsAtBar - atLimit;
+            var parts = new List<string>(2);
+            if (atLimit > 0)
+            {
+                parts.Add(string.Create(CultureInfo.InvariantCulture, $"{atLimit} column{(atLimit == 1 ? " at its" : "s at their")} limit"));
+            }
+
+            if (near > 0)
+            {
+                /* "it" needs a limit named first: with none at its limit the clause says whose limit, so it never points at nothing. */
+                parts.Add(atLimit == 0
+                    ? string.Create(CultureInfo.InvariantCulture, $"{near} column{(near == 1 ? " near its" : "s near their")} limit")
+                    : string.Create(CultureInfo.InvariantCulture, $"{near} near it"));
+            }
+
+            return "Identity capacity critical (" + string.Join(", ", parts) + ")";
         }
 
         /// <summary>#7561: the Needs attention reason clause for overdue backups and CHECKDBs, the service's words on every surface that prints it.</summary>
@@ -2159,6 +2180,8 @@ namespace PerformanceMonitor.Common
             "query_store_forced_plans",
             "query_store_hints",
             "identity_capacity",
+            "object_inventory",
+            "object_dependencies",
         };
 
         /// <summary>
@@ -2256,6 +2279,28 @@ namespace PerformanceMonitor.Common
         /// False for every other collector and for a null name.</summary>
         public static bool IsZeroNormalCollector(string? collectorName) =>
             collectorName is not null && ZeroIsNormalCollectorNames.Contains(collectorName);
+
+        /// <summary>
+        /// #9086: a HEALTHY row whose only remark is a zero the finding explains - a collector whose zero-row window is its normal answer
+        /// (<see cref="IsZeroNormalCollector"/>, a trace-flag list with no flag set, a job snapshot with no job running) with runs behind
+        /// it, no error, denial, missing-session, missing-extension or abandoned run and no recorded note, so <see cref="FormatOutputFinding"/>
+        /// says it read and found nothing. It is not "a look": get_collection_health keeps it in the partial_detail shape so its
+        /// output_finding still shows, and counts it apart from the collectors that need one. An event collector is not here: it already
+        /// compacts. A zero a snapshot collector cannot explain is not here either: that one does need a look.
+        /// </summary>
+        public static bool IsExplainedZero(
+            string? healthStatus, string? collectorName, long rowsStored, long totalRuns, long errorCount, long sessionMissingCount,
+            long extensionMissingCount, long permissionDeniedCount, long abandonedCount, long noteCount) =>
+            string.Equals(healthStatus, Healthy, StringComparison.Ordinal)
+            && IsZeroNormalCollector(collectorName)
+            && rowsStored == 0
+            && totalRuns > 0
+            && errorCount == 0
+            && sessionMissingCount == 0
+            && extensionMissingCount == 0
+            && permissionDeniedCount == 0
+            && abandonedCount == 0
+            && noteCount == 0;
 
         /// <summary>The names in <see cref="ZeroIsNormalCollectorNames"/>, so both suites can pin them against the catalog.</summary>
         public static IReadOnlyCollection<string> ZeroIsNormalCollectorNamesForPinning => ZeroIsNormalCollectorNames;
@@ -2770,6 +2815,78 @@ namespace PerformanceMonitor.Common
                 ? Warning
                 : band;
 
+        /// <summary>
+        /// Whether the window's successes all stored nothing and every run since the newest of them is
+        /// <see cref="ExtensionMissing"/> (#9101). Such a window is the absent extension alone: the collector
+        /// has never read anything here, and the successes are runs that found nothing to read.
+        ///
+        /// <para><b>The reading this ends.</b> A collector can record SUCCESS with zero rows while its extension
+        /// is absent, and later record the named skip for the same state. Its window then holds successes, so the
+        /// <see cref="ExtensionMissing"/> arm of <see cref="Classify"/> (gated on no success) is unreachable, and
+        /// the success clock bands it FAILING once the newest of them is a day old, until they leave the
+        /// window.</para>
+        ///
+        /// <para><b>Exact from what every health read already selects.</b> Three counts and three instants:
+        /// the window holds nothing but successes and extension-missing runs
+        /// (<paramref name="totalRuns"/> is their sum), no run stored a row
+        /// (<paramref name="lastProductiveTimeUtc"/> is null), and the newest run is later than the newest run
+        /// that was not a named skip. With only those two kinds in the window the newest non-skip run is the
+        /// newest success, so every run after it is extension-missing. A window that also holds an error, a
+        /// refusal, an abandoned or a yielded run keeps the ordinary ladder.</para>
+        ///
+        /// <para><b>Disjoint from both regressions.</b> <see cref="RegressedFromProductive"/> and
+        /// <see cref="ProducedThenStopped"/> need a productive run inside the window and this needs none, so a
+        /// collector that stored rows and then lost its extension keeps its band. A success after the skips is
+        /// the newest non-skip run, so it counts as a success.</para>
+        /// </summary>
+        /// <param name="totalRuns">Every run in the window.</param>
+        /// <param name="successCount">Runs recorded SUCCESS.</param>
+        /// <param name="extensionMissingCount">Runs recorded <c>EXTENSION_MISSING</c>.</param>
+        /// <param name="lastRunTimeUtc">The newest run of any status (<c>last_run_time</c>).</param>
+        /// <param name="lastNonSkipTimeUtc">The newest run that was not a named skip (<c>last_non_skip_time</c>).</param>
+        /// <param name="lastProductiveTimeUtc">The newest run that stored rows (<c>last_productive_time</c>).</param>
+        public static bool EmptySuccessesBeforeExtensionMissing(
+            long totalRuns,
+            long successCount,
+            long extensionMissingCount,
+            DateTime? lastRunTimeUtc,
+            DateTime? lastNonSkipTimeUtc,
+            DateTime? lastProductiveTimeUtc)
+        {
+            if (successCount <= 0 || extensionMissingCount <= 0 || totalRuns != successCount + extensionMissingCount)
+            {
+                return false;
+            }
+
+            if (lastProductiveTimeUtc is not null || lastRunTimeUtc is null || lastNonSkipTimeUtc is null)
+            {
+                return false;
+            }
+
+            /* Strictly later, as RegressedFromProductive is: equal instants mean the newest run is the success. */
+            return lastRunTimeUtc.Value > lastNonSkipTimeUtc.Value;
+        }
+
+        /// <summary>
+        /// The success count <see cref="Classify"/> is given (#9101): zero when
+        /// <see cref="EmptySuccessesBeforeExtensionMissing"/> holds, so the ladder reads the window as the skip
+        /// alone and returns <see cref="ExtensionMissing"/>, and <paramref name="successCount"/> otherwise.
+        /// Resolved by the caller, like the cadence, so the ladder stays a function of run-class counts. Every
+        /// surface passes this to <see cref="Classify"/> and <see cref="RecoveryCouldChangeBand"/>, and keeps
+        /// reporting the raw count.
+        /// </summary>
+        public static long SuccessCountForLadder(
+            long totalRuns,
+            long successCount,
+            long extensionMissingCount,
+            DateTime? lastRunTimeUtc,
+            DateTime? lastNonSkipTimeUtc,
+            DateTime? lastProductiveTimeUtc) =>
+            EmptySuccessesBeforeExtensionMissing(
+                totalRuns, successCount, extensionMissingCount, lastRunTimeUtc, lastNonSkipTimeUtc, lastProductiveTimeUtc)
+                ? 0
+                : successCount;
+
         /// <summary>True for the two Always On collectors. On a SQL Server without Always On they run, find nothing and log HEALTHY
         /// with zero rows (#6828, click-through 5).</summary>
         public static bool IsAlwaysOnCollector(string? collectorName) =>
@@ -3235,6 +3352,9 @@ namespace PerformanceMonitor.Common
         {
             ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
             ("shred_gated", "0") => " (the XML was read)",
+            ("relation_scan_skipped", "1") => " (the pool is over the cap, so the per-relation scan was not run)",
+            /* #9518: the run read the setting and not the session. It states the setting and asks for nothing: a threshold of 0 can be deliberate. */
+            (BlockedProcessThresholdOffNote.Label, "1") => " (" + BlockedProcessThresholdOffNote.CountMeaning + ")",
             _ => string.Empty,
         };
 
@@ -3321,6 +3441,15 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #9107: the default trace is turned off on the server. The run is a SUCCESS (so the row bands by its runs, not as a
+                   failure or a denial) and the count alone does not say what to do, so the sentence names the setup step. */
+                if (DefaultTraceOffNote.TryParse(lastNote))
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + DefaultTraceOffNote.Sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", DefaultTraceOffNote.Sentence, lastNote, noteCount, totalRuns);
+                }
+
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
                 /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
                 var truncationSentence = RingBufferTruncationNote.Describe(lastNote);

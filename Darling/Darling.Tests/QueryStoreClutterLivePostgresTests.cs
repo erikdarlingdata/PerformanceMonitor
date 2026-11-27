@@ -294,6 +294,198 @@ public sealed class QueryStoreClutterLivePostgresTests
     }
 
     /// <summary>
+    /// #9478: a fleet reference that runs past its own budget fails soft. The seam fires the fleet bound (or raises the
+    /// <c>57014</c> the bound's cancel request produces) with no wait, and the per-server rows must still come back with a null
+    /// <c>fleet_median</c> and a note naming the overrun. With the caller's own token cancelled the cancellation still
+    /// propagates, because that is not an overrun.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AFleetReferenceOverBudget_ReturnsThePerServerRows_WithANullMedianAndANote(bool queryCanceledError)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var anchor = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, null, ct);
+            await PlantAsync(connection, anchor, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        var asOf = Stamp(anchor);
+
+        DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = fleetBudget =>
+        {
+            fleetBudget.Cancel();
+            if (queryCanceledError) throw new PostgresException("canceling statement due to user request", "ERROR", "ERROR", "57014");
+            return Task.Delay(Timeout.Infinite, fleetBudget.Token);
+        };
+        try
+        {
+            var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, include_fleet_median: true, as_of: asOf);
+            Assert.False(McpHelpers.IsErrorEnvelope(json), json);
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(4, root.GetProperty("database_count").GetInt32());
+                Assert.Equal(Alpha, root.GetProperty("databases").EnumerateArray().First().GetProperty("database_name").GetString());
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("fleet_median").ValueKind);
+                Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, root.GetProperty("fleet_median_note").GetString());
+            }
+
+            using var callerCancelled = new CancellationTokenSource();
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = _ =>
+            {
+                callerCancelled.Cancel();
+                return Task.Delay(Timeout.Infinite, callerCancelled.Token);
+            };
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(
+                postgres, PrimaryName, hours_back: 24, include_fleet_median: true, as_of: asOf, logger: null, cancellationToken: callerCancelled.Token));
+        }
+        finally
+        {
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = null;
+        }
+    }
+
+    /// <summary>
+    /// #8570: the waits, clerk and baseline-marker reads are in flight at the same time. Each one's seam waits for the other two to
+    /// have started, so a call that ran them one after another would never get past the first (the wait gives up after 20 seconds
+    /// and the test fails). The answer is the one the planted fleet gives.
+    /// </summary>
+    [Fact]
+    public async Task TheThreeIndependentReads_AreInFlightTogether_AndTheAnswerIsUnchanged()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var anchor = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, null, ct);
+            await PlantAsync(connection, anchor, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        var asOf = Stamp(anchor);
+
+        var started = 0;
+        var allStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var names = new System.Collections.Concurrent.ConcurrentBag<string>();
+        DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = async (name, token) =>
+        {
+            names.Add(name);
+            if (Interlocked.Increment(ref started) == 3) allStarted.TrySetResult();
+            await allStarted.Task.WaitAsync(TimeSpan.FromSeconds(20), token);
+        };
+        try
+        {
+            var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, as_of: asOf);
+            Assert.False(McpHelpers.IsErrorEnvelope(json), json);
+            Assert.Equal(new[] { "clerk", "discontinuities", "waits" }, names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(4, doc.RootElement.GetProperty("database_count").GetInt32());
+            var included = doc.RootElement.GetProperty("qs_overhead").GetProperty("wait_stats").GetProperty("included").EnumerateArray().ToArray();
+            Assert.Contains(included, w => w.GetProperty("wait_type").GetString() == "QDS_LOADDB" && w.GetProperty("wait_ms_total").GetInt64() == 1900);
+        }
+        finally
+        {
+            DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = null;
+        }
+    }
+
+    /// <summary>
+    /// #8570: a failing wait read still gives the error envelope the tool gave when the reads ran in sequence, and the two reads that
+    /// were started beside it do not outlive the call. On an empty answer the baseline-marker read, which is no part of that answer, is
+    /// stopped and finished before the call returns, and the answer is the same one the plain miss gave.
+    /// </summary>
+    [Fact]
+    public async Task AFailingWaitsRead_GivesTheErrorEnvelope_AndTheEmptyAnswer_LeavesNoReadRunning()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var anchor = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, null, ct);
+            await PlantAsync(connection, anchor, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        var asOf = Stamp(anchor);
+
+        var running = 0;
+        var finished = 0;
+        DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = async (name, token) =>
+        {
+            Interlocked.Increment(ref running);
+            try
+            {
+                if (name == "waits") throw new InvalidOperationException("the waits read failed");
+                if (name == "discontinuities") await Task.Delay(Timeout.Infinite, token);
+            }
+            finally
+            {
+                Interlocked.Increment(ref finished);
+            }
+        };
+        try
+        {
+            var failed = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, as_of: asOf);
+            Assert.True(McpHelpers.IsErrorEnvelope(failed), failed);
+            Assert.Contains("the waits read failed", failed, StringComparison.Ordinal);
+            Assert.Equal(3, Volatile.Read(ref running));
+            Assert.Equal(3, Volatile.Read(ref finished));
+
+            Interlocked.Exchange(ref running, 0);
+            Interlocked.Exchange(ref finished, 0);
+            DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = async (name, token) =>
+            {
+                Interlocked.Increment(ref running);
+                try
+                {
+                    if (name == "discontinuities") await Task.Delay(Timeout.Infinite, token);
+                }
+                finally
+                {
+                    Interlocked.Increment(ref finished);
+                }
+            };
+            var empty = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, EmptyName, hours_back: 24, as_of: asOf);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(empty));
+            Assert.Contains("24-hour window", empty, StringComparison.Ordinal);
+            Assert.Equal(3, Volatile.Read(ref running));
+            Assert.Equal(3, Volatile.Read(ref finished));
+        }
+        finally
+        {
+            DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = null;
+        }
+    }
+
+    /// <summary>
     /// The reader agrees with the pure judgment's arithmetic on the same planted rows — the cross-check that
     /// the SQL's <c>percentile_disc</c> and the C# <see cref="QueryStoreClutter.DiscreteMedian"/> are one
     /// definition: the fleet share median the tool published (40) is the discrete median of the three

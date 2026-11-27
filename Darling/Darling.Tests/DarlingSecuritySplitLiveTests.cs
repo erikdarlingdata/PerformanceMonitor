@@ -715,8 +715,8 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_views TO {McpRole};
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO {McpRole};
 GRANT UPDATE ON config.config_alert_settings TO {McpRole};
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO {McpRole};
--- #6393: the five service flags update_service_flags writes (mirrors the DarlingManagedRoles grant of the same list).
-GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO {McpRole};
+-- #6393: the service flags update_service_flags writes (mirrors the DarlingManagedRoles grant of the same list).
+GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) ON config.config_service TO {McpRole};
 -- #3314: the DELIVERY cooldown, the one alert knob stored on config_notification. COLUMN-level, because that
 -- table holds the SMTP password blob and the Teams/Slack/generic webhook URLs and the PagerDuty routing key.
 -- Mirrors DarlingManagedRoles section 8.

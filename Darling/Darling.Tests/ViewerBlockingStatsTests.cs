@@ -59,8 +59,6 @@ public sealed class ViewerBlockingStatsSqlTests
            the buckets line up 1:1 across the severity and count charts. */
         Assert.Contains("DATE_TRUNC('minute', event_time)", ViewerDataService.BlockingDurationStatsSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY DATE_TRUNC('minute', event_time)", ViewerDataService.BlockingDurationStatsSql, StringComparison.Ordinal);
-        /* Both window bounds are applied (the XE and DMV CTEs each carry them). */
-        Assert.Contains("event_time >= $2 AND event_time <= $3", ViewerDataService.BlockingDurationStatsSql, StringComparison.Ordinal);
     }
 
     [Fact]

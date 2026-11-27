@@ -1,6 +1,7 @@
 using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Exporter;
+using Npgsql;
 using Xunit;
 
 namespace PerformanceMonitor.Exporter.Tests;
@@ -76,5 +77,73 @@ public class StoreConnectionFactoryTests
 
         Assert.Contains("statement_timeout=1800000", builder.Options);
         Assert.Equal(1800, builder.CommandTimeout);
+    }
+
+    private static NpgsqlConnectionStringBuilder RetryBuilder() => new()
+    {
+        Host = "127.0.0.1", Port = 5641, Database = "darling", Username = "u", Password = "p", Timeout = 30,
+    };
+
+    private static NpgsqlException ConnectTimeout() => new("connect timed out", new TimeoutException());
+
+    [Fact]
+    public async Task OpenWithConnectRetry_retries_once_after_a_connect_timeout()
+    {
+        var calls = 0;
+        var connection = await StoreConnectionFactory.OpenWithConnectRetryAsync(RetryBuilder(), (c, t) =>
+        {
+            calls++;
+            return calls == 1 ? Task.FromException(ConnectTimeout()) : Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.Equal(2, calls);
+        Assert.NotNull(connection);
+        await connection.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task OpenWithConnectRetry_propagates_the_second_timeout()
+    {
+        var calls = 0;
+        var second = ConnectTimeout();
+        var thrown = await Assert.ThrowsAsync<NpgsqlException>(() => StoreConnectionFactory.OpenWithConnectRetryAsync(
+            RetryBuilder(), (c, t) =>
+            {
+                calls++;
+                return Task.FromException(calls == 1 ? ConnectTimeout() : second);
+            }, CancellationToken.None));
+
+        Assert.Equal(2, calls);
+        Assert.Same(second, thrown);
+    }
+
+    [Fact]
+    public async Task OpenWithConnectRetry_does_not_retry_other_npgsql_exceptions()
+    {
+        var calls = 0;
+        await Assert.ThrowsAsync<NpgsqlException>(() => StoreConnectionFactory.OpenWithConnectRetryAsync(
+            RetryBuilder(), (c, t) =>
+            {
+                calls++;
+                return Task.FromException(new NpgsqlException("auth failed", new InvalidOperationException()));
+            }, CancellationToken.None));
+
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task OpenWithConnectRetry_does_not_retry_when_cancelled()
+    {
+        using var cts = new CancellationTokenSource();
+        var calls = 0;
+        await Assert.ThrowsAsync<NpgsqlException>(() => StoreConnectionFactory.OpenWithConnectRetryAsync(
+            RetryBuilder(), (c, t) =>
+            {
+                calls++;
+                cts.Cancel();
+                return Task.FromException(ConnectTimeout());
+            }, cts.Token));
+
+        Assert.Equal(1, calls);
     }
 }

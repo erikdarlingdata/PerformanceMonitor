@@ -137,7 +137,7 @@ public static class DarlingServerConnector
     public const string DetectionQueryText = @"
 SELECT /* PerformanceMonitorLite */
     @@VERSION AS sql_version,
-    CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
+    COALESCE(CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')), CONVERT(integer, PARSENAME(CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), 4))) AS major_version,
     DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
     CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
@@ -824,7 +824,9 @@ FROM pg_catalog.pg_control_system() AS s";
     /// path + credentials) and the <c>--test-connection</c>/<c>--validate-config</c> CLI verb, so both
     /// classify a server identically. <see cref="OperationCanceledException"/> propagates (shutdown).
     /// </summary>
-    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false)
+    public static async Task<ConnectionProbeResult> ProbeAsync(
+        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false,
+        IReadOnlyList<string>? columnStatsDatabases = null)
     {
         if (config is null)
         {
@@ -837,7 +839,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
             /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
                and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
-            var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+            var (replicaHost, replicaError, replicaErrorKind) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
             /* #6459: an Azure SQL Database has no readable-replica Query Store read, so the setting is saved and never used. The
                replica is not opened (nothing to test), and the result says so, so the operator is told at save time and not left
                to notice that read_source never fills in. */
@@ -852,7 +854,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
             var missingGrants = isPostgres || checksTheWrongPrincipal
                 ? null
-                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds);
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds, columnStatsDatabases: columnStatsDatabases);
 
             return new ConnectionProbeResult(
                 Success: true,
@@ -877,6 +879,7 @@ FROM pg_catalog.pg_control_system() AS s";
                 HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
                 QueryStoreReplica: replicaHost,
                 QueryStoreReplicaError: replicaError,
+                QueryStoreReplicaErrorKind: replicaErrorKind,
                 QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored,
                 MissingGrantsNote: missingGrants);
         }
@@ -896,10 +899,60 @@ FROM pg_catalog.pg_control_system() AS s";
                 IsAwsRds: false,
                 HasMsdbAccess: false,
                 /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
-                   threw an exception" and says nothing about why. One shared explanation, for every caller. */
-                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
-                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
+                   threw an exception" and says nothing about why. One shared explanation, for every caller.
+                   #9692: a server certificate this machine rejects reads "error occurred during the pre-login handshake", so
+                   the shared sentence that says so follows the driver's text. */
+                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)),
+                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
+                TransportFailure: IsTransportFailure(ex),
+                ErrorKind: FailureKindOf(ex));
         }
+    }
+
+    /// <summary>
+    /// #9693: what a failure is called when its text cannot be shown: the SQL Server error number, the PostgreSQL SqlState, or the
+    /// exception's type when it has neither. None of the three holds anything a caller typed, so a reply that withholds a driver's
+    /// text because it repeats a typed secret still says which failure it was.
+    /// </summary>
+    internal static string FailureKindOf(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        if ((ex as SqlException ?? ex.InnerException as SqlException) is { } sql)
+        {
+            return "SQL Server error " + sql.Number.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if ((ex as PostgresException ?? ex.InnerException as PostgresException) is { } pg)
+        {
+            return "SqlState " + pg.SqlState;
+        }
+
+        return ex.GetType().Name;
+    }
+
+    /// <summary>
+    /// #9674: true when <paramref name="ex"/> is a <see cref="SqlException"/> (or wraps one) none of whose errors the server sent. A
+    /// server-sent error has a class below 20 and a positive number: a login failure, 4064, 40613. A reset connection (10054), a
+    /// certificate chain failure, a refused port, a timeout and other client-side errors are transport failures. Any exception that is
+    /// not a SqlException, such as a secret that cannot be read before the connection is made, is not.
+    /// </summary>
+    internal static bool IsTransportFailure(Exception ex)
+    {
+        var sql = ex as SqlException ?? ex.InnerException as SqlException;
+        if (sql is null)
+        {
+            return false;
+        }
+
+        foreach (SqlError error in sql.Errors)
+        {
+            if (error.Class < 20 && error.Number > 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -909,11 +962,15 @@ FROM pg_catalog.pg_control_system() AS s";
     /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
     /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
     /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection. <paramref name="isAwsRds"/> leaves out the grants RDS refuses (#6889).
+    /// <paramref name="columnStatsDatabases"/> (#8798) are the databases the column_stats collector is configured to read: for each, the login's
+    /// database-level SELECT is checked and a missing one is described. The caller passes the list only when column_stats is enabled for the server;
+    /// null or empty checks nothing (an empty collector scope means "every database", and the connection test never checks every database).
     /// </summary>
     internal static async Task<string?> ProbeMissingGrantsAsync(
         string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
         Func<string, System.Data.Common.DbConnection>? createConnection = null,
-        bool isAwsRds = false)
+        bool isAwsRds = false,
+        IReadOnlyList<string>? columnStatsDatabases = null)
     {
         /* #6889: Amazon RDS refuses CONNECT ANY DATABASE to its master user, so asking for it there names a statement that cannot succeed. */
         var entries = isAzureSqlDatabase
@@ -925,33 +982,43 @@ FROM pg_catalog.pg_control_system() AS s";
         {
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
-            command.CommandTimeout = 15;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
+            string who;
+            string? missingText;
+            string? noUserText;
+            await using (var command = connection.CreateCommand())
             {
-                return null;
+                command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
+                command.CommandTimeout = 15;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return null;
+                }
+
+                var held = new List<int?>();
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
+                }
+
+                who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
+                missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+
+                /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
+                long noUserDatabases = 0;
+                if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
+                {
+                    noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
             }
 
-            var held = new List<int?>();
-            for (var i = 0; i < entries.Count; i++)
-            {
-                held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
-            }
-
-            var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
-            var missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
-
-            /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
-            long noUserDatabases = 0;
-            if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
-            {
-                noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            var noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
-            return missingText is null ? noUserText : noUserText is null ? missingText : missingText + " " + noUserText;
+            var columnStatsText = columnStatsDatabases is { Count: > 0 } && !isAzureSqlDatabase
+                ? await ProbeMissingColumnStatsSelectAsync(connection, columnStatsDatabases, who, cancellationToken)
+                : null;
+            var parts = new[] { missingText, noUserText, columnStatsText }.Where(t => t is not null).ToList();
+            return parts.Count == 0 ? null : string.Join(" ", parts);
         }
         catch (OperationCanceledException)
         {
@@ -965,21 +1032,56 @@ FROM pg_catalog.pg_control_system() AS s";
     }
 
     /// <summary>
+    /// #8798: the listed databases where the login lacks database-level SELECT (the grant DBCC SHOW_STATISTICS needs), described, or null when none is
+    /// missing. One <c>HAS_PERMS_BY_NAME</c> per database in a single query. Only a 0 counts as missing: NULL (a name this server does not know) is no claim.
+    /// </summary>
+    private static async Task<string?> ProbeMissingColumnStatsSelectAsync(
+        System.Data.Common.DbConnection connection, IReadOnlyList<string> databases, string who, CancellationToken cancellationToken)
+    {
+        var listed = databases.Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => d.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (listed.Count == 0)
+        {
+            return null;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT " + string.Join(", ", listed.Select((d, i) =>
+            "HAS_PERMS_BY_NAME(N'" + d.Replace("'", "''", StringComparison.Ordinal) + "', N'DATABASE', N'SELECT') AS d" + i)) + ";";
+        command.CommandTimeout = 15;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var missing = new List<string>();
+        for (var i = 0; i < listed.Count; i++)
+        {
+            if (!reader.IsDBNull(i) && Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture) == 0)
+            {
+                missing.Add(listed[i]);
+            }
+        }
+
+        return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingColumnStatsSelect(missing, who);
+    }
+
+    /// <summary>
     /// #6254: opens the server's Query Store replica connection the way collection opens it: the string comes from
     /// <see cref="ResolveQueryStoreReplicaConnectionString"/> (the same builder: the replica host, <c>ApplicationIntent=ReadOnly</c>,
     /// the server's login and authentication) and the connection is the SQL Server target provider's own <see cref="SqlConnection"/>.
-    /// Returns <c>(null, null)</c> for a server with no replica, a PostgreSQL target or an Azure SQL Database, <c>(host, null)</c> when the
-    /// replica opened, and <c>(host, error)</c> when it did not (a refused login, an unreachable host, a password the builder would not
-    /// release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// Returns no host for a server with no replica, a PostgreSQL target or an Azure SQL Database, the host alone when the
+    /// replica opened, and the host with the error and its kind (<see cref="FailureKindOf"/>) when it did not (a refused login, an
+    /// unreachable host, a password the builder would not release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
     /// </summary>
-    internal static async Task<(string? Host, string? Error)> ProbeQueryStoreReplicaAsync(
+    internal static async Task<(string? Host, string? Error, string? ErrorKind)> ProbeQueryStoreReplicaAsync(
         MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
         Func<string, System.Data.Common.DbConnection>? createConnection = null)
     {
         if (config.IsPostgres || isAzureSqlDatabase
             || PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica) is not { } host)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         try
@@ -987,12 +1089,12 @@ FROM pg_catalog.pg_control_system() AS s";
             var connectionString = ResolveQueryStoreReplicaConnectionString(config, isAzureSqlDatabase, logger);
             if (connectionString is null)
             {
-                return (null, null);
+                return (null, null, null);
             }
 
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            return (host, null);
+            return (host, null, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1000,9 +1102,17 @@ FROM pg_catalog.pg_control_system() AS s";
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)), FailureKindOf(ex));
         }
     }
+
+    /// <summary>
+    /// True when the service connects to <paramref name="server"/> with <c>encrypt_mode</c> Strict, which ignores
+    /// <c>trust_server_certificate</c>: a SQL Server target whose stored mode folds to Strict. A PostgreSQL target reads Strict as
+    /// Mandatory and honours the trust setting. The certificate sentence (<see cref="ServerCertificateTrustFailure"/>) and the
+    /// Strict line (<see cref="StrictEncryptionHint"/>) read the mode the same way, so a Strict entry gets one piece of advice.
+    /// </summary>
+    internal static bool ConnectsStrict(MonitoredServer server) => !server.IsPostgres && StrictEncryptionHint.IsStrict(server.EncryptMode);
 
     /// <summary>
     /// #6459: the Query Store replica a SQL Server target has set and an Azure SQL Database will never read, or null (no replica set,
@@ -1127,6 +1237,26 @@ FROM pg_catalog.pg_control_system() AS s";
 
         return DescribeEngineEdition(engineEdition);
     }
+
+    /// <summary>
+    /// #9697: the facts the service's "Connected" line names. A SQL Server target gives its major version, its engine type
+    /// (<c>Box</c>, <c>AzureSqlDb</c> or <c>ManagedInstance</c>: where the engine runs) and its edition, in the words
+    /// <c>--test-connection</c> prints for it (<see cref="DescribeEditionForProbe"/>), so the two lines never name one server's
+    /// edition two ways. A PostgreSQL target has no SQL Server engine type and no edition, so it gives its own major version and
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>'s words.
+    /// </summary>
+    public static string DescribeConnectedFacts(CollectorTargetInfo target, int engineEdition, string? editionName)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+
+        if (target.Engine == CollectorTargetEngine.PostgreSql)
+        {
+            return $"major {target.PostgresMajorVersion}, engine {MonitoredEngineKind.DescribeEngineKind(MonitoredEngineKind.For(target))}";
+        }
+
+        var engineType = target.IsAzureSqlDb ? "AzureSqlDb" : target.IsAzureManagedInstance ? "ManagedInstance" : "Box";
+        return $"major {target.SqlMajorVersion}, engine {engineType}, edition {DescribeEditionForProbe(engineEdition, editionName)}";
+    }
 }
 
 /// <summary>
@@ -1179,7 +1309,17 @@ public sealed record ConnectionProbeResult(
     bool QueryStoreReplicaIgnoredOnAzureSqlDb = false,
     /* #6472: the sentence naming each missing base grant with the statement that adds it, or null when none is missing (or the check could
        not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
-    string? MissingGrantsNote = null)
+    string? MissingGrantsNote = null,
+    /* #9674: true when a failed SQL Server connect was a transport failure (a SqlException none of whose errors the server sent, see
+       DarlingServerConnector.IsTransportFailure). False for a success, a server-sent error such as a login failure, any other exception
+       (a secret that could not be read) and a PostgreSQL target. A failed Strict connection test gives the Strict hint only when it is
+       true. Trailing and defaulted, like the fields above. */
+    bool TransportFailure = false,
+    /* #9693: what the failure is called when its text is withheld (DarlingServerConnector.FailureKindOf): the SQL Server error number,
+       the PostgreSQL SqlState or the exception's type, for the primary and for the Query Store replica. Null for a success and for a
+       result built without one. Trailing and defaulted, like the fields above. */
+    string? ErrorKind = null,
+    string? QueryStoreReplicaErrorKind = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

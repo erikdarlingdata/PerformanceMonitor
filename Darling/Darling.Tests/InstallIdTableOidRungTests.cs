@@ -42,19 +42,6 @@ public sealed class InstallIdTableOidRungTests
     public static int RungVersion => Rung.Version;
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* No longer the top rung: V160 (the collector run time) landed above it. */
-        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
-    }
-
-    [Fact]
     public void TheRungAddsTwoNullableColumns_IdempotentlyAndSchemaQualified_AndNothingElse()
     {
         var sql = Rung.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);

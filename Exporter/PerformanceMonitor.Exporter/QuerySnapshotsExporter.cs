@@ -41,8 +41,9 @@ public static class QuerySnapshotsExporter
     /// </summary>
     public static string BuildSelect(IReadOnlyList<string> discoveredColumns)
     {
+        var dropped = ColumnPolicies.DroppedColumns("query_snapshots");
         var factColumns = discoveredColumns
-            .Where(c => c is not "query_plan" and not "live_query_plan")
+            .Where(c => !dropped.Contains(c))
             .ToList();
 
         if (factColumns.Count == 0)
@@ -70,7 +71,8 @@ public static class QuerySnapshotsExporter
         CancellationToken ct)
     {
         var sql = BuildSelect(discoveredColumns);
-        var factColumns = discoveredColumns.Where(c => c is not "query_plan" and not "live_query_plan").ToList();
+        var dropped = ColumnPolicies.DroppedColumns("query_snapshots");
+        var factColumns = discoveredColumns.Where(c => !dropped.Contains(c)).ToList();
 
         await using var connection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
         await using var command = new NpgsqlCommand(sql, connection);

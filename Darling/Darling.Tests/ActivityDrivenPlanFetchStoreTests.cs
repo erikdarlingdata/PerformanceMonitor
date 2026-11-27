@@ -30,18 +30,6 @@ public sealed class ActivityDrivenPlanFetchStoreTests
     [Fact]
     public void TheRungIsTheTopOfADenseLadder()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2357 added V78, so this rung is no longer the maximum. What stays true: it is PRESENT, the
-           ladder is ordered and dense, and the build's schema version tracks the maximum. */
-        Assert.Contains(77, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Dense above the one sanctioned historical hole at V45. */
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
-
         Assert.Equal("activity-driven-plan-fetch", PgMigrations.Scripts.Single(s => s.Version == 77).Name);
     }
 

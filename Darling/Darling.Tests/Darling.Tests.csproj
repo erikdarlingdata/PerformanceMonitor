@@ -9,9 +9,10 @@
     <!-- #2347: xunit.v3 under Microsoft.Testing.Platform builds the suite as its own executable. -->
     <OutputType>Exe</OutputType>
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
-         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
-         ambient token through every call. -->
-    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
+         hundreds of short-lived test calls (still fires in about 2800 places); suppressed rather than
+         threading the ambient token through every call.
+         CS4014: still fires where a test discards the Task that Assert.Single returns for an in-flight run.
+         NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
     <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
   </PropertyGroup>
 
@@ -44,6 +45,8 @@
     <!-- #5632 step 6: the server write code; only the tests reference it (the service does not). -->
     <ProjectReference Include="..\PerformanceMonitor.Darling.Remediation\PerformanceMonitor.Darling.Remediation.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
+    <!-- #8847: the stand-in process the tests copy under another name, instead of a copied system tool. -->
+    <ProjectReference Include="..\Darling.Tests.Standin\Darling.Tests.Standin.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Viewer\PerformanceMonitor.Darling.Viewer.csproj" />
     <!-- SystemHealthParser (the code under test) lives in Common; reference it explicitly rather than
          leaning on the transitive Viewer/Service edge. -->
@@ -64,6 +67,9 @@
          brings its Lite.Tests namespace with it and uses only the BCL, xunit and PerformanceMonitor.Alerting,
          which both projects carry. -->
     <Compile Include="..\..\Lite.Tests\CrossSkuSurfaceSourceTests.cs" Link="Linked\CrossSkuSurfaceSourceTests.cs" />
+    <!-- #9611: the Teams card reader. Lite and Darling build their Teams payload with the one shared builder, so both
+         test projects read a built card with the one reader. It uses only the BCL and xunit. -->
+    <Compile Include="..\..\Lite.Tests\TeamsCard.cs" Link="Linked\TeamsCard.cs" />
     <!-- #5644 W6: the default trace EventSequence watermark. The collector is one shared definition, so its
          behaviour model (a simulated trace driven through the real BuildQuery and ReadAsync) is compiled here
          from Lite.Tests rather than copied; it uses only the BCL, System.Data, xunit and PerformanceMonitor.Collectors. -->
@@ -81,6 +87,8 @@
     <None Include="Fixtures\FinOpsIndexAnalysis\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- The shared time range grammar cases (#5562); the web harness reads the same file. -->
     <None Include="Fixtures\time-range-cases.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9688: the Linux config sample ships in the linux-x64 tarball only, so the service project does not copy it here. -->
+    <None Include="..\tools\darling.linux.sample.json" Link="darling.linux.sample.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
@@ -159,4 +167,127 @@
     <!-- Some Viewer windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->
     <Resource Include="..\PerformanceMonitor.Darling.Viewer\EDD.ico" Link="EDD.ico" />
   </ItemGroup>
+
+  <!-- #9686: the build that runs on Linux, chosen with -p:DarlingTestsWithoutViewer=true. The WPF Viewer needs the Windows
+       Desktop runtime, so this build targets net10.0, drops the Viewer reference, and leaves out every test file that cannot
+       compile without it (the LeaveOutViewerTestFiles target below). Without the property nothing here applies, and the
+       project is the Windows one above. Its packages are not locked: the lock file beside this project describes the
+       Windows package graph, so this build points NuGet at a path that holds no lock file. -->
+  <PropertyGroup Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <TargetFramework>net10.0</TargetFramework>
+    <UseWPF>false</UseWPF>
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)\obj\without-viewer.packages.lock.json</NuGetLockFilePath>
+    <!-- CA1416 (a Windows-only API is called from code that can run anywhere): the Windows build targets net10.0-windows, where
+         the rule has nothing to report. Here it fires on every test of a Windows-only part of the service (the managed store,
+         the ACL checks, the firewall rules). Those tests skip themselves off Windows or carry the Platform=Windows trait.
+         CS0649 (a field is never assigned) and xUnit1073 (a collection definition is never used): each fires on a shared
+         helper whose only users are left out of this build. -->
+    <NoWarn>$(NoWarn);CA1416;CS0649;xUnit1073</NoWarn>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <ProjectReference Remove="..\PerformanceMonitor.Darling.Viewer\PerformanceMonitor.Darling.Viewer.csproj" />
+    <Resource Remove="..\PerformanceMonitor.Darling.Viewer\EDD.ico" />
+  </ItemGroup>
+
+  <!-- #9686: which test files the build without the Viewer leaves out. Two sets, both read from the code of each file, with
+       comments and plain strings blanked, so a test that names the Viewer only in a comment, a path or a message still
+       compiles and runs. An interpolated string is kept whole, because the holes in it are code.
+         NamesViewer: the file names the Viewer, the shared WPF library, a System.Windows namespace or ScottPlot (the Viewer's
+           chart package, which reaches this project only through the Viewer).
+         UsesLeftOut: the file uses a type that a left-out file declares, so it cannot compile either. The step repeats until
+           no file is added, because a file left out this way can declare a type that a third file uses. A name the file
+           declares itself is its own (a private helper that shares a name with one in a left-out file). Every part of a
+           partial type is left out with the first.
+       The types of a left-out file are the ones declared at the start of a line, which is where a file-scoped namespace puts
+       a top-level type. When the rule misses a file the build fails with CS0103 or CS0246 on the missing name, and never
+       passes with a test silently absent. When it takes a file it did not need to, that test does not run on Linux: the
+       build prints the three counts, and obj\...\left-out-test-files.txt names each file and the type that took it. -->
+  <UsingTask TaskName="FindViewerTestFiles" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll" Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <ParameterGroup>
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <NamesViewer ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+      <UsesLeftOut ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        // One pass over the text, first match wins: an interpolated string (kept), then a raw, verbatim or plain string, a
+        // character literal and a comment (each blanked).
+        var notCode = new Regex(
+            @"(?<keep>\$+(?<q>""{3,})[\s\S]*?\k<q>|\$@""(?:""""|[^""])*""|@\$""(?:""""|[^""])*""|\$""(?:\\.|[^""\\\n])*"")"
+            + @"|(?<r>""{3,})[\s\S]*?\k<r>|@""(?:""""|[^""])*""|""(?:\\.|[^""\\\n])*""|'(?:\\.|[^'\\\n])+'|//[^\n]*|/\*[\s\S]*?\*/",
+            RegexOptions.Compiled);
+        var viewer = new Regex(@"\bPerformanceMonitor\.Darling\.Viewer\b|\bPerformanceMonitor\.Ui\b|\bSystem\.Windows\b|\bScottPlot\b", RegexOptions.Compiled);
+        var word = new Regex(@"[A-Za-z_][A-Za-z0-9_]*", RegexOptions.Compiled);
+        const string type = @"(?:class|record[ \t]+struct|record[ \t]+class|record|struct|interface|enum)[ \t]+([A-Za-z_][A-Za-z0-9_]*)";
+        var topLevelType = new Regex(@"^(?:(?:public|internal|static|sealed|abstract|partial|file|readonly|ref|unsafe)[ \t]+)*" + type, RegexOptions.Multiline | RegexOptions.Compiled);
+        // No `partial` here: a partial type is not the file's own, its other parts may be in a left-out file.
+        var ownType = new Regex(@"^[ \t]*(?:(?:public|internal|private|protected|static|sealed|abstract|file|readonly|ref|unsafe)[ \t]+)*" + type, RegexOptions.Multiline | RegexOptions.Compiled);
+
+        int count = Files.Length;
+        var words = new HashSet<string>[count];
+        var declares = new List<string>[count];
+        var own = new HashSet<string>[count];
+        var leftOut = new bool[count];
+        var namesViewer = new List<ITaskItem>();
+        var usesLeftOut = new List<ITaskItem>();
+        var leftOutTypes = new HashSet<string>(StringComparer.Ordinal);
+
+        for (int i = 0; i < count; i++)
+        {
+            string code = notCode.Replace(File.ReadAllText(Files[i].GetMetadata("FullPath")), m => m.Groups["keep"].Success ? m.Value : " ");
+            words[i] = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Match m in word.Matches(code)) words[i].Add(m.Value);
+            declares[i] = new List<string>();
+            foreach (Match m in topLevelType.Matches(code)) declares[i].Add(m.Groups[1].Value);
+            own[i] = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Match m in ownType.Matches(code)) own[i].Add(m.Groups[1].Value);
+            if (viewer.IsMatch(code))
+            {
+                leftOut[i] = true;
+                namesViewer.Add(new TaskItem(Files[i]));
+                leftOutTypes.UnionWith(declares[i]);
+            }
+        }
+
+        bool added = true;
+        while (added)
+        {
+            added = false;
+            for (int i = 0; i < count; i++)
+            {
+                if (leftOut[i]) continue;
+                foreach (string name in words[i])
+                {
+                    if (!leftOutTypes.Contains(name) || own[i].Contains(name)) continue;
+                    leftOut[i] = true;
+                    var item = new TaskItem(Files[i]);
+                    item.SetMetadata("Uses", name);
+                    usesLeftOut.Add(item);
+                    leftOutTypes.UnionWith(declares[i]);
+                    added = true;
+                    break;
+                }
+            }
+        }
+
+        NamesViewer = namesViewer.ToArray();
+        UsesLeftOut = usesLeftOut.ToArray();
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="LeaveOutViewerTestFiles" BeforeTargets="CoreCompile" Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <FindViewerTestFiles Files="@(Compile)">
+      <Output TaskParameter="NamesViewer" ItemName="NamesViewerTestFile" />
+      <Output TaskParameter="UsesLeftOut" ItemName="UsesLeftOutTestFile" />
+    </FindViewerTestFiles>
+    <ItemGroup>
+      <Compile Remove="@(NamesViewerTestFile)" />
+      <Compile Remove="@(UsesLeftOutTestFile)" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)left-out-test-files.txt" Overwrite="true" Lines="@(NamesViewerTestFile->'%(Identity): names the Viewer or WPF');@(UsesLeftOutTestFile->'%(Identity): uses %(Uses), declared in a left-out file')" />
+    <Message Importance="high" Text="DarlingTestsWithoutViewer: left out @(NamesViewerTestFile->Count()) test files that name the Viewer or WPF and @(UsesLeftOutTestFile->Count()) that use a type one of those declares, compiling @(Compile->Count())." />
+  </Target>
 </Project>

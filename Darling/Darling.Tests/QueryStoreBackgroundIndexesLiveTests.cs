@@ -502,8 +502,12 @@ WHERE i.indrelid = 'collect.query_store_stats'::regclass
             }
         }
 
+        /* #9276: an interval's start is the one SET column given an UNCHANGED value. The upsert writes it, but a later fetch of the same
+           interval carries the same start, and WideNullStartFirstExec names it in its predicate, where only a changed value is non-HOT
+           (QueryStoreTopSplitLiveTests.TheUpsertsSetList_StaysHot_WhenTheIntervalStartIsUnchanged_AndNotWhenANullStartIsFilled proves both sides). */
         var assignments = setColumns.OrderBy(c => c, StringComparer.Ordinal).Select(column => types[column] switch
         {
+            "timestamp without time zone" when column == "interval_start_time_utc" => $"{column} = {column}",
             "timestamp without time zone" => $"{column} = {column} + interval '1 minute'",
             "boolean" => $"{column} = NOT COALESCE({column}, false)",
             "text" => $"{column} = COALESCE({column}, '') || 'x'",

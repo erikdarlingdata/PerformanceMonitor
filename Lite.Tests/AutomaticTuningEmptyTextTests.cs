@@ -72,9 +72,10 @@ public sealed class AutomaticTuningEmptyTextTests : IClassFixture<SharedDuckDbFi
 
         var root = Parse(await AskAsync());
 
-        Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal(PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 13 }), Message(root));
-        Assert.Contains("has no automatic tuning", Message(root), StringComparison.Ordinal);
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        /* #9099: the version axis words it: the server's version and what the read needs. */
+        Assert.Contains("SQL Server 2016", Message(root), StringComparison.Ordinal);
+        Assert.Contains("SQL Server 2017 or later", Message(root), StringComparison.Ordinal);
     }
 
     /// <summary>The reachable 2017+ case: a registered server whose collector has stored no plan correction cycle.</summary>
@@ -97,7 +98,7 @@ public sealed class AutomaticTuningEmptyTextTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task AFilteredEmptyAnswer_KeepsTheChosenDatabaseSentence()
     {
-        SetServerMajorVersion(13);
+        SetServerMajorVersion(15);
 
         var root = Parse(await McpPlanCorrectionTools.GetPlanCorrections(_service, _serverManager, ServerName, database_name: "NoSuchDb"));
 

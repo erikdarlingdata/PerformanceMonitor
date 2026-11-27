@@ -72,6 +72,23 @@ public sealed class WindowWorkAreaTests
     }
 
     [Fact]
+    public void ClampTop_PullsDownAWindowThatStartedAboveTheWorkArea_ThenFitsOnceCapped()
+    {
+        /* #9093: Settings declares 750 tall, CenterOwner places it by that on a 720 work area (top -15), then
+           Clamp caps the height to 720. The bottom now fits, but the title bar is still above the screen. */
+        Assert.Equal(0, WindowWorkArea.ClampTop(top: -15, actualHeight: 720, new Rect(0, 0, 1024, 720)));
+    }
+
+    [Fact]
+    public void ClampTop_OnAWorkAreaAboveThePrimary_LeavesAWindowInsideItAlone_AndPullsOneAboveItDown()
+    {
+        /* A second monitor stacked above the primary: Top is -1080, so a plain 0 floor would be wrong. */
+        var above = new Rect(0, -1080, 1920, 1040);
+        Assert.Equal(-900, WindowWorkArea.ClampTop(top: -900, actualHeight: 400, above));
+        Assert.Equal(above.Top, WindowWorkArea.ClampTop(top: -1095, actualHeight: 400, above));
+    }
+
+    [Fact]
     public void ClampTop_RespectsAWorkAreaThatDoesNotStartAtTheOrigin()
     {
         /* A monitor above-left of the primary has NEGATIVE coordinates, and a taskbar on top pushes the work

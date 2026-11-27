@@ -62,7 +62,7 @@ public static class DarlingSchemaCapture
         }
 
         var pass = new Pass(runner, server, sessionName, DarlingSnapshotScope.IsActive, cancellationToken);
-        await using var store = await runner.Store.OpenConnectionAsync(cancellationToken);
+        await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.SchemaCapture, cancellationToken);
         pass.Store = store;
         if (server.Target.IsAzureSqlDb)
         {
@@ -100,7 +100,7 @@ public static class DarlingSchemaCapture
 
         try
         {
-            await using var store = await runner.Store.OpenConnectionAsync(cancellationToken);
+            await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.SchemaCapture, cancellationToken);
             if (!await SchemaCaptureStateStore.HasSessionAsync(store, server.ServerId, cancellationToken))
             {
                 runner.SettleSchemaSession(server.ServerId);
@@ -131,14 +131,14 @@ public static class DarlingSchemaCapture
     {
         var skipped = new HashSet<string>(IdentityCapacityCollector.SkippedDatabaseNames, StringComparer.OrdinalIgnoreCase);
         var allowed = scope.Count == 0 ? null : new HashSet<string>(scope.Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
-        var excludedNames = new HashSet<string>((excluded ?? []).Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
+        var excludedNames = (excluded ?? []).Select(s => s.Trim()).ToList();
         return probes
-            .Where(p => p.DatabaseId > 4 && !skipped.Contains(p.Name) && (allowed is null || allowed.Contains(p.Name)) && !excludedNames.Contains(p.Name))
+            .Where(p => p.DatabaseId > 4 && !skipped.Contains(p.Name) && (allowed is null || allowed.Contains(p.Name)) && !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excludedNames, p.Name))
             .Select(p => p.Name)
             .ToList();
     }
 
-    private static string KeyText(SchemaHistoryKey key) =>
+    internal static string KeyText(SchemaHistoryKey key) =>
         key.AgGroupId is { } group
             ? "ag:" + group.ToString("D", CultureInfo.InvariantCulture)
             : "server:" + (key.ServerId ?? 0).ToString(CultureInfo.InvariantCulture);

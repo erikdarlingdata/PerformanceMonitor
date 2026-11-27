@@ -100,10 +100,24 @@ BEGIN
        on its own, and only when the store has it. */
     FOREACH t IN ARRAY ARRAY
     [
+        'collect.plan_regression_block',
+        'collect.plan_regression_block_built',
         'collect.plan_regression_daily',
         'collect.plan_regression_daily_built',
         'collect.query_store_top_daily',
         'collect.query_store_top_daily_built',
+        'collect.query_store_top_hourly',
+        'collect.query_store_grid_daily',
+        'collect.query_store_slicer_hourly',
+        'collect.query_store_closed_day_built',
+        'collect.query_store_closed_day_tick',
+        'collect.query_store_clutter_plan_daily',
+        'collect.query_store_clutter_collections_daily',
+        'collect.query_stats_host_hourly',
+        'collect.query_stats_host_hourly_built',
+        'collect.query_store_clutter_plan_hourly',
+        'collect.query_store_clutter_collections_hourly',
+        'collect.query_store_clutter_hour_built',
         'collect.query_store_compose_stamp',
         'collect.query_store_compose_stamp_built'
     ]

@@ -238,6 +238,140 @@ public sealed partial class ServerEditLiveTests : IDisposable
         }
     }
 
+    /* #9635: the two per-server settings the Viewer's dialog sets, written through the tool as the mcp role and read back from the store. */
+    [Fact]
+    public async Task AsTheMcpRole_CapturePlansAndAlertDelivery_AreSetAndClearedThroughTheTool_AndTheServiceIsToldToReload()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            /* The seeded row holds capture_plans TRUE and the override PerEvent. */
+            await SeedServerAsync(rig.Owner, 5191, "gamma-01", "gamma-01.example.test", "integrated", null, null, ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            var set = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", set["status"]!.GetValue<string>());
+            Assert.False(set["tested"]!.GetValue<bool>());
+            Assert.False(set["reconnects"]!.GetValue<bool>());
+            Assert.Equal("f|Summary", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.True(await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct) > versionBefore);
+
+            /* The answer's token is the row's own modified_at, so the next edit that sends it as expected_modified_at is not a conflict. */
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01",
+                "{\"capture_plans\":null,\"alert_delivery_mode_override\":null,\"expected_modified_at\":\"" + set["modified_at"]!.GetValue<string>() + "\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cleared["status"]!.GetValue<string>());
+            Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 5191 AND (capture_plans IS NOT NULL OR alert_delivery_mode_override IS NOT NULL)", ct));
+
+            /* An edit of another field leaves both settings as they are. */
+            var again = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"capture_plans\":true,\"alert_delivery_mode_override\":\"PerEvent\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", again["status"]!.GetValue<string>());
+            var cost = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"monthly_cost_usd\":9}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cost["status"]!.GetValue<string>());
+            Assert.Equal("t|PerEvent", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+
+            /* A stale token is a conflict and the settings are not written. */
+            var stale = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01",
+                "{\"capture_plans\":false,\"expected_modified_at\":\"" + set["modified_at"]!.GetValue<string>() + "\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("conflict", stale["status"]!.GetValue<string>());
+            Assert.Equal("true", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+
+            /* The web route's role cannot write the two columns, so its parse still refuses them. */
+            var web = Parse(await Edit.EditServerByIdAsync(rig.Mcp, 5191, "{\"capture_plans\":false}", null, ct));
+            Assert.Equal("invalid", web["status"]!.GetValue<string>());
+            Assert.Equal("true", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /* #9635: add_servers stores each value of the two settings, an entry without the keys still stores NULL, and an invalid value writes nothing. */
+    [Fact]
+    public async Task TheAddServersTool_StoresTheTwoSettings_AsTheEntryNamesThem_AndTheRemoveUndoBringsThemBack()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            var answer = Parse(await Edit.AddServersAsync(rig.Mcp,
+                "[{\"host\":\"add-on.example.test\",\"capture_plans\":true,\"alert_delivery_mode_override\":\"summary\"},"
+                + "{\"host\":\"add-off.example.test\",\"capture_plans\":false,\"alert_delivery_mode_override\":\"PerEvent\"},"
+                + "{\"host\":\"add-null.example.test\",\"capture_plans\":null,\"alert_delivery_mode_override\":null},"
+                + "{\"host\":\"add-none.example.test\"},"
+                + "{\"host\":\"add-bad.example.test\",\"capture_plans\":\"yes\"},"
+                + "{\"host\":\"add-bad2.example.test\",\"alert_delivery_mode_override\":\"Bogus\"}]",
+                Reachable, ct, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal(4, answer["added"]!.GetValue<int>());
+            Assert.Equal(2, answer["failed"]!.GetValue<int>());
+            var bad = answer["results"]!.AsArray().Where(r => r!["status"]!.GetValue<string>() == "invalid").Select(r => r!["detail"]!.GetValue<string>()).ToList();
+            Assert.Contains(bad, d => d.StartsWith("capture_plans must be true, false, or null", StringComparison.Ordinal));
+            Assert.Contains(bad, d => d.StartsWith("alert_delivery_mode_override must be", StringComparison.Ordinal));
+
+            const string Read = "SELECT concat_ws('|', coalesce(capture_plans::text, 'null'), coalesce(alert_delivery_mode_override, 'null')) FROM config_monitored_servers WHERE host = '";
+            Assert.Equal("true|Summary", await ScalarAsync<string>(rig.Owner, Read + "add-on.example.test'", ct));
+            Assert.Equal("false|PerEvent", await ScalarAsync<string>(rig.Owner, Read + "add-off.example.test'", ct));
+            Assert.Equal("null|null", await ScalarAsync<string>(rig.Owner, Read + "add-null.example.test'", ct));
+            Assert.Equal("null|null", await ScalarAsync<string>(rig.Owner, Read + "add-none.example.test'", ct));
+            Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE host LIKE 'add-bad%'", ct));
+
+            /* get_server_settings reads both back, in the form edit_server takes. */
+            var settings = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "add-off.example.test", ct))["settings"]!.AsObject();
+            Assert.False(settings["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("PerEvent", settings["alert_delivery_mode_override"]!.GetValue<string>());
+            var unset = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "add-none.example.test", ct))["settings"]!.AsObject();
+            Assert.Null(unset["capture_plans"]);
+            Assert.Null(unset["alert_delivery_mode_override"]);
+
+            /* The undo of a removal re-adds the definition with the two settings it had. */
+            var removed = Parse(await Edit.RemoveServer(rig.Mcp, "add-on.example.test"));
+            Assert.True(removed["previous"]!["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("Summary", removed["previous"]!["alert_delivery_mode_override"]!.GetValue<string>());
+            var readd = Parse(await Edit.AddServersAsync(rig.Mcp, removed["undo"]!["arguments"]!["servers_json"]!.GetValue<string>(), Reachable, ct,
+                ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal(1, readd["added"]!.GetValue<int>());
+            Assert.Equal("true|Summary", await ScalarAsync<string>(rig.Owner, Read + "add-on.example.test'", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task GetServerSettings_ShowsTheTwoPerServerSettings_AfterAnEditServerSetsThem()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5192, "delta-01", "delta-01.example.test", "integrated", null, null, ct);
+            var edit = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "delta-01", "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", edit["status"]!.GetValue<string>());
+
+            var settings = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "delta-01", ct))["settings"]!.AsObject();
+            Assert.False(settings["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("Summary", settings["alert_delivery_mode_override"]!.GetValue<string>());
+
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "delta-01", "{\"capture_plans\":null,\"alert_delivery_mode_override\":null}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cleared["status"]!.GetValue<string>());
+            var after = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "delta-01", ct))["settings"]!.AsObject();
+            Assert.Null(after["capture_plans"]);
+            Assert.Null(after["alert_delivery_mode_override"]);
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task GetServerSettings_ShowsTheFieldsEditServerChanges_BeforeAndAfterAnEdit_AndNeverASecret()
     {
@@ -381,6 +515,95 @@ public sealed partial class ServerEditLiveTests : IDisposable
             var renamed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"display_name\":\"Renamed\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", renamed["status"]!.GetValue<string>());
             Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /// <summary>#9693: the <c>--edit-server</c> verb runs the edit as the store owner. The refusal of a change to how a row with a
+    /// remediation login connects is in the store's edit function, not in a role's trigger, so the owner meets it too: the verb
+    /// answers with the same sentence the other surfaces give, exits 1 and writes nothing, whether or not the row keeps a password.</summary>
+    [Fact]
+    public async Task AsTheStoreOwner_TheEditServerVerb_RefusesAnAddressEditOnARowWithARemediationLogin_WithTheSameSentence_AndWritesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5194, "alpha-94", "alpha-94.example.test", "integrated", null, null, ct, remediationBlob: "rem-blob");
+            var before = await RowSignatureAsync(rig.Owner, 5194, ct);
+            var hostBefore = await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            Task<string> OwnerEdit(string changesJson) =>
+                Edit.EditServerByNameAsync(rig.Owner, "alpha-94.example.test", changesJson, Reachable, TestKeyRings.Healthy, null, ct);
+            Task<string> NeverEnabled(int serverId, bool enable) => throw new InvalidOperationException("enabled must not be touched when the edit is refused.");
+            /* The verb's target: the row as it is read once before the first send, with its modified_at as the expected value. */
+            async Task<DarlingCliCommands.EditServerTarget> TargetAsync()
+            {
+                var row = (await new Edit.PostgresServerEditStore(rig.Owner).ReadRowAsync(5194, ct))!;
+                return new DarlingCliCommands.EditServerTarget(
+                    row.ServerId, "alpha-94.example.test", row.Name, row.Host, row.Port, Edit.AuthWord(row.Auth), row.Username, Edit.ModifiedAtToken(row.ModifiedAt));
+            }
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "host=alpha-99.example.test"], out var moveRequest, out _));
+            var (moveLines, moveExit) = await DarlingCliCommands.RunEditServerAsync(moveRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
+            Assert.Equal(1, moveExit);
+            Assert.Contains(Edit.EditRemediationKeptText, string.Join('\n', moveLines), StringComparison.Ordinal);
+            Assert.Equal(hostBefore, await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "name=Renamed-94"], out var renameRequest, out _));
+            var (renameLines, renameExit) = await DarlingCliCommands.RunEditServerAsync(renameRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
+            Assert.Equal(0, renameExit);
+            Assert.Contains("Changed Renamed-94", string.Join('\n', renameLines), StringComparison.Ordinal);
+            Assert.Equal("Renamed-94", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheStoreOwner_ThePasswordKeyIsCheckedInTheWriteTransaction_AKeyThatIsNoLongerCurrentSavesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5195, "alpha-95", "alpha-95.example.test", "sql", "monitor", "old-sealed-value", ct);
+            var privateKey = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(privateKey);
+            var keyId = ring.Status.KeyId!;
+            await ExecAsync(rig.Owner,
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('afb6cecb558a0858', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
+            var before = await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', trust_server_certificate, encrypted_password, modified_at) FROM config_monitored_servers WHERE server_id = 5195", ct);
+            var changes = $"{{\"trust_server_certificate\":true,\"password\":\"{RetypedPassword}\"}}";
+
+            /* The ring was chosen for a key the store no longer calls current: the write is refused in its own transaction. */
+            var refused = Parse(await Edit.EditServerCoreAsync(
+                new DarlingCliCommands.KeyCheckedEditStore(new Edit.PostgresServerEditStore(rig.Owner), ring), 5195, changes, Reachable, ring, null, ct));
+            Assert.Equal("refused", refused["status"]!.GetValue<string>());
+            Assert.Contains("password key", refused["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal(before, await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', trust_server_certificate, encrypted_password, modified_at) FROM config_monitored_servers WHERE server_id = 5195", ct));
+
+            /* The same edit with the store's current key saves and seals the password to it. */
+            await ExecAsync(rig.Owner, "DELETE FROM config.password_key", ct);
+            await ExecAsync(rig.Owner,
+                $"INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('{keyId}', decode('{Convert.ToHexString(privateKey.PublicKey.Spki)}', 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
+            var saved = Parse(await Edit.EditServerCoreAsync(
+                new DarlingCliCommands.KeyCheckedEditStore(new Edit.PostgresServerEditStore(rig.Owner), ring), 5195, changes, Reachable, ring, null, ct));
+            Assert.Equal("updated", saved["status"]!.GetValue<string>());
+            Assert.NotEqual("old-sealed-value", await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5195", ct));
             ok = true;
         }
         finally

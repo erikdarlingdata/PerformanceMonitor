@@ -325,86 +325,59 @@ public static class PayloadDimensions
         "INTERVAL '" + LastSeenRefreshGuardHours.ToString(CultureInfo.InvariantCulture) + " hours'";
 
     /// <summary>
-    /// The batch upsert: ONE statement, two array parameters plus the collection timestamp, so it
+    /// The batch insert of new content: ONE statement, two array parameters plus the collection timestamp, so it
     /// carries no multi-statement/positional-parameter hazard (an Npgsql batch mixing the two fails
     /// SILENTLY). <c>ON CONFLICT DO NOTHING</c> is what makes the write path idempotent and is the
-    /// whole dedup mechanism — the second and every later sighting of the same content writes
-    /// nothing.
+    /// whole dedup mechanism: the second and every later sighting of the same content writes nothing here.
     ///
-    /// <para>The conflict arm refreshes <see cref="LastSeenColumn"/> only when it is more than
-    /// <see cref="LastSeenRefreshGuardHours"/> stale. Without that guard every referenced dim row would
-    /// take an UPDATE every collection cycle — a dead tuple per row per minute on a hot table — for a
-    /// watermark whose consumer (the <see cref="LastSeenColumn"/> sweep) has a multi-day horizon. The
-    /// guard caps a continuously-seen row to <c>24 / LastSeenRefreshGuardHours</c> UPDATEs a day (4 at
-    /// the current 6-hour width, down from 24 at the original 1-hour width), and stays correct as long
-    /// as the GC margin exceeds the guard width (it is a full day).</para>
+    /// <para><b>#9304: this statement never updates a dimension row.</b> The liveness stamp of a digest is on its narrow
+    /// <see cref="PayloadDimensionSeen"/> row, and <see cref="TouchSql"/> refreshes it, so an unchanged text or plan is
+    /// not rewritten (and a text's trigrams are not added to the GIN index again). The <c>WHERE NOT EXISTS</c> pre-filter
+    /// reads the stamp table: a digest whose stamp is inside the <see cref="LastSeenRefreshGuardHours"/> window never
+    /// reaches the insert, so the conflict arm runs at most once per guard window for a digest.</para>
     ///
-    /// <para><b>#4503: <see cref="LastSeenColumn"/> is indexed on every dimension table (the prune's
-    /// <c>ORDER BY last_seen LIMIT</c> needs it), so the guarded UPDATE can never go HOT — it is a
-    /// non-HOT update to a large, scattered heap on every touch that survives the guard. Measured on one
-    /// production store at the original 1-hour width: <c>query_plan_dim</c> alone took 894,656 such
-    /// touches in 71 hours, ~4.87 M full-page images, ~42 KB of WAL per row. Widening the guard to 6
-    /// hours is a 6x cut in how often that cost can recur per row, with retention widened to match (see
-    /// <see cref="DarlingRetention.ComputeDimensionCutoff"/>).</para>
+    /// <para><b>The conflict arm LOCKS the conflicting row, on purpose.</b> It is <c>DO UPDATE ... WHERE</c>, whose
+    /// <c>WHERE</c> is true only when the dimension row's own <c>last_seen</c> is more than
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/> behind, and every GC candidate is. Taking the row lock is what
+    /// keeps a digest this batch is about to reference from being retired under it: a GC batch that reaches the row later
+    /// waits for this transaction, re-reads the row's new <c>last_seen</c> and skips it. With <c>DO NOTHING</c>, which takes
+    /// no lock, this order loses the content: the wide row is live (nothing happens), the GC locks it, <see cref="TouchSql"/>
+    /// skips it (<c>SKIP LOCKED</c>) and stamps the stamp row, the writer commits its fact rows, and the GC's cascade
+    /// deletes the stamp, leaving the fact rows with no content. The wide row is locked before the stamp row, the same order
+    /// as the GC (wide row in the <c>DELETE</c>, stamp in the cascade), so this adds no deadlock. The #4249 cost of the old
+    /// arm, a lock on every conflicting row, stays small: the pre-filter keeps a fresh digest from reaching the arm. A new
+    /// dimension row's stamp row is written by the insert trigger (<see cref="PayloadDimensionSeen.TriggerSql"/>), at the
+    /// same collection timestamp.</para>
     ///
-    /// <para><b>#4249: the conflict guard only stops the UPDATE, not the WRITE.</b> Postgres locks every
-    /// conflicting row BEFORE evaluating the <c>WHERE</c> on <c>DO UPDATE</c> — "all rows will be locked
-    /// when the ON CONFLICT DO UPDATE action is taken" per the INSERT reference — so a digest re-sighted
-    /// inside the guard window still took a <c>Heap/LOCK</c> WAL record and a dirtied page every cycle,
-    /// measured at 12-23% of one store's WAL. The <c>WHERE NOT EXISTS</c> pre-filter on the <c>SELECT</c>
-    /// fixes that: it is a plain MVCC read, which takes no lock, so a digest whose stored <see
-    /// cref="LastSeenColumn"/> is already within the guard window never reaches <c>INSERT</c> or <c>ON
-    /// CONFLICT</c> at all and writes nothing. The <c>ON CONFLICT ... WHERE</c> arm stays for the race
-    /// the pre-filter cannot close: two sessions whose pre-filter reads both land before either commits
-    /// can both decide the same digest is stale and both attempt the insert.</para>
+    /// <para>Callers MUST pass digest-deduplicated arrays, and in digest ORDER: dedup makes a batch conflict-free with
+    /// itself, the order makes it conflict-free with its siblings (two sessions that insert two shared digests in
+    /// opposite order wait on each other, 40P01, #1801). <c>PayloadDimensionBatch.ToArrays</c> imposes both, and the
+    /// <c>ORDER BY u.digest</c> keeps the order the filtered plan inserts in, whatever join the planner picks for the
+    /// pre-filter (#4249).</para>
     ///
-    /// <para>Callers MUST pass digest-deduplicated arrays: Postgres raises 21000 ("ON CONFLICT DO
-    /// UPDATE command cannot affect row a second time") when one statement presents the same key
-    /// twice, and a 200-row batch sharing a handful of plans presents duplicates constantly. The
-    /// write path accumulates into a digest-keyed dictionary, which dedups structurally.</para>
-    ///
-    /// <para>They must ALSO pass them in digest ORDER, which is a separate requirement dedup does not
-    /// supply: dedup makes a batch conflict-free with ITSELF, ordering makes it conflict-free with its
-    /// SIBLINGS. This statement takes one row lock per conflict key, so two concurrent sessions whose
-    /// batches share two digests in opposite relative order each hold the lock the other needs next and
-    /// deadlock (40P01, #1801). <c>PayloadDimensionBatch.ToArrays</c> imposes that order client-side, and
-    /// until #4249 that was the WHOLE mechanism — deliberately client-side rather than an <c>ORDER BY</c>
-    /// here, so the lock order owed nothing to how the planner executed the statement.</para>
-    ///
-    /// <para><b>#4249 added the <c>WHERE NOT EXISTS</c> anti-join above, and that changes the claim.</b>
-    /// A join gives the planner a row source it can execute in whatever order it finds cheapest — a hash
-    /// anti-join against a large dim table returns survivors in HASH order, not <c>unnest</c>'s input
-    /// order — so client order alone no longer fixes the order rows reach <c>ON CONFLICT</c>. Both
-    /// branches carry <c>ORDER BY u.digest</c> on the <c>SELECT</c> now, restoring a deterministic
-    /// acquisition order for the rows that actually proceed to lock. The client-side sort still matters:
-    /// it is what makes a batch conflict-free with itself (dedup) actually land in digest order for the
-    /// <c>unnest</c> arrays this <c>ORDER BY</c> re-sorts, and it is the order every other digest-keyed
-    /// caller in this design relies on. Belt and suspenders, not redundant — the sort fixes the INPUT
-    /// order, the <c>ORDER BY</c> fixes the order the FILTERED, JOINED plan actually locks in.</para>
+    /// <para>#2069: the compressed-content dim inserts gzip BYTES into <see cref="CompressedContentColumn"/> (text column
+    /// left NULL on new rows); every other dim keeps the text shape. #2171: <paramref name="compressContent"/> false routes
+    /// the plan dim through the TEXT branch instead (<c>plan_xml_compression = 'none'</c>).</para>
     /// </summary>
-    /// <para>#2069: the compressed-content dim upserts gzip BYTES into
-    /// <see cref="CompressedContentColumn"/> (text column left NULL on new rows); every other dim
-    /// keeps the text shape. One method so the two shapes cannot drift on conflict semantics.</para>
-    /// <para>#2171: <paramref name="compressContent"/> false routes the plan dim through the TEXT
-    /// branch instead - <c>query_plan_xml</c> written, <c>query_plan_gz</c> left NULL - which is the
-    /// <c>plan_xml_compression = 'none'</c> store mode for direct-SQL consumers (Grafana and friends
-    /// read the column with no extension; lz4 TOAST does the compressing). Readers need no new
-    /// arm: the text-first-else-gz resolution below already covers every mix of eras and modes.</para>
     public static string UpsertSql(string dimTable, bool compressContent = true)
     {
+        var seen = PayloadDimensionSeen.SeenName(dimTable);
+        var freshStamp =
+            $"WHERE NOT EXISTS (\n" +
+            $"    SELECT 1 FROM {seen} s\n" +
+            $"    WHERE s.{DigestColumn} = u.digest\n" +
+            $"    AND   s.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
+            $"ORDER BY u.digest\n" +
+            $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
+            $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {PayloadDimensionSeen.WideRowRefreshInterval}";
+
         if (compressContent && string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal))
         {
             return
                 $"INSERT INTO {dimTable} ({DigestColumn}, {CompressedContentColumn}, {LastSeenColumn})\n" +
                 $"SELECT u.digest, u.payload, $3\n" +
                 $"FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
-                $"WHERE NOT EXISTS (\n" +
-                $"    SELECT 1 FROM {dimTable} d\n" +
-                $"    WHERE d.{DigestColumn} = u.digest\n" +
-                $"    AND   d.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
-                $"ORDER BY u.digest\n" +
-                $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
-                $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {LastSeenRefreshGuardInterval}";
+                freshStamp;
         }
 
         var payloadColumn = PayloadColumnOf(dimTable);
@@ -412,61 +385,128 @@ public static class PayloadDimensions
             $"INSERT INTO {dimTable} ({DigestColumn}, {payloadColumn}, {LastSeenColumn})\n" +
             $"SELECT u.digest, u.payload, $3\n" +
             $"FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
-            $"WHERE NOT EXISTS (\n" +
-            $"    SELECT 1 FROM {dimTable} d\n" +
-            $"    WHERE d.{DigestColumn} = u.digest\n" +
-            $"    AND   d.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
-            $"ORDER BY u.digest\n" +
-            $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
-            $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {LastSeenRefreshGuardInterval}";
+            freshStamp;
     }
 
     /// <summary>
-    /// The keep-alive for digests a batch referenced without content: ONE statement, one array of digests plus
-    /// the collection timestamp. It refreshes <see cref="LastSeenColumn"/> on the dim rows whose stored value
-    /// is more than <see cref="LastSeenRefreshGuardHours"/> stale, and returns the digests of the array that
-    /// have NO dim row at all (the fact row written from them resolves to nothing, and the caller must stop
-    /// presenting them).
+    /// The keep-alive for digests a batch referenced: ONE statement, one array of digests plus the collection timestamp. It
+    /// refreshes the stamp row (<see cref="PayloadDimensionSeen"/>) of every digest whose stamp is more than
+    /// <see cref="LastSeenRefreshGuardHours"/> stale, writes one for a dimension row that has none, and returns the digests
+    /// of the array that have NO dimension row at all (the fact row written from them resolves to nothing, and the caller
+    /// must stop presenting them). The writer runs it for the digests it inserted or found as well as the ones a batch
+    /// referenced without content, so every digest a batch references is stamped.
     ///
-    /// <para>The GC liveness invariant of <see cref="LastSeenColumn"/> holds exactly as on the insert path
-    /// (<see cref="UpsertSql"/>): a digest a batch references is stamped, never left older than
-    /// <see cref="LastSeenRefreshGuardHours"/> behind the newest fact row pointing at it, so the sweep
-    /// (which trails by more than that guard) cannot delete content a live row still references. The guard
-    /// is the same constant, so it also keeps the same cost cap: a continuously referenced digest takes at
-    /// most <c>24 / LastSeenRefreshGuardHours</c> updates a day, not one per cycle.</para>
+    /// <para>The GC liveness invariant holds as it did on the dimension row: a digest a batch references is stamped, never
+    /// left older than <see cref="LastSeenRefreshGuardHours"/> behind the newest fact row pointing at it, so the sweep (which
+    /// trails by more than that guard) cannot delete content a live row still references. The same guard keeps the same
+    /// cost cap: a continuously referenced digest takes at most <c>24 / LastSeenRefreshGuardHours</c> stamp updates a day.</para>
     ///
-    /// <para>The rows to refresh are chosen and locked in a subquery (<c>FOR UPDATE SKIP LOCKED</c>), so the
-    /// touch never waits on a row lock. There is no single total order across the upsert (<see cref="UpsertSql"/>,
-    /// whose conflict arm locks the row even when its guard is false) and this touch: one batch can hold digest A
-    /// from its upsert and want B in its touch while another holds B and wants A, and a waiting touch would turn
-    /// that into a deadlock that rolls back a whole batch. Skipping a locked row is safe because whoever holds a
-    /// stale-but-live dim row is refreshing it: the upsert's conflict arm, another touch, or the Query Store
-    /// plan map's <c>dim_touch</c>. A holder that rolls back leaves the row stale, and the next cycle touches it
-    /// again, far inside the dimension GC's margin. GC can never be the holder: <see cref="RowCappedDeleteSql"/>
-    /// only reaches rows older than <see cref="ComputeDimensionCutoff"/>, at least the guard plus one day behind,
-    /// and a digest referenced every cycle is never more than about <see cref="LastSeenRefreshGuardHours"/> hours
-    /// stale. A skipped row correctly counts as present.</para>
+    /// <para><b>The dimension row's own <c>last_seen</c></b> is refreshed here too, when it is more than
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/> stale, for the sake of an older build that prunes on it (see
+    /// <see cref="PayloadDimensionSeen"/>). No other path updates a dimension row.</para>
     ///
-    /// <para>The absent-digest read is a plain read of the table as the statement began: the refresh never
-    /// deletes, and GC cannot reach a live digest, so a digest present at that point is present. The converse
-    /// can be false: a digest another, uncommitted batch is still inserting is not visible to this statement and
-    /// is reported absent. That costs one extra render on the next cycle and nothing else.</para>
+    /// <para>The rows to refresh are chosen and locked in a subquery (<c>FOR UPDATE SKIP LOCKED</c>), so the refresh never
+    /// waits on a row lock, for the reason the old shape gave: there is no single lock order across this statement, the
+    /// insert (<see cref="UpsertSql"/>), the Query Store plan map's <c>dim_touch</c> and the GC's cascade, and a waiting
+    /// refresh would turn that into a deadlock that rolls back a whole batch. Skipping a locked row is safe because whoever
+    /// holds a stale-but-live stamp is refreshing it, or a transaction that rolls back leaves it stale for the next cycle,
+    /// far inside the GC's margin. The stamp insert takes a key share lock on the dimension row through the foreign key, so the
+    /// adopt step tests the row with <c>FOR KEY SHARE SKIP LOCKED</c> and leaves one a GC batch holds, which would otherwise wait on
+    /// it and deadlock (#9304); the GC adopts that row's stamp itself on its next pass. The stamp test sits behind <c>OFFSET 0</c>, so the planner cannot push the locking test below it and lock the wide row of every wanted digest: only a digest with no stamp row is locked (#9304). The GC cannot be the holder of a row a live digest owns: it only reaches stamps older
+    /// than the dimension cutoff of <c>DarlingRetention.ComputeDimensionCutoff</c>, at least the guard plus one day behind. A skipped row
+    /// correctly counts as present. A stamp row that does not exist yet is inserted with <c>DO NOTHING</c>, which takes no
+    /// lock either.</para>
+    ///
+    /// <para>The absent-digest read is a plain read of the table as the statement began, and a digest another, uncommitted
+    /// batch is still inserting is reported absent. That costs one extra render on the next cycle and nothing else.</para>
     /// </summary>
     public static string TouchSql(string dimTable)
     {
         PayloadColumnOf(dimTable);
+        var seen = PayloadDimensionSeen.SeenName(dimTable);
         return
-            $"WITH refreshed AS (\n" +
-            $"    UPDATE {dimTable} SET {LastSeenColumn} = $2\n" +
+            $"WITH want AS (\n" +
+            $"    SELECT d.{DigestColumn} FROM {dimTable} d\n" +
+            $"    WHERE d.{DigestColumn} = ANY($1::bytea[])\n" +
+            $"    AND   NOT EXISTS (\n" +
+            $"        SELECT 1 FROM {seen} s\n" +
+            $"        WHERE s.{DigestColumn} = d.{DigestColumn}\n" +
+            $"        AND   s.{LastSeenColumn} >= $2 - {LastSeenRefreshGuardInterval})),\n" +
+            $"stamped AS (\n" +
+            $"    UPDATE {seen} SET {LastSeenColumn} = $2\n" +
             $"    WHERE {DigestColumn} IN (\n" +
-            $"        SELECT s.{DigestColumn} FROM {dimTable} s\n" +
-            $"        WHERE s.{DigestColumn} = ANY($1::bytea[])\n" +
+            $"        SELECT s.{DigestColumn} FROM {seen} s\n" +
+            $"        WHERE s.{DigestColumn} IN (SELECT {DigestColumn} FROM want)\n" +
             $"        AND   s.{LastSeenColumn} < $2 - {LastSeenRefreshGuardInterval}\n" +
             $"        ORDER BY s.{DigestColumn}\n" +
+            $"        FOR UPDATE SKIP LOCKED)\n" +
+            $"    RETURNING 1),\n" +
+            $"adopted AS (\n" +
+            $"    INSERT INTO {seen} ({DigestColumn}, {LastSeenColumn})\n" +
+            $"    SELECT m.{DigestColumn}, $2\n" +
+            $"    FROM (SELECT w.{DigestColumn} FROM want w\n" +
+            $"          WHERE NOT EXISTS (SELECT 1 FROM {seen} s WHERE s.{DigestColumn} = w.{DigestColumn})\n" +
+            $"          OFFSET 0) AS m\n" +
+            $"    WHERE EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = m.{DigestColumn} FOR KEY SHARE SKIP LOCKED)\n" +
+            $"    ORDER BY m.{DigestColumn}\n" +
+            $"    ON CONFLICT ({DigestColumn}) DO NOTHING\n" +
+            $"    RETURNING 1),\n" +
+            $"widened AS (\n" +
+            $"    UPDATE {dimTable} SET {LastSeenColumn} = $2\n" +
+            $"    WHERE {DigestColumn} IN (\n" +
+            $"        SELECT d.{DigestColumn} FROM {dimTable} d\n" +
+            $"        WHERE d.{DigestColumn} IN (SELECT {DigestColumn} FROM want)\n" +
+            $"        AND   d.{LastSeenColumn} < $2 - {PayloadDimensionSeen.WideRowRefreshInterval}\n" +
+            $"        ORDER BY d.{DigestColumn}\n" +
             $"        FOR UPDATE SKIP LOCKED)\n" +
             $"    RETURNING 1)\n" +
             $"SELECT w.digest FROM unnest($1::bytea[]) AS w(digest)\n" +
             $"WHERE NOT EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = w.digest)\n" +
             $"ORDER BY w.digest";
+    }
+
+    /// <summary>
+    /// The dimension GC's batch (#9304): deletes up to <paramref name="cap"/> dimension rows whose stamp
+    /// (<see cref="PayloadDimensionSeen"/>) is behind the cutoff (<c>$1</c>), oldest first, and returns the stamp values of
+    /// the rows it deleted, so the caller takes their maximum as the next batch's cursor (<paramref name="hasCursor"/> adds
+    /// <c>AND last_seen &gt;= $2</c>, the keyset cursor of <c>DarlingRetention.CursoredRowCappedDeleteSql</c>). The stamp row
+    /// goes with its dimension row through the foreign key's cascade, in the same statement, so a batch that times out
+    /// rolls back both.
+    ///
+    /// <para>The order and the cap come from the stamp table's own index, so the batch reads the narrow table and probes the
+    /// dimension row of each due stamp by primary key. A dimension row that is not there (never, while the foreign key
+    /// holds) deletes nothing and returns nothing, so it takes no place under the cap.</para>
+    ///
+    /// <para>The dimension row's own <c>last_seen</c> is tested twice, as <c>QueryStoreTextSeen.PruneSql</c> tests the text
+    /// row's. Inside the capped select, so a stamp that is stale while its dimension row is fresh (a store back from an older
+    /// build, which stamped the dimension row only) takes no place under the cap. And on the <c>DELETE</c> itself, which is
+    /// what a concurrent refresh is re-checked against: every stamp behind the cutoff is also behind
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/>, so a refresh that references the digest rewrites the dimension
+    /// row first (<see cref="TouchSql"/>), and the delete, which waited for that row, reads the new version and skips it.
+    /// Without the second test the re-check would only compare the digest and delete a row the refresh just kept alive.</para>
+    ///
+    /// <para>The <c>LATERAL ... OFFSET 0</c> keeps the dimension side a primary-key probe per stale stamp, in stamp order, so
+    /// the <c>LIMIT</c> stops the stamp index scan after <paramref name="cap"/> due rows.</para>
+    /// </summary>
+    public static string CursoredDeleteSql(string dimTable, int cap, bool hasCursor)
+    {
+        var seen = PayloadDimensionSeen.TableName(dimTable);
+        return
+            $"WITH due AS (\n" +
+            $"    SELECT s.{DigestColumn}, s.{LastSeenColumn} FROM {seen} s\n" +
+            $"    CROSS JOIN LATERAL (\n" +
+            $"        SELECT k.{DigestColumn} FROM collect.{dimTable} k\n" +
+            $"        WHERE k.{DigestColumn} = s.{DigestColumn}\n" +
+            $"        AND   k.{LastSeenColumn} < $1\n" +
+            $"        OFFSET 0) AS x\n" +
+            $"    WHERE s.{LastSeenColumn} < $1\n" +
+            (hasCursor ? $"    AND   s.{LastSeenColumn} >= $2\n" : string.Empty) +
+            $"    ORDER BY s.{LastSeenColumn} LIMIT {cap.ToString(CultureInfo.InvariantCulture)}),\n" +
+            $"gone AS (\n" +
+            $"    DELETE FROM collect.{dimTable} d USING due\n" +
+            $"    WHERE d.{DigestColumn} = due.{DigestColumn}\n" +
+            $"    AND   d.{LastSeenColumn} < $1\n" +
+            $"    RETURNING due.{LastSeenColumn})\n" +
+            $"SELECT {LastSeenColumn} FROM gone";
     }
 }

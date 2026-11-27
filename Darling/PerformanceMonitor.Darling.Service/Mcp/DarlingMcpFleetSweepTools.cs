@@ -20,6 +20,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -51,6 +52,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpFleetSweepTools
 {
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_sweep_reports"), Description(
         "Reads the scheduled Fleet Sweep Report: the timeline for the window, the newest sweep in full, and the " +
         "watch worklist (default: open+carried only; pass watch_state for pending/closed); pass sweep_id (a " +

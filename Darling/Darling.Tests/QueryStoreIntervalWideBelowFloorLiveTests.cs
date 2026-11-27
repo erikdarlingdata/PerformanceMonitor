@@ -430,7 +430,7 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal(S, plan.ReadStart);
         Assert.Equal(S, plan.ClampedStart);
         Assert.Equal(QueryStoreIntervalWide.WideStartBound.Window, plan.StartBound);
-        Assert.Contains("collection_time >= $2", DarlingDataReader.QueryStoreTopTableSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time > $2", DarlingDataReader.QueryStoreTopTableSql, StringComparison.Ordinal);
     }
 
     [Fact]

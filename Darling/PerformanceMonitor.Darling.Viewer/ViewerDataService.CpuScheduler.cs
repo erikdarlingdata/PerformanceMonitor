@@ -103,7 +103,7 @@ public sealed partial class ViewerDataService
     public static readonly string CpuSchedulerSnapshotSql = $"""
         WITH newest AS
         (
-            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time > $2 AND collection_time <= $3", newestOnly: true)}
         )
         SELECT
             collection_time,
@@ -156,7 +156,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, int Runnable, int Blocked, int Queued)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(5) != 1)
@@ -192,7 +192,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(CpuSchedulerSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;

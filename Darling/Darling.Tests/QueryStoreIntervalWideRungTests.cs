@@ -38,18 +38,9 @@ public sealed class QueryStoreIntervalWideRungTests
     private static PgMigrations.Migration V145 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("query-store-interval-wide", V145.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
-           being true when V146 landed. The invariant that outlives the handoff is that the LADDER's top and
-           the declared version agree, which the two lines above already say. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>

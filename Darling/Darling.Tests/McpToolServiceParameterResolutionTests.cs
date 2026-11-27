@@ -60,6 +60,9 @@ public sealed class McpToolServiceParameterResolutionTests
             /* The SDK binds a CancellationToken parameter to the call's own cancellation (#4203), never from DI and
                never as a client argument, so it has no seat. */
             .Where(t => t != typeof(CancellationToken))
+            /* #9388: find_tools takes the request's own McpServer, which the SDK binds from the request and never serves
+               from DI or as a client argument. */
+            .Where(t => t != typeof(ModelContextProtocol.Server.McpServer))
             .Select(t => Nullable.GetUnderlyingType(t) ?? t)
             .Distinct()
             .ToList();

@@ -67,11 +67,11 @@ public sealed class PgTableTuningTests
 
         /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
            start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
-        Assert.Equal(8, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
-        Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
+        Assert.Equal(12, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #9223 the query_store_stats server, hash and time index (the raw tail of the fleet summary); #9171 the database_states cover; #9172 the cpu window cover; #8570 the procedure name index; #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
+        Assert.Equal(6, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #9171 the narrow database_states index, dropped once the cover is valid; #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
-        /* Per-table autovacuum-insert override on exactly the FOUR high-rate insert tables (NOT a global GUC
+        /* Per-table autovacuum-insert override on the FOUR high-rate insert hypertables (NOT a global GUC
            change). pg_statement_stats joined them: it is query_stats' per-minute PostgreSQL twin, same shape
            and cadence and the same pure-insert hypertable chunks, so the stock 0.2 scale factor leaves the
            day's hot chunk stale before the TimescaleDB rollover exactly as it did for the other three. */
@@ -80,6 +80,11 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
+        /* #9482: the clutter plan rollups are plain tables the hypertable sweep never reaches, read index-only newest hours first, so
+           they take the insert knob by name. */
+        Assert.Contains("ALTER TABLE collect.query_store_clutter_plan_hourly SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE collect.query_store_clutter_plan_daily SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
+
         /* #2402: the plan dimension takes the DEAD-TUPLE knob, not the insert one. It is a plain table
            whose churn comes from retention DELETEs, so autovacuum_vacuum_insert_* — which governs every
            entry above — does not apply to it at all. Asserted by exact text because the two knob families
@@ -87,7 +92,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(18, PgTableTuning.Statements.Count);   /* 8 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover) + 5 DROP INDEX + 5 ALTER TABLE */
+        Assert.Equal(47, PgTableTuning.Statements.Count);   /* #9357 added the procedure_stats hour ledger's fillfactor, 12 CREATE INDEX (#9223 added the query_store_stats server, hash and time index, #9171 added the database_states cover, #4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index, #9172 the cpu window cover) + 6 DROP INDEX (the sixth drops the narrow database_states index once the cover is valid) + 28 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables, #9111 the four closed-day rollup tables, #9482 the two clutter plan rollups) */
     }
 
     /// <summary>
@@ -129,7 +134,7 @@ public sealed class PgTableTuningTests
             .Where(s => s.Contains("autovacuum_vacuum_insert_scale_factor", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(4, literals.Count);
+        Assert.Equal(6, literals.Count);   /* the four high-rate insert hypertables and #9482's two clutter plan rollups */
         Assert.All(literals, s =>
             Assert.Contains("(" + PgTableTuning.InsertTuningOptions + ")", s, StringComparison.Ordinal));
     }

@@ -46,7 +46,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// none of it;</item>
 /// <item>one row per product-owned plain table the walk would otherwise lump (<c>object_kind = 'table'</c>,
 /// #3582): <c>collect.query_store_text</c> (V74 stores statement text INLINE by design — 15 GiB on that
-/// store), <c>collect.query_store_plan_map</c> and <c>config.config_alert_log</c>. Every store shape;</item>
+/// store), <c>collect.query_store_plan_map</c>, <c>config.config_alert_log</c> and, since #8817,
+/// <c>collect.oversized_plan_backlog</c> (the over-cap plan XML it holds reached 15.6 GiB on one store with
+/// no growth history anywhere in the inventory). Every store shape;</item>
 /// <item>two catch-all rows that make the inventory RECONCILABLE against <c>pg_database_size</c> (#3582):
 /// <c>object_kind = 'other'</c> sums every user-schema relation none of the rows above accounts for, with
 /// the relation count, and <c>object_kind = 'system'</c> does the same for the system catalogs and
@@ -69,6 +71,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// that the checkpointer had been there; the per-interval figures the MCP surface and the self-alert judge
 /// are DIFFERENCES between consecutive rows, computed at read time — see <see cref="CheckpointerInsertSql"/>
 /// for why the counters are stored raw;</item>
+/// <item>one row carrying the store's own WAL figures (<c>object_kind = 'wal'</c>, #9419): <c>pg_stat_wal</c>'s cumulative counters and the size and file count of <c>pg_wal</c>, written by <see cref="StoreWalFigures"/> into its own columns (V305)</item>
 /// <item>one summary row (<c>object_kind = 'store'</c>): <c>pg_database_size</c> plus the enabled-server
 /// count (the fleet reader's <c>WHERE is_enabled</c> registry predicate), so the per-server ingest rate —
 /// daily growth divided by servers, the number onboarding N primaries multiplies — is derivable from the
@@ -849,10 +852,11 @@ FROM pg_stat_bgwriter AS b";
 
     /// <summary>
     /// The checkpointer's CUMULATIVE sync time alone, in milliseconds, PostgreSQL 17+ (#4823): the one-column read
-    /// the worker takes once a minute so the longest SINGLE checkpoint sync inside an hour can be found. The hourly
-    /// checkpointer row (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart
-    /// difference to the hour's TOTAL sync time, and the Store Checkpointer Pressure alert divides that by the
-    /// hour's checkpoint count, so one 23.5 s sync among four checkpoints averaged 5.9 s and read as clean. Rounded
+    /// the worker takes once a minute so each SINGLE checkpoint sync inside an hour can be found, with the minute it
+    /// finished in (#9549 looks for a store read or write that suffered in such a minute). The hourly checkpointer row
+    /// (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart difference to the
+    /// hour's TOTAL sync time, which over the hour's checkpoint count is an average, so one 23.5 s sync among four
+    /// checkpoints reads as 5.9 s. Rounded
     /// the way the hourly row rounds it (<c>sync_time</c> is <c>double precision</c> milliseconds), so a minute's
     /// difference and the hour's compare. Nothing is written: <c>CheckpointSyncSampler</c> keeps the previous value
     /// in memory.
@@ -938,7 +942,9 @@ FROM pg_stat_bgwriter AS b";
     /// design (Query Store already de-duplicates statement text one row per statement per database, so
     /// there was nothing for a digest dimension to squeeze) and which was 15 GiB on the largest production
     /// store; <c>collect.query_store_plan_map</c>, the V72 plan-id-to-digest map; <c>config.config_alert_log</c>,
-    /// the alert history and dismissals; and the four V143/V145 per-interval Query Store tables (#3953,
+    /// the alert history and dismissals; <c>collect.oversized_plan_backlog</c> (#8817), the over-cap plan XML
+    /// backlog, a plain table that reached 15.6 GiB on one store while only the un-enumerated census could see
+    /// it, with no growth history; and the four V143/V145 per-interval Query Store tables (#3953,
     /// #4382) — <c>collect.query_store_interval_latest</c>, <c>collect.query_store_interval_latest_pending</c>,
     /// <c>collect.query_store_interval_wide</c> and <c>collect.query_store_interval_wide_pending</c>. Those
     /// four accounted for most of a +19.4 GB rise in <see cref="OtherObjectKind"/> on one production store
@@ -1017,7 +1023,14 @@ SELECT
     'collect.{QueryStoreIntervalWide.PendingTableName}',
     '{TableObjectKind}',
     pg_total_relation_size('collect.{QueryStoreIntervalWide.PendingTableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.PendingTableName}'::regclass)";
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.PendingTableName}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    '{OversizedPlanBacklog.TableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('{OversizedPlanBacklog.TableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{OversizedPlanBacklog.TableName}'::regclass)";
 
     /// <summary>The <c>object_kind</c> of the user-schema catch-all row (#3582): every relation in a
     /// non-system schema that no named row accounts for. See <see cref="HypertableObjectKind"/> for why
@@ -1080,7 +1093,7 @@ AND   NOT (c.relispartition AND EXISTS (
 
     /// <summary>
     /// The relations some NAMED row already sizes, every store shape (#3582, extended #4609): the two
-    /// payload dimensions and the seven named plain tables. A relation matched here is never in a catch-all row, or the
+    /// payload dimensions and the eight named plain tables. A relation matched here is never in a catch-all row, or the
     /// reconciliation would count it twice. Every name is the SAME compile-time constant the INSERT arm
     /// interpolates — the dims through <see cref="PayloadDimensions"/>, the tables through their
     /// schema-qualified owners' constants — so the census and the rows it excludes cannot drift apart. That
@@ -1100,7 +1113,8 @@ AND   NOT (c.relispartition AND EXISTS (
         'collect.{QueryStoreIntervalLatest.TableName}',
         'collect.{QueryStoreIntervalLatest.PendingTableName}',
         'collect.{QueryStoreIntervalWide.TableName}',
-        'collect.{QueryStoreIntervalWide.PendingTableName}')";
+        'collect.{QueryStoreIntervalWide.PendingTableName}',
+        '{OversizedPlanBacklog.TableName}')";
 
     /// <summary>
     /// The relations the TimescaleDB rows already size, as a fragment (#3582, reshaped by #3918): every
@@ -1719,6 +1733,9 @@ WHERE metric_time < $1";
             written += await checkpointer.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* #9419: the store's own WAL figures, raw like the checkpointer row. Failure-isolated inside: a role that cannot read them never fails the sweep. */
+        written += await StoreWalFigures.CaptureAsync(connection, metricTime, logger, cancellationToken);
+
         /* #3582: the product-owned plain tables the inventory knows by name. */
         using (var tables = new NpgsqlCommand(TableInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
@@ -1751,6 +1768,10 @@ WHERE metric_time < $1";
             retention.Parameters.AddWithValue(metricTime.AddDays(-RetentionDays));
             await retention.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        /* #9413: what each store table did this hour, as deltas. Its own rows and its own retention, so it adds nothing to the count above, and a failure
+           inside it is logged there and never fails the sweep. */
+        await StoreTableActivity.CaptureAsync(connection, timescaleAvailable, utcNow, logger, SweepTimeoutSeconds, cancellationToken);
 
         logger?.LogDebug("Store self-metrics sweep wrote {Rows} rows at {MetricTime}", written, metricTime);
         return written;

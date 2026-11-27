@@ -96,7 +96,6 @@ public sealed class DarlingServerTagsTests
            own ordinal-free rewrite already records. */
         var v35 = PgMigrations.Scripts.Single(s => s.Version == 35);
         Assert.Equal("availability-group-alerts", v35.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains("ALTER TABLE config.config_alert_settings", v35.Sql, StringComparison.Ordinal);
         Assert.Contains("notify_ag_health boolean NOT NULL DEFAULT true", v35.Sql, StringComparison.Ordinal);
         Assert.Contains("ag_lag_alert_seconds integer NOT NULL DEFAULT 300", v35.Sql, StringComparison.Ordinal);

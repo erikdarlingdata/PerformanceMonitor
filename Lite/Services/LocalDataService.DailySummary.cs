@@ -128,7 +128,7 @@ alerts AS (
       AND metric_name NOT LIKE '%Resolved%'
       AND metric_name NOT LIKE '%Restored%'
       AND metric_name NOT LIKE '%Resumed%'
-      AND metric_name NOT LIKE '%Restarted%'
+      AND (metric_name NOT LIKE '%Restarted%' OR metric_name = 'Instance Restarted')
       AND metric_name NOT LIKE '%Recovered%'
       AND metric_name NOT LIKE '%Reconnected%'
     GROUP BY 1

@@ -29,6 +29,7 @@
 --   collection_log row from 3 hours back (the last collection before the outage), so the card reads Offline with its last values
 -- Seeded (the long-name SQL Server): collection_log 1 (cpu_utilization_stats at the anchor, #7569), so its card reads stale
 --   like the other two and not Offline
+--   plus (#8841) cpu_scheduler_stats 1 (24 runnable tasks) and identity_capacity 1 scan (an int identity at 82 percent used), for the fleet card's Threads reason and Identity capacity tile
 
 \set ON_ERROR_STOP on
 -- The anchor, as UTC text. Set by the caller (-v anchor='2026-01-01 12:00:00'), else taken once here, from the store's clock.
@@ -272,6 +273,26 @@ SELECT 9310000 + 10 * d.n + r.n, mm.t, :sid, :'sname', 'SalesAG', d.db, r.replic
 FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
 CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'OrdersDb')) AS d(n, db)
 CROSS JOIN (VALUES (1, 'UISQL01', TRUE), (2, 'UISQL02', FALSE)) AS r(n, replica, is_local);
+
+-- The long-name server's fleet card (#8841): an Identity capacity tile with data, and a Threads chip with a reason. It is the one server with no
+-- cpu_utilization_stats, so neither row moves a page that expects one (ui-sql's Triage scheduler pressure stays empty). collection_id 9400001 and up.
+--   cpu_scheduler_stats 1 row at the newest minute: 24 runnable tasks, nothing queued for a worker, 40 workers over a 960 ceiling. 20 or more runnable
+--     tasks band the chip Warning and it reads "24 runnable".
+--   identity_capacity 1 scan of one database (the marker row, then the column row): an int identity at 82 percent used. One scan has no rate, so the
+--     column is banded on its percent alone, Warning, and the tile reads "1 column".
+INSERT INTO collect.cpu_scheduler_stats (collection_id, collection_time, server_id, server_name, max_workers_count, scheduler_count, cpu_count,
+    total_runnable_tasks_count, total_work_queue_count, total_current_workers_count, avg_runnable_tasks_count, runnable_percent)
+SELECT 9400001, t, :lsid, :'lname', 960, 4, 4, 24, 0, 40, 6, 0
+FROM ui_minutes WHERE m = 0;
+
+INSERT INTO collect.identity_capacity (collection_id, collection_time, server_id, server_name, database_name)
+SELECT 9400011, t, :lsid, :'lname', 'SalesDb'
+FROM ui_minutes WHERE m = 0;
+
+INSERT INTO collect.identity_capacity (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, column_name,
+    data_type, type_precision, last_value, seed_value, increment_value, percent_used)
+SELECT 9400012, t, :lsid, :'lname', 'SalesDb', 'dbo', 'OrderLines', 'OrderLineId', 'int', 10, 1760000000, 1, 1, 81.94
+FROM ui_minutes WHERE m = 0;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- ui-pg: the PostgreSQL target. Its storage name is the config host. Ids ride 20000000 and up, clear of ui-sql's.

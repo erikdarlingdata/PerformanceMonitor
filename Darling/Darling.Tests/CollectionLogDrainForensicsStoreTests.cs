@@ -37,13 +37,11 @@ namespace Darling.Tests;
 public class CollectionLogDrainForensicsStoreTests
 {
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("collection-log-drain-forensics", PgMigrations.Scripts.Single(s => s.Version == 109).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Count, versions.Distinct().Count());
     }
 
@@ -357,13 +355,15 @@ public class CollectionLogDrainForensicsStoreTests
            ALTER ANY EVENT SESSION), so the run is an early return that read and drained nothing. The RDS
            endpoint-check arm is the fifteenth: the run stops before any RDS or Performance Insights call, so it read and
            drained nothing either. The AWS role arm (#5452) is the sixteenth, for the same reason: a role the service cannot
-           use stops the run before any RDS call. */
-        Assert.Equal(16, Regex.Matches(worker, @"drain: null").Count);
+           use stops the run before any RDS call. #8982's plan-capture stand-down is the seventeenth:
+           readiness says auto_explain is not loaded, so the run stops before it reads the target or the
+           RDS log. */
+        Assert.Equal(17, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same sixteen arms and for the same reason: no item
+        /* And V110's fetch sums stay null on those same seventeen arms and for the same reason: no item
            completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
            passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(16, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(17, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     private static string ReadSource(string relativePath)

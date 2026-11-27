@@ -379,6 +379,48 @@ public sealed class ViewerPostgresTabsTests
         Assert.Equal("", waits.Explanation);
     }
 
+    /// <summary>
+    /// #8913: an Aurora server whose stored extension list shows pg_stat_kcache absent gets the engine limit on the Overview grid, as
+    /// Collection Health gives it, and not the missing-extension fault the collector's own log row carries. A stock PostgreSQL server
+    /// keeps the setup sentence.
+    /// </summary>
+    [Fact]
+    public void TheOverviewGrid_ShowsTheEngineLimit_ForAnAuroraExtensionTheServerDoesNotOffer()
+    {
+        var collectors = ViewerPostgresTabs.PostgresCollectors();
+        const string setup = "CREATE EXTENSION pg_stat_kcache";
+        var facts = new[]
+        {
+            new ViewerDataService.PostgresCollectorLogFacts(
+                "pg_kernel_stats", new DateTime(2026, 8, 22, 12, 0, 0), new DateTime(2026, 8, 22, 12, 0, 0),
+                Runs: 60, FailedRuns: 60, RowsCollected: 0, LastStatus: "EXTENSION_MISSING", LastMessage: setup + " to create it, then set shared_preload_libraries"),
+        };
+        var absent = new[] { "pg_stat_kcache", "pg_qualstats" };
+
+        var aurora = ViewerDataService.BuildPostgresCollectorHealth(
+            Server(MonitoredEngineKind.AuroraPostgres), collectors, facts, absent).Single(r => r.Collector == "pg_kernel_stats");
+        Assert.True(aurora.IsPermanentGap);
+        Assert.False(aurora.IsFault);
+        Assert.Equal("Not collected on this engine", aurora.Status);
+        Assert.Contains("does not offer the pg_stat_kcache extension", aurora.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(setup, aurora.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("shared_preload_libraries", aurora.Explanation, StringComparison.Ordinal);
+
+        /* No stored list (never read, or the read failed) makes no claim on Aurora either: the log row's own text stands. */
+        var unknown = ViewerDataService.BuildPostgresCollectorHealth(
+            Server(MonitoredEngineKind.AuroraPostgres), collectors, facts, null).Single(r => r.Collector == "pg_kernel_stats");
+        Assert.False(unknown.IsPermanentGap);
+        Assert.True(unknown.IsFault);
+        Assert.Contains(setup, unknown.Explanation, StringComparison.Ordinal);
+
+        /* Vanilla PostgreSQL is untouched even when handed the same list. */
+        var vanilla = ViewerDataService.BuildPostgresCollectorHealth(
+            Server(MonitoredEngineKind.Postgres), collectors, facts, absent).Single(r => r.Collector == "pg_kernel_stats");
+        Assert.False(vanilla.IsPermanentGap);
+        Assert.True(vanilla.IsFault);
+        Assert.Contains(setup, vanilla.Explanation, StringComparison.Ordinal);
+    }
+
     // ── Empty-state prose ────────────────────────────────────────────────────────────────────────
 
     /// <summary>

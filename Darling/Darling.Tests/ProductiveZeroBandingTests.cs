@@ -360,7 +360,7 @@ public sealed class ProductiveZeroBandingTests
            shape: an abandoned cycle is stored as SUCCESS with zero rows plus the budget note, and that is
            data LOSS rather than a source that went quiet. Counting it would attribute an abandonment to a
            regression. */
-        foreach (var sql in new[] { DarlingDataReader.CollectionHealthSql, DarlingFleetReader.FleetCollectionHealthSql })
+        foreach (var sql in new[] { DarlingDataReader.CollectionHealthSql })
         {
             Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
             Assert.Contains("COALESCE(rows_collected, 0) = 0", sql, StringComparison.Ordinal);

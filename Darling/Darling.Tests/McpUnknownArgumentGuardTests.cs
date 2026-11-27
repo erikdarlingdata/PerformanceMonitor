@@ -106,7 +106,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
     /// and arrays (get_tool_guide's <c>string[]</c>) model-facing; the old inline one called both services and
     /// dropped them from the schemas this census checks.</remarks>
-    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
+    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer);
 
     private static CallToolRequestParams Call(string toolName, Dictionary<string, JsonElement> arguments) =>
         new() { Name = toolName, Arguments = arguments };
@@ -644,20 +644,14 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
-    /// The registrations named in the host source — the same derivation
-    /// <see cref="McpToolTypeRegistrationTests"/> uses, so this census covers the tools that actually ship
-    /// rather than every class in the assembly.
+    /// The tool classes the host registers (<see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes"/>), so this census covers
+    /// the tools that actually ship.
     /// </summary>
     internal static HashSet<string> RegisteredToolTypeNames()
     {
-        var source = File.ReadAllText(HostSourcePath());
+        var names = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
 
-        var names = Regex
-            .Matches(source, @"WithGeminiCompatibleTools<(\w+)>")
-            .Select(m => m.Groups[1].Value)
-            .ToHashSet(StringComparer.Ordinal);
-
-        Assert.True(names.Count > 0, "Found no .WithGeminiCompatibleTools<T>() registrations in the host.");
+        Assert.True(names.Count > 0, "The host registers no tool classes.");
 
         return names;
     }

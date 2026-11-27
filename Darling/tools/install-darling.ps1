@@ -345,7 +345,8 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
 # returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
-# list): darling.json, and every file whose name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
+# list): darling.json, upgrade-run.json (the run record upgrade-darling.ps1 writes and the service removes, #9432), and every file whose
+# name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
 # install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
 # take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
 # write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
@@ -361,7 +362,7 @@ function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
-        Files          = @('darling.json')
+        Files          = @('darling.json', 'upgrade-run.json')
         BackupPrefix   = 'darling.json.bak-'
     }
 }
@@ -1231,7 +1232,7 @@ function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
         $segments = Get-DarlingSegmentsBelowRoot $root "$($finding.Path)"
         if ($null -eq $segments -or $segments.Count -ne 1) { return @() }
         $leaf = $segments[0]
-        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or -not $leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) { return @() }
         if ($names -notcontains $leaf) { $names += $leaf }
     }
     return @($names)
@@ -1956,14 +1957,43 @@ function Test-DarlingIsUpgrade([string]$MsiPhase, [bool]$MsiUpgrade, $Existing) 
     return ($null -ne $Existing)
 }
 
+# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
+# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
+# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
+function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
+    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
+}
+
+# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
+# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
+function Test-DarlingInteractiveHost {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } }
+    catch { return $false }
+    foreach ($argument in [Environment]::GetCommandLineArgs()) {
+        if ($argument -match '^[-/]NonI') { return $false }
+    }
+    return $true
+}
+
 # The one place a question is asked of a person at steps 1b and 2. Under -MsiPhase nobody can answer (a custom action has no console), so
-# the answer is "continue" and nothing is read (#6480). The reader is a parameter so a test can see that it is not called.
+# the answer is "continue" and nothing is read (#6480). On a host nobody can answer on, the answer is No (#9342).
+# The reader is a parameter so a test can see that it is not called.
 function Read-DarlingAnswer([string]$MsiPhase, [string]$Prompt, [scriptblock]$Ask = $null) {
     if ($MsiPhase) {
         Write-Host "Continuing: a -MsiPhase run asks no questions ($Prompt)" -ForegroundColor Yellow
         return 'y'
     }
-    if (-not $Ask) { $Ask = { param($text) Read-Host $text } }
+    if (-not $Ask) {
+        # No person can answer under remoting, redirected input or -NonInteractive: a Read-Host there throws or hangs and hides the
+        # pre-flight lines and the exit code. The default answer is No, so the caller exits with its own code (#9342).
+        if (-not (Test-DarlingInteractiveHost)) {
+            Write-Host "Not asking: this session cannot be answered, so the default (No) is taken ($Prompt)" -ForegroundColor Yellow
+            return 'n'
+        }
+        $Ask = { param($text) Read-Host $text }
+    }
     return (& $Ask $Prompt)
 }
 
@@ -2403,26 +2433,6 @@ function Test-DarlingDomainController {
 # CLI work for them without a sign-out. Who gets the group's access is still the administrator's decision: the answer defaults
 # to No, -NoOperatorPrompt never asks, and -AddOperator names the account for a scripted install. Each function below is small
 # so a test can stand in for the machine.
-
-# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
-# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
-# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
-function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
-    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
-}
-
-# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
-# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
-function Test-DarlingInteractiveHost {
-    if (-not [Environment]::UserInteractive) { return $false }
-    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
-    try { if ([Console]::IsInputRedirected) { return $false } }
-    catch { return $false }
-    foreach ($argument in [Environment]::GetCommandLineArgs()) {
-        if ($argument -match '^[-/]NonI') { return $false }
-    }
-    return $true
-}
 
 # DOMAIN\user of the person signed in to THIS session: the owner of the session's explorer.exe. That is not always the
 # account the script runs as (a person who elevates with another administrator account is signed in as themselves, and the

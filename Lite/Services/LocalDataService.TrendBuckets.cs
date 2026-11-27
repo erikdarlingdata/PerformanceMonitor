@@ -69,7 +69,7 @@ ranked AS (
         ) AS series_rank
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   ($4 IS NULL OR database_name = $4)
     AND   (delta_reads > 0 OR delta_writes > 0)
@@ -151,7 +151,7 @@ labelled AS (
       AND r.file_type = f.file_type
       AND (r.file_name IS NULL OR r.file_name = f.file_name)
     WHERE f.server_id = $1
-    AND   f.collection_time >= $2
+    AND   f.collection_time > $2
     AND   f.collection_time <= $3
     AND   ($4 IS NULL OR f.database_name = $4)
     AND   f.sample_interval_seconds IS DISTINCT FROM 0
@@ -235,6 +235,8 @@ raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
 ),
@@ -248,6 +250,7 @@ rated AS
     FROM raw
     WHERE interval_seconds > 0
     AND   delta_wait_time_ms >= 0
+    AND   collection_time > $2
 )";
 
     /// <summary>
@@ -362,7 +365,7 @@ ORDER BY 1";
         {
             using var connection = await OpenConnectionAsync();
             using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT 1 FROM {relation} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 LIMIT 1";
+            command.CommandText = $"SELECT 1 FROM {relation} WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 LIMIT 1";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -518,6 +521,8 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   rtrim(wait_type) = rtrim($2)
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $3 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($3, $4]. */
     AND   collection_time >= $3
     AND   collection_time <= $4
     {exclude}
@@ -531,6 +536,7 @@ rated AS
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
         CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
     FROM raw
+    WHERE collection_time > $3
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $3) AS bucket_start,
@@ -605,8 +611,8 @@ SELECT
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   (
-          (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
-       OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
+          (sample_time_utc IS NOT NULL AND sample_time_utc > $2 AND sample_time_utc <= $3)
+       OR (sample_time_utc IS NULL AND sample_time > $4 AND sample_time <= $5)
       )
 GROUP BY 1, 9
 ORDER BY 1";
@@ -669,10 +675,12 @@ SELECT
     MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
     MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
     (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
-    MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+    MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb,
+    MAX(log_used_percent) AS peak_log_used_percent,
+    MAX(log_used_mb) AS peak_log_used_mb
 FROM v_tempdb_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 GROUP BY 1
 ORDER BY 1";
@@ -697,7 +705,9 @@ ORDER BY 1";
                 ToDouble(reader.GetValue(7)),
                 ToInt64(reader.GetValue(8)),
                 (int)ToInt64(reader.GetValue(9)),
-                ToDouble(reader.GetValue(10))));
+                ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : ToDouble(reader.GetValue(12))));
         }
 
         return items;
@@ -723,7 +733,7 @@ SELECT
     AVG(COALESCE(plan_cache_mb, 0)) AS plan_cache_mb
 FROM v_memory_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 GROUP BY 1
 ORDER BY 1";
@@ -768,7 +778,7 @@ WITH grants AS
         SUM(granted_memory_mb) AS total_granted_mb
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY collection_time
 )
@@ -862,7 +872,7 @@ WITH flagged AS
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2
-        AND   collection_time >= $3
+        AND   collection_time > $3
         AND   collection_time <= $4
         AND   {isWaitStatistics}
         WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
@@ -882,7 +892,7 @@ WITH flagged AS
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2
-        AND   collection_time >= $3
+        AND   collection_time > $3
         AND   collection_time <= $4
         AND   NOT ({isWaitStatistics})
     ) AS raw

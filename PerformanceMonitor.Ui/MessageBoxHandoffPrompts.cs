@@ -40,6 +40,19 @@ namespace PerformanceMonitor.Ui
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning) == MessageBoxResult.Yes;
 
+        /// <summary>
+        /// #9197: the one dialog for a start that failed because the single-instance mutex could not be created or opened
+        /// and no other instance is running. Both apps show it, so a person at the screen sees why the app did not open
+        /// instead of watching it close with nothing said.
+        /// </summary>
+        public static void ShowStartFailed(string appName, string reason) =>
+            MessageBox.Show(
+                $"{appName} could not start: {reason}.\n\n" +
+                "No other copy is running. Check that this account may create named objects, then start it again.",
+                $"{appName} — Start failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+
         public void ShowMustCloseElevatedManually(string oldVersion) =>
             MessageBox.Show(
                 $"A previous version ({oldVersion}) of {_appName} is running with administrator " +

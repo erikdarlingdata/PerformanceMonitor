@@ -90,6 +90,8 @@ public partial class ViewerServerTab : IDisposable
         _tempDbFileIoHover?.Dispose();
         /* Each partial owns its own hover fields; the single Dispose() forwards to their teardowns
            so the whole tab tears down through one path. */
+        /* #8898: the static theme event holds this tab until it lets go. */
+        ThemeManager.ThemeChanged -= OnThemeChanged;
         DisposeChartHelpers();
         DisposeMemoryHelpers();
         DisposePlanCacheHelpers();
@@ -105,45 +107,96 @@ public partial class ViewerServerTab : IDisposable
         DisposeSystemHealthChartHelpers();
     }
 
-    /// <summary>Loads the CPU tab: raw per-sample CPU utilization over the window.</summary>
-    private async Task LoadCpuAsync()
+    /// <summary>
+    /// #8898: a chart takes the theme in its own draw method, so a theme change (a Settings pick, its live preview, or the revert on
+    /// Close) left every chart on an open tab in the old theme until its next load. Mirrors Lite's <c>ServerTab.OnThemeChanged</c>: applies
+    /// the theme to every chart the tab owns, refreshes it, and reapplies the Overview lanes' theme. The charts are the tab's
+    /// <c>WpfPlot</c> fields (one per chart in the XAML) and the PostgreSQL trend charts, which are built in code and held in a dictionary.
+    /// Subscribed in the constructor and released in <see cref="Dispose"/>, not on Unloaded: a tab control unloads a tab it switches away
+    /// from, and a handler dropped there would stop following the theme after the first switch.
+    /// </summary>
+    private void OnThemeChanged(string _)
+    {
+        foreach (var field in GetType().GetFields(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+        {
+            if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+            {
+                ChartStyle.Restyle(chart); // #9109: colours only, the load's axis limits and ticks stay
+                chart.Refresh();
+            }
+        }
+
+        foreach (var (chart, _) in _pgTrendCharts.Values)
+        {
+            ChartStyle.Restyle(chart);
+            chart.Refresh();
+        }
+
+        OverviewLanes.ReapplyTheme();
+    }
+
+    /// <summary>#9112: the CPU tab's three store reads, so a test can hand the tab reads that take a known time. The product uses the data service's.</summary>
+    internal sealed record CpuTabReads(
+        Func<DateTime, DateTime, Task<List<CpuUtilizationSample>>> Utilization,
+        Func<DateTime, DateTime, Task<List<CpuSchedulerTrendPoint>>> SchedulerTrend,
+        Func<DateTime, DateTime, Task<CpuSchedulerSnapshot?>> SchedulerSnapshot);
+
+    /// <summary>A test's stand-in for the CPU tab's reads; null in the product.</summary>
+    internal CpuTabReads? CpuReadsOverride { get; set; }
+
+    private CpuTabReads CpuReads => CpuReadsOverride ?? new CpuTabReads(
+        (startUtc, endUtc) => _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetCpuSchedulerTrendAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetCpuSchedulerSnapshotAsync(_server.ServerId, startUtc, endUtc));
+
+    /// <summary>Loads the CPU tab: raw per-sample CPU utilization over the window. #9112: each read is named on the load's clock and the
+    /// draw is a named client step, so a slow CPU refresh says which one it was instead of logging the reads as client work.</summary>
+    private async Task LoadCpuAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc);
+        var samples = await Timed(timer, "CPU read", CpuReads.Utilization(startUtc, endUtc));
         /* The read is start-only server-side; bound the end for a custom range so a window that ends in
            the past doesn't trail to the newest sample. sample_time is de-skewed to naive UTC (matching endUtc). */
         if (IsCustomRange)
         {
             samples = samples.Where(s => s.SampleTime <= endUtc).ToList();
         }
-        RenderCpuChart(samples, startUtc, endUtc);
+        ClientStep(timer, "CPU chart draw", () => RenderCpuChart(samples, startUtc, endUtc));
 
         /* The CPU tab is a sub-TabControl (CPU Utilization + CPU Scheduler); load the scheduler sub-tab in
            the same pass — the CPU tab's full-refresh branch, mirroring the Memory tab's all-sub-tabs load. */
-        await LoadCpuSchedulerAsync();
+        await LoadCpuSchedulerAsync(timer);
     }
 
     /// <summary>Loads the tempdb tab: usage/size trend and per-file I/O latency, read concurrently.</summary>
-    private async Task LoadTempDbAsync()
+    private async Task LoadTempDbAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
-        using var readFanOut = ViewerReadFanOut.Of(2);
-        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc);
-        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
+        using var readFanOut = ViewerReadFanOut.Of(3);
+        /* #9112: every read is named on the load's clock, and the draws are named client steps. */
+        var trendTask = Timed(timer, "TempDB trend read", _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc));
+        var fileIoTask = Timed(timer, "TempDB file I/O read", _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc));
+        /* #8881: who holds the oldest open tempdb log transaction as of the chart's newest collection. */
+        var holderTask = Timed(timer, "TempDB log holder read", _dataService.GetNewestTempDbLogHolderAsync(_server.ServerId, startUtc, endUtc));
         var trend = await trendTask;
         var fileIo = await fileIoTask;
+        var holder = await holderTask;
 
         /* Both reads are bucketed (#4234/#4349) and already windowed server-side on endUtc; no client-side
            post-filter is needed for a custom range. */
-        RenderTempDbUsageChart(trend, startUtc, endUtc);
-        RenderTempDbSizeChart(trend, startUtc, endUtc);
-        RenderTempDbFileIoChart(fileIo, startUtc, endUtc);
+        ClientStep(timer, "TempDB usage chart draw", () =>
+        {
+            RenderTempDbUsageChart(trend, startUtc, endUtc);
+            ViewerChartCards.SetSubtitle(TempDbChart, TempDbLogHolderLine.Build(holder));
+        });
+        ClientStep(timer, "TempDB size chart draw", () => RenderTempDbSizeChart(trend, startUtc, endUtc));
+        ClientStep(timer, "TempDB file I/O chart draw", () => RenderTempDbFileIoChart(fileIo, startUtc, endUtc));
 
         /* #6861: a refused tempdb_stats leaves the trend empty, and the note says why in the MCP's words, without its closing paragraph for an MCP client. The file I/O chart
            reads file_io_stats, so it neither feeds nor clears the note. */
-        await ShowEngineGapAsync(TempDbNoDataMessage, "tempdb_stats", trend.Count);
+        await Timed(timer, "TempDB engine gap read", ShowEngineGapAsync(TempDbNoDataMessage, "tempdb_stats", trend.Count));
 
         (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
             TempDbFileIoGapState(_server.DisplayName, _server.EngineEdition, fileIo.Count);
@@ -253,12 +306,24 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(vsPlot);
         _tempDbHover?.Add(vsPlot, "Version Store");
 
+        /* #8881: the tempdb log's used space, drawn only where the store has a reading. A bucket with none is NaN, which the plot leaves as a gap:
+           never a zero, which would read as an empty log. */
+        var logUsed = TempDbLogSeries.Values(data.Select(d => d.LogUsedMb).ToList());
+        if (logUsed is not null)
+        {
+            var logPlot = TempDbChart.Plot.Add.TimeSeries(times, logUsed);
+            logPlot.LegendText = "Log Used";
+            logPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TempDbLog"));
+            ChartStyle.StyleScatter(logPlot);
+            _tempDbHover?.Add(logPlot, "Log Used");
+        }
+
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
-        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max() }.Max();
+        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max(), logUsed is null ? 0 : TempDbLogSeries.Max(logUsed) }.Max();
         SetChartYLimitsWithLegendPadding(TempDbChart, 0, maxVal);
 
         ShowChartLegend(TempDbChart);

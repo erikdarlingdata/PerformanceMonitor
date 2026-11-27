@@ -981,10 +981,10 @@ public class SlackDetailsSizeTests
     /* ---------------- Teams ---------------- */
 
     /// <summary>
-    /// The same lost page on Teams: the O365 MessageCard renders one section per field-bearing detail
-    /// with no per-section count limit, and the connector caps the payload at 28 KB. The heaviest shape
+    /// The same lost page on Teams: the Adaptive Card renders one section per field-bearing detail
+    /// with no element count limit, and Teams caps a posted message at about 28 KB. The heaviest shape
     /// the story can produce (fifteen incidents, 25 items) is measured here against that cap, so the
-    /// decision to ship no Teams change is a number rather than a hope — and a producer that widens the
+    /// decision to give the Teams card no budget is a number rather than a hope — and a producer that widens the
     /// page past it fails this pin instead of a delivery.
     /// </summary>
     [Fact]
@@ -1000,6 +1000,6 @@ public class SlackDetailsSizeTests
             context: context, triageUrl: TriageUrl, displayName: "Analysis finding", nowUtc: s_now);
 
         var bytes = Encoding.UTF8.GetByteCount(teams);
-        Assert.True(bytes < 28 * 1024, $"the Teams card is {bytes} bytes against the connector's 28 KB cap");
+        Assert.True(bytes < WebhookAlertService.TeamsPayloadMaxBytes, $"the Teams card is {bytes} bytes against the 28 KB message cap");
     }
 }

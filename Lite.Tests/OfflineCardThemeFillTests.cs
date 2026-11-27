@@ -28,7 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Settings applies it, two real cards (one offline, one healthy) are rendered at 900x600, and the pixels inside each card's
 /// padding are sampled beside the status line, the Last Collect row and the Memory row.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class OfflineCardThemeFillTests
 {
     private static Uri ThemeUri(string name) => new($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}Theme.xaml");

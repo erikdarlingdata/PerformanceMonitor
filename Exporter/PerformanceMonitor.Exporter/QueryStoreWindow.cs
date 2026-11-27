@@ -31,7 +31,7 @@ public static class QueryStoreWindow
         "avg_tempdb_space_used", "min_tempdb_space_used", "max_tempdb_space_used",
         "plan_type", "plan_forcing_type", "is_forced_plan", "force_failure_count", "last_force_failure_reason",
         "compatibility_level", "query_plan_hash", "replica_role", "runtime_stats_interval_id",
-        "interval_start_time_utc", "collection_time",
+        "interval_start_time_utc", "interval_end_time_utc", "collection_time",
     ];
 
     private static readonly Dictionary<string, string> RawColumnTypes = new()
@@ -57,6 +57,7 @@ public static class QueryStoreWindow
         ["replica_role"] = "VARCHAR",
         ["runtime_stats_interval_id"] = "BIGINT",
         ["interval_start_time_utc"] = "TIMESTAMP",
+        ["interval_end_time_utc"] = "TIMESTAMP",
         ["collection_time"] = "TIMESTAMP",
     };
 
@@ -509,11 +510,13 @@ public static class QueryStoreWindow
     }
 
     /// <summary>
-    /// fails loudly if the store's collation is not C/POSIX, or if `database_name` on `collect.query_store_stats`
-    /// carries a column-level collation override. Both production stores are libc 'C' (decided fact; /// override): under that collation PostgreSQL text order equals DuckDB byte order, which is the precondition the
-    /// DuckDB-side Query Store key queries (<see cref="SqlBuilder.QueryStorePlanShapeKeyDuckDbSql"/>, <see
-    /// cref="SqlBuilder.QueryStoreTextKeyDuckDbSql"/>) depend on. Never falls back silently: a non-C store must fail
-    /// plan_shape/query_text loudly, not silently mis-order examples.
+    /// Fails loudly if the store's collation is not C/POSIX, or if `database_name` on `collect.query_store_stats`
+    /// carries a column-level collation override. Under the C collation PostgreSQL text order equals DuckDB byte
+    /// order, which is the precondition the DuckDB-side Query Store key queries (<see
+    /// cref="SqlBuilder.QueryStorePlanShapeKeyDuckDbSql"/>, <see cref="SqlBuilder.QueryStoreTextKeyDuckDbSql"/>)
+    /// depend on. Never falls back silently: a non-C store must fail plan_shape/query_text loudly, not silently
+    /// mis-order examples. The failure is a <see cref="ConfigException"/>: one line that names the remedy, which the
+    /// CLI maps to exit 2. `check-config` and `run --plan-only` run the same check through <see cref="StoreCheck"/>.
     /// </summary>
     public static async Task AssertCCollationAsync(Npgsql.NpgsqlConnection connection, CancellationToken ct)
     {
@@ -521,8 +524,8 @@ public static class QueryStoreWindow
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            throw new InvalidOperationException(
-                "Query Store key derivation: could not read the store's collation (pg_database had no row for the current database).");
+            throw new ConfigException(
+                "store: could not read the store's collation (pg_database had no row for the current database)");
         }
 
         var datCollate = reader.IsDBNull(0) ? null : reader.GetString(0);
@@ -530,19 +533,17 @@ public static class QueryStoreWindow
 
         if (!string.Equals(datCollate, "C", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException(
-                $"Query Store key derivation requires the store's collation to be 'C' (byte order), so PostgreSQL " +
-                $"text order matches DuckDB byte order. Found datcollate = '{datCollate}'. Refusing to compute " +
-                "plan_shape/query_text Query Store keys under a different collation: fix the store's collation, " +
-                "or escalate for a collation-aware key query.");
+            throw new ConfigException(
+                $"store: the store database uses the collation '{datCollate}' and the exporter needs 'C' (byte order) for its " +
+                "Query Store keys. A database collation cannot be changed in place: create the store database with " +
+                "LOCALE 'C' and move the data into it, or start a new Darling store on a new volume (see \"The store login\" in Exporter/README.md)");
         }
 
         if (columnCollation is not null)
         {
-            throw new InvalidOperationException(
-                $"Query Store key derivation requires collect.query_store_stats.database_name to have no column-level " +
-                $"collation override. Found collation '{columnCollation}'. Refusing to compute plan_shape/query_text " +
-                "Query Store keys: fix the column's collation, or escalate for a collation-aware key query.");
+            throw new ConfigException(
+                $"store: collect.query_store_stats.database_name has the column collation '{columnCollation}' and the exporter " +
+                "needs none. Remove the column collation (see \"The store login\" in Exporter/README.md)");
         }
     }
 }

@@ -74,7 +74,7 @@ public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollec
     /* Azure SQL DB: read from ring_buffer (database-scoped session)
        Azure SQL DB uses database_xml_deadlock_report event instead of xml_deadlock_report.
        Use .query() to get XML with structure intact, then CONVERT to nvarchar(max) */
-    private const string AzureQueryText = $@"
+    private static readonly string AzureQueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 /* #4200: @execution_count is this cycle's read of the ring-buffer target's own delivered-event
@@ -92,13 +92,14 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
+/* #9517: the session is found once and both target reads use its address. The targets DMV builds every running
+   session's target rows unless the filter is an equality on event_session_address. A session that is not running leaves
+   @xe_address NULL, which matches no target row, so the counter reads NULL and the shred read finds nothing. */
+{RingBufferXml.ResolveAddressSql(true, XeSessionName)}
+
 SELECT
     @execution_count = xet.execution_count
-FROM sys.dm_xe_database_session_targets AS xet
-JOIN sys.dm_xe_database_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'{XeSessionName}'
-AND   xet.target_name = N'ring_buffer'
+{RingBufferXml.TargetFromSql(true, "ring_buffer")}
 OPTION(RECOMPILE);
 
 /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
@@ -122,12 +123,8 @@ BEGIN
 
     SELECT /* PerformanceMonitorLite */
         @ring_text = CONVERT(nvarchar(max), xet.target_data),
-        @ring_session = xes.name
-    FROM sys.dm_xe_database_session_targets AS xet
-    JOIN sys.dm_xe_database_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{XeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        @ring_session = @xe_name
+    {RingBufferXml.TargetFromSql(true, "ring_buffer")}
     OPTION(RECOMPILE);
 
     {RingBufferXml.ParseSql}
@@ -214,7 +211,7 @@ SELECT
 
     /* On-prem / Azure MI / AWS RDS: read from ring_buffer (server-scoped session)
        Use .query() to get XML with structure intact, then CONVERT to nvarchar(max) */
-    private const string ServerScopedQueryText = $@"
+    private static readonly string ServerScopedQueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 /* #4200: see AzureQueryText's twin comment -- same gate, server-scoped session. */
@@ -228,13 +225,14 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
+/* #9517: the session is found once and both target reads use its address. The targets DMV builds every running
+   session's target rows unless the filter is an equality on event_session_address. A session that is not running leaves
+   @xe_address NULL, which matches no target row, so the counter reads NULL and the shred read finds nothing. */
+{RingBufferXml.ResolveAddressSql(false, XeSessionName)}
+
 SELECT
     @execution_count = xet.execution_count
-FROM sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'{XeSessionName}'
-AND   xet.target_name = N'ring_buffer'
+{RingBufferXml.TargetFromSql(false, "ring_buffer")}
 OPTION(RECOMPILE);
 
 /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
@@ -258,12 +256,8 @@ BEGIN
 
     SELECT /* PerformanceMonitorLite */
         @ring_text = CONVERT(nvarchar(max), xet.target_data),
-        @ring_session = xes.name
-    FROM sys.dm_xe_session_targets AS xet
-    JOIN sys.dm_xe_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{XeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        @ring_session = @xe_name
+    {RingBufferXml.TargetFromSql(false, "ring_buffer")}
     OPTION(RECOMPILE);
 
     {RingBufferXml.ParseSql}

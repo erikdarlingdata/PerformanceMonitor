@@ -198,6 +198,55 @@ public sealed class ViewerFinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>
+    /// #8880: the Index Analysis roll-up grid draws a Heaps column after Unused, and each roll-up row's heap count shows in it.
+    /// </summary>
+    [Fact]
+    public void TheIndexAnalysisRollup_DrawsAHeapsColumnAfterUnused_WithEachRowsCount()
+    {
+        var problems = StaTestThread.Run(() => WithTheme(() => WithTab(MaximizedTabWidth, 925, (tab, window) =>
+        {
+            var rollup = (DataGrid)tab.FindName("FinOpsIndexAnalysisRollupGrid");
+            Reveal(rollup);
+            typeof(FinOpsTab).GetMethod("IndexAnalysisGridsHoldRows", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(tab, [true]);
+            ((FrameworkElement)tab.FindName("FinOpsIndexAnalysisNoDataMessage")).Visibility = Visibility.Collapsed;
+            rollup.ItemsSource = ViewerDataService.ProjectRollups(new PerformanceMonitor.Common.IndexCleanupAnalysisResult
+            {
+                OverallRollup = new PerformanceMonitor.Common.IndexCleanupRollup { Heaps = 1234, UnusedIndexes = 5 },
+                DatabaseRollups = [new PerformanceMonitor.Common.IndexCleanupRollup { DatabaseName = "Sales", DatabaseId = 7, Heaps = 1234, UnusedIndexes = 5 }],
+            });
+            Settle(window);
+
+            var found = new List<string>();
+            var headers = ClippedTextProbe.Descendants(rollup).OfType<DataGridColumnHeader>().Where(h => h.Column is not null)
+                .OrderBy(h => h.Column.DisplayIndex).ToList();
+            var heapsHeader = headers.FirstOrDefault(h => Equals(h.Column.Header, "Heaps"));
+            if (heapsHeader is null || !heapsHeader.IsVisible || heapsHeader.ActualWidth <= 0)
+            {
+                found.Add("the roll-up grid draws no Heaps column header");
+                return found;
+            }
+
+            var before = headers.LastOrDefault(h => h.Column.DisplayIndex < heapsHeader.Column.DisplayIndex);
+            if (!Equals(before?.Column.Header, "Unused"))
+            {
+                found.Add($"the Heaps column follows '{before?.Column.Header}', not Unused");
+            }
+
+            var cells = ClippedTextProbe.Descendants(rollup).OfType<DataGridCell>().Where(c => c.Column == heapsHeader.Column)
+                .Select(c => string.Join("", ClippedTextProbe.Descendants(c).OfType<TextBlock>().Where(b => b.IsVisible).Select(b => b.Text)))
+                .ToList();
+            if (cells.Count != 2 || cells.Any(text => text != "1,234"))
+            {
+                found.Add($"the Heaps cells read [{string.Join(", ", cells)}], not 1,234 on the overall row and the database row");
+            }
+
+            return found;
+        })));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
     [Fact]
     public void HighImpact_ShowsOneEmptySentence_WhenTheWindowHasNoRows()
     {

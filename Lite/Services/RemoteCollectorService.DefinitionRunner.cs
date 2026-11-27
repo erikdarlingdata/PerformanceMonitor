@@ -192,6 +192,9 @@ public partial class RemoteCollectorService
            the open interval", which is today's behavior exactly. */
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
         {
+            /* #9359: the clamp memory a previous process stored, before any clamp decision of this server. */
+            await SeedQueryStoreClampReportsAsync(serverId, cancellationToken);
+
             var openIntervalState = await GetCollectorStateAsync(
                 serverId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
 
@@ -273,6 +276,9 @@ public partial class RemoteCollectorService
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
             /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
             LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
+            /* #9529: only query_snapshots reads it. The scheduled run reuses the plans it holds. The live snapshot
+               button builds its own command with no context, so it holds nothing and fetches under the cap. */
+            SnapshotPlanCache = _snapshotPlanCache,
         };
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now
@@ -357,6 +363,9 @@ public partial class RemoteCollectorService
             using var duckConnection = _duckDb.CreateConnection();
             await duckConnection.OpenAsync(cancellationToken);
 
+            /* #9359: the stored clamp entry changes the landed databases call for, written once after the loop. */
+            var azureLandedChanges = new List<QueryStoreLandedChange>();
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -375,6 +384,9 @@ public partial class RemoteCollectorService
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. Mirrors Darling. */
                 string? stagedOpenIntervalStamp = null;
+                /* #9088: the raw watermark this database's cycle clamped, landed in _queryStoreClampReports only
+                   once its read and flush succeed. Mirrors Darling. */
+                DateTime? stagedClampRaw = null;
 
                 /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
                    iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
@@ -486,7 +498,19 @@ public partial class RemoteCollectorService
                            enumeration path emits, so the bounded history hole stays LOGGED and does
                            not become the one silent hole in a policy whose whole premise is that it
                            is visible. */
-                        if (context.CatchupClampApplied)
+                        /* #9088: a database whose Query Store has nothing new never advances its stored watermark, so
+                           the same clamp repeats every cycle. Once an earlier successful cycle reported this raw
+                           watermark and read everything the new floor skips, the warning and the hole stay quiet. */
+                        if (context.CatchupClampApplied
+                            && context.Watermark is DateTime clampedRaw)
+                        {
+                            stagedClampRaw = clampedRaw;
+                        }
+
+                        if (context.CatchupClampApplied
+                            && !(context.Watermark is DateTime seenRaw
+                                 && WatermarkPolicy.ClampCatchup(seenRaw, collectionTime) is DateTime seenFloor
+                                 && _queryStoreClampReports.AlreadyReported(serverId, databaseName, seenRaw, seenFloor)))
                         {
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -501,7 +525,8 @@ public partial class RemoteCollectorService
                                 && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
-                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                await RecordQueryStoreBackfillHoleAsync(
+                                    serverId, databaseName, _queryStoreClampReports.HoleFloor(serverId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -584,6 +609,10 @@ public partial class RemoteCollectorService
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(serverId, databaseName);
+                        if (_queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime) is { } azureLandedChange)
+                        {
+                            azureLandedChanges.Add(azureLandedChange);
+                        }
 
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
@@ -700,6 +729,8 @@ public partial class RemoteCollectorService
             }
 
             context.CurrentDatabaseName = null;
+
+            await PersistQueryStoreLandedAsync(serverId, azureLandedChanges, cancellationToken);
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
@@ -933,6 +964,14 @@ public partial class RemoteCollectorService
                    15-minute refresh window on a cycle that captured nothing. Mirrors Darling. */
                 var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
+                /* #9088: the raw watermark each database's cycle clamped, staged at decision time and landed in
+                   _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
+                var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
+                /* #9359: the stored clamp entry changes the landed items call for. onItemComplete cannot await, so they are written once the
+                   driver returns. */
+                var landedClampChanges = new List<QueryStoreLandedChange>();
+
                 /* One database's cutoff, hole records and open-interval decision for the given routing decision (null for every
                    collector but query_store). Also the retry on the primary after a replica read fails (#6254). */
                 async Task PrepareItemAsync(string item, QueryStoreRouteDecision? decision, CancellationToken ct)
@@ -953,7 +992,19 @@ public partial class RemoteCollectorService
                     var cutoff = QueryStoreReplicaRouting.ComputeCutoff(
                         raw, collectionTime, decision?.LookBack ?? TimeSpan.Zero, qsState?.Guard.WasCut(item) ?? false);
                     var clamped = cutoff.Cutoff;
-                    if (cutoff.ClampFired)
+                    stagedClampRaws.Remove(item);
+                    if (cutoff.ClampFired && raw is DateTime clampedRaw)
+                    {
+                        stagedClampRaws[item] = clampedRaw;
+                    }
+
+                    /* #9088: a database with nothing new in its Query Store keeps the same stale raw watermark, so the clamp
+                       repeats every cycle. Once an earlier successful cycle reported this raw watermark and read everything
+                       the new floor skips, the warning and the hole stay quiet. */
+                    if (cutoff.ClampFired
+                        && !(raw is DateTime seenRaw
+                             && clamped is DateTime seenFloor
+                             && _queryStoreClampReports.AlreadyReported(serverId, item, seenRaw, seenFloor)))
                     {
                         _logger?.LogWarning(
                             "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -965,7 +1016,8 @@ public partial class RemoteCollectorService
                         if (clamped.HasValue
                             && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            await RecordQueryStoreBackfillHoleAsync(serverId, item, cutoff.HoleFrom ?? raw!.Value, cutoff.HoleTo ?? clamped.Value, ct);
+                            await RecordQueryStoreBackfillHoleAsync(
+                                serverId, item, _queryStoreClampReports.HoleFrom(serverId, item, raw!.Value, cutoff), cutoff.HoleTo ?? clamped.Value, ct);
                         }
                     }
 
@@ -1201,6 +1253,13 @@ public partial class RemoteCollectorService
                                 OnQueryStoreItemSucceeded(serverId, item);
                             }
 
+                            if (_queryStoreClampReports.Land(
+                                    serverId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime)
+                                is { } landedClampChange)
+                            {
+                                landedClampChanges.Add(landedClampChange);
+                            }
+
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
                                staged (read faulted) must not leak into a later run's landing. */
@@ -1288,6 +1347,8 @@ public partial class RemoteCollectorService
                    enumeration already left; EVERY item lost rethrows the first failure so RunCollectorAsync
                    classifies the cycle from the real exception (PERMISSIONS / transient / ERROR). Mirrors
                    Darling's runner. */
+                await PersistQueryStoreLandedAsync(serverId, landedClampChanges, cancellationToken);
+
                 telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, driverResult.PartialFailureNote);
 
                 /* #6254: where this run read Query Store (null with no replica set). */
@@ -1582,7 +1643,7 @@ public partial class RemoteCollectorService
     /// (rows_collected = Σ non-empty batch counts). Synchronous (the DuckDB appender API is), returning the
     /// count so the driver can await it as a completed task.
     /// </summary>
-    private static int WriteBatch<TRow>(
+    internal static int WriteBatch<TRow>(
         DuckDBConnection duckConnection,
         ICollectorDefinition<TRow> definition,
         List<TRow> rows,
@@ -1626,31 +1687,42 @@ public partial class RemoteCollectorService
         }
 
         var rowsWritten = 0;
+
+        /* #9241: a table that has a digest column goes through a TEMP stage: its text is kept once in the dimension, in one
+           transaction, or inline when the store has no vh_ view for it. A failure anywhere stores nothing, so the whole batch counts
+           as not written and the baselines go back. */
+        var plan = TextDimensionWriter.PlanFor(duckConnection, definition.TargetTable);
+        if (plan != TextDimensionWriter.WritePlan.Plain)
+        {
+            try
+            {
+                TextDimensionWriter.CreateStage(duckConnection, definition.TargetTable);
+                using (var appender = duckConnection.CreateAppender("temp", "main", TextDimensionWriter.StageName(definition.TargetTable)))
+                {
+                    AppendRows(appender, definition, rows, serverId, serverName, collectionTime, context, ref rowsWritten);
+                }
+
+                TextDimensionWriter.Publish(duckConnection, definition.TargetTable, plan);
+            }
+            catch
+            {
+                (rows as IBaselineRollback)?.RollBackBaselines();
+                throw;
+            }
+            finally
+            {
+                TextDimensionWriter.DropStage(duckConnection, definition.TargetTable);
+            }
+
+            _queryTagSightings.Append(definition, rows, serverId, s_queryTagFlushDb);
+            return rowsWritten;
+        }
+
         try
         {
             using (var appender = duckConnection.CreateAppender(definition.TargetTable))
             {
-                var writer = new AppenderCollectorRowWriter();
-
-                foreach (var item in rows)
-                {
-                    var row = appender.CreateRow();
-
-                    if (definition.IncludesCollectionId)
-                    {
-                        row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
-                    }
-
-                    row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
-                       .AppendValue(serverId)                    /* server_id INTEGER */
-                       .AppendValue(serverName);                 /* server_name VARCHAR */
-
-                    writer.CurrentRow = row;
-                    definition.WritePayload(item, writer, context);
-                    row.EndRow();
-
-                    rowsWritten++;
-                }
+                AppendRows(appender, definition, rows, serverId, serverName, collectionTime, context, ref rowsWritten);
             }
         }
         catch when (rowsWritten == 0)
@@ -1667,6 +1739,40 @@ public partial class RemoteCollectorService
         _queryTagSightings.Append(definition, rows, serverId, s_queryTagFlushDb);
 
         return rowsWritten;
+    }
+
+    /// <summary>Appends a batch's rows, prefix columns first and then the definition's payload, counting each row as it is appended.</summary>
+    private static void AppendRows<TRow>(
+        DuckDBAppender appender,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        int serverId,
+        string serverName,
+        DateTime collectionTime,
+        CollectorContext context,
+        ref int rowsWritten)
+    {
+        var writer = new AppenderCollectorRowWriter();
+
+        foreach (var item in rows)
+        {
+            var row = appender.CreateRow();
+
+            if (definition.IncludesCollectionId)
+            {
+                row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
+            }
+
+            row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
+               .AppendValue(serverId)                    /* server_id INTEGER */
+               .AppendValue(serverName);                 /* server_name VARCHAR */
+
+            writer.CurrentRow = row;
+            definition.WritePayload(item, writer, context);
+            row.EndRow();
+
+            rowsWritten++;
+        }
     }
 
     /// <summary>

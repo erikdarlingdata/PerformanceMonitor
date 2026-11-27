@@ -49,7 +49,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN sched.total_current_workers_count >= (osi.max_workers_count * 0.90)
+                WHEN sched.total_work_queue_count > 0
                 THEN 1
                 ELSE 0
             END

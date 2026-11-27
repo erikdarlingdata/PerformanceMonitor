@@ -144,7 +144,7 @@ LIMIT 1";
 SELECT MAX(collection_time)
 FROM v_database_size_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3";
 
     /// <summary>The unbounded fallback half of <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/>, reached

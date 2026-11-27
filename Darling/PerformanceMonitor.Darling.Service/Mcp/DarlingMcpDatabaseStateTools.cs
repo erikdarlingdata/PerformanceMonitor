@@ -46,6 +46,7 @@ public sealed class DarlingMcpDatabaseStateTools
         "Possible cause: the database_states collector is switched off in this server's collector schedule; get_collector_schedules shows it.";
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_database_state_expectations"), Description(
         "Lists one server's databases with the state each is in now and the state the Database State alert expects it to be in: expected_state, whether a person set it (is_user_override), and status (as_expected, deviating, ignored, or pending when no baseline is learned yet). The Viewer's database state override editor shows the same. " +
         "<<GUIDE>>" +
@@ -57,7 +58,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> GetDatabaseStateExpectations(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("Optional: only this database (exact name).")] string? database_name = null,
+        [Description("Optional: only this database.")] string? database_name = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -123,6 +124,7 @@ public sealed class DarlingMcpDatabaseStateTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_database_state_expected"), Description(
         "Sets or clears the state the Database State alert expects one database to be in, the same override the Viewer's editor sets: expected_state is a state (ONLINE, OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, STANDBY), IGNORE (never alert for this database) or CLEAR (remove the expectation). Changes shared alert configuration. Returns previous and the undo call." +
         "<<GUIDE>>" +
@@ -135,7 +137,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> SetDatabaseStateExpected(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("The database's exact name, as get_database_state_expectations shows it.")] string database_name,
+        [Description("The database, as get_database_state_expectations shows it.")] string database_name,
         [Description("ONLINE, OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, STANDBY, IGNORE, or CLEAR.")] string expected_state,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
@@ -152,7 +154,8 @@ public sealed class DarlingMcpDatabaseStateTools
                 return DarlingMcpAlertTools.Outcome("invalid", "expected_state is required: one of " + string.Join(", ", AllowedStates()) + ". Nothing was changed.");
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+            /* A write never guesses between two servers: a name that is one server's stored name and another's display name is refused. */
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
             if (error is not null)
             {
                 return error;

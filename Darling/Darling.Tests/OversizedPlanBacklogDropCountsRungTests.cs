@@ -35,9 +35,6 @@ public sealed class OversizedPlanBacklogDropCountsRungTests
     {
         Assert.Equal("oversized-plan-backlog-dropped-counts", Rung.Name);
         Assert.Contains(TableName, Rung.Sql, StringComparison.Ordinal);
-
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     [Fact]

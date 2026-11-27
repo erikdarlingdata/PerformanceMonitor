@@ -23,7 +23,9 @@ namespace PerformanceMonitor.Collectors;
 /// database-scoped twin, <c>sys.dm_xe_database_session_targets</c>) counts events the session has
 /// delivered to the target. Because each of these two sessions carries exactly one event type (verified
 /// against <c>DarlingXeSessions.cs</c>: one <c>ADD EVENT</c> per session), that counter is an exact "did
-/// anything arrive since the last run?" signal, and reading it costs one integer with no XML materialized.
+/// anything arrive since the last run?" signal. The read finds the session by name once and then the target by that session's
+/// address (#9517), so it builds only that session's own target row and casts no XML; the bytes other sessions' targets hold
+/// add nothing to it.
 /// Both collectors read it in <c>BuildQuery</c>, BEFORE the cast, in the same batch, and skip the cast+shred
 /// entirely when it has not moved.</para>
 ///

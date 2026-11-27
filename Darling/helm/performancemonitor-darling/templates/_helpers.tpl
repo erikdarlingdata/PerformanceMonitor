@@ -37,6 +37,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and (regexMatch "^v?[0-9]+[.][0-9]+[.][0-9]+$" $tag) (semverCompare "<=3.12.0" $tag) -}}
 {{- fail (printf "image.tag %s is too old: the chart needs a Darling image newer than 3.12.0. The probes use the health port, which ships in the first release after 3.12.0; on 3.12.0 or older the startup probe fails and the kubelet restarts the pod in a loop. Pin a newer tag, or build the image from this checkout." $tag) -}}
 {{- end -}}
+{{- if and .Values.metrics.enabled (regexMatch "^v?[0-9]+[.][0-9]+[.][0-9]+$" $tag) (semverCompare "<=3.13.0" $tag) -}}
+{{- fail (printf "image.tag %s is too old for metrics.enabled: the /metrics port ships in the first release after 3.13.0. Pin a newer tag, or turn metrics off." $tag) -}}
+{{- end -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}
@@ -96,13 +99,22 @@ an empty value name means the chart sets the key itself and nothing overrides it
   (list (list "mcp" "network" "listen") "mcp.* or network.*")
   (list (list "mcp" "network" "allowFrom") "mcp.network.allowFrom or network.allowFrom")
   (list (list "mcp" "network" "token") "mcp.* or network.* (the token comes from the chart Secret)")
+  (list (list "metrics") "metrics.*")
   (list (list "health") "")
   (list (list "passwordKey") "passwordKey.*")
 -}}
+{{- /* While the chart wires the web and MCP logins (store.provisionRoles.wireConnectionStrings), it owns those two keys too. */ -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $owned = concat $owned (list
+  (list (list "postgres" "webConnectionString") "store.provisionRoles.wireConnectionStrings")
+  (list (list "postgres" "mcpConnectionString") "store.provisionRoles.wireConnectionStrings")) -}}
+{{- end -}}
 {{- range $owned -}}
 {{- $path := index . 0 -}}
 {{- if include "performancemonitor-darling.pathPresent" (dict "cfg" $.Values.config "path" $path) -}}
-{{- if index . 1 -}}
+{{- if eq (index . 1) "store.provisionRoles.wireConnectionStrings" -}}
+{{- fail (printf "config.%s is owned by the chart while store.provisionRoles.wireConnectionStrings is true: the chart writes this key. Set store.provisionRoles.wireConnectionStrings=false to keep your own key" (join "." $path)) -}}
+{{- else if index . 1 -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config; use the value %s instead" (join "." $path) (index . 1)) -}}
 {{- else -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" (join "." $path)) -}}
@@ -112,7 +124,7 @@ an empty value name means the chart sets the key itself and nothing overrides it
 {{- /* The chart writes its own top-level blocks under these names. A copy spelled in another case would sit beside them in
 darling.json, and Darling, which reads keys ignoring case, would read only one of the two. */ -}}
 {{- range $key, $_ := .Values.config -}}
-{{- range $want := list "postgres" "web" "mcp" "health" "passwordKey" -}}
+{{- range $want := list "postgres" "web" "mcp" "metrics" "health" "passwordKey" -}}
 {{- if and (eq (lower $key) (lower $want)) (ne $key $want) -}}
 {{- fail (printf "config.%s must be spelled config.%s: the chart writes its own %s block, and Darling reads keys ignoring case, so it would read only one of the two" $key $want $want) -}}
 {{- end -}}
@@ -215,6 +227,37 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- toJson $block -}}
 {{- end -}}
 
+{{/* The owned metrics block of darling.json, or {} while metrics is off: Darling reads a missing block as off, and writing none keeps
+darling.json (and so the pod's checksum/config) as it was for a release that never turns metrics on. Darling's own check, while metrics is
+on, refuses a metrics port that clashes with the health, web or MCP port whether or not web and MCP are enabled (the chart always writes
+both ports), so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
+{{- define "performancemonitor-darling.metricsJson" -}}
+{{- $m := .Values.metrics -}}
+{{- $block := dict -}}
+{{- if and $m.serviceMonitor.enabled (not $m.enabled) -}}
+{{- fail "metrics.serviceMonitor.enabled needs metrics.enabled=true" -}}
+{{- end -}}
+{{- if $m.enabled -}}
+{{- $_ := set $block "enabled" true -}}
+{{- $_ := set $block "port" (int $m.port) -}}
+{{- if eq (int $m.port) 5154 -}}
+{{- fail "metrics.port (5154) is the health port: give the metrics listener its own port" -}}
+{{- end -}}
+{{- if eq (int $m.port) (int .Values.web.port) -}}
+{{- fail (printf "metrics.port (%d) is the same as web.port: give the metrics listener its own port" (int $m.port)) -}}
+{{- end -}}
+{{- if eq (int $m.port) (int .Values.mcp.port) -}}
+{{- fail (printf "metrics.port (%d) is the same as mcp.port: give the metrics listener its own port" (int $m.port)) -}}
+{{- end -}}
+{{- $_ := set $block "listen" "0.0.0.0" -}}
+{{- $_ := set $block "token" (printf "file:/run/secrets/darling/%s" .Values.secrets.metricsTokenKey) -}}
+{{- if $m.allowFrom -}}
+{{- $_ := set $block "allowFrom" $m.allowFrom -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $block -}}
+{{- end -}}
+
 {{/* darling.json: the operator's config with the chart-owned keys merged over it. */}}
 {{- define "performancemonitor-darling.darlingJson" -}}
 {{- include "performancemonitor-darling.checkOwnedKeys" . -}}
@@ -238,12 +281,20 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- $_ := set $postgres "connectionString" $cs -}}
 {{- end -}}
 {{- end -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $_ := set $postgres "webConnectionString" "file:/run/darling-store-logins/web" -}}
+{{- $_ := set $postgres "mcpConnectionString" "file:/run/darling-store-logins/mcp" -}}
+{{- end -}}
 {{- range $surface := list "web" "mcp" -}}
 {{- if eq (int (get (get $.Values $surface) "port")) 5154 -}}
 {{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
 {{- end -}}
 {{- end -}}
 {{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
+{{- $metrics := include "performancemonitor-darling.metricsJson" . | fromJson -}}
+{{- if $metrics -}}
+{{- $_ := set $owned "metrics" $metrics -}}
+{{- end -}}
 {{- if .Values.passwordKey.existingSecret -}}
 {{- if eq .Values.passwordKey.source "env" -}}
 {{- $_ := set $owned "passwordKey" "env:DARLING_PASSWORD_KEY" -}}
@@ -280,9 +331,9 @@ of the name plus 11 characters (63 at most), and the headless Service appends "-
 {{- printf "%s-store" (include "performancemonitor-darling.fullname" . | trunc 46 | trimSuffix "-") -}}
 {{- end -}}
 
-{{/* Name of a surface's Service and Ingress: <fullname>-web or <fullname>-mcp, at most 63 characters. Argument: dict "ctx" <root> "surface" "web"|"mcp". */}}
+{{/* Name of a surface's Service, Ingress and ServiceMonitor: <fullname>-web, -mcp or -metrics, at most 63 characters. Argument: dict "ctx" <root> "surface" "web"|"mcp"|"metrics". */}}
 {{- define "performancemonitor-darling.surfaceName" -}}
-{{- printf "%s-%s" (include "performancemonitor-darling.fullname" .ctx | trunc 59 | trimSuffix "-") .surface -}}
+{{- printf "%s-%s" (include "performancemonitor-darling.fullname" .ctx | trunc (int (sub 62 (len .surface))) | trimSuffix "-") .surface -}}
 {{- end -}}
 
 {{/* Selector labels of the bundled store pod. The name label differs from the Darling pod's, so the Darling Deployment's selector never matches the store pod. */}}
@@ -309,4 +360,67 @@ app.kubernetes.io/component: store
 {{- else if and .Values.store.external.passwordSecret.name (not .Values.store.external.connectionStringSecret.name) -}}
 {{- printf "%s|%s" .Values.store.external.passwordSecret.name .Values.store.external.passwordSecret.key -}}
 {{- end -}}
+{{- end -}}
+
+
+{{/* Name of the store-roles hook Job, at most 63 characters. */}}
+{{- define "performancemonitor-darling.storeRolesJobName" -}}
+{{- printf "%s-store-roles" (include "performancemonitor-darling.fullname" . | trunc 49 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/* The image of the store-roles Job's psql container: store.provisionRoles.psqlImage, else store.bundled.image. */}}
+{{- define "performancemonitor-darling.psqlImage" -}}
+{{- default .Values.store.bundled.image .Values.store.provisionRoles.psqlImage -}}
+{{- end -}}
+
+{{/* The SSL mode handed to the verb: the Npgsql word of store.external.sslMode, as it is. The verb maps it to the libpq word. */}}
+{{- define "performancemonitor-darling.provisionRolesSslMode" -}}
+{{- .Values.store.external.sslMode -}}
+{{- end -}}
+
+{{/* Fails the render when store.provisionRoles is on without what makes it work. Call it only when the option is enabled. */}}
+{{- define "performancemonitor-darling.checkProvisionRoles" -}}
+{{- $p := .Values.store.provisionRoles -}}
+{{- if ne .Values.store.mode "external" -}}
+{{- fail "store.provisionRoles.enabled needs store.mode=external: the bundled store provisions its own roles, so set store.provisionRoles.enabled to false" -}}
+{{- end -}}
+{{- if not $p.rolePasswordsSecret -}}
+{{- fail "store.provisionRoles.rolePasswordsSecret is required when store.provisionRoles.enabled is true: name a Secret you manage with the keys admin, viewer, web and mcp" -}}
+{{- end -}}
+{{- $viaPassword := ne (toString $p.login.passwordSecret.name) "" -}}
+{{- $viaString := ne (toString $p.login.connectionStringSecret.name) "" -}}
+{{- if eq $viaPassword $viaString -}}
+{{- fail "store.provisionRoles.login needs exactly one of passwordSecret.name and connectionStringSecret.name: the Secret holding the store owner's password, or a whole Npgsql connection string for the owner" -}}
+{{- end -}}
+{{- if and $viaPassword .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.login.passwordSecret cannot be used with store.external.connectionStringSecret: there is no host to pair the password with; use store.provisionRoles.login.connectionStringSecret instead" -}}
+{{- end -}}
+{{- if and $viaPassword (has (toString .Values.store.external.sslMode) (list "VerifyCA" "VerifyFull")) (not .Values.store.external.caSecret.name) -}}
+{{- fail (printf "store.external.caSecret.name is required when store.provisionRoles.enabled uses the passwordSecret login and store.external.sslMode is %s: psql (libpq) needs a root certificate file to verify the server, where the service itself would fall back to the OS trust store. Name the Secret holding your CA in store.external.caSecret" .Values.store.external.sslMode) -}}
+{{- end -}}
+{{- if and $p.wireConnectionStrings .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.wireConnectionStrings cannot be on while store.external.connectionStringSecret is used: the chart has no host to put in the web and MCP connection strings. Set store.provisionRoles.wireConnectionStrings to false and point config.postgres.webConnectionString and config.postgres.mcpConnectionString at your own connection strings (file: references into a Secret) yourself" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Prints "true" while the chart wires the web and MCP logins: store.provisionRoles is on and wireConnectionStrings is on. */}}
+{{- define "performancemonitor-darling.wireStoreLogins" -}}
+{{- if and .Values.store.provisionRoles.enabled .Values.store.provisionRoles.wireConnectionStrings -}}true{{- end -}}
+{{- end -}}
+
+{{/* The non-secret Npgsql prefix of the web and MCP connection strings, from the host-based store.external settings, the way
+the owner connection string is built in darlingJson (without Username). The store-logins init container appends the role's
+Username and Password. Host, Database and SSL Mode must not contain ';' or '='. */}}
+{{- define "performancemonitor-darling.storeLoginsBase" -}}
+{{- $ext := .Values.store.external -}}
+{{- range $field := list "host" "database" "sslMode" -}}
+{{- if regexMatch "[;=]" (toString (get $ext $field)) -}}
+{{- fail (printf "store.external.%s must not contain ';' or '='" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $base := printf "Host=%s;Port=%v;Database=%s;SSL Mode=%s" $ext.host $ext.port $ext.database $ext.sslMode -}}
+{{- if $ext.caSecret.name -}}
+{{- $base = printf "%s;Root Certificate=/etc/darling/store-ca/ca.crt" $base -}}
+{{- end -}}
+{{- $base -}}
 {{- end -}}

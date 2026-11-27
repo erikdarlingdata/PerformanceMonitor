@@ -32,7 +32,7 @@ namespace Lite.Tests;
 /// <para>The pair is synthetic and is the one the Darling viewer's collision tests use: two different hosts that
 /// hash to one id.</para>
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public sealed class ServerIdCollisionTests : IDisposable
 {
     private const string HolderHost = "sql9jocsv";
@@ -40,7 +40,7 @@ public sealed class ServerIdCollisionTests : IDisposable
 
     private readonly string _configDir = Path.Combine(Path.GetTempPath(), "pmlite-test-" + Guid.NewGuid().ToString("N"));
     private readonly List<string> _credentialIds = new();
-    private readonly CredentialService _credentials = new();
+    private readonly CredentialService _credentials = new(new InMemoryCredentialStore());
 
     public ServerIdCollisionTests()
     {

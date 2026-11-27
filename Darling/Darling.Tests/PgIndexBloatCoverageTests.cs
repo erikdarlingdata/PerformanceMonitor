@@ -411,8 +411,7 @@ public sealed class PgIndexBloatCoverageTests
 
         Assert.Contains(label + "0 holding 0 B", measured.Census, StringComparison.Ordinal);
         Assert.DoesNotContain(PgIndexBloatCoverage.NotMeasured, measured.Census, StringComparison.Ordinal);
-        Assert.Contains(
-            label + PgIndexBloatCoverage.NotMeasured, unmeasured.Census, StringComparison.Ordinal);
+        Assert.Contains(PgIndexBloatCoverage.NotMeasured, unmeasured.Census, StringComparison.Ordinal);
 
         /* A THIRD token, and it is not decoration. The byte-weighted share is 0 of 0 bytes on the measured
            arm - undefined arithmetic over a real measurement - and the first draft printed NotMeasured
@@ -457,6 +456,59 @@ public sealed class PgIndexBloatCoverageTests
     }
 
     /// <summary>
+    /// #8840: when no coverage figure has a value the census says so once, in one sentence, instead of printing the unmeasured
+    /// word beside every figure. A census with any measured figure keeps the full text.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnmeasuredCensus_SaysNotMeasuredOnce(bool evidenceUnreadable)
+    {
+        var verdict = evidenceUnreadable
+            ? PgIndexBloatCoverage.EvidenceUnreadable(0)
+            : PgIndexBloatCoverage.Classify(false, Nothing, Nothing, [], 0);
+
+        Assert.Equal(PgIndexBloatCoverageArm.Undetermined, verdict.Arm);
+        Assert.Equal(1, Occurrences(verdict.Census, PgIndexBloatCoverage.NotMeasured));
+        Assert.DoesNotContain("WITH a trusted answer", verdict.Census, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITH NO answer", verdict.Census, StringComparison.Ordinal);
+        Assert.DoesNotContain("Rows returned", verdict.Census, StringComparison.Ordinal);
+        Assert.Equal(1, verdict.Census.Count(c => c == '.'));
+    }
+
+    [Fact]
+    public void AnUnmeasuredCensus_KeepsARowCountThatIsThere()
+    {
+        var verdict = PgIndexBloatCoverage.Classify(false, Nothing, Nothing, [], 25);
+
+        Assert.Equal(1, Occurrences(verdict.Census, PgIndexBloatCoverage.NotMeasured));
+        Assert.EndsWith("Rows returned (over the window you asked for, and capped by your row limit): 25.", verdict.Census, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMeasuredCensus_KeepsTheFullText()
+    {
+        var verdict = PgIndexBloatCoverage.Classify(
+            true,
+            new PgIndexBloatTally(3, 3L * 1024 * 1024),
+            Nothing,
+            [new PgIndexBloatSuppressionBucket(PgIndexBloatSuppression.NoPagesYet, 1, 1024 * 1024, null)],
+            4);
+
+        Assert.Equal(
+            "Candidate btree indexes on this server (measured over the last 48h, independently of your row limit): 4 holding 4.0 MB. "
+            + "WITH a trusted answer: 3 holding 3.0 MB - 75.00% of the candidate footprint "
+            + "(from the statistics model: 3 holding 3.0 MB; older exact measurements still in retention: 0 holding 0 B). "
+            + "WITH NO answer: 1 holding 1.0 MB, by reason and ranked BY BYTES because the row ranking and the byte ranking disagree"
+            + " - index occupies no pages 1 / 1.0 MB. "
+            + "Rows returned (over the window you asked for, and capped by your row limit): 4.",
+            verdict.Census);
+    }
+
+    private static int Occurrences(string text, string word) =>
+        text.Split(word, StringSplitOptions.None).Length - 1;
+
+    /// <summary>
     /// R9: the evidence lookback is a FIXED span ending where the read ends, not the caller's window — and
     /// the label the census prints is that same figure.
     /// </summary>
@@ -495,10 +547,16 @@ public sealed class PgIndexBloatCoverageTests
 
         foreach (var (name, verdict, _) in s_cases)
         {
-            Assert.Contains(
-                PgIndexBloatCoverage.EvidenceHoursDescription,
-                verdict.Census,
-                StringComparison.Ordinal);
+            /* A census that prints figures labels the span they are measured over. The one that prints none
+               (#8840: nothing was measured) has no figure to label. */
+            if (verdict.Arm != PgIndexBloatCoverageArm.Undetermined)
+            {
+                Assert.Contains(
+                    PgIndexBloatCoverage.EvidenceHoursDescription,
+                    verdict.Census,
+                    StringComparison.Ordinal);
+            }
+
             Assert.False(string.IsNullOrWhiteSpace(name));
         }
 

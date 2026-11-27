@@ -131,9 +131,9 @@ public partial class WebhookAlertService
                   .Replace(">", "&gt;", StringComparison.Ordinal);
 
     /// <summary>#7202: the most bytes the Details prose of a Teams card may take on the wire, once markdown-escaped and JSON-encoded
-    /// (a non-ASCII character or an <c>&amp; &lt; &gt; + '</c> becomes a six-byte <c>\uXXXX</c>). The connector rejects a
-    /// card past about 28 KB, so a long flat detail (a list of hundreds of names) gets 20 KB and the rest of the card keeps
-    /// room for its facts and sections.</summary>
+    /// (a non-ASCII character or an <c>&amp; &lt; &gt; + '</c> becomes a six-byte <c>\uXXXX</c>). Teams refuses a posted
+    /// message past about 28 KB ("Request Entity too large"), so a long flat detail (a list of hundreds of names) gets 20 KB and
+    /// the rest of the card keeps room for its facts and sections.</summary>
     internal const int TeamsProseMaxBytes = 20_000;
 
     /// <summary>
@@ -177,15 +177,15 @@ public partial class WebhookAlertService
     }
 
     /// <summary>
-    /// A MessageCard text and fact value render markdown, so alert text is placed in them with the characters that form
-    /// links, images, emphasis and mentions backslash-escaped: <c>[ ] * `</c>, a <c>_</c> that is not inside a
-    /// word (markdown reads <c>query_stats</c> literally), a <c>~</c> in a <c>~~</c> pair, and a backslash that precedes
+    /// An Adaptive Card <c>TextBlock</c>, and a fact's title and value, render markdown, so alert text is placed in them with
+    /// the characters that form links, images, emphasis and mentions backslash-escaped: <c>[ ] * `</c>, a <c>_</c> that is not
+    /// inside a word (markdown reads <c>query_stats</c> literally), a <c>~</c> in a <c>~~</c> pair, and a backslash that precedes
     /// punctuation (markdown reads that pair as an escape, so a path such as <c>C:\temp</c> is left as it is).
     /// <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> become the entities <c>&amp;amp;</c>, <c>&amp;lt;</c> and <c>&amp;gt;</c>
-    /// (the ampersand first, so no entity is escaped twice): an entity shows as the character under a markdown
-    /// reader and under a reader of the card's limited inline HTML alike.
-    /// A MessageCard has no plain-text field, so the escape is the smaller change. Darling's own formatting (the
-    /// <c>_label_</c> and backtick spans of a record) is written outside this call.
+    /// (the ampersand first, so no entity is escaped twice): a markdown reader shows an entity as the character, and
+    /// an Adaptive Card takes no HTML.
+    /// A <c>TextBlock</c> has no plain-text mode, so the text is escaped. Darling's own formatting (the <c>_label_</c> of a
+    /// record) is written outside this call, and a record's text goes in a <c>TextRun</c>, which is not markdown.
     /// </summary>
     internal static string TeamsEscape(string? text)
     {
@@ -234,15 +234,63 @@ public partial class WebhookAlertService
     }
 
     /// <summary>
-    /// A record text as the inside of a single-backtick code span: a backtick becomes a straight quote (it would
-    /// end the span), and each run of line breaks (CR, LF, CR LF, NEL, and the line and paragraph separators) becomes one
-    /// space. A markdown reader ends a paragraph, and with it an open span, at a blank line, so the text stays on one
-    /// line and the span closes where the card closes it.
+    /// A line of Teams markdown that opens with a heading marker (<c>#</c> runs), a bullet (<c>-</c> or <c>+</c>), an ordered-list
+    /// number (<c>1.</c> or <c>1)</c>) or a rule (three or more <c>-</c> or <c>=</c>) is read as that structure and loses the marker.
+    /// A marker counts only when white space or the end of the line follows it, so <c>#1</c>, <c>-5</c>, <c>3.5</c> and <c>==</c> are text.
     /// </summary>
-    internal static string TeamsCodeSpanText(string? text) =>
+    private static readonly Regex TeamsLineStartMarker = new(
+        @"^(?<marker>#+|[-+]|[0-9]+[.)]|-{3,}|={3,})(?=\s|$)",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The spaces and tabs a line of Teams markdown opens with. Teams shows a line without them, and a markdown reader that
+    /// follows CommonMark reads a line indented four or more columns as a code block, so a line is sent without them.
+    /// </summary>
+    private static readonly Regex TeamsLineIndent = new(@"^[ \t]+", RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Backslash-escapes the marker at the start of each line of already-escaped Teams prose, so a line that a source wrote as
+    /// <c>- 5 retries left</c> or <c># of failed rows: 3</c> shows with its marker. Every punctuation character of a marker is
+    /// escaped (<c>\#\#</c>, <c>\-\-\-</c>), and the digits of a number stay as they are (<c>1\.</c>). A line's indentation is
+    /// dropped first (<see cref="TeamsLineIndent"/>), so a marker after it is at the line start. Markdown reads a backslash before ASCII punctuation as an escape, as it does for the escapes in
+    /// <see cref="TeamsEscape"/>. A marker in the middle of a line is not at a line start and is left alone.
+    /// </summary>
+    internal static string TeamsEscapeLineStarts(string escaped)
+    {
+        if (string.IsNullOrEmpty(escaped))
+        {
+            return escaped;
+        }
+
+        return TeamsLineStartMarker.Replace(TeamsLineIndent.Replace(escaped, string.Empty), match =>
+        {
+            var marker = match.Groups["marker"].Value;
+            var builder = new StringBuilder();
+            foreach (var ch in marker)
+            {
+                if (ch is >= '0' and <= '9')
+                {
+                    builder.Append(ch);
+                }
+                else
+                {
+                    builder.Append('\\').Append(ch);
+                }
+            }
+
+            return builder.ToString();
+        });
+    }
+
+    /// <summary>
+    /// A record text as the text of a monospace <c>TextRun</c>: each run of line breaks (CR, LF, CR LF, NEL, and the line and
+    /// paragraph separators) becomes one space, so the text reads as one wrapped line. A <c>TextRun</c> shows its text as it
+    /// is (it is not markdown), so nothing else is changed and nothing is escaped.
+    /// </summary>
+    internal static string TeamsRunText(string? text) =>
         string.IsNullOrEmpty(text)
             ? string.Empty
-            : TeamsLineBreakRun.Replace(text.Replace('`', '\''), " ");
+            : TeamsLineBreakRun.Replace(text, " ");
 
     private static readonly Regex TeamsLineBreakRun = new(@"[\r\n\u0085\p{Zl}\p{Zp}]+", RegexOptions.CultureInvariant);
 
@@ -255,24 +303,133 @@ public partial class WebhookAlertService
             ? $"[External: {external.Source}] {title}"
             : title;
 
+    /// <summary>The Adaptive Card schema version the Teams card declares: the one Microsoft's own webhook example declares, and
+    /// the lowest that has every element the card uses (a styled <c>Container</c> with <c>bleed</c>, a <c>TextBlock</c>, a
+    /// <c>FactSet</c>, a <c>RichTextBlock</c> and <c>Action.OpenUrl</c>).</summary>
+    internal const string TeamsCardVersion = "1.2";
+
+    /// <summary>The most bytes a Teams card may take on the wire. Microsoft documents that a posted message past about 28 KB
+    /// fails with "Request Entity too large".</summary>
+    internal const int TeamsPayloadMaxBytes = 28 * 1024;
+
     /// <summary>
-    /// Builds an O365 MessageCard payload for Teams incoming webhooks.
-    /// The themeColor property renders as a colored accent bar at the top of the card.
-    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a <c>potentialAction</c> OpenUri button —
-    /// the MessageCard-native link affordance — pointing at the computed triage page. Null (base URL unset,
-    /// or a test send) renders exactly the pre-#2710 card.</para>
-    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail. It becomes its own
-    /// <c>Details</c> section ahead of the per-incident ones, because a multi-paragraph remedy in a
-    /// label/value fact renders as an unreadable column — <c>text</c> is the MessageCard-native place for
-    /// prose, and the snooze footer already uses it.</para>
-    /// <para>#3612: this card carries NO analogue of the Slack block budget, on purpose. The MessageCard
-    /// format has no section-count limit (its reference offers "don't include more than 10 sections" as a
-    /// readability guideline, not a rejection), and the connector's one hard ceiling is the ~28 KB payload.
-    /// The analysis page that Slack lost renders here at 16.6 KB with its 21 items and 17.4 KB at the 25
-    /// items the heaviest shape the story can produce (fifteen incidents, the most three five-row
-    /// drill-downs can surface) — about 210 bytes per incident, so the cap is some fifty incidents away
-    /// from any shape a producer can emit. <c>SlackDetailsSizeTests</c> pins the heaviest shape against
-    /// the cap so a producer that widens the page finds out there rather than in a lost delivery.</para>
+    /// The Adaptive Card container style nearest a severity color: <c>attention</c> for red, <c>warning</c> for amber,
+    /// <c>good</c> for green and <c>accent</c> for blue. An Adaptive Card has no free color, so the header band takes the
+    /// style whose color is closest to the one the email and Slack show. A color that does not parse reads as blue.
+    /// </summary>
+    internal static string TeamsCardStyle(string hexColor)
+    {
+        if (!int.TryParse(hexColor.AsSpan().TrimStart('#'), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var rgb))
+        {
+            return "accent";
+        }
+
+        static int Distance(int a, int b)
+        {
+            var (red, green, blue) = (((a >> 16) & 0xFF) - ((b >> 16) & 0xFF), ((a >> 8) & 0xFF) - ((b >> 8) & 0xFF), (a & 0xFF) - (b & 0xFF));
+            return (red * red) + (green * green) + (blue * blue);
+        }
+
+        (int Rgb, string Style)[] anchors = [(0xDC2626, "attention"), (0xD97706, "warning"), (0x16A34A, "good"), (0x2EAEF1, "accent")];
+        return anchors.MinBy(anchor => Distance(anchor.Rgb, rgb)).Style;
+    }
+
+    /// <summary>A wrapping <c>TextBlock</c>. Its text is markdown, so alert text in it is escaped by the caller.</summary>
+    private static Dictionary<string, object> TeamsTextBlock(string text, bool bold = false, bool subtle = false, string? size = null, string? spacing = null)
+    {
+        var block = new Dictionary<string, object> { ["type"] = "TextBlock", ["text"] = text, ["wrap"] = true };
+        if (bold)
+        {
+            block["weight"] = "Bolder";
+        }
+
+        if (subtle)
+        {
+            block["isSubtle"] = true;
+        }
+
+        if (size is not null)
+        {
+            block["size"] = size;
+        }
+
+        if (spacing is not null)
+        {
+            block["spacing"] = spacing;
+        }
+
+        return block;
+    }
+
+    /// <summary>How the lines of an external alert's detail are set in the card's <c>Details</c> section.</summary>
+    internal enum TeamsDetailLines
+    {
+        /// <summary>One <c>TextBlock</c> whose lines are joined by a doubled line feed, the break Teams documents for a new line
+        /// in a TextBlock outside a list. A TextBlock's markdown shows a lone line feed as a space, and a blank line shows the
+        /// same gap as one break.</summary>
+        DoubledLineFeed,
+
+        /// <summary>One <c>TextBlock</c> per line, which does not depend on how Teams reads a line feed in markdown. A blank line
+        /// sends no block.</summary>
+        BlockPerLine,
+    }
+
+    /// <summary>The form the card sends. This is the one place that chooses it.</summary>
+    internal const TeamsDetailLines TeamsExternalDetailLines = TeamsDetailLines.DoubledLineFeed;
+
+    /// <summary>
+    /// The blocks under the <c>Details</c> heading for already-escaped prose, cut by <see cref="CapTeamsProse"/>. An engine
+    /// alert's prose is one <c>TextBlock</c> as it is. An external alert's detail has its line-start markers escaped
+    /// (<see cref="TeamsEscapeLineStarts"/>), each line is sent without its leading spaces and tabs, and its lines are set in
+    /// <paramref name="form"/>. Markdown shows a run of spaces inside a line as one in either form.
+    /// </summary>
+    internal static List<object> TeamsDetailBlocks(string escapedProse, bool external, TeamsDetailLines form)
+    {
+        if (!external)
+        {
+            return [TeamsTextBlock(CapTeamsProse(escapedProse), spacing: "Small")];
+        }
+
+        var lines = TeamsEscapeLineStarts(escapedProse);
+        if (form == TeamsDetailLines.DoubledLineFeed)
+        {
+            return [TeamsTextBlock(CapTeamsProse(lines.Replace("\n", "\n\n", StringComparison.Ordinal)), spacing: "Small")];
+        }
+
+        var blocks = new List<object>();
+        foreach (var line in CapTeamsProse(lines).Split('\n'))
+        {
+            if (line.Length > 0)
+            {
+                blocks.Add(TeamsTextBlock(line, spacing: blocks.Count == 0 ? "Small" : "None"));
+            }
+        }
+
+        return blocks;
+    }
+
+    /// <summary>One section of the card: a <c>Container</c> under a separator line.</summary>
+    private static object TeamsSection(List<object> items) => new { type = "Container", separator = true, items };
+
+    /// <summary>
+    /// Builds the Teams payload: one Adaptive Card in the message envelope a Teams webhook takes
+    /// (<c>type: message</c>, and an <c>attachments</c> entry whose <c>contentType</c> is
+    /// <c>application/vnd.microsoft.card.adaptive</c>, whose <c>contentUrl</c> is null and whose <c>content</c> is the card).
+    /// A Workflows webhook shows a MessageCard's text but not its buttons, and shows an Adaptive Card whole, so every Teams
+    /// URL gets this one format.
+    /// <para>The card reads top to bottom: a header band in the severity's style (<see cref="TeamsCardStyle"/>) holding the
+    /// title and the edition and server line, the lead facts, the <c>Details</c> prose, one section per incident, the
+    /// newest-sample age line, and the snooze footer. The card asks for the full message width.</para>
+    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an <c>Action.OpenUrl</c> button pointing at the computed
+    /// triage page, the one action kind a webhook card needs and Teams supports there. Null (base URL unset, a test send, or
+    /// Lite, which has no triage page) sends a card with no <c>actions</c>.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail. It becomes its own <c>Details</c> section
+    /// ahead of the per-incident ones, because a multi-paragraph remedy in a label/value fact renders as an unreadable
+    /// column.</para>
+    /// <para>#3612: this card carries NO analogue of the Slack block budget, on purpose. An Adaptive Card has no
+    /// element-count limit, and the one hard ceiling is the payload size (<see cref="TeamsPayloadMaxBytes"/>).
+    /// <c>SlackDetailsSizeTests</c> pins the heaviest shape the analysis page can produce (fifteen incidents, 25 items)
+    /// against that ceiling, so a producer that widens the page finds out there rather than in a lost delivery.</para>
     /// <para>#7202: that reasoning covers the analysis page only. A flat detail that lists one name per database can run to
     /// hundreds of kilobytes, so the Details prose is cut by <see cref="CapTeamsProse"/> to <see cref="TeamsProseMaxBytes"/>.</para>
     /// </summary>
@@ -291,10 +448,9 @@ public partial class WebhookAlertService
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
-        /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
+        /* The title shows the human name when present; ForMetric above stays on the immutable metric
            name (the severity key), and a null/empty display name renders the metric name unchanged. */
         var titleName = ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
-        var themeColor = hexColor.TrimStart('#');
         /* One instant, with the local rendering DERIVED from it rather than read separately: two reads can
            land either side of a second, which would have the card's own "Time (UTC)" and "Time (Local)"
            facts naming two different seconds of one alert. SpecifyKind because an injected clock may hand
@@ -306,37 +462,42 @@ public partial class WebhookAlertService
 
         if (isTest)
         {
-            facts.Add(new { name = "Status", value = "Webhook configuration is working correctly" });
-            facts.Add(new { name = "Sent at", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
+            facts.Add(new { title = "Status", value = "Webhook configuration is working correctly" });
+            facts.Add(new { title = "Sent at", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
         else
         {
-            facts.Add(new { name = "Server", value = TeamsEscape(serverName) });
+            facts.Add(new { title = "Server", value = TeamsEscape(serverName) });
             var resourceName = DeriveResourceName(context);
             if (resourceName is not null)
-                facts.Add(new { name = "Resource", value = TeamsEscape(resourceName) });
+                facts.Add(new { title = "Resource", value = TeamsEscape(resourceName) });
             var database = DeriveResourceDatabase(context);
             if (!string.IsNullOrEmpty(database))
-                facts.Add(new { name = "Database", value = TeamsEscape(database) });
-            facts.Add(new { name = "Current Value", value = TeamsEscape(currentValue) });
+                facts.Add(new { title = "Database", value = TeamsEscape(database) });
+            facts.Add(new { title = "Current Value", value = TeamsEscape(currentValue) });
             /* #5825: an alert resolution has no threshold, and an empty fact says nothing. */
             if (!string.IsNullOrEmpty(thresholdValue))
-                facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
-            facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
-            facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
+                facts.Add(new { title = "Threshold", value = TeamsEscape(thresholdValue) });
+            facts.Add(new { title = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
+            facts.Add(new { title = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
 
         /* #2108: each Fields-carrying detail item becomes its OWN section further down, so a
            multi-incident alert reads as labeled, self-contained units instead of one flat fact
            list where a victim's fields and its fingerprint's fields drift apart. Advice prose and
-           remediation-T-SQL items stay folded into the lead section's facts — they are commentary
+           remediation-T-SQL items stay folded into the lead facts — they are commentary
            on the whole alert, not incidents. */
         var itemSections = new List<object>();
 
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(TeamsEscape(prose)), markdown = true });
+            /* #9576: an external alert's detail keeps its line breaks, in the form TeamsExternalDetailLines names. Only the text a
+               source sent carries breaks this way: an engine alert's prose is left exactly as it is. Each line starts a paragraph
+               of its own, so a line that opens with a heading, list or rule marker keeps the marker as text (#9607). */
+            var detailBlocks = new List<object> { TeamsTextBlock("Details", bold: true) };
+            detailBlocks.AddRange(TeamsDetailBlocks(TeamsEscape(prose), context?.External is not null, TeamsExternalDetailLines));
+            itemSections.Add(TeamsSection(detailBlocks));
         }
 
         if (context?.Details != null)
@@ -346,7 +507,7 @@ public partial class WebhookAlertService
                 if (detail.IsCodeBlock)
                 {
                     /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
-                    facts.Add(new { name = detail.Heading, value = TsqlWebhookHint });
+                    facts.Add(new { title = detail.Heading, value = TsqlWebhookHint });
                     continue;
                 }
 
@@ -356,61 +517,68 @@ public partial class WebhookAlertService
                        Investigation/Remediation paragraph (split on the blank line).
                        Body is exclusive with Fields, matching the email and Slack surfaces
                        which skip Fields when Body is present. */
-                    facts.Add(new { name = "Advice", value = TeamsEscape(detail.Heading) });
+                    facts.Add(new { title = "Advice", value = TeamsEscape(detail.Heading) });
                     foreach (var para in detail.Body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
                     {
                         var (label, text) = SplitProseLabel(para);
-                        facts.Add(new { name = TeamsEscape(label), value = TeamsEscape(text) });
+                        facts.Add(new { title = TeamsEscape(label), value = TeamsEscape(text) });
                     }
                     continue;
                 }
 
+                var items = new List<object> { TeamsTextBlock(TeamsEscape(detail.Heading), bold: true) };
                 var itemFacts = new List<object>();
+                void FlushFacts()
+                {
+                    if (itemFacts.Count > 0)
+                    {
+                        items.Add(new { type = "FactSet", spacing = "Small", facts = itemFacts });
+                        itemFacts = [];
+                    }
+                }
+
                 if (detail.Records.Count > 0)
                 {
-                    /* #3644: a record-shaped detail is one fact per ROW — name "#N", value the summary line
-                       over the text(s) in backticks — rather than one fact per attribute (seven per row). The
-                       MessageCard fact list is a name/value table, so the flat fields did not interleave here
-                       the way Slack's grid did; the compact list is the same reading order in a third of the
-                       rows, and the same row numbers a reader sees on Slack and in the email. Fact values
-                       render markdown; a MessageCard supports inline code but no fenced block, and the
-                       text's own backticks would end the span early, so they are replaced with a straight
-                       quote (a T-SQL text never carries one; a PostgreSQL text rarely). */
+                    /* #3644: a record-shaped detail is one fact per ROW — title "#N", value the summary line — rather
+                       than one fact per attribute (seven per row): the same reading order in a third of the rows, and the
+                       same row numbers a reader sees on Slack and in the email. A row's text(s) follow its fact, each in
+                       a monospace TextRun: Teams' TextBlock markdown has no code span, and a TextRun shows a query text
+                       exactly as it is. A row with two or more texts labels each one in italics. */
                     foreach (var record in detail.Records)
                     {
-                        var value = new StringBuilder(TeamsEscape(record.Summary));
-                        foreach (var (label, text) in record.Texts)
+                        itemFacts.Add(new { title = string.Create(CultureInfo.InvariantCulture, $"#{record.Ordinal}"), value = TeamsEscape(record.Summary) });
+                        if (record.Texts.Count == 0)
                         {
-                            if (value.Length > 0)
-                            {
-                                value.Append("  \n");
-                            }
-
-                            if (record.Texts.Count > 1)
-                            {
-                                value.Append('_').Append(TeamsEscape(label)).Append("_  \n");
-                            }
-
-                            value.Append('`').Append(TeamsCodeSpanText(text)).Append('`');
+                            continue;
                         }
 
-                        itemFacts.Add(new { name = string.Create(CultureInfo.InvariantCulture, $"#{record.Ordinal}"), value = value.ToString() });
+                        FlushFacts();
+                        foreach (var (label, text) in record.Texts)
+                        {
+                            if (record.Texts.Count > 1)
+                            {
+                                items.Add(TeamsTextBlock($"_{TeamsEscape(label)}_", spacing: "Small"));
+                            }
+
+                            items.Add(new
+                            {
+                                type = "RichTextBlock",
+                                spacing = "Small",
+                                inlines = new object[] { new { type = "TextRun", text = TeamsRunText(text), fontType = "Monospace" } }
+                            });
+                        }
                     }
                 }
                 else
                 {
                     foreach (var (label, value) in detail.Fields)
                     {
-                        itemFacts.Add(new { name = TeamsEscape(label), value = TeamsEscape(value) });
+                        itemFacts.Add(new { title = TeamsEscape(label), value = TeamsEscape(value) });
                     }
                 }
 
-                itemSections.Add(new
-                {
-                    activityTitle = TeamsEscape(detail.Heading),
-                    facts = itemFacts,
-                    markdown = true
-                });
+                FlushFacts();
+                itemSections.Add(TeamsSection(items));
             }
         }
 
@@ -418,66 +586,62 @@ public partial class WebhookAlertService
         var ageLine = AlertDetailText.SampleAgeLineFor(context, prose);
         if (ageLine is not null)
         {
-            itemSections.Add(new { text = ageLine, markdown = true });
+            itemSections.Add(TeamsSection([TeamsTextBlock(ageLine)]));
         }
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
             : $"{emoji} {badgeText} — {TeamsEscape(titleName)}";
 
-        var sections = new List<object>
+        var body = new List<object>
         {
+            /* The severity color: an Adaptive Card has no accent bar, so the header is a band in the nearest container style. */
             new
             {
-                activityTitle = title,
-                activitySubtitle = isTest ? branding.EditionName : $"{branding.EditionName} — {TeamsEscape(serverName)}",
-                facts,
-                markdown = true
-            }
+                type = "Container",
+                style = TeamsCardStyle(hexColor),
+                bleed = true,
+                items = new object[]
+                {
+                    TeamsTextBlock(title, bold: true, size: "Large"),
+                    TeamsTextBlock(isTest ? branding.EditionName : $"{branding.EditionName} — {TeamsEscape(serverName)}", subtle: true, spacing: "None")
+                }
+            },
+            new { type = "FactSet", facts }
         };
-        sections.AddRange(itemSections);
+        body.AddRange(itemSections);
 
         if (!isTest && branding.SnoozeHint is not null)
         {
-            sections.Add(new { text = branding.SnoozeHint });
+            body.Add(TeamsSection([TeamsTextBlock(branding.SnoozeHint)]));
         }
 
-        var summary = isTest
-            ? "[SQL Monitor] Test Notification"
-            : $"[SQL Monitor] {badgeText}: {titleName} on {serverName}";
+        /* A Dictionary, because "$schema" is not a C# identifier, and because "actions" is left out rather than sent
+           empty or null when there is no triage link. */
+        var card = new Dictionary<string, object>
+        {
+            ["$schema"] = "http://adaptivecards.io/schemas/adaptive-card.json",
+            ["type"] = "AdaptiveCard",
+            ["version"] = TeamsCardVersion,
+            ["msteams"] = new { width = "Full" },
+            ["body"] = body
+        };
+        if (triageUrl is not null)
+        {
+            card["actions"] = new object[] { new { type = "Action.OpenUrl", title = TriageLink.LinkLabel(triageUrl), url = triageUrl } };
+        }
 
-        /* #2710: the OpenUri action carries its schema keys as REAL "@type" (a Dictionary, because a C#
-           @-identifier only escapes the keyword — the existing card's `@type` serializes as "type", a
-           looseness Teams tolerates on the envelope but potentialAction is stricter about). Two shapes
-           rather than a nullable property, because System.Text.Json serializes a null member and a
-           "potentialAction": null key is exactly the kind of half-present field connectors choke on. */
-        object card = triageUrl is null
-            ? new
+        /* The envelope is exactly what the webhook's schema names: type, and attachments of contentType, contentUrl (always
+           null) and content. */
+        var message = new
+        {
+            type = "message",
+            attachments = new object[]
             {
-                @type = "MessageCard",
-                @context = "http://schema.org/extensions",
-                themeColor,
-                summary,
-                sections
+                new { contentType = "application/vnd.microsoft.card.adaptive", contentUrl = (string?)null, content = card }
             }
-            : new
-            {
-                @type = "MessageCard",
-                @context = "http://schema.org/extensions",
-                themeColor,
-                summary,
-                sections,
-                potentialAction = new object[]
-                {
-                    new Dictionary<string, object>
-                    {
-                        ["@type"] = "OpenUri",
-                        ["name"] = TriageLink.LinkLabel(triageUrl),
-                        ["targets"] = new object[] { new { os = "default", uri = triageUrl } }
-                    }
-                }
-            };
+        };
 
-        return JsonSerializer.Serialize(card, s_jsonOptions);
+        return JsonSerializer.Serialize(message, s_jsonOptions);
     }
 }

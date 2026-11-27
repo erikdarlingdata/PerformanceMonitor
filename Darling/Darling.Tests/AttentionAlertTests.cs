@@ -76,6 +76,7 @@ public sealed class AttentionAlertTests
         Assert.Equal(30.0, finding.RatePerMinute);
         Assert.Equal(10, finding.BarCrossed);
         Assert.False(finding.Muted);
+        Assert.False(finding.Filtered);
     }
 
     [Fact]
@@ -163,6 +164,7 @@ public sealed class AttentionAlertTests
 
         Assert.NotNull(finding);
         Assert.True(finding!.Muted);
+        Assert.False(finding.Filtered);
         Assert.Equal(AlertSeverityLevel.Critical, finding.Severity);
         Assert.Equal(100.0, finding.RatePerMinute);
     }
@@ -187,6 +189,7 @@ public sealed class AttentionAlertTests
 
         Assert.NotNull(finding);
         Assert.False(finding!.Muted);
+        Assert.False(finding.Filtered);
         Assert.True(finding.Estimated);
         Assert.Equal(AlertSeverityLevel.Warning, finding.Severity);
         Assert.Equal(30.0, finding.RatePerMinute);
@@ -195,15 +198,119 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
-    public void IntelliSenseCancels_Alone_PushTheServerOverTheBar_ButTheFireIsRecordedMuted()
+    public void IntelliSenseCancels_Alone_PushTheServerOverTheBar_AndTheCrossingIsFiltered_NotMuted()
     {
         /* 150 IntelliSense cancels and 5 application timeouts: the exact 155 x 3 = 465 is 155 per minute (Critical), the judged count is 465 x 5/155 = 15 = 5 per minute. */
         var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(IntelliSenseWindow(465, 150, 5), T0), 10, 60);
 
         Assert.NotNull(finding);
-        Assert.True(finding!.Muted);
+        Assert.True(finding!.Filtered);
+        Assert.False(finding.Muted);
+        Assert.True(finding.Estimated);
+        Assert.Equal(AlertSeverityLevel.Critical, finding.Severity);
+        Assert.Equal(155.0, finding.RatePerMinute);
         Assert.Equal(15.0, finding.JudgedCount, 3);
         Assert.Equal(150, finding.ExcludedSamples);
+    }
+
+    /* ---------------- #8971: a crossing only the built-in filters drop is Filtered; one a mute rule silences is Muted ---------------- */
+
+    [Fact]
+    public void Filtered_TheMuteCheckIsNotAsked_WhenTheFiltersAloneTakeTheRateUnderTheBar()
+    {
+        /* The callback would mute everything, so asking it would turn the finding Muted: the filters already took 155 per minute to 5. */
+        var asked = new List<(string? Database, string? App)>();
+        var finding = AttentionEvaluator.Evaluate(
+            AttentionEvaluator.Read(IntelliSenseWindow(465, 150, 5), T0), 10, 60, (database, app) => { asked.Add((database, app)); return true; });
+
+        Assert.NotNull(finding);
+        Assert.True(finding!.Filtered);
+        Assert.False(finding.Muted);
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void Muted_WhenTheFiltersLeaveTheRateOverTheBar_AndAMuteRuleTakesItUnder()
+    {
+        /* 465 over 3 minutes = 155 per minute exact. 50 IntelliSense, 100 backup and 5 web samples: the filters leave 105 of 155,
+           465 x 105/155 = 315 = 105 per minute, still Critical. The backup mute then leaves 5: 465 x 5/155 = 15 = 5 per minute. */
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 465) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 50),
+            Sample(runs[0], "sales", "backup", 100),
+            Sample(runs[0], "sales", "web", 5),
+        });
+
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60, (_, app) => app == "backup");
+
+        Assert.NotNull(finding);
+        Assert.True(finding!.Muted);
+        Assert.False(finding.Filtered);
+        Assert.Equal(AlertSeverityLevel.Critical, finding.Severity);
+        Assert.Equal(155.0, finding.RatePerMinute);
+        Assert.Equal(15.0, finding.JudgedCount, 3);
+    }
+
+    [Fact]
+    public void Fires_WhenTheFiltersAndAMuteRuleTogetherStillLeaveTheRateOverTheBar()
+    {
+        /* 50 IntelliSense, 50 backup (muted) and 55 web samples of 155: 465 x 55/155 = 165 = 55 per minute, a Warning. */
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 465) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 50),
+            Sample(runs[0], "sales", "backup", 50),
+            Sample(runs[0], "sales", "web", 55),
+        });
+
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60, (_, app) => app == "backup");
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.False(finding.Filtered);
+        Assert.Equal(AlertSeverityLevel.Warning, finding.Severity);
+        Assert.Equal(55.0, finding.RatePerMinute);
+    }
+
+    [Fact]
+    public void Filtered_EvenWhenEverySampleIsLeftOutByTheFilters_AndAServerWideMuteExists()
+    {
+        /* Every sampled event is IntelliSense: the filters alone judge zero. A server-wide rule would mute it, but the filters came first. */
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(IntelliSenseWindow(465, 155, 0), T0), 10, 60, (_, _) => true);
+
+        Assert.NotNull(finding);
+        Assert.True(finding!.Filtered);
+        Assert.False(finding.Muted);
+        Assert.Equal(0, finding.JudgedCount, 3);
+    }
+
+    [Fact]
+    public void Filtered_ForEachBuiltInFilter_AndForTheirSum()
+    {
+        /* 540 over 3 minutes = 180 per minute exact; 2 of 180 sampled events pass, 540 x 2/180 = 6 = 2 per minute. */
+        AttentionEvaluator.Finding? Judge(params AttentionSampleGroup[] groups) =>
+            AttentionEvaluator.Evaluate(AttentionEvaluator.Read(GroupsWindow(540, groups), T0), 10, 60, (_, _) => false);
+
+        var vsCode = Judge(new AttentionSampleGroup(T0, "master", AttentionWindowSql.VsCodeMetadataApps[0], 178), new AttentionSampleGroup(T0, "sales", "web", 2));
+        var shortOnes = Judge(new AttentionSampleGroup(T0, "sales", "etl", 178, ShortSamples: 178), new AttentionSampleGroup(T0, "sales", "web", 2));
+        var azdata = Judge(new AttentionSampleGroup(T0, "master", "azdata", 178, AzdataMetadataSamples: 178), new AttentionSampleGroup(T0, "sales", "web", 2));
+        var dbatools = Judge(
+            new AttentionSampleGroup(T0, "master", AttentionWindowSql.DbatoolsClientApp, 178, DbatoolsMetadataSamples: 178), new AttentionSampleGroup(T0, "sales", "web", 2));
+        var mixed = Judge(
+            new AttentionSampleGroup(T0, "master", AttentionEvaluator.IntelliSenseClientApp, 40),
+            new AttentionSampleGroup(T0, "sales", "etl", 50, ShortSamples: 50),
+            new AttentionSampleGroup(T0, "master", "azdata", 40, AzdataMetadataSamples: 40),
+            new AttentionSampleGroup(T0, "master", AttentionWindowSql.DbatoolsClientApp, 48, DbatoolsMetadataSamples: 48),
+            new AttentionSampleGroup(T0, "sales", "web", 2));
+
+        foreach (var finding in new[] { vsCode, shortOnes, azdata, dbatools, mixed })
+        {
+            Assert.NotNull(finding);
+            Assert.True(finding!.Filtered);
+            Assert.False(finding.Muted);
+            Assert.Equal(6.0, finding.JudgedCount, 3);
+        }
     }
 
     [Fact]
@@ -228,20 +335,21 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
-    public void EventsUnderOneMillisecond_AreLeftOutOfTheJudgedRate_AndTheFireIsRecordedMuted()
+    public void EventsUnderOneSecond_AreLeftOutOfTheJudgedRate_AndTheCrossingIsFiltered_NotMuted()
     {
-        /* 540 over 3 minutes = 180 per minute exact. 998 of 1000 sampled events lasted 20 to 40 us (a cancel on a command that had finished), 2 are real: 540 x 2/1000 = 1.08 judged, under the bar. */
+        /* 540 over 3 minutes = 180 per minute exact. 998 of 1000 sampled events lasted under the 1 s floor (a few ms, or 20 to 40 us), 2 are real: 540 x 2/1000 = 1.08 judged, under the bar. */
         var window = GroupsWindow(540,
             new AttentionSampleGroup(T0, "sales", "Core Microsoft SqlClient Data Provider", 998, ShortSamples: 998),
             new AttentionSampleGroup(T0, "sales", "web", 2));
         var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
 
         Assert.NotNull(finding);
-        Assert.True(finding!.Muted);
+        Assert.True(finding!.Filtered);
+        Assert.False(finding.Muted);
         Assert.Equal(180.0, finding.RatePerMinute);
         Assert.Equal(998, finding.ShortSamples);
         Assert.Equal(1.08, finding.JudgedCount, 2);
-        Assert.Contains("998 of the 1,000 sampled events lasted under 1 ms", finding.Summary, StringComparison.Ordinal);
+        Assert.Contains("998 of the 1,000 sampled events lasted under 1 s", finding.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -256,7 +364,7 @@ public sealed class AttentionAlertTests
         Assert.False(finding.Estimated);
         Assert.Equal(180.0, finding.RatePerMinute);
         Assert.Equal(0, finding.ShortSamples);
-        Assert.DoesNotContain("under 1 ms", finding.Summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("under 1 s", finding.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -288,6 +396,36 @@ public sealed class AttentionAlertTests
         Assert.Equal(120, finding.AzdataMetadataSamples);
         Assert.Equal(540 * 60d / 180, finding.JudgedCount, 3);
         Assert.Contains("120 of the 180 sampled events were Azure Data Studio metadata queries", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DbatoolsSmoMetadataReads_AreLeftOut_AndNamedApartFromAzureDataStudio_ButItsOwnQueriesStillCount()
+    {
+        /* 540 over 3 minutes. 90 dbatools SMO reads and 30 Azure Data Studio metadata statements are left out, 60 sampled events stay: 540 x 60/180 = 180 judged = 60 per minute. */
+        var window = GroupsWindow(540,
+            new AttentionSampleGroup(T0, "master", AttentionWindowSql.DbatoolsClientApp, 120, DbatoolsMetadataSamples: 90),
+            new AttentionSampleGroup(T0, "master", "azdata", 30, AzdataMetadataSamples: 30),
+            new AttentionSampleGroup(T0, "sales", AttentionWindowSql.DbatoolsClientApp, 30));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.Equal(90, finding.DbatoolsMetadataSamples);
+        Assert.Equal(30, finding.AzdataMetadataSamples);
+        Assert.Equal(540 * 60d / 180, finding.JudgedCount, 3);
+        Assert.Contains("90 of the 180 sampled events were dbatools SMO metadata reads", finding.Summary, StringComparison.Ordinal);
+        Assert.Contains("30 of the 180 sampled events were Azure Data Studio metadata queries", finding.Summary, StringComparison.Ordinal);
+
+        var line = AlertContextBuilders.BuildClientTimeoutItems(finding, window)
+            .SelectMany(i => i.Fields)
+            .Single(f => f.Label == "dbatools").Value;
+        Assert.Contains("90 of 180 sampled events were dbatools SMO metadata reads", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DbatoolsItself_IsNotAnExcludedApp_BecauseItRunsPeoplesOwnQueriesToo()
+    {
+        Assert.False(AttentionEvaluator.IsExcludedApp(AttentionWindowSql.DbatoolsClientApp));
     }
 
     [Fact]
@@ -942,6 +1080,128 @@ public sealed class AttentionAlertTests
         var fires = Fires(h);
         Assert.All(fires, f => Assert.True(f.Muted));
         Assert.Equal(3, fires.Count);
+    }
+
+    /* ---------------- #8971: a crossing only the built-in filters drop writes no rows ---------------- */
+
+    /// <summary>A run at <paramref name="now"/> whose exact count is 465 over the 3-minute span (155 per minute), with 150 IntelliSense
+    /// samples and 5 from <paramref name="app"/>: the filters alone leave 5 per minute.</summary>
+    private static AttentionWindow FilteredCrossingWindow(DateTime now, string app = "web")
+    {
+        var runs = Runs(now.AddSeconds(-5), 8);
+        return Window(runs, new[] { Count(runs[0], 465) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 150),
+            Sample(runs[0], "sales", app, 5),
+        });
+    }
+
+    /// <summary>A run at <paramref name="now"/> whose exact count is 540 over the 3-minute span, 998 of 1,000 samples under 1 s.</summary>
+    private static AttentionWindow ShortCrossingWindow(DateTime now)
+    {
+        var runs = Runs(now.AddSeconds(-5), 8);
+        return Window(runs, new[] { Count(runs[0], 540) }, new[]
+        {
+            new AttentionSampleGroup(runs[0].AddSeconds(2), "sales", "Core Microsoft SqlClient Data Provider", 998, ShortSamples: 998),
+            new AttentionSampleGroup(runs[0].AddSeconds(2), "sales", "web", 2),
+        });
+    }
+
+    [Fact]
+    public async Task Engine_FilteredStorm_ThatCrossesAndDips_WritesNoFireAndNoClearedRow_OverADayOfMinutes()
+    {
+        /* The #8971 shape: a server whose exact rate is mostly IntelliSense and sub-millisecond cancels crosses the bar for a few
+           minutes and dips under it for one, all day. Each crossing was a Muted row every cooldown and each dip a Cleared row. */
+        var h = Armed();
+        var asked = new List<AlertMuteContext>();
+        h.IsMuted = ctx => { asked.Add(ctx); return true; };
+        var engine = h.Build();
+
+        for (var minute = 0; minute < 1440; minute++)
+        {
+            h.Adapter.Attention = (minute % 5) switch
+            {
+                4 => Window(Runs(h.Now.AddSeconds(-5), 8)),
+                1 => ShortCrossingWindow(h.Now),
+                _ => FilteredCrossingWindow(h.Now),
+            };
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        Assert.Empty(Fires(h));
+        Assert.DoesNotContain(h.Resolutions, r => r.MetricName == AttentionEvaluator.MetricName);
+        Assert.DoesNotContain(asked, c => c.MetricName == AttentionEvaluator.MetricName);
+    }
+
+    [Fact]
+    public async Task Engine_ARealFire_ThenOnlyFilteredNoise_ResolvesOnce_AndStaysSilent()
+    {
+        var h = Armed();
+        var engine = h.Build();
+        h.Adapter.Attention = StormWindow(h.Now, 90);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        for (var minute = 1; minute <= 20; minute++)
+        {
+            h.Now = h.Now.AddMinutes(1);
+            h.Adapter.Attention = FilteredCrossingWindow(h.Now);
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        }
+
+        var fire = Assert.Single(Fires(h));
+        Assert.False(fire.Muted);
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == AttentionEvaluator.MetricName);
+        Assert.Equal("Client Timeouts Cleared", resolution.Title);
+    }
+
+    [Fact]
+    public async Task Engine_FiltersLeaveTheRateOver_AndAMuteRuleTakesItUnder_StillWritesOneMutedRowPerCooldown()
+    {
+        /* 50 IntelliSense, 100 backup (muted) and 5 web samples: the filters leave 105 per minute, the mute takes it to 5. Eleven
+           minutes, a run a minute, the default five-minute cooldown: the same three Muted rows a muted storm with no filters writes. */
+        var h = Armed();
+        h.IsMuted = ctx => ctx.ClientAppName == "backup";
+        var engine = h.Build();
+
+        for (var minute = 0; minute <= 10; minute++)
+        {
+            var runs = Runs(h.Now.AddSeconds(-5), 8);
+            h.Adapter.Attention = Window(runs, new[] { Count(runs[0], 465) }, new[]
+            {
+                Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 50),
+                Sample(runs[0], "sales", "backup", 100),
+                Sample(runs[0], "sales", "web", 5),
+            });
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var fires = Fires(h);
+        Assert.All(fires, f => Assert.True(f.Muted));
+        Assert.Equal(3, fires.Count);
+        Assert.DoesNotContain(h.Resolutions, r => r.MetricName == AttentionEvaluator.MetricName);
+    }
+
+    [Fact]
+    public async Task Engine_FiltersPresent_ButTheRateStaysOver_FiresUnmutedOnce()
+    {
+        /* 150 IntelliSense and 30 web samples of a 540 exact count: 90 judged, 30 per minute, a Warning delivered as today. */
+        var h = Armed();
+        var engine = h.Build();
+        var runs = Runs(h.Now.AddSeconds(-5), 8);
+        h.Adapter.Attention = Window(runs, new[] { Count(runs[0], 540) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 150),
+            Sample(runs[0], "sales", "web", 30),
+        });
+
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var fire = Assert.Single(Fires(h));
+        Assert.False(fire.Muted);
+        Assert.Equal(AlertSeverityLevel.Warning, fire.Severity);
+        Assert.Equal("30.0 per minute", fire.CurrentValue);
     }
 
     [Fact]

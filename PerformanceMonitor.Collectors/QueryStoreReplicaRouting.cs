@@ -194,6 +194,19 @@ public static class QueryStoreReplicaRouting
     /// <summary>L = F + this, for a database that has a capturing secondary (rows up to 18.5 minutes old at F = 900).</summary>
     public static readonly TimeSpan CapturingLookBackMargin = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// The longest flush interval a look-back covers (#8570): <see cref="LookBackFor"/> takes a slower flush as this one. It bounds L,
+    /// so a stored row's <c>collection_time</c> trails its interval's start by at most an interval, the catch-up cap and
+    /// <see cref="MaxLookBack"/>, the bound the raw Query Store reads place their <c>collection_time</c> ceiling on. A primary fallback
+    /// loses nothing to it: a replica read runs only under the <see cref="MaxReplicaFlushSeconds"/> gate, so the read before a
+    /// fallback lagged by less than the cap. A capturing secondary feeding a primary that flushes slower than an hour can report an
+    /// interval's runtime later than the look-back reaches, and the live path does not re-read that interval.
+    /// </summary>
+    public const int MaxLookBackFlushSeconds = 3600;
+
+    /// <summary>The widest L: <see cref="MaxLookBackFlushSeconds"/> plus <see cref="CapturingLookBackMargin"/>.</summary>
+    public static readonly TimeSpan MaxLookBack = TimeSpan.FromSeconds(MaxLookBackFlushSeconds) + CapturingLookBackMargin;
+
     /// <summary>The wire value of a reason, as <c>read_source</c> and the logs show it.</summary>
     public static string ReasonText(QueryStoreRouteReason reason) => reason switch
     {
@@ -208,9 +221,10 @@ public static class QueryStoreReplicaRouting
         _ => "",
     };
 
-    /// <summary>L for a flush interval: F + 5 minutes, or F + 10 when a capturing secondary feeds the database.</summary>
+    /// <summary>L for a flush interval: F + 5 minutes, or F + 10 when a capturing secondary feeds the database, with F at most
+    /// <see cref="MaxLookBackFlushSeconds"/>.</summary>
     public static TimeSpan LookBackFor(int flushIntervalSeconds, bool hasCapturingSecondary) =>
-        TimeSpan.FromSeconds(Math.Max(0, flushIntervalSeconds))
+        TimeSpan.FromSeconds(Math.Clamp(flushIntervalSeconds, 0, MaxLookBackFlushSeconds))
         + (hasCapturingSecondary ? CapturingLookBackMargin : LookBackMargin);
 
     /// <summary>Decides one database's source, reason and look-back.</summary>

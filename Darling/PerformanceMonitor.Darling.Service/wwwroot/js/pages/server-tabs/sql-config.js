@@ -288,7 +288,9 @@ export const AGENT_ALERT_SPECS = [
    target (and a native-only target's two backup facts) shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
 function protectionFactText(f) {
   if (!f) return "-";
-  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");
+  /* #8865: an errors_found CHECKDB says how many errors the check reported, next to its age. */
+  const errors = f.state === "errors_found" && f.errors != null ? ", " + f.errors + (f.errors === 1 ? " error" : " errors") : "";
+  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ") + errors;
   const overdue = f.overdue ? " - overdue" : "";
   if (f.age) return f.age + (state ? " (" + state + ")" : "") + overdue;
   return (state || "-") + overdue;
@@ -302,22 +304,53 @@ function protectionFact(key, label) {
     cellClass: (r) => (r[key] && r[key].overdue ? "sev-High" : null),
   };
 }
+/* #8865: the CHECKDB cell carries the service's own sentence as its tooltip (a backfill still running, a replica that is not readable), so a
+   `pending` or an unreadable replica explains itself where it shows. A replica that refuses connections says so even when its CHECKDB reads ok. */
+function checkDbCell(r) {
+  const f = r.checkdb;
+  const text = protectionFactText(f);
+  const tip = f && f.detail ? f.detail : r.replica_readable === false ? "This replica is not readable, so CHECKDB cannot run on it." : null;
+  return el("span", { text, title: tip });
+}
+/* #9376: the log backup cell carries the service's sentence as its tooltip, so a system database that expects no log backup says why. */
+function logBackupCell(r) {
+  const f = r.log_backup;
+  return el("span", { text: protectionFactText(f), title: f && f.detail ? f.detail : null });
+}
+const sourceLabel = (f) => (!f || !f.source ? "" : f.source === "error_log" ? "Error log" : "Boot page");
 const DATABASE_PROTECTION_COLUMNS = [
   { key: "database", label: "Database", name: true },
   { key: "state", label: "State", small: true },
   protectionFact("full_backup", "Last full backup"),
-  protectionFact("log_backup", "Last log backup"),
-  protectionFact("checkdb", "Last good CHECKDB"),
+  { ...protectionFact("log_backup", "Last log backup"), render: logBackupCell },
+  { ...protectionFact("checkdb", "Last good CHECKDB"), render: checkDbCell },
+  /* #8865: where the CHECKDB time came from (the replica's own error log, or the boot page) and the options its line named. */
+  { key: "checkdb_source", label: "CHECKDB source", small: true, hint: "Error log: the replica's own SQL Server error log. Boot page: the database boot page, which every replica of an Availability Group shares." },
+  { key: "checkdb_options", label: "CHECKDB options", small: true, hideWhenEmpty: true },
   /* #7416: the column reads "native" on a boxed server, which draws as nothing, so it is dropped when no row names a platform. */
   { key: "platform_label", label: "Platform", hideWhenEmpty: true, small: true },
   { key: "excluded_reason", label: "Not judged because", small: true },
 ];
+/* #8865 (R12): a server-level note only when there is something to act on: a refused or failed read, skipped archives or unparsed lines, so a CHECKDB
+   judged on the boot page or on a partial log is not read as a clean one. A healthy read, an old capture and a platform that is not read say nothing (null). */
+export function errorLogNote(data) {
+  const e = data && data.error_log;
+  if (!e) return null;
+  const parts = [];
+  if (e.status === "precondition") parts.push("refused" + (e.grant ? ", grant " + e.grant : ""));
+  else if (e.status === "failed") parts.push("failed" + (e.message ? ": " + e.message : ""));
+
+  if (e.skipped_archives) parts.push("skipped archives " + e.skipped_archives);
+  if (e.unparsed_lines) parts.push(e.unparsed_lines + " unparsed " + (e.unparsed_lines === 1 ? "line" : "lines"));
+  return parts.length ? parts.join("; ") : null;
+}
 const DATABASE_PROTECTION_STATS = [
   { key: "summary.text", label: "Overdue", format: "text", small: true, sentence: true },
+  { key: "error_log.status", label: "Error log", display: errorLogNote, hideWhenDisplayEmpty: true, small: true, hint: "How the read of each replica's SQL Server error log went. CHECKDB is judged from it for an Availability Group database." },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
 export const platformLabel = (r) => (r && r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : "");
-const overdueFirst = (rows) => [...rows].map((r) => ({ ...r, platform_label: platformLabel(r) })).sort((a, b) => {
+const overdueFirst = (rows) => [...rows].map((r) => ({ ...r, platform_label: platformLabel(r), checkdb_source: sourceLabel(r.checkdb), checkdb_options: r.checkdb && r.checkdb.options ? r.checkdb.options : "" })).sort((a, b) => {
   const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
   return score(b) - score(a);
 });

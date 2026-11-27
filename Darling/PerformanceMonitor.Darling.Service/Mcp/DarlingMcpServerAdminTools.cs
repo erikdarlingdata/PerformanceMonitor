@@ -21,6 +21,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -68,9 +69,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// onto the read tools' (id, storage name, display name) identity — rather than the <c>servers</c> registry the
 /// read tools resolve against (#3653 A15/A16: that registry is written on FIRST successful connect, so a server
 /// added with a bad password or an unreachable host could not be removed by the tool that added it), by the
-/// matching rule the read tools use: an exact match, or a partial match ONLY when it is unique — a name several
-/// servers answer to is refused with the candidates named, because a DELETE must never remove whichever sibling
-/// sorts first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
+/// matching rule the read tools use, but a DELETE acts on an exact name only: a name several servers answer to
+/// is refused with the candidates named, because a DELETE must never remove whichever sibling sorts first, and a
+/// name that matches one server only in part is answered <c>partial_match</c> with that server named and nothing
+/// removed, because a remove must not act on a guess (#9665). It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
@@ -82,6 +84,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// running service hot-reloads the monitored set within one sweep. <b>The SQL password transits the MCP endpoint in
 /// the request JSON</b>; on a LAN deployment serve the endpoint over HTTPS with <c>mcp.network.tls</c> (#5288), or
 /// front it with a TLS reverse proxy.</para>
+///
+/// <para><b>Left out of MCP on purpose (#9637).</b> Two admin functions have no tool, and no one should add one by accident.
+/// The store maintenance commands <c>--backfill-rollups</c>, <c>--collapse-legacy-slices</c> and <c>--recompress-plan-dim</c>
+/// need a disk check first and can run for a long time, which does not fit a tool call:
+/// <c>get_store_maintenance_readiness</c> reads their state, and the commands run from the command line. <c>--drop-xe-sessions</c>
+/// on its own has no tool because it drops sessions that other installs may share, so it stays a command-line step that runs
+/// before <c>remove_server</c>.</para>
 /// </summary>
 [McpServerToolType]
 public sealed partial class DarlingMcpServerAdminTools
@@ -94,8 +103,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>
     /// The reply for a failed connection test. Every reply to an MCP or web client carries one fixed sentence naming
     /// the host and port the caller sent, and nothing the driver said: the driver's text goes to the service log
-    /// only, with the typed secrets redacted, line breaks and other control characters replaced, and the length
-    /// capped. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
+    /// only, with line breaks and other control characters replaced and the length capped. A driver text that repeats a
+    /// typed secret is withheld whole, in the log and in the reply (<see cref="WithheldText"/>, #9693), and any other text
+    /// is passed on as the driver wrote it. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
     /// at the service host's own command line by the person who administers it; that caller gets the driver's text.
     /// </summary>
     internal static string ConnectFailureReply(
@@ -104,23 +114,38 @@ public sealed partial class DarlingMcpServerAdminTools
         /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
            stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
         var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
-        var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
+        var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)"
+            : RepeatsTypedSecret(probe.Error, secrets) ? WithheldText("The driver's text", probe.ErrorKind) : probe.Error;
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
-           full redacted text for the person at the service host's own command line. */
+           full text for the person at the service host's own command line. */
         logger?.LogWarning("Connection test to {Target} failed: {DriverText}",
             Hosting.DarlingHttpRefusalLog.Sanitize(target, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
+        /* #9674: a Strict test that failed on something other than a login says what Strict needs, because the driver's text does not. The
+           line is fixed text, with nothing the driver said in it, so every caller gets it, including the ones that never see the driver text. */
+        var strict = StrictHintFor(server, probe);
+        var strictLine = strict is null ? string.Empty : Environment.NewLine + strict;
         if (revealConnectError && !string.IsNullOrWhiteSpace(probe.Error))
         {
-            return $"Could not connect: {driverText}";
+            return $"Could not connect: {driverText}{strictLine}";
         }
 
-        return $"Could not connect to {target}. The service log has the details.";
+        return $"Could not connect to {target}. The service log has the details.{strictLine}";
     }
+
+    /// <summary>
+    /// #9674: the Strict line for a failed connection test of <paramref name="server"/>, or null. Given only for a Strict entry
+    /// whose failure was a transport failure (<see cref="ConnectionProbeResult.TransportFailure"/>). None for a PostgreSQL target (Strict
+    /// is a SQL Server option) and none for a native-library load failure (no connection can work from this install, whatever the mode).
+    /// Shared by the add and edit replies, the <c>--test-connection</c> verb and the <c>test_connect</c> command.
+    /// </summary>
+    internal static string? StrictHintFor(MonitoredServer server, ConnectionProbeResult probe) =>
+        server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.TransportFailure);
 
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "add_servers"), Description(
         "Adds servers (a JSON ARRAY) to the monitored fleet: each entry is validated, probed live, and written to " +
         "the shared central store immediately if new and reachable, no confirm step; the running service picks it " +
@@ -148,7 +173,10 @@ public sealed partial class DarlingMcpServerAdminTools
         "arn:aws:iam::123456789012:role/darling-monitor; accepted only if darling.json's allowedAwsRoles lists it) and " +
         "aws_external_id (optional, write-only, needs aws_role_arn); query_store_replica (optional, SQL Server only: a " +
         "readable secondary as host or host,port, or an availability group listener, to read Query Store from instead of " +
-        "the server; same login; empty = off; not used on Azure SQL Database). Servers are processed " +
+        "the server; same login; empty = off; not used on Azure SQL Database); capture_plans (optional: true keeps this server's plan XML, " +
+        "false collects its statistics without plan XML, null or absent follows the service-wide setting) and alert_delivery_mode_override " +
+        "(optional: \"Summary\" or \"PerEvent\" for this server's deadlock and blocking alerts, null or absent inherits the global mode; the " +
+        "same values edit_server sets). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
@@ -168,7 +196,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. An entry that carries a key this tool does not read (name for display_name, a misspelt key) is still processed with that key dropped, and its result adds ignored_keys:[{key, did_you_mean}], the key names only (did_you_mean is the key it reads that was likely meant, or null); an entry with no such key has no ignored_keys. requested is " +
         "the number of entries you sent and the four counters SUM to it, every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
@@ -236,6 +264,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
             var results = new List<ServerResult>(invalidResults);
 
+            /* #9780: the keys of each entry the parse does not read, named in that entry's result. */
+            var unread = DarlingMcpAddServerKeys.ByEntry(servers_json);
+
             /* The MCP caller's policy refuses entries here, before any store access or probe. */
             entries = DarlingMcpAddServersPolicy.Screen(policy, entries, results);
 
@@ -246,7 +277,7 @@ public sealed partial class DarlingMcpServerAdminTools
                reports only the per-entry invalids. */
             if (entries.Count == 0)
             {
-                return Aggregate(results);
+                return Aggregate(results, unread);
             }
 
             /* Seed the case-folded dedupe gate from the authoritative store rows FIRST, then partition the batch —
@@ -403,7 +434,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 }
             }
 
-            return Aggregate(results);
+            return Aggregate(results, unread);
         }
         catch (Exception ex)
         {
@@ -411,36 +442,39 @@ public sealed partial class DarlingMcpServerAdminTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "remove_server"), Description(
         "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
         "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +
         "historical data is NOT deleted. Matches by exact name first (display or storage name/address, " +
-        "case-insensitive); a partial match is honored only if exactly one definition contains it, otherwise " +
-        "nothing is deleted and candidates are listed for re-issue. Matches against DEFINITIONS, not the " +
+        "case-insensitive). A partial match deletes nothing: the one definition that contains the text is " +
+        "named, and the call is repeated with its exact name. Matches against DEFINITIONS, not the " +
         "connected registry, so an unconnected server can still be removed. <<GUIDE>> " +
         "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
         "list_servers reports them). The name is resolved against the monitored-server DEFINITIONS in the central " +
         "store (config_monitored_servers, the table add_servers writes and this tool deletes from), NOT against the " +
         "registry of servers that have connected, so a server that was added but has never connected can be removed " +
         "by the tool that added it. Matching is exact first (case-insensitive, against the storage name and the " +
-        "display name); a PARTIAL match is honored ONLY when exactly one defined server contains the text. When " +
-        "the name is ambiguous: an exact name shared by two definitions, or a fragment such as \"-01\" that " +
+        "display name). A PARTIAL match never deletes: when exactly one defined server contains the text the " +
+        "response is {status:\"partial_match\", matched_by:\"partial\", candidates:[{server, display_name, " +
+        "ever_connected}], message}, nothing is deleted, and the call is repeated with that server's exact display " +
+        "name or storage name. When the name is ambiguous: an exact name shared by two definitions, or a fragment such as \"-01\" that " +
         "several servers contain, NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
         "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
+        "display_name, matched_by:\"exact\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success: ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
-        "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
+        "{status:\"ambiguous\", ...} or {status:\"partial_match\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
         "not_found whose matched_in is \"servers\" means the name IS a connected server but has no definition in the " +
         "store to delete (it is defined in darling.json, or its definition was already removed); the message otherwise " +
         "lists the servers that are defined. " +
         "server_name is matched as list_servers / get_alert_history report it.")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
-        [Description("The name of the monitored server to remove: its display name or storage name / address. A partial name is accepted only when it matches exactly one server.")] string server_name)
+        [Description("The name of the monitored server to remove: its display name or storage name / address. A partial name deletes nothing: the one server it matches is named and the call is repeated with the exact name.")] string server_name)
     {
         try
         {
@@ -465,8 +499,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
                The read resolver (DarlingServerResolver) matches with this same rule. It was first-wins on a
                partial match once, and on a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
-               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
-               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
+               whichever sorted first, and said so only after the fact (#3541 A14). A unique partial was honored after
+               that, and a remove must not act on a guess either (#9665): a partial match, unique or not, is refused,
+               and the unique one is named so the caller repeats the call with the exact name. */
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
             var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
@@ -521,6 +556,20 @@ public sealed partial class DarlingMcpServerAdminTools
                     matched_by = target.MatchedBy,
                     matched_in = "config_monitored_servers",
                     candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName, ever_connected = everConnected[c.ServerId] }),
+                }, McpHelpers.JsonOptions);
+            }
+
+            if (target.MatchedBy != "exact")
+            {
+                var guess = target.Candidates[0];
+                return JsonSerializer.Serialize(new
+                {
+                    status = "partial_match",
+                    message = $"'{server_name}' matches one defined server only in part ({guess.DisplayName ?? guess.ServerName}); nothing was removed. " +
+                              "Re-issue remove_server with that server's exact display name or storage name.",
+                    matched_by = target.MatchedBy,
+                    matched_in = "config_monitored_servers",
+                    candidates = new[] { new { server = guess.ServerName, display_name = guess.DisplayName, ever_connected = everConnected[guess.ServerId] } },
                 }, McpHelpers.JsonOptions);
             }
 
@@ -728,7 +777,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept. "
                     + "The service also drops this install's own Extended Events sessions on the server, with one attempt within 15 seconds, except a session another registration of this install keeps. "
                     + "The shared sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) stay on the server, and so does a session that drop could not reach. "
-                    + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
+                    + "For a server nothing else monitors, an operator runs " + OperatorVerbForm.EntryPointHere() + " --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
             previous = row is null ? null : RemovedPreviousOf(row),
@@ -745,7 +794,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal const string RemoveUndoNote =
         "The undo re-adds the definition, but its password is a placeholder (the stored one cannot be read back) and the add probes the connection first, so replace the placeholder before running it. " +
         "A re-add does not bring back this server's tag assignments, query-tag assignments and rules, collector schedule overrides and run times, " +
-        "monthly cost, excluded databases, plan-capture and alert-delivery settings, or an AWS external ID; the server comes back enabled. " +
+        "monthly cost, excluded databases, or an AWS external ID; the server comes back enabled. " +
         "Collected history and the connected-servers registry row were never deleted and reattach by the server id.";
 
     /// <summary>The removed definition without its password and AWS external ID, in the keys add_servers takes, so it is also the undo's one entry.</summary>
@@ -790,6 +839,17 @@ public sealed partial class DarlingMcpServerAdminTools
         if (row.AwsRoleArn is not null)
         {
             entry["aws_role_arn"] = row.AwsRoleArn;
+        }
+
+        /* #9635: the two per-server settings come back with the re-add. NULL (follow the service) is what an entry without them stores. */
+        if (row.CapturePlans is not null)
+        {
+            entry["capture_plans"] = row.CapturePlans;
+        }
+
+        if (row.AlertDeliveryModeOverride is not null)
+        {
+            entry["alert_delivery_mode_override"] = row.AlertDeliveryModeOverride;
         }
 
         return entry;
@@ -869,7 +929,7 @@ ORDER BY d.host, d.database";
         }
         catch (JsonException ex)
         {
-            return (entries, invalid, $"servers_json is not valid JSON: {ex.Message}");
+            return (entries, invalid, JsonParseError.Describe("servers_json", ex));
         }
 
         if (root is not JsonArray array)
@@ -910,7 +970,8 @@ ORDER BY d.host, d.database";
         }
 
         var host = TryGetString(obj, "host");
-        var label = string.IsNullOrWhiteSpace(host) ? $"(entry {index + 1})" : host!.Trim();
+        /* #9787: a host holding a control character is not repeated as the entry's name in the answer. */
+        var label = string.IsNullOrWhiteSpace(host) || ServerFieldText.HasRefusedCharacter(host) ? $"(entry {index + 1})" : host!.Trim();
 
         ServerResult Invalid(string message) => new(index, label, AddStatus.Invalid, message);
 
@@ -977,6 +1038,13 @@ ORDER BY d.host, d.database";
             /* Managed identity carries no secret. A user-assigned identity may name its client id in username;
                a system-assigned identity omits it. Nothing is required and nothing is stored as a secret. */
             username = TryGetString(obj, "username") is { Length: > 0 } miClientId ? miClientId.Trim() : null;
+        }
+
+        /* #9787: the four text fields every later log line, drift warning and printed command repeats hold no control character.
+           The sentence names the field and the class, never the value. */
+        if (ServerFieldText.FirstRefusal(displayName, host, database, username) is { } fieldRefusal)
+        {
+            return (null, Invalid(fieldRefusal));
         }
 
         /* encrypt_mode + trust_server_certificate are deliberately EXPOSED (per Erik) — a headless caller sets the
@@ -1083,8 +1151,24 @@ ORDER BY d.host, d.database";
             return (null, Invalid(replicaError));
         }
 
+        /* #9635: the two per-server settings, with the values and the refusals edit_server gives (one parse for both tools). An absent key or a
+           null is "follow the service setting" and "inherit the global mode", the NULL a new row had before. */
+        var (capturePlans, captureError) = ParseCapturePlansSetting(obj["capture_plans"]);
+        if (captureError is not null)
+        {
+            return (null, Invalid(captureError));
+        }
+
+        var (deliveryOverride, deliveryError) = ParseAlertDeliveryOverrideSetting(obj["alert_delivery_mode_override"]);
+        if (deliveryError is not null)
+        {
+            return (null, Invalid(deliveryError));
+        }
+
         var probeConfig = new MonitoredServer
         {
+            CapturePlans = capturePlans,
+            AlertDeliveryModeOverride = deliveryOverride is null ? null : Enum.Parse<AlertNotificationMode>(deliveryOverride),
             QueryStoreReplica = queryStoreReplica,
             AwsRoleArn = awsRole,
             AwsExternalId = awsExternalId,
@@ -1269,7 +1353,7 @@ ORDER BY d.host, d.database";
 
     /// <summary>The INSERT — column set + shape mirrored from <c>StoreConfigProvider.SeedMonitoredServersAsync</c>
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
-    /// <c>alert_delivery_mode_override</c> default to NULL (inherit the globals), <c>monthly_cost_usd</c>/
+    /// <c>alert_delivery_mode_override</c> are the entry's own values (#9635), NULL when it names none (inherit the globals), <c>monthly_cost_usd</c>/
     /// <c>excluded_databases</c> are the neutral defaults, and <c>is_enabled</c> is TRUE (collection starts at
     /// once). The dedupe gate is the first guard and <see cref="IdentityLockSql"/> the second: the INSERT runs in a
     /// transaction that holds the identity lock, after the storage keys were read again under it (#5240). ON CONFLICT
@@ -1282,7 +1366,7 @@ INSERT INTO config_monitored_servers (
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at,
     aws_role_arn, aws_external_id, query_store_replica)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18, $19)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $20, $21, $15, $16, TRUE, $14, $14, $17, $18, $19)
 ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
@@ -1438,6 +1522,8 @@ ON CONFLICT (server_id) DO NOTHING";
         AddNullableText(command, config.AwsRoleArn);                                                                                  // $17
         AddNullableText(command, config.AwsRoleArn is null ? null : config.AwsExternalId);                                            // $18
         AddNullableText(command, QueryStoreReplicaSetting.Normalize(config.QueryStoreReplica));                                       // $19 (#6254)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = (object?)config.CapturePlans ?? DBNull.Value }); // $20 (#9635)
+        AddNullableText(command, config.AlertDeliveryModeOverride?.ToString());                                                       // $21 (#9635)
         var written = await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return written;
@@ -1691,7 +1777,7 @@ ON CONFLICT (server_id) DO NOTHING";
     /// status is added as a literal and the test is skipped, the first real call says so instead of summarising
     /// the batch short.</para>
     /// </summary>
-    internal static string Aggregate(List<ServerResult> results)
+    internal static string Aggregate(List<ServerResult> results, IReadOnlyDictionary<int, IReadOnlyList<UnreadServerKey>>? unread = null)
     {
         var ordered = results.OrderBy(r => r.Order).ToList();
         var counters = new Dictionary<string, int>(StringComparer.Ordinal)
@@ -1721,14 +1807,31 @@ ON CONFLICT (server_id) DO NOTHING";
             collided = counters["collided"],
             failed = counters["failed"],
             /* #6403: an added server's undo is the remove_server call for its storage name; a skipped, refused or failed entry changed nothing and has none. */
-            results = ordered.Select(r => new
-            {
-                server = r.Server,
-                status = r.Status,
-                detail = r.Detail,
-                undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer }),
-            }),
+            results = ordered.Select(r => ResultRow(r, unread)),
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// One entry of the answer's <c>results</c>. An entry whose keys the parse did not all read carries <c>ignored_keys</c> (#9780):
+    /// <c>[{key, did_you_mean}]</c>, each a key name and the key the core reads that it most likely meant (null when none is near).
+    /// A clean entry has no such field, so the answer a script reads today is unchanged. Names only, never a value.
+    /// </summary>
+    private static object ResultRow(ServerResult r, IReadOnlyDictionary<int, IReadOnlyList<UnreadServerKey>>? unread)
+    {
+        var undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer });
+        if (unread is null || !unread.TryGetValue(r.Order, out var keys))
+        {
+            return new { server = r.Server, status = r.Status, detail = r.Detail, undo };
+        }
+
+        return new
+        {
+            server = r.Server,
+            status = r.Status,
+            detail = r.Detail,
+            undo,
+            ignored_keys = keys.Select(k => new { key = k.Key, did_you_mean = k.DidYouMean }),
+        };
     }
 
     /// <summary>The probed facts for an <c>added</c> server, from the same describer the
@@ -1742,8 +1845,8 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <summary>
     /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
     /// none. A replica that would not open is a note and never a refusal: the primary answered, the server is saved, and collection reads
-    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, redacted and bounded,
-    /// as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
+    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, bounded, and withheld
+    /// whole when it repeats a typed secret, as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
     /// </summary>
     internal static string? QueryStoreReplicaReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealError, params string?[] secrets)
@@ -1754,7 +1857,9 @@ ON CONFLICT (server_id) DO NOTHING";
             return line;
         }
 
-        var driverText = RedactEditSecret(probe.QueryStoreReplicaError, secrets);
+        var driverText = RepeatsTypedSecret(probe.QueryStoreReplicaError, secrets)
+            ? WithheldText("The driver's text", probe.QueryStoreReplicaErrorKind)
+            : probe.QueryStoreReplicaError;
         logger?.LogWarning("Query Store replica test for {Target} failed: {DriverText}",
             Hosting.DarlingHttpRefusalLog.Sanitize(probe.QueryStoreReplica, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
         return revealError

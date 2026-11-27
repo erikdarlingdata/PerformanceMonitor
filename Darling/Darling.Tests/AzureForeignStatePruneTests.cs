@@ -128,14 +128,22 @@ public sealed class AzureForeignStatePruneTests
         /* #2312 shrank this from five to three: the planwm:/textwm: watermark families retired with the
            watermarks themselves (the fetches are activity-driven against the store now), and V77 deleted
            their orphaned rows wholesale — a dropped-database prune has nothing left to own there. */
-        Assert.Equal(3, QueryStorePerDatabaseState.PrunableKeys.Count);
+        Assert.Equal(5, QueryStorePerDatabaseState.PrunableKeys.Count);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.DoneKeyPrefix);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.HoleKeyPrefix);
+        /* #9359: the last landed clamped read, so a restart does not forget it. */
+        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
+            k => k.Prefix == QueryStoreBackfillState.LandedKeyPrefix);
         /* #2312: the open-interval refresh stamp. */
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreOpenIntervalState.WatermarkKeyPrefix);
+        /* #8865: the newest CHECKDB remembered per database, owned by database_protection. */
+        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
+            k => k.Prefix == DatabaseProtectionErrorLogState.CheckKeyPrefix
+                && k.Owner == "database_protection"
+                && k.Owner == DatabaseProtectionCollector.Instance.Name);
 
         /* Nothing may sit outside both lists — a server-scoped key added to PrunableKeys by reflex would be
            deleted every cycle. The one member is the drop record of the long-query session older versions shared

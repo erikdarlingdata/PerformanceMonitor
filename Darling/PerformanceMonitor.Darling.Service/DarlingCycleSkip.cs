@@ -38,7 +38,8 @@ internal sealed record CycleSkipSnapshot(
 /// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, the time
 /// this body queued for a fleet slot, (#5824) the previous body's scheduled analysis pass length and how many analysis
 /// passes held fleet slots when this body got its slot, and the daily-run permit backlog as this body started: how many
-/// daily runs were waiting for a permit and how long the oldest had waited. 0 or null is "not measured".</summary>
+/// daily runs were waiting for a permit and how long the oldest had waited, and (#9192) what held the fleet slots during the gate
+/// wait: the longest collector of the bodies that held them. 0 or null is "not measured".</summary>
 internal readonly record struct CycleSkipCauses(
     long PrevBodyMs,
     string? PrevBodySlowestName,
@@ -47,7 +48,8 @@ internal readonly record struct CycleSkipCauses(
     long PrevAnalysisMs = 0,
     int GateWaitAnalysisHolders = 0,
     int DailyRunsWaiting = 0,
-    long OldestDailyWaitMs = 0)
+    long OldestDailyWaitMs = 0,
+    SlotHolder? GateWaitHolder = null)
 {
     /// <summary>#8539: the longest of each cause across two bodies, each kept with its own detail (the slowest collector
     /// of the longer body, the analysis holders of the longer wait). The daily-run permit backlog is not carried: a row
@@ -58,7 +60,7 @@ internal readonly record struct CycleSkipCauses(
         var wait = a.GateWaitMs >= b.GateWaitMs ? a : b;
         return new CycleSkipCauses(
             body.PrevBodyMs, body.PrevBodySlowestName, body.PrevBodySlowestMs, wait.GateWaitMs,
-            Math.Max(a.PrevAnalysisMs, b.PrevAnalysisMs), wait.GateWaitAnalysisHolders);
+            Math.Max(a.PrevAnalysisMs, b.PrevAnalysisMs), wait.GateWaitAnalysisHolders, GateWaitHolder: wait.GateWaitHolder);
     }
 }
 
@@ -298,10 +300,22 @@ internal static class DarlingCycleSkip
         var wait = waitIsEarlier ? earlier : causes;
         if (wait.GateWaitMs >= CauseFloorMs)
         {
-            var holders = wait.GateWaitAnalysisHolders > 0
-                ? string.Create(CultureInfo.InvariantCulture,
-                    $" ({CountText.Plural(wait.GateWaitAnalysisHolders, "slot")} {(wait.GateWaitAnalysisHolders == 1 ? "was" : "were")} held by scheduled analysis passes when it got one)")
-                : string.Empty;
+            /* #5824: the slots scheduled analysis passes held when this body got its slot. #9192: and the collector that ran
+               longest in the bodies that held slots during the wait, in one bracket, in the style of the "(slowest: ...)" text of
+               the previous-body cause. */
+            var heldBy = new List<string>();
+            if (wait.GateWaitAnalysisHolders > 0)
+            {
+                heldBy.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"{CountText.Plural(wait.GateWaitAnalysisHolders, "slot")} {(wait.GateWaitAnalysisHolders == 1 ? "was" : "were")} held by scheduled analysis passes when it got one"));
+            }
+
+            if (wait.GateWaitHolder is { } holder)
+            {
+                heldBy.Add(HolderText(holder));
+            }
+
+            var holders = heldBy.Count > 0 ? " (" + string.Join("; ", heldBy) + ")" : string.Empty;
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture, $"{(waitIsEarlier ? "an earlier" : "this")} pass waited {Format(wait.GateWaitMs)} for a fleet collection slot{holders}"),
                 wait.GateWaitMs, GateWaitName, wait.GateWaitMs));
@@ -359,6 +373,26 @@ internal static class DarlingCycleSkip
 
         return new CycleSkipReport(
             (int)Math.Min(int.MaxValue, total), durationMs is { } d ? ClampMs(d) : null, item, ClampMs(itemMs), message);
+    }
+
+    /// <summary>
+    /// #9192: the holder of the fleet slots a wait queued behind: the collector that ran longest in the bodies that held slots
+    /// meanwhile, how many of them it was the slowest collector in, and where its time went. The phase that took more of the
+    /// run is named with its share of the run, so a reader sees at once whether the wait came from the monitored servers or from
+    /// the store. A run that reported no split names the collector and its length only.
+    /// </summary>
+    internal static string HolderText(SlotHolder holder)
+    {
+        var phase = string.Empty;
+        if (holder.ReadMs is { } read && holder.StoreMs is { } store)
+        {
+            phase = store >= read
+                ? $", store write {Format(store)} of {Format(holder.TotalMs)}"
+                : $", monitored-server read {Format(read)} of {Format(holder.TotalMs)}";
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"slots were held by {CountText.Plural(holder.Bodies, "collection pass", "collection passes")} during the wait; longest collector: {holder.Collector.Replace('_', ' ')} {Format(holder.TotalMs)}, slowest in {holder.BodiesSlowestIn} of them{phase}");
     }
 
     /// <summary>

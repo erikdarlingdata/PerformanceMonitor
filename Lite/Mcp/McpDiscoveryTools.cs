@@ -72,10 +72,12 @@ public sealed class McpDiscoveryTools
         }
     }
 
-    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time. A server whose connection check is failing reads Offline and its row carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; all three are null otherwise.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time. A server whose connection check is failing reads Offline and its row carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; connect_down_since and last_connect_error are null otherwise, and so is reason unless the row reads Disabled. A server whose data collection is turned off is listed too: it reads Disabled with a reason saying so, and no connection status is read for it.")]
     public static async Task<string> ListServers(ServerManager serverManager, LocalDataService dataService)
     {
-        var servers = serverManager.GetEnabledServers();
+        /* #9087: every configured server, not only the enabled ones. A server whose collection is off was left out, and when all
+           were off the answer said none are configured. */
+        var servers = serverManager.GetAllServers();
         if (servers.Count == 0)
         {
             /* #6277: the `empty` status envelope, the same true negative Darling's list_servers answers an empty
@@ -86,13 +88,18 @@ public sealed class McpDiscoveryTools
         var rows = new List<object>(servers.Count);
         foreach (var s in servers)
         {
-            var status = serverManager.GetConnectionStatus(s.Id);
-            var statusText = status.IsOnline switch
-            {
-                true => "Online",
-                false => "Offline",
-                null => "Status not checked"
-            };
+            /* #9087: a server whose collection is off has no connection answer to report: Lite sends it no query, and the last one it had
+               is not shown. Its status is the word the Lite window uses (#9085), and no connection status is read for it. */
+            var disabled = !s.IsEnabled;
+            var status = disabled ? new ServerConnectionStatus { ServerId = s.Id } : serverManager.GetConnectionStatus(s.Id);
+            var statusText = disabled
+                ? ServerCardStatus.Disabled.Word()
+                : status.IsOnline switch
+                {
+                    true => "Online",
+                    false => "Offline",
+                    null => "Status not checked"
+                };
 
             var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
             var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayNameWithIntent, s.RegisteredAtUtc);
@@ -111,7 +118,9 @@ public sealed class McpDiscoveryTools
                 status = statusText,
                 /* #7590: an unreachable server says since when and why, from the in-process connection check (the same sentence
                    Darling's list_servers gives from its stored one); all three are null while the server is online or unchecked. */
-                reason = status.UnreachableReason,
+                reason = disabled
+                    ? ServerHealthClassifier.DisabledServerReason
+                    : status.UnreachableReason,
                 connect_down_since = status.UnreachableReason is null ? null : (status.StatusChangedAt ?? status.LastChecked)?.ToUniversalTime().ToString("o"),
                 last_connect_error = status.UnreachableReason is null ? null : status.ErrorMessage,
                 read_only = s.ReadOnlyIntent,

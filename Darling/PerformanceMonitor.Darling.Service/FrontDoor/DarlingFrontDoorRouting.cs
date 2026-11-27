@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,11 +33,16 @@ internal enum FrontDoorToolClass
 
     /// <summary>Every other tool: asked of every store, the answers kept apart.</summary>
     FanOut,
+
+    /// <summary>The front door answers it itself and never forwards it (#9388): it is about the front door's own served tool set, which
+    /// no store knows.</summary>
+    Local,
 }
 
 /// <summary>
-/// Which of its three classes a tool is in, by name (#6840). The lists are names and not a reading of the tool's source, so a tool
-/// added later is in no class until someone puts it in one, and the census test fails on it.
+/// Which of its classes a tool is in, by name (#6840). A tool that names no server and is not a write declares its class with
+/// <see cref="FrontDoorClassAttribute"/> beside its <c>[McpServerTool]</c> attribute, so a tool added later is in no class until it
+/// declares one, and the census test fails on it.
 /// </summary>
 internal static class DarlingFrontDoorRouting
 {
@@ -50,69 +56,44 @@ internal static class DarlingFrontDoorRouting
     internal const string AllServers = "*";
 
     /// <summary>The tools a store-required answer is owed for beyond the write policy's three sets: they read or run one store's own
-    /// saved state (a Custom View, a custom alert rule, the investigation queue), so which store holds it is not a guess.</summary>
-    internal static readonly IReadOnlySet<string> ExtraStoreRequiredTools = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "run_custom_view_panel",
-        "test_custom_alert_rule",
-        "backtest_custom_alert_rule",
-        "wait_for_investigation_requests",
-    };
+    /// saved state (a Custom View, a custom alert rule, the investigation queue), so which store holds it is not a guess. Each carries
+    /// <c>[FrontDoorClass(FrontDoorToolClass.StoreRequired)]</c>.</summary>
+    internal static IReadOnlySet<string> ExtraStoreRequiredTools => Declared(FrontDoorToolClass.StoreRequired);
 
-    /// <summary>The tools that compute from their arguments alone (a plan, a definition, a guide), so the first healthy store answers.</summary>
-    internal static readonly IReadOnlySet<string> AnyOneStoreTools = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "get_tool_guide",
-        "analyze_plan_xml",
-        "validate_custom_view",
-        "validate_custom_alert_rule",
-        "describe_custom_view_catalog",
-        "list_custom_alert_templates",
-    };
+    /// <summary>The tools that compute from their arguments alone (a plan, a definition, a guide), so the first healthy store answers.
+    /// Each carries <c>[FrontDoorClass(FrontDoorToolClass.AnyOneStore)]</c>.</summary>
+    internal static IReadOnlySet<string> AnyOneStoreTools => Declared(FrontDoorToolClass.AnyOneStore);
+
+    /// <summary>The tools the front door answers itself and never wraps or forwards (#9388). <c>find_tools</c> searches the tools THIS
+    /// request is served here (what the caller's token can call on the front door, with <c>store</c> in each schema), where a store would
+    /// search its own set under the front door's peer token. <c>call_tool</c> is rewritten to the inner tool before dispatch, so its own
+    /// method never runs, and its <c>store</c> goes inside <c>arguments</c>. Each carries <c>[FrontDoorClass(FrontDoorToolClass.Local)]</c>.</summary>
+    internal static IReadOnlySet<string> LocalTools => Declared(FrontDoorToolClass.Local);
 
     /// <summary>The arguments whose value is a row id inside one store. An id from one store means nothing in another, so a call that
     /// carries one is store-required.</summary>
     internal static readonly IReadOnlySet<string> StoreLocalIdArguments = new HashSet<string>(StringComparer.Ordinal)
     {
         "rule_id", "view_id", "route_id", "fallback_route_id", "tag_id", "parent_id", "note_id", "request_id", "claim_id",
-        "command_id", "journal_id", "sweep_id", "called_id", "query_id", "route_ids", "server_ids",
+        "command_id", "journal_id", "sweep_id", "called_id", "query_id", "route_ids", "server_ids", "window_id",
     };
 
     /// <summary>The tools that name no server and are asked of every store when no store is named (#6840). Together with the other two
-    /// sets and the tools that take <c>server_name</c>, they cover every registered tool: a census test fails on one that is in none.</summary>
-    internal static readonly IReadOnlySet<string> FanOutTools = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "find_database",
-        "get_agent_changes",
-        "get_collection_state",
-        "get_collector_cost",
-        "get_command_result",
-        "get_compiles_after_evict",
-        "get_custom_alert_rule",
-        "get_custom_view",
-        "get_daily_health_report",
-        "get_finops_inventory",
-        "get_fleet_overview",
-        "get_investigation_evidence",
-        "get_mute_rules",
-        "get_notification_routes",
-        "get_people",
-        "get_query_fleet_summary",
-        "get_read_latency",
-        "get_server_actions",
-        "get_store_host",
-        "get_store_log",
-        "get_store_metrics",
-        "get_store_query_history",
-        "get_store_query_stats",
-        "get_sweep_reports",
-        "list_custom_alert_rules",
-        "list_custom_views",
-        "list_query_tag_rules",
-        "list_query_tags",
-        "list_servers",
-        "test_query_tag_rule",
-    };
+    /// sets and the tools that take <c>server_name</c>, they cover every registered tool: a census test fails on one that is in none.
+    /// Each carries <c>[FrontDoorClass(FrontDoorToolClass.FanOut)]</c>.</summary>
+    internal static IReadOnlySet<string> FanOutTools => Declared(FrontDoorToolClass.FanOut);
+
+    /// <summary>The tool names each <see cref="FrontDoorClassAttribute"/> declares, by class, read once from every registered tool method.</summary>
+    private static readonly Lazy<IReadOnlyDictionary<FrontDoorToolClass, IReadOnlySet<string>>> DeclaredClasses = new(
+        () => Enum.GetValues<FrontDoorToolClass>().ToDictionary(
+            c => c,
+            c => (IReadOnlySet<string>)DarlingMcpToolTypes.Tools
+                .Where(t => t.Method.GetCustomAttribute<FrontDoorClassAttribute>()?.ToolClass == c)
+                .Select(t => t.Name)
+                .ToHashSet(StringComparer.Ordinal)),
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static IReadOnlySet<string> Declared(FrontDoorToolClass toolClass) => DeclaredClasses.Value[toolClass];
 
     /// <summary>True when <paramref name="tool"/> is in the store-required class: any write, investigation or server admin tool, or one
     /// of <see cref="ExtraStoreRequiredTools"/>.</summary>
@@ -126,12 +107,13 @@ internal static class DarlingFrontDoorRouting
     /// in the write policy's sets, which the existing census already holds every tool to), and the census test fails it at build time.</summary>
     internal static FrontDoorToolClass ClassOf(string tool) =>
         IsStoreRequired(tool) ? FrontDoorToolClass.StoreRequired
+        : LocalTools.Contains(tool) ? FrontDoorToolClass.Local
         : AnyOneStoreTools.Contains(tool) ? FrontDoorToolClass.AnyOneStore
         : FrontDoorToolClass.FanOut;
 
     /// <summary>The classes <paramref name="tool"/> is listed in, for the census: one name in two lists is a defect.</summary>
     internal static int ClassesListedIn(string tool) =>
-        (IsStoreRequired(tool) ? 1 : 0) + (AnyOneStoreTools.Contains(tool) ? 1 : 0) + (FanOutTools.Contains(tool) ? 1 : 0);
+        (IsStoreRequired(tool) ? 1 : 0) + (AnyOneStoreTools.Contains(tool) ? 1 : 0) + (LocalTools.Contains(tool) ? 1 : 0) + (FanOutTools.Contains(tool) ? 1 : 0);
 
     /// <summary>True when the call carries a store-local id with a value.</summary>
     internal static bool CarriesStoreLocalId(IDictionary<string, JsonElement>? arguments)

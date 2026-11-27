@@ -130,6 +130,12 @@ public static class DarlingSecrets
         }
     }
 
+    /// <summary>The refusal for a stored reference that darling.json declares for the same server with connection settings that
+    /// differ from the registry's (#9693). It names no path and no variable.</summary>
+    internal const string ReferenceDeclaredForOtherSettingsText =
+        "darling.json declares this password reference for this server with connection settings that differ from the registry's, and a reference is used only for the connection it is declared for. "
+        + "Make the two agree: run --edit-server with the file's values (the start-up warning about this server gives the command), or set the entry in darling.json back to the registry's values.";
+
     /// <summary>
     /// Dereferences an <c>env:</c>/<c>file:</c> reference held in a server's stored secret slot (#5240), after asking
     /// whether it names one of this service's own configuration files or secrets
@@ -142,14 +148,16 @@ public static class DarlingSecrets
     /// nothing else stops. The text is the refusal's own sentence, which names no path and no variable, and the
     /// referenced value is never read.</para>
     /// </summary>
-    private static string ResolveStoredReference(string reference, string settingName, bool declaredByFile)
+    private static string ResolveStoredReference(string reference, string settingName, bool declaredByFile, bool declaredForOtherSettings = false)
     {
         /* One exception to the refusal: darling.json itself declares this same reference, in this same slot, for this same
            server id (MonitoredServer.EncryptedPasswordDeclaredByFile). The mark is set where the server is built, from the
            file, and never from a stored value, so a reference that is only in the store is still asked about. */
         if (!declaredByFile && DarlingOwnedSecrets.ReferenceRefusal(reference) is { } refusal)
         {
-            throw new InvalidOperationException($"{settingName}: {refusal}");
+            /* #9693: a reference darling.json declares for this server with other connection settings is refused all the same,
+               and the sentence says what is true of it: the settings differ. A reference no entry declares keeps the refusal's own. */
+            throw new InvalidOperationException($"{settingName}: {(declaredForOtherSettings ? ReferenceDeclaredForOtherSettingsText : refusal)}");
         }
 
         return DarlingSecretSource.Resolve(reference, settingName);
@@ -186,7 +194,8 @@ public static class DarlingSecrets
             if (DarlingSecretSource.IsReference(server.EncryptedPassword))
             {
                 return ResolveStoredReference(
-                    server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword", server.EncryptedPasswordDeclaredByFile);
+                    server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword", server.EncryptedPasswordDeclaredByFile,
+                    server.EncryptedPasswordDeclaredForOtherSettings);
             }
 
             /* #2255: the raw CryptographicException ("Key not valid for use in specified state") reached the
@@ -194,7 +203,7 @@ public static class DarlingSecrets
                identity is only known HERE, so this is where it gets attached. */
             return OpenSaved(
                 server.EncryptedPassword, $"The saved password for server '{server.DisplayName}'", () => server.SecretBinding,
-                server.EncryptedPasswordDeclaredByFile, server.SecretPin, ring, dpapi,
+                server.EncryptedPasswordDeclaredByFile, server.SecretPin, server.SecretPinWaiting, ring, dpapi,
                 $"the stored password for server '{server.DisplayName}' (servers[].encryptedPassword)");
         }
 
@@ -287,7 +296,7 @@ public static class DarlingSecrets
 
         return OpenSaved(
             blob, $"The saved remediation password for server '{server.DisplayName}'", () => server.RemediationBinding,
-            server.RemediationEncryptedPasswordDeclaredByFile, server.RemediationPin, ring, dpapi,
+            server.RemediationEncryptedPasswordDeclaredByFile, server.RemediationPin, server.SecretPinWaiting, ring, dpapi,
             $"the stored REMEDIATION password for server '{server.DisplayName}' (servers[].remediationEncryptedPassword)");
     }
 
@@ -339,7 +348,7 @@ public static class DarlingSecrets
 
         return OpenSaved(
             stored, "The saved SMTP password", () => smtp.SecretBinding, smtp.EncryptedPasswordDeclaredByFile, smtp.SecretPin,
-            ring, dpapi, "the stored SMTP password (smtp.encryptedPassword)");
+            smtp.SecretPinWaiting, ring, dpapi, "the stored SMTP password (smtp.encryptedPassword)");
     }
 
     /// <summary>
@@ -442,16 +451,20 @@ public static class DarlingSecrets
     }
 
     private static string OpenSaved(
-        string stored, string subject, Func<PasswordBinding> bindingFor, bool declaredByFile, LegacyPin? pin,
+        string stored, string subject, Func<PasswordBinding> bindingFor, bool declaredByFile, LegacyPin? pin, bool pinWaiting,
         IPasswordKeyRing ring, LegacyDpapi dpapi, string decryptWhat)
     {
         if (PasswordSeal.IsSealed(stored))
         {
             /* A ring that cannot open anything says why (not loaded yet, or refused). Asking it to open would
-               report an unknown key, which is not what is wrong. */
+               report an unknown key, which is not what is wrong. A ring that is not loaded yet is ready a moment later with nobody
+               doing anything, so it is an ordinary failure the connect retries; a ring that refuses needs an operator (#9749). */
             if (!ring.Status.CanSeal)
             {
-                throw new InvalidOperationException(ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason);
+                var reason = ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason;
+                throw string.Equals(reason, DarlingPasswordKey.NotReadyReason, StringComparison.Ordinal)
+                    ? new InvalidOperationException(reason)
+                    : new SavedSecretUnavailableException(reason);
             }
 
             try
@@ -460,24 +473,34 @@ public static class DarlingSecrets
             }
             catch (PasswordSealException ex)
             {
-                throw new InvalidOperationException(SealFailureText(subject, ex));
+                throw new SavedSecretUnavailableException(SealFailureText(subject, ex));
             }
             catch (ArgumentException)
             {
                 /* A connection field that is not valid text: the value cannot be opened for this connection. */
-                throw new InvalidOperationException(BindingText(subject));
+                throw new SavedSecretUnavailableException(BindingText(subject));
             }
         }
 
         if (!dpapi.IsWindows)
         {
-            throw new InvalidOperationException(
+            throw new SavedSecretUnavailableException(
                 $"{subject} was saved with Windows DPAPI on another machine and cannot be read here. Enter it again.");
         }
 
         if (!LegacyValueUsable(stored, declaredByFile, pin, bindingFor, dpapi))
         {
-            throw new InvalidOperationException(
+            /* #9749: with no pin and the one-time pin step still waiting to run (#5456), the value opens once the step has run, which
+               the service tries again on every sweep. That is an ordinary failure the connect retries, and the same advice the re-enter
+               line gives. A pin that does not match, or no step waiting, is a value that needs entering again. */
+            if (!declaredByFile && pin is null && pinWaiting)
+            {
+                throw new InvalidOperationException(
+                    $"{subject} is in the old format and waits for the one-time pin step, which has not run yet. " +
+                    "The service tries it again on every sweep. Do not enter the password again yet.");
+            }
+
+            throw new SavedSecretUnavailableException(
                 $"{subject} is in the old format and was saved after this service was upgraded, or its connection changed. " +
                 "Update the Darling Viewer, then enter the password again.");
         }
@@ -488,7 +511,7 @@ public static class DarlingSecrets
         }
         catch (CryptographicException ex)
         {
-            throw new InvalidOperationException(DescribeDecryptFailure(decryptWhat), ex);
+            throw new SavedSecretUnavailableException(DescribeDecryptFailure(decryptWhat), ex);
         }
     }
 
@@ -507,6 +530,28 @@ public static class DarlingSecrets
     private static bool PinMatches(LegacyPin pin, string stored, PasswordBinding binding) =>
         CryptographicOperations.FixedTimeEquals(pin.ValueSha256, SHA256.HashData(Encoding.UTF8.GetBytes(stored)))
         && CryptographicOperations.FixedTimeEquals(pin.BindingSha256, binding.LegacyPinHash());
+}
+
+/// <summary>
+/// #9749: a saved secret this host cannot open (a sealed value whose key is not held or whose connection changed, an old-format value that
+/// is not usable here, a DPAPI blob that will not decrypt, or a key ring that refuses). Nothing about it clears on its own: the operator
+/// restores the key or enters the secret again. Two refusals clear without anyone acting and are a plain <see cref="InvalidOperationException"/>
+/// instead: a key ring that is not loaded yet, and an old-format value with no pin while the one-time pin step waits to run. It is an
+/// <see cref="InvalidOperationException"/> so every existing catch still sees it, and it carries the same sentence the operator reads. The
+/// worker's connect failure log tests the type, so a cause like this reads as "will keep failing until fixed" and any other failure as a
+/// retry the server may recover from.
+/// </summary>
+internal sealed class SavedSecretUnavailableException : InvalidOperationException
+{
+    public SavedSecretUnavailableException(string message)
+        : base(message)
+    {
+    }
+
+    public SavedSecretUnavailableException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }
 
 /// <summary>A legacy DPAPI value's pin as read from <c>config.legacy_secret_pin</c>: the hash of the stored text and the hash of the

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
@@ -329,6 +330,42 @@ public sealed class ConfigChangesReaderTests : IClassFixture<SharedDuckDbFixture
         Assert.Contains("collection_time >= $4", LocalDataService.EmptyTraceFlagRunsSql);
         var start = new DateTime(2026, 10, 12, 0, 0, 0, DateTimeKind.Utc);
         Assert.Equal(start.AddMonths(-RetentionService.ArchiveRetentionMonths), LocalDataService.EmptyTraceFlagRunsFloor(start));
+    }
+
+    /// <summary>Empty runs sit two hours before the window, exactly on its start, inside it, exactly on its end and an hour after
+    /// it. The read returns the runs in (start, end] and one baseline, the newest run at or before the start: the run stamped on
+    /// the start, once, and not the older one.</summary>
+    [Fact]
+    public async Task TheEmptyRunRead_TakesTheRunOnTheWindowStartAsItsBaseline_AndTheRunOnTheWindowEnd()
+    {
+        var service = new LocalDataService(_duckDb);
+        var start = new DateTime(2026, 10, 12, 8, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddHours(2);
+        foreach (var stamp in new[] { start.AddHours(-2), start, start.AddHours(1), end, end.AddHours(1) })
+            await SeedTraceFlagRunAsync(stamp, "SUCCESS", 0);
+
+        var runs = (await service.GetEmptyTraceFlagRunsAsync(ServerId, start, end)).OrderBy(t => t);
+
+        Assert.Equal(new[] { start, start.AddHours(1), end }, runs);
+    }
+
+    /// <summary>The window after it shares the edge: the run on the shared edge is the first window's last run and the second
+    /// window's baseline.</summary>
+    [Fact]
+    public async Task TwoEmptyRunWindowsBackToBack_ShareOnlyTheRunOnTheirEdge()
+    {
+        var service = new LocalDataService(_duckDb);
+        var start = new DateTime(2026, 10, 12, 8, 0, 0, DateTimeKind.Unspecified);
+        var middle = start.AddHours(2);
+        var end = start.AddHours(4);
+        foreach (var stamp in new[] { start.AddHours(1), middle, middle.AddHours(1), end })
+            await SeedTraceFlagRunAsync(stamp, "SUCCESS", 0);
+
+        var first = (await service.GetEmptyTraceFlagRunsAsync(ServerId, start, middle)).OrderBy(t => t);
+        var second = (await service.GetEmptyTraceFlagRunsAsync(ServerId, middle, end)).OrderBy(t => t);
+
+        Assert.Equal(new[] { start.AddHours(1), middle }, first);
+        Assert.Equal(new[] { middle, middle.AddHours(1), end }, second);
     }
 
     // ── Row VM projection (server-time render, shared with the other grids) ──

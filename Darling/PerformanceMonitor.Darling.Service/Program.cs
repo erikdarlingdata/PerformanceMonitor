@@ -336,7 +336,17 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
     }
 
     return await DarlingCliCommands.AddServerAsync(
-        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags);
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags,
+        passwordInput: addServerFlags.Any ? Console.OpenStandardInput() : null);
+}
+
+/* CLI verb: --edit-server <server name> --set <field>=<value> [--set ...] [--config <path>] (#9693) - change a registered
+   server's settings in the store, through the MCP edit_server path, so a headless host with the web dashboard and MCP off can
+   change one. A password is never an argument. Same platform posture as --add-server (Windows only for a MANAGED store
+   credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsEditServerVerb(args[0]))
+{
+    return await DarlingCliCommands.EditServerAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
@@ -372,6 +382,20 @@ if (args.Length > 0 && DarlingCliCommands.IsGrantScriptVerb(args[0]))
     return await DarlingCliCommands.GrantScriptAsync(args[1..], DarlingCliCommands.OpenGrantScriptOutput(), Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --prepare-provision-roles (#8779) - the init step of the chart's store-roles Job: wait for the store schema, check that the
+   login owns the collect and config objects, and write the rendered provision-roles.sql with a pgpass and a libpq env file for psql.
+   Needs no darling.json; prints no password. */
+if (args.Length > 0 && DarlingCliCommands.IsPrepareProvisionRolesVerb(args[0]))
+{
+    return await DarlingCliCommands.PrepareProvisionRolesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* #9349: read one database's object usage from the stored chain and from every snapshot, and print the difference. Reads only. */
+if (args.Length > 0 && DarlingCliCommands.IsObjectUsageCompareVerb(args[0]))
+{
+    return await DarlingCliCommands.ObjectUsageCompareAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
 {
     return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
@@ -400,6 +424,15 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
 if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
 {
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --set-login-password --username <login> [--dry-run] [--config <path>] (#9689) - save one password, read from stdin,
+   for every server that uses the login, disabled ones included. A store moved to another machine, or a reset password key, leaves every saved
+   password to be entered again, and a headless host has no Viewer to enter them in. The password is never an argument. Same
+   platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsSetLoginPasswordVerb(args[0]))
+{
+    return await DarlingCliCommands.SetLoginPasswordAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
@@ -528,7 +561,8 @@ if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
         recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None, recompressFreeBytes);
 }
 
-var builder = Host.CreateApplicationBuilder(args);
+/* #9837: built on the folder that holds the binaries, never on the working folder (see DarlingHostBinding.ContentRoot). */
+var builder = DarlingProcessServices.CreateHostBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe
    serves interactive debugging and `sc create` installation (plan HP7/Phase 8). */
@@ -537,11 +571,22 @@ builder.Services.AddWindowsService(options =>
     options.ServiceName = "PerformanceMonitor Darling";
 });
 
+/* #9702: under systemd (a Type=notify unit) this sends READY=1 and STOPPING=1, and replaces the console lifetime's
+   "Application started. Press Ctrl+C" lines with systemd's own. It registers nothing when the process is not a systemd
+   service (a Windows service, a console run, the container), so it sits beside AddWindowsService, which is likewise a
+   no-op off Windows. READY=1 goes out when the host starts, before the store is ready: the journal's "Postgres store
+   ready" and "collection loop started" lines are what say the service collects. */
+builder.Services.AddSystemd();
+
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
-   runs get the same file, which is exactly what an operator collecting a bug report wants. */
+   runs get the same file, which is exactly what an operator collecting a bug report wants. The host disposes the provider on
+   its way out, which writes the lines still buffered, the stop line among them (#9747). */
 var fileLoggerProvider = new DarlingFileLoggerProvider();
-builder.Logging.AddProvider(fileLoggerProvider);
+DarlingProcessServices.AddFileLog(builder.Logging, fileLoggerProvider);
+
+/* #9415: counts the service's own ERROR and WARN lines (and keeps the first of each) for the start history row. It writes nothing. */
+builder.Logging.AddProvider(new ServiceLogTallyProvider(ServiceLogTally.Shared));
 
 if (OperatingSystem.IsWindows())
 {

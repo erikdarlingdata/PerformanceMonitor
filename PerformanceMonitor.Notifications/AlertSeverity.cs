@@ -88,7 +88,7 @@ internal static class AlertSeverity
             /* #3653 (A8e): graded at the fire site — Warning, or Critical at the CPU health band's Critical
                bar (95% of a fixed host, the card's ladder). Like the deadlock arm above, this styles only
                pre-#3653 replays, all of which were amber. */
-            "High CPU" => ("#F59E0B", "WARNING", "\U0001F7E1"),
+            "High CPU" or "Capacity at ceiling" => ("#F59E0B", "WARNING", "\U0001F7E1"),
             /* #3539 A4: GRADED at both engines' fire sites now — Warning at one task/backend continuously
                stuck across the ten-minute window, Critical at ten (PoisonWaitEvaluator's shared bars; the
                PostgreSQL twin has graded since #2711, SQL Server fired presence-flat CRITICAL until #3539).
@@ -110,6 +110,8 @@ internal static class AlertSeverity
             /* #3653 (A8e): fires with an explicit WARNING override now (and only Warning — the engine's fire
                site says why no Critical tier exists), so this arm styles pre-#3653 replays, which were amber. */
             "tempdb Space" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "tempdb Log Space" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "tempdb Growth Fit" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Long-Running Job" => ("#D97706", "WARNING", "\U0001F7E0"),
             // Emailed/webhooked and fired as a Warning toast — was falling through to INFO-blue.
             "Failed Agent Job" => ("#D97706", "WARNING", "\U0001F7E0"),
@@ -119,6 +121,9 @@ internal static class AlertSeverity
             // replay; default it to WARNING-amber rather than the INFO-blue fall-through (#1136 gap).
             "Database State" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Volume Free Space" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #8884: both fire with an explicit severity (Memory Dumps goes Critical on 3 dumps in 10 minutes); this arm styles a replay. */
+            "Instance Restarted" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "Memory Dumps" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Server Unreachable" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Server Restored" => ("#16A34A", "RESOLVED", "\U0001F7E2"),
             // Availability Group family (#991). "AG Replica Reconnected" fires with severity null on purpose,
@@ -135,6 +140,10 @@ internal static class AlertSeverity
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
             /* #7368: fires Warning at its one site. */
             "Store Autovacuum Behind" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #8950: fires Warning at its one site. */
+            "Store Vacuum Stalled" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #9000: fires Warning at its one site. */
+            "Store Growth" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
             /* #6873: the three database protection alerts fire Warning at their one site. */

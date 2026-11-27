@@ -596,6 +596,8 @@ public sealed class DarlingStoreHostProfileTests
        own identity (the NTLM-relay vector Low 4 describes) — mirrors DarlingManagedPostgres.TryResolveConfPath's
        own UNC refusal for an include directive. */
 
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TryResolveProfileDataDirectory_UncDataDirectory_ReturnsNull()
     {
@@ -616,6 +618,8 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(Path.GetFullPath(local), resolved);
     }
 
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ResolveVolumeAnchor_ManagedUncDataDirectory_FallsBackToServiceBaseDirectory()
     {
@@ -708,6 +712,8 @@ public sealed class DarlingStoreHostProfileTests
     /// <summary>An anchor that is not there has no volume to ask, so the profile is not ready, with no figures
     /// and no filesystem. Asked of the drive letter above it, the same read answers for any path under the
     /// drive.</summary>
+    // #9686: Needs the Windows per-path volume read, which fails for a folder that is not there, where Linux answers for the root volume.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void GatherDataVolume_AnchorThatIsNotThere_IsNotReady()
     {
@@ -740,6 +746,8 @@ public sealed class DarlingStoreHostProfileTests
     /// <summary>A UNC anchor is never asked: the profile is not ready and the per-path read is not made,
     /// because that read would reach out to the share as this process's own identity, the reach
     /// <see cref="DarlingStoreHostProfile.TryResolveProfileDataDirectory"/> refuses for a data directory.</summary>
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void GatherDataVolume_UncAnchor_IsNotReady_AndTheReadIsNeverMade()
     {

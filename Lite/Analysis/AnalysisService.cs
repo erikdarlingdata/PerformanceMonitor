@@ -85,6 +85,12 @@ public class AnalysisService
     public string? WindowEmptyMessage { get; private set; }
 
     /// <summary>
+    /// True when <see cref="WindowEmptyMessage"/> says retention removed the window (#8910) rather than that collection may
+    /// have missed it. The MCP tools read it to drop their pointer at collection health, which is green for that window.
+    /// </summary>
+    public bool WindowEmptyRemovedByRetention { get; private set; }
+
+    /// <summary>
     /// How much of the last pass's window the collector actually observed (#3538 A2), stamped by the
     /// fact collector and carried out here the way <see cref="WindowEmptyMessage"/> is, because the
     /// findings list cannot say it: a pass over a window with a three-hour hole returns the SAME shape as
@@ -154,7 +160,9 @@ public class AnalysisService
         _collector = new DuckDbFactCollector(
             duckDb, collectorFrequencyMinutes,
             /* #5630: the same fetcher serves the plan-regression inputs check; a caller with none passes no source. */
-            planFetcher as IQueryStorePlanSource);
+            planFetcher as IQueryStorePlanSource,
+            /* #9195: a service is built per pass, so the judged plan pairs live with the store. */
+            PlanInputOutcomeCache.For(duckDb));
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
@@ -240,6 +248,7 @@ public class AnalysisService
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
+        WindowEmptyRemovedByRetention = false;
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
@@ -269,7 +278,13 @@ public class AnalysisService
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken);
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours)
+                && await WindowEndsBeforeTheOldestRowAsync(context))
+            {
+                dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, cancellationToken: context.CancellationToken);
+            }
+
             if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
                 InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
@@ -279,6 +294,24 @@ public class AnalysisService
 
                 LastAnalysisTime = DateTime.UtcNow;
                 _passFailures.Succeeded(context.ServerId);
+                return [];
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention. The coverage
+               witness reads that same table (v_wait_stats), so every fact statement below would find nothing in it and the pass would
+               land on the unobserved-window answer; one MIN says so first and the facts are not read. A window that straddles the
+               oldest row keeps the full pass. Only a replay can end that early. */
+            if (context.AsOfUtc is not null
+                && await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken) is { } removedBoundary
+                && removedBoundary.RemovedWindow(context.TimeRangeEnd))
+            {
+                WindowEmptyMessage = WindowEmptyText.ComposeRemovedBeforeRead(context, removedBoundary);
+                WindowEmptyRemovedByRetention = true;
+                AppLogger.Info("AnalysisService",
+                    $"No collection in the analysis window for {context.ServerName} " +
+                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                    $"because retention removed it, not because collection is down (no fact was read). {removedBoundary.Describe()}");
+                LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
 
@@ -335,12 +368,28 @@ public class AnalysisService
                    read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
                    "unstamped" is not a third state here — Coverage is null only when collection threw, and
                    that unwinds through the catch below, never through this test. */
-                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count);
+                /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and the
+                   message says so instead of blaming collection. The read costs one MIN, and only on this branch. */
+                var retention = await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken);
+                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
+                WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
-                AppLogger.Warn("AnalysisService",
-                    $"No observed collection in the analysis window for {context.ServerName} " +
-                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
+                /* #9152: the same check that words the MCP answer words the log line. A window retention removed is not a
+                   collector that is down, so it is Info and says so. */
+                if (retention is not null && WindowEmptyRemovedByRetention)
+                {
+                    AppLogger.Info("AnalysisService",
+                        $"No collection in the analysis window for {context.ServerName} " +
+                        $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                        $"because retention removed it, not because collection is down ({facts.Count} point-in-time fact(s) only). {retention.Describe()}");
+                }
+                else
+                {
+                    AppLogger.Warn("AnalysisService",
+                        $"No observed collection in the analysis window for {context.ServerName} " +
+                        $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                        $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
+                }
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
@@ -584,22 +633,38 @@ public class AnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            /* #9195: get_analysis_facts is an interactive read. The plan check answers from what the background pass cached and
+               fetches at most the allowance's few plans (3 fetches, 3 s). */
+            InteractiveRead = true,
+            InteractiveFetches = new InteractivePlanFetchAllowance()
         };
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        /* #9195: the read lock wait of every store read this call makes, for the slow-read line. */
+        using var lockWaits = ReadLockWaitTally.Begin();
+        /* #9195: the profile files this call writes when DuckDbReadProfile is on, named on the slow-read line. */
+        using var profiles = DuckDbProfileTrail.Begin();
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
+        var scopeTime = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
 
         try
         {
+            var passStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             var facts = await _collector.CollectFactsAsync(context);
+            var passTime = System.Diagnostics.Stopwatch.GetElapsedTime(passStarted);
+            var detectorTime = TimeSpan.Zero;
             if (context.ObservedDurationMs > 0)
             {
                 /* Same detector, same context, same position as the pass (#3691). A collector that
                    observed the window but emitted no fact does not short-circuit this: the detector reads
                    the store on its own and its facts are part of what this read shows. */
+                var detectorStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
                 facts.AddRange(anomalies);
+                detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
+            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime, lockWaits, context.InteractiveFetches, profiles);
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
@@ -611,6 +676,26 @@ public class AnalysisService
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null, CollectionCaveatState.From(context));
         }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when the facts read took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>, with the time
+    /// split between its steps. The "Fact collection took" line times the fact pass alone, and a field read ran about 2 s longer
+    /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or neither
+    /// (the scope and the other small steps before the pass). Scoring runs after the line and is in memory.
+    /// </summary>
+    private static void ReportSlowFactsRead(
+        string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector, ReadLockWaitTally lockWaits,
+        InteractivePlanFetchAllowance? planFetches, DuckDbProfileTrail profiles)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        AppLogger.Info("AnalysisService",
+            $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
+            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms, " +
+            $"plan fetches {planFetches?.Fetches ?? 0} in {Ms(planFetches?.FetchTime ?? TimeSpan.Zero)} ms (inside the fact pass), " +
+            $"{lockWaits.DescribeLockWait()} (inside those){profiles.Describe()}");
     }
 
     /// <summary>
@@ -670,20 +755,34 @@ public class AnalysisService
     /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
     /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
     /// the facts did not make.</para>
+    ///
+    /// <para>#9195: <paramref name="interactive"/> is true for <c>compare_analysis</c>, a read someone is waiting on: both windows'
+    /// plan checks then answer from the outcomes a background pass cached, and share one allowance of at most 3 live plan
+    /// fetches in 3 s for the pairs it lacks. The config-change attribution inside the pass leaves it false, so the pass keeps
+    /// fetching under its own budget.</para>
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The token stays where it was: callers pass it positionally, and a bool ahead of it would turn that " +
+                        "argument into a compile error at each of them. Appending the flag is the edit that cannot rebind a call.")]
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool interactive = false)
     {
+        /* #9195: one allowance for the whole call, so the two windows together make at most 3 fetches in 3 s. */
+        var allowance = interactive ? new InteractivePlanFetchAllowance() : null;
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var lockWaits = ReadLockWaitTally.Begin();
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive,
+            InteractiveFetches = allowance
         };
 
         var comparisonContext = new AnalysisContext
@@ -692,7 +791,9 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive,
+            InteractiveFetches = allowance
         };
         baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
@@ -703,8 +804,12 @@ public class AnalysisService
 
         try
         {
+            /* The windows are read one after the other. Starting both before awaiting either would buy nothing here:
+               DuckDB.NET's async completes on the calling thread (see DuckDbInitializer's LockReleaser), and a store
+               read that never yields cannot overlap another. */
             var baselineFacts = await _collector.CollectFactsAsync(baselineContext);
             var comparisonFacts = await _collector.CollectFactsAsync(comparisonContext);
+            if (interactive) ReportSlowComparisonRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), lockWaits, allowance);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
@@ -721,6 +826,22 @@ public class AnalysisService
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
+    }
+
+    /// <summary>
+    /// #9195: the compare read's counterpart of <see cref="ReportSlowFactsRead"/>: one Information line when the two windows' fact
+    /// passes took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>, with the plan fetches the call made and their time.
+    /// </summary>
+    private static void ReportSlowComparisonRead(
+        string serverName, int serverId, TimeSpan total, ReadLockWaitTally lockWaits, InteractivePlanFetchAllowance? planFetches)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        AppLogger.Info("AnalysisService",
+            $"Analysis comparison read took {Ms(total)} ms for {serverName} (server {serverId}): " +
+            $"plan fetches {planFetches?.Fetches ?? 0} in {Ms(planFetches?.FetchTime ?? TimeSpan.Zero)} ms (inside the fact passes), " +
+            $"{lockWaits.DescribeLockWait()} (inside those)");
     }
 
     /// <summary>
@@ -1231,7 +1352,7 @@ ORDER BY event_time";
     /// </summary>
     internal async Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken: cancellationToken);
         if (hours is null)
             return null;
 
@@ -1241,20 +1362,31 @@ ORDER BY event_time";
     }
 
     /// <summary>
-    /// Returns the total span of collected data for a server (no time range filter).
+    /// Returns the total span of data collected for a server up to <paramref name="windowEndUtc"/> (all of it when null).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
-    /// be analyzed over a 4-hour window without dilution.
+    /// be analyzed over a 4-hour window without dilution. A pass gives its window's end, so a pass as of a past
+    /// instant measures the history the server had by then.
     /// </summary>
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
-    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
-        => await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken) ?? 0;
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, DateTime? windowEndUtc = null, CancellationToken cancellationToken = default)
+        => await TryGetTotalDataSpanHoursAsync(serverId, windowEndUtc, cancellationToken) ?? 0;
+
+    /// <summary>
+    /// True when the window ends before the oldest row the store holds for the server. Such a window has no history by its
+    /// end, which says nothing about how long the server had been monitored by then: retention may have removed those rows,
+    /// or the server was not monitored yet. The history gate then measures all the history the store holds, so the pass goes
+    /// on to the empty-window answer, which says which of the two it was.
+    /// </summary>
+    private async Task<bool> WindowEndsBeforeTheOldestRowAsync(AnalysisContext context)
+        => await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken) is { } boundary
+           && context.TimeRangeEnd < boundary.OldestRowUtc;
 
     /// <summary>
     /// The same span, but null when the read failed (as opposed to 0 for a server with no rows).
     /// </summary>
-    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
+    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, DateTime? windowEndUtc = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1266,9 +1398,12 @@ ORDER BY event_time";
             cmd.CommandText = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM v_wait_stats
-WHERE server_id = $1";
+WHERE server_id = $1" + (windowEndUtc.HasValue ? @"
+AND   collection_time <= $2" : "");
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            if (windowEndUtc is { } windowEnd)
+                cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd });
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)
@@ -1282,6 +1417,50 @@ WHERE server_id = $1";
                allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
                into an insufficient-data SKIP, which is a different and far calmer-looking answer
                than the one the caller is about to log. */
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The oldest row the store holds for a server in <c>v_wait_stats</c> (the hot table and the parquet archive) and the
+    /// retention that bounds it, for the window-empty answer to tell a window retention removed from one collection missed
+    /// (#8910). The hot table's <c>retention_days</c> moves rows to the archive and does not delete them, so what bounds the
+    /// history is the archive's <see cref="RetentionService.ArchiveRetentionMonths"/>. Null when the server has no row, or when
+    /// the read fails: a failed read must not turn an answer into an error, and the answer then keeps its collection
+    /// wording. An abandonment is not swallowed. The same unbounded MIN the data-span gate already runs on every pass.
+    /// </summary>
+    public async Task<RetentionBoundary?> ReadRetentionBoundaryAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT MIN(collection_time) FROM v_wait_stats WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (result is not DateTime oldest)
+                return null;
+
+            /* The archive purge deletes a whole month's file once the month start passes the cutoff, so after a purge the oldest
+               row sits at the first month start at or after the cutoff, not at the cutoff (RetentionService.OldestRetainedInstant,
+               the rule the purge itself follows). The daily purge can lag the cutoff by one interval, which is how far before it
+               the oldest row can sit while the purge is running. */
+            var now = DateTime.UtcNow;
+            return new RetentionBoundary(
+                DateTime.SpecifyKind(oldest, DateTimeKind.Utc),
+                now.AddMonths(-RetentionService.ArchiveRetentionMonths),
+                DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc) + RetentionBoundary.HorizonSlack,
+                now.AddMonths(-RetentionService.ArchiveRetentionMonths) - CollectionBackgroundService.RetentionInterval,
+                "wait_stats",
+                $"{RetentionService.ArchiveRetentionMonths} months of retention for wait_stats");
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            AppLogger.Warn("AnalysisService", $"The retention boundary read failed; the window-empty answer keeps its collection wording: {ex.Message}");
             return null;
         }
     }

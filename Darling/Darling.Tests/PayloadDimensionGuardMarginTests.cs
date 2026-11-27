@@ -91,4 +91,31 @@ public sealed class PayloadDimensionGuardMarginTests
             $"cutoff {cutoff:yyyy-MM-dd HH:mm}Z computed for now {now:yyyy-MM-dd HH:mm}Z with a " +
             $"{planContentRetentionDays}-day plan-content knob.");
     }
+
+    /// <summary>
+    /// The dimension row's own refresh interval (<see cref="PayloadDimensionSeen.WideRowRefreshHours"/>, for the sake of an
+    /// older build and for the dimension GC's re-check) against the smallest cutoff the dimension GC is ever given: the
+    /// retention pass's own arithmetic at a one-day retention and a one-day plan-content knob, which is the floor the older
+    /// build's prune also has. The two guard widths on either side of the interval must fit inside it.
+    /// </summary>
+    [Fact]
+    public void TheWideRowRefreshIntervalFitsInsideTheSmallestDimensionCutoff()
+    {
+        var now = new DateTime(2026, 9, 27, 12, 0, 0, DateTimeKind.Unspecified);
+        var smallestCutoffHours = (int)(now - DarlingRetention.ComputeDimensionCutoff(
+            now, widestFactRetentionDays: 1, oldestSurvivingDigestFact: null, planContentRetentionDays: 1)).TotalHours;
+
+        Assert.True(
+            PayloadDimensionSeen.OlderBuildCutoffHours <= smallestCutoffHours,
+            $"the older build's cutoff is {PayloadDimensionSeen.OlderBuildCutoffHours}h, the smallest the dimension GC computes is {smallestCutoffHours}h.");
+
+        Assert.True(
+            PayloadDimensionSeen.WideRowRefreshStaysInsideDimensionCutoff(),
+            $"the dimension row is restamped once it is {PayloadDimensionSeen.WideRowRefreshHours}h behind: that must be no shorter than the "
+            + $"{PayloadDimensions.LastSeenRefreshGuardHours}h stamp guard and leave a guard window on either side of it inside the {smallestCutoffHours}h cutoff.");
+
+        Assert.Equal(
+            $"interval '{PayloadDimensionSeen.WideRowRefreshHours} hours'",
+            PayloadDimensionSeen.WideRowRefreshInterval);
+    }
 }

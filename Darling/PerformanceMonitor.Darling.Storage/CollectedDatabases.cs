@@ -55,12 +55,12 @@ public static class CollectedDatabases
     /// <summary>
     /// <see cref="NamesLimitedSql"/> narrowed to the names that contain a search text: $3 is the LIKE pattern
     /// <see cref="SearchPattern"/> builds (one text parameter, matched case-insensitively with <c>ILIKE</c>, with
-    /// backslash as the escape character so <c>%</c>, <c>_</c> and <c>\</c> in the text match only themselves). The
+    /// PostgreSQL's default LIKE escape character, the backslash, so <c>%</c>, <c>_</c> and <c>\</c> in the text match only themselves; no ESCAPE clause is written, because the log reader withholds a statement with one, #9236). The
     /// narrowing is applied BEFORE the row limit, so a database past the list's cap is found by its text. This is what
     /// lets the web picker's search box reach past the list's cap. #5314.
     /// </summary>
     public const string NamesSearchLimitedSql = NamesBody
-        + "\nAND   database_name ILIKE $3 ESCAPE '\\'"
+        + "\nAND   database_name ILIKE $3"
         + "\nORDER BY lower(database_name), database_name"
         + "\nLIMIT $2";
 

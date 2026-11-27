@@ -61,6 +61,21 @@ public static class MonitorApplicationNames
     public const string StoreNotMonitorProgramNamePredicate =
         "(" + StoreProgramNameColumn + " IS NULL OR " + StoreProgramNameColumn + " NOT ILIKE '" + SqlProgramNameLikePattern + "')";
 
+    /// <summary>
+    /// #9340: the predicate, for a read over the STORE's blocked-process-report columns, that drops a blocking pair when BOTH sides are the
+    /// monitor's own sessions (the monitor's collectors queued behind each other on a compile or memory problem). A pair with one user side
+    /// stays: a user's session blocked by, or blocking, the monitor is still real blocking. NULL-safe: a missing app name on either side is
+    /// not the monitor's, so the row is kept (a bare <c>NOT (a AND b)</c> would turn a NULL side into NULL and drop it). Column names are
+    /// unqualified, and the text works in PostgreSQL and DuckDB (both <c>ILIKE</c>).
+    /// </summary>
+    public const string StoreNotMonitorOnlyBlockingPairPredicate =
+        "NOT (COALESCE(blocked_client_app ILIKE '" + SqlProgramNameLikePattern + "', FALSE) AND COALESCE(blocking_client_app ILIKE '" + SqlProgramNameLikePattern + "', FALSE))";
+
+    /// <summary>The C# twin of <see cref="StoreNotMonitorOnlyBlockingPairPredicate"/>: true when both sessions of a blocking pair carry the
+    /// monitor's program-name prefix. For the pair rows the chain fact reads, which merge DMV snapshots in memory (#9340).</summary>
+    public static bool IsMonitorOnlyBlockingPair(string? blockedClientApp, string? blockingClientApp)
+        => MatchesSqlProgramNamePattern(blockedClientApp) && MatchesSqlProgramNamePattern(blockingClientApp);
+
     /// <summary>The C# twin of the <c>LIKE</c> pattern above: true when the program name begins with
     /// <see cref="SqlProgramNamePrefix"/> (ordinal, ignoring case), so a test can check each name the monitor
     /// connects under against the same prefix the SQL uses.</summary>

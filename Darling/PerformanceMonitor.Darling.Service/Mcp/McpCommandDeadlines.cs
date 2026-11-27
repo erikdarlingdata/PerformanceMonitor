@@ -78,8 +78,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// pool, each an independent <c>NpgsqlDataSource.Create</c> on a connection string with a different
 /// <c>Username</c> — so a stalled MCP read cannot starve fleet-wide collection through the pool, and the
 /// permit argument does NOT reach as far here as it did in the viewer (#2901), where one control awaited ten
-/// concurrent reads against <c>MaxPoolSize = 10</c>. The widest fan-out on this surface is a
-/// <c>Task.WhenAll</c> over TWO reads, against <c>MaxPoolSize = 24</c>. What the permit still buys is the
+/// concurrent reads against <c>MaxPoolSize = 10</c>. The widest fan-out on this surface is
+/// <c>get_object_usage</c>'s: four reads for each of at most two registrations (the server and its read-only
+/// partner), eight at once, against <c>MaxPoolSize = 24</c>. What the permit still buys is the
 /// second-order cost the pool bound exists for: every pooled connection is a live <c>postgres.exe</c>
 /// PROCESS, each spawn must re-reserve the shared memory region, and the store logged 8
 /// "could not reserve shared memory region" retries on 2026-09-03 — so a longer hold means more spawns, not

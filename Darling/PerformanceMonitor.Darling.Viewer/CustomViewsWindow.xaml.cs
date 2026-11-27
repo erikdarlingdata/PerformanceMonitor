@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Win32;
 using PerformanceMonitor.Darling.Storage;
@@ -133,6 +134,7 @@ public partial class CustomViewsWindow : Window
             _quiet = false;
             NoViewsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             UpdateButtons();
+            await LoadSelectedRowIfNoneLoadedAsync();
         }
         catch (Exception ex)
         {
@@ -179,6 +181,35 @@ public partial class CustomViewsWindow : Window
             return;
         }
 
+        await LoadRowAsync(row);
+    }
+
+    /* #9108: LoadAsync binds the rows with _quiet set, so the row the grid selects on its own (the first, or the selectId row) never
+       raised a load. Once _quiet is clear, load whatever the grid shows selected when the editor still holds nothing. */
+    private async Task LoadSelectedRowIfNoneLoadedAsync()
+    {
+        if (CustomViewsEditorModel.RowToLoad(ViewsGrid.SelectedItem, EditorActive) is { } row)
+        {
+            await LoadRowAsync(row);
+        }
+    }
+
+    /* A click on the row the grid already shows selected raises no SelectionChanged, so nothing would load it. Only a click inside a
+       row counts, not one on a column header or a group header. */
+    private async void ViewsGrid_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        for (var node = e.OriginalSource as DependencyObject; node is not null and not DataGrid; node = node is Visual ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node))
+        {
+            if (node is DataGridRow)
+            {
+                await LoadSelectedRowIfNoneLoadedAsync();
+                return;
+            }
+        }
+    }
+
+    private async Task LoadRowAsync(CustomViewRow row)
+    {
         if (!ConfirmDiscard())
         {
             RestoreSelection();

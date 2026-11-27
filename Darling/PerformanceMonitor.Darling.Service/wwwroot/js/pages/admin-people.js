@@ -7,10 +7,11 @@
  */
 
 /* Admin > People (#7107): the people the service knows, the sign-ins that map to each one, and the grants each one holds.
-     GET /api/people             {can_decide, signed_in_admin, sign_in_key, people?: [{person_id, display_name, enabled, identities: [...], grants: [...]}]}
+     GET /api/people             {can_decide, signed_in_admin, sign_in_key, people?: [{person_id, display_name, enabled, has_history?, identities: [...], grants: [...]}]}
                                  people comes only to an administrator. Any other session gets its own key and no list.
-     PUT /api/people/{command}   the command's args  ->  200 {status: added|renamed|removed|unchanged, message}; 400; 403; 404; 409; 503
-   The commands: add_person, rename_person, set_person_enabled, add_person_identity, remove_person_identity, add_person_grant, remove_person_grant.
+                                 has_history comes only when the store login can decide and can read the history.
+     PUT /api/people/{command}   the command's args  ->  200 {status: added|renamed|removed|deleted|unchanged, message}; 400; 403; 404; 409; 503
+   The commands: add_person, rename_person, set_person_enabled, add_person_identity, remove_person_identity, add_person_grant, remove_person_grant, delete_person.
    Every signed-in person sees their own sign-in key here, with a copy button, so they can hand it to an administrator, who pastes it into the
    person's web sign-in. The key is a hash of the sign-in, and knowing it signs nobody in. The shared web token has no key.
    Changes are made only by a signed-in admin under a store login that can decide. Under any other session the list still shows and the page says so.
@@ -91,6 +92,12 @@ export function peopleRows(data) {
     changed_by: who(p.updated_by),
     changed: p.updated_at_utc || null,
   }));
+}
+
+/** True when a person has no sign-in, no grant and no history, the three things that stop a delete. A list that does not say whether a
+    person has history leaves that to the service, which refuses the delete in a sentence. */
+export function canDeletePerson(p) {
+  return !!p && (p.identities || []).length === 0 && (p.grants || []).length === 0 && p.has_history !== true;
 }
 
 /** The args of an add_person_identity write from the form's values, or { error } when a value is missing. Slack ids are upper case. */
@@ -249,13 +256,13 @@ export async function buildPeople(body, generation, ctx) {
   mount(body, nodes);
 }
 
-/** One person's details: rename, enable or disable, sign-ins and grants, with the controls only when the session can decide. */
+/** One person's details: rename, enable or disable, delete, sign-ins and grants, with the controls only when the session can decide. Delete shows only for a person who can be deleted. */
 function detailPanel(p, canDecide, key, scopes, ctx) {
   const id = p.person_id;
   const parts = [el("h3", { text: p.display_name })];
   if (canDecide) {
     if (form.rename === null) form.rename = p.display_name;
-    parts.push(el("div", { class: "row-actions" }, [
+    const actions = [
       field("Name:", input("rename", form.rename, { maxlength: "128" })),
       button({ text: "Rename", onClick: () => write("rename_person", { person_id: id, display_name: form.rename.trim() }, ctx) }),
       button({ text: p.enabled ? "Disable" : "Enable", "aria-label": (p.enabled ? "Disable " : "Enable ") + p.display_name,
@@ -264,7 +271,15 @@ function detailPanel(p, canDecide, key, scopes, ctx) {
           if (p.enabled && !window.confirm("Disable " + p.display_name + "? Nothing they press is accepted while they are disabled. Enable puts it back.")) return undefined;
           return write("set_person_enabled", { person_id: id, enabled: !p.enabled }, ctx);
         } }),
-    ]));
+    ];
+    if (canDeletePerson(p)) {
+      actions.push(button({ text: "Delete", "aria-label": "Delete " + p.display_name, onClick: () => (
+        /* #7954: a delete asks first and says that it cannot be put back. A delete that took closes the details, which have nobody left to show. */
+        window.confirm("Delete " + p.display_name + "? This removes them from the list and cannot be undone.")
+          ? write("delete_person", { person_id: id }, ctx, () => { openId = null; form = blankForm(); }) : undefined
+      ) }));
+    }
+    parts.push(el("div", { class: "row-actions" }, actions));
   }
 
   parts.push(el("p", { class: "mute-label", text: "Sign-ins" }));

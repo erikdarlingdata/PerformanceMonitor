@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -71,7 +72,7 @@ ORDER BY " + WindowTiles.LocalHourSql;
                 context.ServerId, MetricNames.PgReplayLagBytes, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             var tiles = new List<WindowTile>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             using (var cmd = WindowCommand(ReplayLagWindowSql, connection, context))
             {
                 /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the

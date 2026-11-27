@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -55,8 +56,16 @@ public static class DarlingPgBufferUsageReader
         double PctDirty,
         DateTime CaptureTime,
         long RelationsInSnapshot = 0,
-        long SnapshotBuffers = 0)
+        long SnapshotBuffers = 0,
+        string RelationBreakdown = RelationsListed)
     {
+        /// <summary>
+        /// True for the one row of a snapshot whose per-relation scan was skipped (#9508): it carries the pool totals and no
+        /// relation. Its <see cref="Buffers"/> is 0 only because a count cannot be missing here, so a caller that lists
+        /// relations leaves this row out.
+        /// </summary>
+        public bool IsTotalsOnly => RelationBreakdown != RelationsListed;
+
         /// <summary>
         /// A word for a row that has no relation name, null when it has one (#7455). The name is missing by
         /// design and not by fault, and a blank cell reads as a fault: the largest row on a quiet server is
@@ -64,6 +73,44 @@ public static class DarlingPgBufferUsageReader
         /// </summary>
         public string? NameLabel => RelationLabel(DatabaseName, RelationName);
     }
+
+    /// <summary><see cref="PgBufferUsageRow.RelationBreakdown"/> of an ordinary snapshot: the rows are the relations.</summary>
+    public const string RelationsListed = "relations";
+
+    /// <summary>
+    /// The snapshot has no relation rows by design (#9508): the pool was over the collector's cap, so only the totals were
+    /// read. Not a failure and not missing data.
+    /// </summary>
+    public const string SkippedOverCap = "skipped_over_cap";
+
+    /// <summary>
+    /// The snapshot has no relation rows and no used count (#9508): the pool was over the cap and the target has no
+    /// <c>pg_buffercache_summary()</c>, so the totals are the pool size alone. <c>ALTER EXTENSION pg_buffercache UPDATE</c>
+    /// is what gives the target the function.
+    /// </summary>
+    public const string Precondition = "precondition";
+
+    /// <summary>The statement that gives a target <c>pg_buffercache_summary()</c> (#9508). The service never runs it.</summary>
+    public const string PreconditionStatement = "ALTER EXTENSION pg_buffercache UPDATE";
+
+    /// <summary>
+    /// What a reader says about a snapshot with no relation rows (#9508), so a skip by design reads differently from a
+    /// failure and from no data. Null for an ordinary snapshot.
+    /// </summary>
+    public static string? BreakdownNote(string relationBreakdown, long poolBuffersTotal) => relationBreakdown switch
+    {
+        SkippedOverCap =>
+            $"The per-relation breakdown was skipped by design: the pool is {poolBuffersTotal:N0} buffers, over the "
+            + $"{PgBufferUsageCollector.PoolCapBuffers:N0}-buffer cap above which the collector does not scan pg_buffercache "
+            + "(the scan costs about 1 microsecond per buffer on the monitored server). The pool totals come from pg_buffercache_summary().",
+        Precondition =>
+            $"The per-relation breakdown was skipped by design: the pool is {poolBuffersTotal:N0} buffers, over the "
+            + $"{PgBufferUsageCollector.PoolCapBuffers:N0}-buffer cap above which the collector does not scan pg_buffercache, "
+            + "and this target has no pg_buffercache_summary() to read the pool totals from, so how much of the pool is in use is unknown. "
+            + $"The precondition is {PreconditionStatement} in the database the collector connects to (the function arrives with "
+            + "extension version 1.4, PostgreSQL 16). The collector never runs it.",
+        _ => null,
+    };
 
     /// <summary>
     /// Shown for a buffer that has a database name and no relation name. The stored row does not record which
@@ -97,13 +144,18 @@ public static class DarlingPgBufferUsageReader
        that produces a divide-by-zero error instead of a NULL turns an odd sample into a failed read.
 
        relations_in_snapshot and snapshot_buffers are windows over the whole snapshot, evaluated before LIMIT
-       cuts the page (#7455), so a caller learns the real size of what the page is cut from. */
+       cuts the page (#7455), so a caller learns the real size of what the page is cut from.
+
+       #9508: a snapshot whose per-relation scan was skipped is ONE row with buffers NULL (the relation columns are NULL
+       too). count(b.buffers) leaves it out of relations_in_snapshot, NULLS LAST keeps it behind any relation row, and
+       relation_breakdown says which kind of snapshot this is: pool_buffers_used NULL means the totals-only row has no
+       summary to read the used count from. */
     public const string PgBufferUsageSql = """
         WITH newest AS (
             SELECT max(collection_time) AS at
             FROM pg_buffer_usage
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -118,12 +170,17 @@ public static class DarlingPgBufferUsageReader
             (100.0 * b.buffers / NULLIF(b.pool_buffers_total, 0))::double precision AS pct_of_pool,
             (100.0 * b.dirty_buffers / NULLIF(b.buffers, 0))::double precision       AS pct_dirty,
             b.collection_time,
-            count(*) OVER ()                                                          AS relations_in_snapshot,
-            sum(b.buffers) OVER ()::bigint                                            AS snapshot_buffers
+            count(b.buffers) OVER ()                                                  AS relations_in_snapshot,
+            sum(b.buffers) OVER ()::bigint                                            AS snapshot_buffers,
+            CASE
+                WHEN b.buffers IS NOT NULL THEN 'relations'
+                WHEN b.pool_buffers_used IS NOT NULL THEN 'skipped_over_cap'
+                ELSE 'precondition'
+            END                                                                       AS relation_breakdown
         FROM pg_buffer_usage AS b
         JOIN newest AS n ON b.collection_time = n.at
         WHERE b.server_id = $1
-        ORDER BY b.buffers DESC
+        ORDER BY b.buffers DESC NULLS LAST
         LIMIT $4
         """;
 
@@ -163,7 +220,8 @@ public static class DarlingPgBufferUsageReader
                     ? default
                     : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc),
                 RelationsInSnapshot: reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                SnapshotBuffers: reader.IsDBNull(12) ? 0 : reader.GetInt64(12)));
+                SnapshotBuffers: reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+                RelationBreakdown: reader.IsDBNull(13) ? RelationsListed : reader.GetString(13)));
         }
 
         return rows;

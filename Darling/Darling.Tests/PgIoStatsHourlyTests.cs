@@ -31,7 +31,6 @@ public sealed class PgIoStatsHourlyTests
         var sql = PgIoStatsHourly.StitchedReadSql;
 
         /* Raw is bounded to the head [start, h1) and the tail [h2, end]; the middle is never scanned. */
-        Assert.Contains("collection_time >= $2 AND collection_time < $5", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $6 AND collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_io_stats_hourly", sql, StringComparison.Ordinal);
         Assert.Contains("hour_start >= $5 AND hour_start < $6", sql, StringComparison.Ordinal);

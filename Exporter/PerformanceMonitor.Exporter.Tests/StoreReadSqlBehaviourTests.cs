@@ -49,7 +49,7 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
                     continue;
                 }
 
-                sql.AppendLine($"CREATE TABLE {name} (server_name text, {t.TimeColumn} timestamp);");
+                sql.AppendLine($"CREATE TABLE {name} (server_name text, {t.TimeColumn} {(t.TimeColumnHasTimeZone ? "timestamptz" : "timestamp")});");
                 sql.AppendLine($"CREATE INDEX ON {name} ({t.TimeColumn});");
                 sql.AppendLine(Seed(name, t.TimeColumn!));
             }
@@ -60,6 +60,24 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
             sql.AppendLine("ALTER TABLE config.config_alert_log ADD COLUMN send_error text;");
             sql.AppendLine("ALTER TABLE collect.pg_log_events ADD COLUMN occurred_at timestamp, ADD COLUMN message text, ADD COLUMN family text, ADD COLUMN a_brand_new_column text;");
             sql.AppendLine("ALTER TABLE collect.query_snapshots ADD COLUMN session_id int, ADD COLUMN query_text text, ADD COLUMN query_plan text, ADD COLUMN live_query_plan text;");
+            sql.AppendLine("ALTER TABLE collect.query_tag_sightings ADD COLUMN key_kind text, ADD COLUMN text_sample text, ADD COLUMN seen_count bigint;");
+            sql.AppendLine("INSERT INTO collect.query_tag_sightings (server_name, last_seen, key_kind, text_sample, seen_count) VALUES ('sighted', '2026-10-22 11:30:00', 'hash', 'select secret', 3);");
+
+            // Tables that carry server_id and no server_name: the read looks the name up in collect.servers (server 1 and
+            // 2 are there, 99 and NULL are not). collect.servers is the registry's snapshot table, so it gets its id here.
+            sql.AppendLine("ALTER TABLE collect.servers ADD COLUMN server_id int;");
+            sql.AppendLine("UPDATE collect.servers SET server_id = CASE server_name WHEN 'at_from' THEN 1 WHEN 'at_to' THEN 2 END;");
+            sql.AppendLine("CREATE TABLE collect.rsn_probe (server_id int, collection_time timestamp, v int);");
+            sql.AppendLine("CREATE INDEX ON collect.rsn_probe (collection_time);");
+            sql.AppendLine("INSERT INTO collect.rsn_probe VALUES (1, '2026-10-22 11:10:00', 1), (2, '2026-10-22 11:20:00', 2), (99, '2026-10-22 11:30:00', 3), " +
+                "(NULL, '2026-10-22 11:40:00', 4), (1, '2026-10-22 12:00:00', 5), (1, '2026-10-22 10:59:59', 6);");
+            sql.AppendLine("INSERT INTO collect.rsn_probe SELECT 1, timestamp '2026-09-01' + i * interval '7 minutes', 0 FROM generate_series(1, 5000) i;");
+            sql.AppendLine("CREATE TABLE config.kic_probe (id int GENERATED ALWAYS AS IDENTITY, server_id int, name text);");
+            sql.AppendLine("INSERT INTO config.kic_probe (server_id, name) VALUES (1, 'a'), (NULL, 'b');");
+            sql.AppendLine("CREATE TABLE collect.tz_probe (server_name text, last_seen timestamptz);");
+            sql.AppendLine("CREATE INDEX ON collect.tz_probe (last_seen);");
+            sql.AppendLine(Seed("collect.tz_probe", "last_seen"));
+
             sql.AppendLine("INSERT INTO collect.plan_correction (server_name, collection_time, \"Weird Name\") VALUES ('weird', '2026-10-22 11:30:00', 'w1');");
             sql.AppendLine($"INSERT INTO collect.job_history (server_name, collection_time, run_status, message) VALUES " +
                 $"('jh_failed', '2026-10-22 11:30:00', 0, repeat('x', 3000)), ('jh_ok', '2026-10-22 11:30:00', 1, 'all fine');");
@@ -79,24 +97,26 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
             sql.AppendLine("CREATE INDEX ON collect.system_health_events (collection_time);");
             sql.AppendLine(Seed("collect.system_health_events", "collection_time"));
 
-            sql.AppendLine("""
+            sql.AppendLine($$"""
                 CREATE TABLE collect.query_stats (
                   collection_id bigint, server_id int, server_name text, database_name text, query_hash text, query_plan_hash text,
                   collection_time timestamp, sample_interval_seconds int,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint, delta_logical_reads bigint,
                   delta_logical_writes bigint, delta_physical_reads bigint, delta_rows bigint, delta_spills bigint,
-                  query_plan_digest bytea, query_text_digest bytea);
+                  query_plan_digest bytea, query_text_digest bytea, host_object_name text,
+                  {{ExtraColumns(QueryStatsWindow.RawColumns, QueryStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "query_hash", "query_plan_hash", "host_object_name", "collection_time", "sample_interval_seconds", "query_plan_digest", "query_text_digest"])}});
                 CREATE INDEX ON collect.query_stats (collection_time);
                 CREATE TABLE collect.procedure_stats (
                   collection_id bigint, server_id int, server_name text, database_name text, schema_name text, object_name text, object_type text,
                   collection_time timestamp, sample_interval_seconds int,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint, delta_logical_reads bigint,
                   delta_logical_writes bigint, delta_physical_reads bigint, delta_spills bigint,
-                  query_plan_digest bytea, plan_handle text, cached_time timestamp, query_plan_xml text, query_plan_xml_bytes int);
+                  query_plan_digest bytea, plan_handle text, cached_time timestamp, query_plan_xml text, query_plan_xml_bytes int,
+                  {{ExtraColumns(ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "schema_name", "object_name", "object_type", "collection_time", "sample_interval_seconds", "query_plan_digest", "plan_handle", "cached_time", "query_plan_xml_bytes", "plan_xml_is_null", "has_plan_xml_bytes"])}});
                 CREATE INDEX ON collect.procedure_stats (collection_time);
                 INSERT INTO collect.query_stats (server_name, collection_time) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes' FROM generate_series(1, 5000) i;
                 INSERT INTO collect.procedure_stats (server_name, collection_time) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes' FROM generate_series(1, 5000) i;
-                CREATE TABLE collect.pg_statement_text (server_id int, queryid bigint, query_text text, first_seen timestamp, last_seen timestamp, PRIMARY KEY (server_id, queryid));
+                CREATE TABLE collect.pg_statement_text (server_id int, queryid bigint, query_text text, first_seen timestamp, last_seen timestamp, own_entries jsonb, PRIMARY KEY (server_id, queryid));
                 INSERT INTO collect.pg_statement_text SELECT 1 + i % 2, i, 'q' || i, now(), now() FROM generate_series(1, 20000) i;
                 CREATE TABLE config.config_collector_schedules (server_id int, collector_name text, frequency_minutes int, enabled boolean);
                 INSERT INTO config.config_collector_schedules VALUES (1, 'memory_grant_stats', 5, true), (NULL, 'memory_grant_stats', 10, true);
@@ -137,6 +157,14 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
                    $"('last_in', '2026-10-22 11:59:59.999999'{vals}), ('at_to', '2026-10-22 12:00:00'{vals});\n" +
                    $"INSERT INTO {table} (server_name, {timeColumn}{cols}) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes'{vals} " +
                    "FROM generate_series(1, 5000) i;";
+        }
+
+        /// <summary>The window read's columns the base DDL does not name (the DMV attributes), typed like the DuckDB side.</summary>
+        private static string ExtraColumns(string[] rawColumns, Func<string, string> duckDbType, string[] inBase)
+        {
+            return string.Join(", ", rawColumns
+                .Where(c => !inBase.Contains(c) && !c.StartsWith("delta_", StringComparison.Ordinal))
+                .Select(c => $"{c} {duckDbType(c) switch { "INTEGER" => "int", "VARCHAR" => "text", "TIMESTAMP" => "timestamp", _ => "bigint" }}"));
         }
 
         private static string PgTypeFor(string column) => column switch
@@ -351,7 +379,7 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
 
         Assert.Equal(QueryStatsWindow.RawColumns, result.Columns);
         Assert.Equal(["qsw", "qsw"], result.Names().Where(n => n == "qsw"));      // two rows, not one grouped row
-        Assert.Equal([1L, 2L], result.Rows.Where(r => (string?)r[0] == "qsw").Select(r => (long)r[6]!).OrderBy(v => v));
+        Assert.Equal([1L, 2L], result.Rows.Where(r => (string?)r[0] == "qsw").Select(r => (long)r[result.Columns.IndexOf("delta_execution_count")]!).OrderBy(v => v));
     }
 
     [Fact]
@@ -578,6 +606,110 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
         Assert.Equal("query_plan", result.Columns[^1]);                       // the reader loop streams the last ordinal
         Assert.Equal(["collection_time", "server_name", "session_id", "query_text", "query_plan"], result.Columns);
         Assert.Contains("<plan/>", result.Column("query_plan"));
+    }
+
+    [Fact]
+    public async Task Query_snapshots_policy_leaves_both_plan_columns_out_of_the_discovered_columns_and_the_read_selects_the_rest()
+    {
+        if (Builder is null) { return; }
+        var table = OptionalTables.TryGet("query_snapshots")!;
+        var found = await DiscoverAsync(table);
+        Assert.Contains("query_plan", found);
+        Assert.Contains("live_query_plan", found);
+
+        var projected = (await RunAsync(
+            SqlBuilder.BuildOptionalSelect(table, found.Select(n => new DiscoveredColumn(n, "text", "text")).ToList(), ColumnPolicies.For(table.Name)),
+            Window())).Columns;
+
+        Assert.Equal(found.Where(n => n is not "query_plan" and not "live_query_plan"), projected);
+        Assert.Contains("session_id", projected);
+        Assert.Contains("query_text", projected);
+
+        // The query_snapshots exporter reads the same fact columns, plus query_plan last to build the plan tables.
+        var exporterRead = (await RunAsync(QuerySnapshotsExporter.BuildSelect(found), Window())).Columns;
+        Assert.Equal(projected.Append("query_plan"), exporterRead);
+        Assert.DoesNotContain("live_query_plan", exporterRead);
+    }
+
+    [Fact]
+    public async Task Query_tag_sightings_policy_leaves_text_sample_out_and_the_read_selects_the_rest()
+    {
+        if (Builder is null) { return; }
+        var table = OptionalTables.TryGet("query_tag_sightings")!;
+        var found = await DiscoverAsync(table);
+        Assert.Contains("text_sample", found);
+
+        var result = await RunAsync(
+            SqlBuilder.BuildOptionalSelect(table, found.Select(n => new DiscoveredColumn(n, "text", "text")).ToList(), ColumnPolicies.For(table.Name)),
+            Window());
+
+        Assert.Equal(found.Where(n => n != "text_sample"), result.Columns);
+        var row = Assert.Single(result.Rows, r => (string?)r[result.Columns.IndexOf("server_name")] == "sighted");
+        Assert.Equal("hash", row[result.Columns.IndexOf("key_kind")]);
+        Assert.Equal(3L, row[result.Columns.IndexOf("seen_count")]);
+    }
+
+    private async Task<List<string>> DiscoverAsync(OptionalTable table) =>
+        (await RunAsync(SqlBuilder.OptionalColumnDiscoverySqlFor(table),
+            [new NpgsqlParameter("schema", table.Schema), new NpgsqlParameter("table", table.Name)])).Column("column_name").Select(v => (string)v!).ToList();
+
+    // ---- a table with server_id and no server_name -----------------------------------------------------------------
+
+    private static OptionalTable Probe(string schema, string name, string? timeColumn) =>
+        new(name, schema, timeColumn, timeColumn is null ? OptionalTableKind.Snapshot : OptionalTableKind.Window, [], "7a", OptionalTableStatus.Candidate, "probe");
+
+    [Fact]
+    public async Task A_resolved_server_name_comes_from_collect_servers_and_is_null_for_an_unknown_or_missing_server()
+    {
+        if (Builder is null) { return; }
+        var table = Probe("collect", "rsn_probe", "collection_time") with { ResolveServerName = true };
+        var sql = SqlBuilder.BuildOptionalSelect(table, Discovered("collection_time", "v"), policy: null);
+
+        var result = await RunAsync(sql, Window());
+
+        Assert.Equal(["server_name", "collection_time", "v"], result.Columns);
+        string? NameOf(int v) => (string?)result.Rows.Single(r => (int)r[2]! == v)[0];
+        Assert.Equal("at_from", NameOf(1));
+        Assert.Equal("at_to", NameOf(2));
+        Assert.Null(NameOf(3));      // a server_id no longer in collect.servers
+        Assert.Null(NameOf(4));      // a NULL server_id
+        Assert.Equal(4, result.Rows.Count);
+        await AssertIndexRangeReadAsync(sql, Window(), "collection_time");
+    }
+
+    [Fact]
+    public async Task An_identity_column_is_discovered_only_for_a_table_that_asks_for_it()
+    {
+        if (Builder is null) { return; }
+        var keeping = Probe("config", "kic_probe", null) with { KeepIdentityColumns = true, ResolveServerName = true };
+        var plain = keeping with { KeepIdentityColumns = false };
+
+        Assert.Equal(["id", "name"], await DiscoverAsync(keeping));
+        Assert.Equal(["name"], await DiscoverAsync(plain));
+
+        var result = await RunAsync(SqlBuilder.BuildOptionalSelect(keeping, Discovered("id", "name"), policy: null));
+        Assert.Equal(["server_name", "id", "name"], result.Columns);
+        Assert.Equal("at_from", (string?)result.Rows.Single(r => (string?)r[2] == "a")[0]);
+        Assert.Null(result.Rows.Single(r => (string?)r[2] == "b")[0]);
+    }
+
+    [Fact]
+    public async Task A_timestamptz_time_column_is_read_as_utc_whatever_the_session_time_zone_is()
+    {
+        if (Builder is null) { return; }
+        var flagged = Probe("collect", "tz_probe", "last_seen") with { TimeColumnHasTimeZone = true };
+        var unflagged = flagged with { TimeColumnHasTimeZone = false };
+
+        async Task<List<string>> NamesInNewYorkAsync(OptionalTable table)
+        {
+            await using var connection = await StoreConnectionFactory.OpenAsync(Builder!, default);
+            await using (var zone = new NpgsqlCommand("SET TimeZone = 'America/New_York'", connection)) { await zone.ExecuteNonQueryAsync(); }
+            return (await ReadAsync(connection, null, SqlBuilder.BuildOptionalSelect(table, ["server_name", "last_seen"]), Window())).Names().ToList();
+        }
+
+        Assert.Equal(["at_from", "last_in"], await NamesInNewYorkAsync(flagged));
+        Assert.NotEqual(["at_from", "last_in"], await NamesInNewYorkAsync(unflagged));   // the control: the zone moves the window without the flag
+        await AssertIndexRangeReadAsync(SqlBuilder.BuildOptionalSelect(flagged, ["server_name", "last_seen"]), Window(), "last_seen");
     }
 
     // ---- the two hourly oracle statements the DuckDB rollups were checked against -------------------------------

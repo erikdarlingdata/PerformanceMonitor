@@ -91,7 +91,7 @@ WHERE route_id = $5 AND generic_url = $2
 
     internal static async Task<ViewerSigningKeyState?> ReadSigningStateAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;
@@ -114,7 +114,7 @@ WHERE route_id = $5 AND generic_url = $2
 
         await using var command = _dataSource.CreateCommand("SELECT route_id FROM config_notification_routes WHERE signing_key <> '' ORDER BY route_id");
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             ids.Add(reader.GetInt32(0));

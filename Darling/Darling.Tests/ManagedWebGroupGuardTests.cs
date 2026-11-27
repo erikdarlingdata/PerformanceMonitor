@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,12 +42,14 @@ public sealed class ManagedWebGroupGuardTests
     private const string Token = "group-guard-test-token-0123456789abcdefghij";
     private const string Host = "127.0.0.1";
 
-    private sealed class FakeMetadata : IWebAccessGroupMetadata
+    internal sealed class FakeMetadata : IWebAccessGroupMetadata
     {
         public (WebAccessGroup Group, Guid Epoch)? Group;
         public Guid? Epoch;
         public int Reads;
+        public int EpochReads;
         public bool Throw;
+        public bool ThrowOnEpoch;
 
         public Task<(WebAccessGroup Group, Guid Epoch)?> ReadEnabledGroupAsync(Guid groupId, CancellationToken ct)
         {
@@ -55,21 +58,29 @@ public sealed class ManagedWebGroupGuardTests
             return Task.FromResult(Group is { } g && g.Group.GroupId == groupId ? Group : null);
         }
 
-        public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct) => Task.FromResult(Epoch);
+        public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct)
+        {
+            EpochReads++;
+            return ThrowOnEpoch ? throw new InvalidOperationException("relation config.web_access_advanced does not exist") : Task.FromResult(Epoch);
+        }
     }
 
-    private sealed class FakeCredentials : IWebAccessGroupCredentials
+    internal sealed class FakeCredentials : IWebAccessGroupCredentials
     {
         public List<WebAccessGroupCredential> Rows = new();
+        public int CredentialReads;
 
-        public Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<WebAccessGroupCredential>>(Rows);
+        public Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct)
+        {
+            CredentialReads++;
+            return Task.FromResult<IReadOnlyList<WebAccessGroupCredential>>(Rows);
+        }
 
         public Task<bool> ActivateAsync(Guid id, long revision, Guid generation, string? refusalCode, CancellationToken ct) =>
             Task.FromResult(true);
     }
 
-    private sealed class Rig : IDisposable
+    internal sealed class Rig : IDisposable
     {
         public readonly PasswordPrivateKey Key = PasswordPrivateKey.Generate();
         public IPasswordKeyRing Ring;
@@ -79,7 +90,7 @@ public sealed class ManagedWebGroupGuardTests
         public readonly Guid Epoch = Guid.NewGuid();
         public readonly DarlingWebGroupTokens Groups;
 
-        public Rig(WebAccessGroupScope scope = WebAccessGroupScope.Tags)
+        public Rig(WebAccessGroupScope scope = WebAccessGroupScope.Tags, ILogger? logger = null, Func<bool>? storeReady = null)
         {
             Ring = DarlingPasswordKey.FromPrivateKey(Key);
             Group = new WebAccessGroup(Guid.NewGuid(), "Finance", scope, true, Guid.NewGuid(), 2, "active", null,
@@ -88,7 +99,7 @@ public sealed class ManagedWebGroupGuardTests
                 PasswordSeal.Seal(Token, Key.PublicKey, PasswordBinding.ForWebAccessToken(Group.GroupId, Group.TokenGeneration))));
             Metadata.Group = (Group, Epoch);
             Metadata.Epoch = Epoch;
-            Groups = new DarlingWebGroupTokens(() => Credentials, Metadata, () => Ring, Shared, null, null, NullLogger.Instance);
+            Groups = new DarlingWebGroupTokens(() => Credentials, Metadata, () => Ring, Shared, null, null, logger ?? NullLogger.Instance, storeReady);
         }
 
         public async Task<DarlingWebGroupTokens.Match> RefreshedMatchAsync()
@@ -269,6 +280,76 @@ public sealed class ManagedWebGroupGuardTests
     }
 
     // The test server's response stream is a forward-only reader over what the pipeline wrote, so it is read from where it stands.
+    private const string UnavailableWarning = "Managed web group credentials are unavailable";
+
+    private static int UnavailableWarnings(CapturingTestLogger log) =>
+        log.Lines.Count(line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains(UnavailableWarning, StringComparison.Ordinal));
+
+    [Fact]
+    public async Task ANotConfiguredFeature_NeverWarns()
+    {
+        var log = new CapturingTestLogger();
+        using var rig = new Rig(logger: log, storeReady: () => true);
+        rig.Metadata.Epoch = null;
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.False(rig.Groups.Available);
+        Assert.Equal(0, UnavailableWarnings(log));
+    }
+
+    [Fact]
+    public async Task AFailureBeforeTheStoreIsReady_IsSilent_AndTheSameFailureAfterItWarnsOnce()
+    {
+        var ready = false;
+        var log = new CapturingTestLogger();
+        using var rig = new Rig(logger: log, storeReady: () => ready);
+        rig.Metadata.ThrowOnEpoch = true;
+
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.False(rig.Groups.Available);
+        Assert.Equal(0, UnavailableWarnings(log));
+
+        ready = true;
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(1, UnavailableWarnings(log));
+    }
+
+    [Fact]
+    public async Task BeforeTheStoreIsReady_TheRefreshMakesNoStoreCall_AndAfterItTheRefreshReads()
+    {
+        var ready = false;
+        using var rig = new Rig(storeReady: () => ready);
+
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(0, rig.Metadata.EpochReads);
+        Assert.Equal(0, rig.Credentials.CredentialReads);
+        Assert.False(rig.Groups.Available);
+
+        ready = true;
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(1, rig.Metadata.EpochReads);
+        Assert.Equal(1, rig.Credentials.CredentialReads);
+        Assert.True(rig.Groups.Available);
+    }
+
+    [Fact]
+    public async Task AConfiguredFeatureWhoseKeyCannotSeal_WarnsOnlyOnceTheStoreIsReady()
+    {
+        var ready = false;
+        var log = new CapturingTestLogger();
+        using var rig = new Rig(logger: log, storeReady: () => ready);
+        rig.Ring = DarlingPasswordKey.Refusing("test key temporarily unavailable");
+
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(0, UnavailableWarnings(log));
+
+        ready = true;
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(1, UnavailableWarnings(log));
+    }
+
     private static async Task<string> Body(HttpContext response)
     {
         using var reader = new StreamReader(response.Response.Body);

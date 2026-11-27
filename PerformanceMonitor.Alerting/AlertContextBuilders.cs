@@ -538,8 +538,7 @@ public static class AlertContextBuilders
 
         return events
             .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
-                !excludedDatabases.Any(ex =>
-                    string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excludedDatabases, e.DatabaseName))
             .ToList();
     }
 
@@ -658,7 +657,7 @@ public static class AlertContextBuilders
     /// </summary>
     public static bool IsDeadlockExcluded(DeadlockAlertRow row, IReadOnlyList<string> excludedDatabases)
     {
-        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(row.DeadlockGraphXml, excludedDatabases);
+        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllInExcluded(row.DeadlockGraphXml, excludedDatabases);
     }
     public static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
     {
@@ -789,14 +788,26 @@ public static class AlertContextBuilders
 
         if (finding.ShortSamples > 0)
         {
-            reading.Fields.Add(("Under 1 ms", string.Create(CultureInfo.InvariantCulture,
-                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under 1 ms (a cancel on a command that had already finished); they are left out of the rate judged")));
+            reading.Fields.Add(($"Under {AttentionWindowSql.MinInterruptDurationText}", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} (too short to be a client timeout); they are left out of the rate judged")));
+        }
+
+        if (finding.MatchedCalls > 0)
+        {
+            reading.Fields.Add(("Matched calls", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.MatchedCalls:N0} of {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} but each matched a call the client cancelled while it ran; they count as client timeouts. The attention event times the cancel, not the command, so its length is not the timeout's length")));
         }
 
         if (finding.AzdataMetadataSamples > 0)
         {
             reading.Fields.Add(("Azure Data Studio", string.Create(CultureInfo.InvariantCulture,
                 $"{finding.AzdataMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries; they are left out of the rate judged")));
+        }
+
+        if (finding.DbatoolsMetadataSamples > 0)
+        {
+            reading.Fields.Add(("dbatools", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.DbatoolsMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were dbatools SMO metadata reads; they are left out of the rate judged")));
         }
 
         if (finding.Bars is not null)
@@ -1349,6 +1360,76 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>The headline of the TempDB Growth Won't Fit alert (#8882): the largest shortfall, and how many more volumes are short.</summary>
+    public static string TempDbGrowthFitMessage(TempDbGrowthFitResult result) => TempDbGrowthFit.Describe(result);
+
+    /// <summary>
+    /// The TempDB Growth Won't Fit context (#8882): one item per volume that cannot take the next growth, naming the volume, the files, the
+    /// MB needed and the MB free, then one item with the count of files that cannot grow at all.
+    /// </summary>
+    public static AlertContext? BuildTempDbGrowthFitContext(TempDbGrowthFitResult result)
+    {
+        if (result is null) throw new ArgumentNullException(nameof(result));
+
+        var context = new AlertContext();
+        foreach (var shortfall in result.Shortfalls)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"{shortfall.Volume}: next {(shortfall.IsLog ? "log" : "data file")} growth needs {shortfall.NeededMb:F0} MB, {shortfall.FreeMb:F0} MB free",
+                Fields = new()
+                {
+                    ("Volume", shortfall.Volume),
+                    ("Files", string.Join(", ", shortfall.FileNames)),
+                    ("Growth Needed", $"{shortfall.NeededMb:F0} MB"),
+                    ("Volume Free", $"{shortfall.FreeMb:F0} MB"),
+                    ("Short By", $"{shortfall.ShortByMb:F0} MB")
+                }
+            });
+        }
+
+        var cannotGrow = BuildTempDbCannotGrowItem(result, onlyWhenNoDataFileCanGrow: false);
+        if (cannotGrow is not null)
+        {
+            context.Details.Add(cannotGrow);
+        }
+
+        return context;
+    }
+
+    /// <summary>
+    /// The count of tempdb files that cannot grow (growth turned off, or already at the ceiling), and "no data file can grow" when that
+    /// is true of every data file (#8882). Null when there is nothing to say: no such file, or, with
+    /// <paramref name="onlyWhenNoDataFileCanGrow"/>, when at least one data file can still grow.
+    /// </summary>
+    public static AlertDetailItem? BuildTempDbCannotGrowItem(TempDbGrowthFitResult result, bool onlyWhenNoDataFileCanGrow)
+    {
+        if (result is null) throw new ArgumentNullException(nameof(result));
+
+        if (result.FilesUnableToGrow.Count == 0 || (onlyWhenNoDataFileCanGrow && !result.NoDataFileCanGrow))
+        {
+            return null;
+        }
+
+        var fields = new List<(string, string)>
+        {
+            ("Files That Cannot Grow", $"{result.FilesUnableToGrow.Count} of {result.FileCount}"),
+            ("Names", string.Join(", ", result.FilesUnableToGrow))
+        };
+        if (result.NoDataFileCanGrow)
+        {
+            fields.Insert(0, ("No Data File Can Grow", $"All {result.DataFileCount} data files are at their ceiling or have growth turned off"));
+        }
+
+        return new AlertDetailItem
+        {
+            Heading = result.NoDataFileCanGrow
+                ? $"tempdb: no data file can grow ({result.FilesUnableToGrow.Count} of {result.FileCount} files cannot grow)"
+                : $"tempdb: {result.FilesUnableToGrow.Count} of {result.FileCount} files cannot grow",
+            Fields = fields
+        };
+    }
+
     public static AlertContext? BuildTempDbSpaceContext(TempDbSpaceInfo tempDb)
     {
         var context = new AlertContext();
@@ -1377,6 +1458,143 @@ public static class AlertContextBuilders
                     ? $"Session #{tempDb.TopConsumerSessionId} ({tempDb.TopConsumerMb:F0} MB)"
                     : "None")
             }
+        });
+        return context;
+    }
+
+    /// <summary>The TempDB Log Space alert's one-line message (#8881): the used percent, the truncation holdup reason and the holder
+    /// (session, login, program, transaction age and log bytes) when the collector captured one.</summary>
+    public static string TempDbLogSpaceMessage(TempDbSpaceInfo tempDb, DateTime now)
+    {
+        var used = tempDb.LogUsedPercent ?? 0;
+        var sb = new System.Text.StringBuilder();
+        sb.Append(System.Globalization.CultureInfo.InvariantCulture, $"tempdb log at {used:F0}% of its size");
+        if (tempDb.LogUsedMb is { } usedMb && tempDb.LogTotalMb is { } totalMb)
+        {
+            sb.Append(System.Globalization.CultureInfo.InvariantCulture, $" ({usedMb:F0} of {totalMb:F0} MB)");
+        }
+
+        sb.Append(", holdup reason ").Append(string.IsNullOrWhiteSpace(tempDb.LogTruncationHoldupReason) ? "unknown" : tempDb.LogTruncationHoldupReason);
+        if (tempDb.HolderSessionId is { } session)
+        {
+            sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", held by session {session}");
+            sb.Append(", login ").Append(string.IsNullOrWhiteSpace(tempDb.HolderLoginName) ? "unknown" : tempDb.HolderLoginName);
+            sb.Append(", program ").Append(string.IsNullOrWhiteSpace(tempDb.HolderProgramName) ? "unknown" : tempDb.HolderProgramName);
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                sb.Append(", transaction open ").Append(FormatHolderAge(age));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
+            }
+
+            if (tempDb.HolderLogBytesReserved is { } bytesReserved)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesReserved / 1048576.0:F0} MB reserved");
+            }
+        }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            /* The collector keeps the oldest open tempdb transaction even when no session owns it, so a begin time or log bytes without a session
+               id is a real holder: a system or orphaned transaction. Saying "none captured" for it would be false. */
+            sb.Append(", the oldest open tempdb transaction has no session (a system or orphaned transaction)");
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                sb.Append(", open ").Append(FormatHolderAge(age));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
+            }
+        }
+        else if (HolderWasNotRead(tempDb))
+        {
+            sb.Append(", ").Append(TempDbLogHolderLine.NotReadBelowBarText);
+        }
+        else if (tempDb.HolderLoginName is null)
+        {
+            sb.Append(", no holding transaction captured");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>True when the snapshot's log is under the percent the collector starts reading the holder at, so an empty holder means
+    /// "not read" and not "none found". An alert bar set below that percent fires in this range (#8881).</summary>
+    private static bool HolderWasNotRead(TempDbSpaceInfo tempDb) =>
+        (tempDb.LogUsedPercent ?? 0) < TempDbLogHolderLine.MinLogUsedPercent;
+
+    /// <summary>How long the holder's transaction has been open at <paramref name="now"/>, or null when the snapshot has no begin time.
+    /// Never negative: a clock that reads a moment behind the server's would otherwise print a negative age.</summary>
+    public static TimeSpan? TempDbHolderAge(TempDbSpaceInfo tempDb, DateTime now) =>
+        tempDb.HolderBeginTimeUtc is { } begin ? (now > begin ? now - begin : TimeSpan.Zero) : null;
+
+    private static string FormatHolderAge(TimeSpan age) =>
+        age.TotalHours >= 1
+            ? System.FormattableString.Invariant($"{(int)age.TotalHours} h {age.Minutes} min")
+            : age.TotalMinutes >= 1
+                ? System.FormattableString.Invariant($"{(int)age.TotalMinutes} min {age.Seconds} s")
+                : System.FormattableString.Invariant($"{(int)age.TotalSeconds} s");
+
+    /// <summary>The TempDB Log Space alert's detail card (#8881): the log's size and use, why it cannot truncate, and the holder.</summary>
+    public static AlertContext? BuildTempDbLogSpaceContext(TempDbSpaceInfo tempDb, DateTime now)
+    {
+        var context = new AlertContext();
+        var fields = new List<(string, string)>
+        {
+            ("Log Used", tempDb.LogUsedMb is { } u && tempDb.LogTotalMb is { } t ? System.FormattableString.Invariant($"{u:F0} of {t:F0} MB") : "Unknown"),
+            ("Log Reuse Wait", string.IsNullOrWhiteSpace(tempDb.LogReuseWaitDesc) ? "Unknown" : tempDb.LogReuseWaitDesc),
+            ("Truncation Holdup", string.IsNullOrWhiteSpace(tempDb.LogTruncationHoldupReason) ? "Unknown" : tempDb.LogTruncationHoldupReason),
+        };
+        if (tempDb.HolderSessionId is { } session)
+        {
+            fields.Add(("Holder Session", System.FormattableString.Invariant($"#{session}")));
+            fields.Add(("Holder Login", string.IsNullOrWhiteSpace(tempDb.HolderLoginName) ? "Unknown" : tempDb.HolderLoginName));
+            fields.Add(("Holder Program", string.IsNullOrWhiteSpace(tempDb.HolderProgramName) ? "Unknown" : tempDb.HolderProgramName));
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                fields.Add(("Transaction Age", FormatHolderAge(age)));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
+            }
+
+            if (tempDb.HolderLogBytesReserved is { } bytesReserved)
+            {
+                fields.Add(("Holder Log Reserved", System.FormattableString.Invariant($"{bytesReserved / 1048576.0:F0} MB")));
+            }
+        }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            fields.Add(("Holder", "Oldest open tempdb transaction has no session (a system or orphaned transaction)"));
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                fields.Add(("Transaction Age", FormatHolderAge(age)));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
+            }
+        }
+        else if (HolderWasNotRead(tempDb))
+        {
+            fields.Add(("Holder", "Not read: " + TempDbLogHolderLine.NotReadBelowBarText));
+        }
+        else
+        {
+            fields.Add(("Holder", "None captured"));
+        }
+
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = System.FormattableString.Invariant($"tempdb log at {tempDb.LogUsedPercent ?? 0:F0}% of its size"),
+            Fields = fields
         });
         return context;
     }
@@ -1488,7 +1706,17 @@ public static class AlertContextBuilders
         {
             var item = new AlertDetailItem { Heading = j.JobName, Fields = new() };
             item.Fields.Add(("Job", j.JobName));
-            item.Fields.Add(("Failed At", j.RunDateTimeFormatted));
+            /* #8972: RunDateTime is when the run STARTED. "Failed At" is the start plus the run's duration, so it
+               is stated only when the duration is known; without one the start is labelled as what it is. */
+            if (j.FailedAtFormatted is string failedAt)
+            {
+                item.Fields.Add(("Started", j.RunDateTimeFormatted));
+                item.Fields.Add(("Failed At", failedAt));
+            }
+            else
+            {
+                item.Fields.Add(("Run Started", j.RunDateTimeFormatted));
+            }
             if (j.StepId > 0 && !string.IsNullOrEmpty(j.StepName))
                 item.Fields.Add(("Step", $"{j.StepId}: {j.StepName}"));
             if (!string.IsNullOrEmpty(j.Message))

@@ -48,6 +48,7 @@ public sealed class DarlingMcpInvestigationAdminTools
     private const string NotPendingSentence = "That note is not pending: it was already decided, or it is gone.";
     private const string NotOpenSentence = "That request is not open: it is already closed or expired, or it is gone.";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "write_investigation_note"), Description(
         "Writes an investigation note as a person: approved as written, so it reaches the briefs of the next investigations at once (the web's Write a note). Changes the monitoring store only. " +
         "<<GUIDE>>" +
@@ -81,7 +82,7 @@ public sealed class DarlingMcpInvestigationAdminTools
             string? serverDisplay = null;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
                 if (error is not null)
                 {
                     return error;
@@ -118,6 +119,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "approve_investigation_note"), Description(
         "Approves a pending agent note so it reaches the briefs of the next investigations (the web's Approve on the pending notes screen). Changes the monitoring store only. " +
         "<<GUIDE>>" +
@@ -131,6 +133,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         CancellationToken cancellationToken = default) =>
         DecideAsync(postgres, note_id, approve: true, logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "reject_investigation_note"), Description(
         "Rejects a pending agent note so it never reaches a brief (the web's Reject on the pending notes screen). Changes the monitoring store only. " +
         "<<GUIDE>>" +
@@ -144,6 +147,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         CancellationToken cancellationToken = default) =>
         DecideAsync(postgres, note_id, approve: false, logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "close_investigation_request"), Description(
         "Closes an open, claimed or reported investigation request with a reason, so no agent works it further (the web's Close). Changes the monitoring store only. " +
         "<<GUIDE>>" +

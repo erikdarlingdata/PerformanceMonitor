@@ -61,6 +61,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
 /// it ever stops being one.</para>
 ///
+/// <para><b>One more index, for the sightings count (#9452).</b> <see cref="PendingIndexName"/> (V310) is partial to the pending rows, on
+/// <c>(server_id)</c> alone, so the upsert's per-cycle pending count reads it without the heap. See <see cref="PendingIndexName"/>
+/// for why it names no <c>last_seen_at</c>.</para>
+///
 /// <para><b>Not a collector table.</b> It is absent from <see cref="CollectorCatalog"/>, so
 /// <see cref="TimescaleSupport"/>'s catalog-driven hypertable conversion and
 /// <c>DarlingRetention</c>'s catalog purge never reach it — the <c>collect.store_metrics</c> precedent. It
@@ -178,6 +182,50 @@ CREATE TABLE IF NOT EXISTS collect.oversized_plan_backlog_drops
 );";
 
     /// <summary>
+    /// #8789: the <c>collector_name</c> under which <see cref="RecordSightingsSql"/> keeps, in <c>collect.collector_state</c>, how many
+    /// new rows its latest cycle left out (state key: the collector, state value: the number). No migration: the table is the
+    /// store's small per-server state, and a row here is one short number.
+    /// </summary>
+    public const string LeftOutStateOwner = "oversized_plan_backlog";
+
+    /// <summary>
+    /// #8789: the sweep's once-per-pass step that takes what <see cref="RecordSightingsSql"/> recorded as left out. $1 is the server
+    /// and $2 the pass's clock. It deletes the server's numbers (so the next cycle starts a new one, and the pass counts what it
+    /// took once), adds each to the hour of $2 in <c>collect.oversized_plan_backlog_drops</c> as <c>rows_dropped</c> and
+    /// <c>rows_first_seen</c>, the two columns the trim's own counting fills, and returns the total. One statement, so a number is
+    /// never deleted without being counted. A row the trim would have dropped in this pass is counted here as the trim counted it,
+    /// once per pass.
+    /// </summary>
+    public const string TakeLeftOutSql = @"
+WITH taken AS
+(
+    DELETE FROM collect.collector_state
+    WHERE server_id = $1
+    AND   collector_name = '" + LeftOutStateOwner + @"'
+    RETURNING
+        state_key,
+        state_value::bigint AS n
+),
+counted AS
+(
+    INSERT INTO collect.oversized_plan_backlog_drops AS d
+    (server_id, collector_name, hour_start, rows_dropped, rows_first_seen)
+    SELECT
+        $1,
+        t.state_key,
+        date_trunc('hour', $2::timestamp),
+        t.n,
+        t.n
+    FROM taken AS t
+    WHERE t.n > 0
+    ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog_drops DO UPDATE SET
+        rows_dropped = d.rows_dropped + EXCLUDED.rows_dropped,
+        rows_first_seen = d.rows_first_seen + EXCLUDED.rows_first_seen
+)
+SELECT COALESCE(sum(t.n), 0)::integer
+FROM taken AS t;";
+
+    /// <summary>
     /// The primary key as a bound predicate, written once so the three statements that stamp one row's
     /// outcome address exactly the row the claim handed back.
     /// </summary>
@@ -190,8 +238,132 @@ AND   statement_start_offset = $5
 AND   statement_end_offset = $6";
 
     /// <summary>
-    /// One sighting. <c>first_seen_at</c> and <c>last_seen_at</c> both take <c>$10</c> on the insert, so a
-    /// first sighting reads as seen-once rather than as a row with an unknown age.
+    /// The order the pending cap ranks rows in, written once for <see cref="DropOverCapSql"/> and for the cap's simulation in
+    /// <see cref="RecordSightingsSql"/>, so the two cannot drift. Most recently sighted first. #8789: among rows sighted at the same
+    /// instant, the one that has waited longest (the oldest <c>first_seen_at</c>) ranks first. Rows tied on <c>last_seen_at</c> were all seen
+    /// in the same pass, so which of them survives is arbitrary, and ranking the newest first made the survivors the ones the table
+    /// deleted last time: a row the cap dropped came back on the next sighting with a fresh <c>first_seen_at</c>, ranked above the
+    /// rows that stayed, and pushed one of them out. Every pass then deleted and inserted the same number of rows and reset their
+    /// waiting time. Ranking the longest wait first lets a row that is in the table keep its place.
+    /// </summary>
+    private const string PendingRankOrder = @"last_seen_at DESC,
+                first_seen_at ASC,
+                observed_bytes DESC,
+                collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset";
+
+    /// <summary>
+    /// The key of an incoming row of <see cref="RecordSightingsSql"/> (alias <c>i</c>) matched to the same key on the alias
+    /// <c>{0}</c>, written once.
+    /// </summary>
+    private const string SameKeyAs = @"{0}.plan_handle = i.plan_handle
+      AND   {0}.sql_handle = i.sql_handle
+      AND   {0}.statement_start_offset = i.statement_start_offset
+      AND   {0}.statement_end_offset = i.statement_end_offset";
+
+    private static string SameKey(string alias) => SameKeyAs.Replace("{0}", alias, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The pending rows seen at or after the sighting time ($10): the rows that can rank ahead of a new row. The second test of the
+    /// gate of <see cref="RecordSightingsSql"/> counts them.
+    /// </summary>
+    public const string RecentPendingFilter = "last_seen_at >= $10";
+
+    /// <summary>The <c>incoming</c> and <c>existing</c> CTEs of <see cref="RecordSightingsSql"/>, without the leading WITH.</summary>
+    private static readonly string IncomingCtes = @"incoming AS
+(
+    SELECT
+        u.plan_handle,
+        u.sql_handle,
+        u.statement_start_offset,
+        u.statement_end_offset,
+        (array_agg(u.database_name ORDER BY u.ord DESC) FILTER (WHERE u.database_name IS NOT NULL))[1] AS database_name,
+        (array_agg(u.query_hash ORDER BY u.ord DESC) FILTER (WHERE u.query_hash IS NOT NULL))[1] AS query_hash,
+        (array_agg(u.observed_bytes ORDER BY u.ord DESC))[1] AS observed_bytes
+    FROM unnest($3::text[], $4::text[], $5::integer[], $6::integer[], $7::text[], $8::text[], $9::bigint[])
+        WITH ORDINALITY AS u
+        (plan_handle, sql_handle, statement_start_offset, statement_end_offset, database_name, query_hash, observed_bytes, ord)
+    GROUP BY
+        u.plan_handle,
+        u.sql_handle,
+        u.statement_start_offset,
+        u.statement_end_offset
+),
+existing AS
+(
+    SELECT b.*
+    FROM incoming AS i
+    JOIN collect.oversized_plan_backlog AS b
+      ON  b.server_id = $1
+      AND b.collector_name = $2
+      AND " + SameKey("b") + @"
+)";
+
+    /// <summary>The <c>pending_counts</c> and <c>gate</c> CTEs of <see cref="RecordSightingsSql"/>, which read <c>incoming</c> and <c>existing</c>.</summary>
+    private static readonly string GateCtes = @"pending_counts AS
+(
+    SELECT count(*) AS pending_rows
+    FROM collect.oversized_plan_backlog
+    WHERE server_id = $1
+    AND   " + NeverTriedPendingPredicate + @"
+),
+gate AS
+(
+    /* Over the cap, and (the second test) a new row could rank past it. A new row enters the ranking with last_seen_at = $10 and
+       the order starts last_seen_at DESC, so only rows seen at or after $10 can rank ahead of it. Its rank is at most the table's
+       pending rows seen at or after $10 plus every incoming row (an over-count: it can only send a cycle down the full path).
+       At or under the cap no new row can be left out, so the ranking is skipped. In normal running every pending row was seen
+       before this cycle, so this holds on every cycle.
+
+       #9452: the first test reads the pending count from the partial index alone. The second test needs last_seen_at, which no index
+       holds (one would end the heap-only update of a re-sighting), so it reads the heap. CASE is the one construct that evaluates its
+       branches in order, so the heap is read only when the first test is already over the cap, and the decision is the AND it was. */
+    SELECT
+        CASE
+            WHEN
+            (
+                (
+                    SELECT p.pending_rows
+                    FROM pending_counts AS p
+                )
+                +
+                (
+                    SELECT count(*)
+                    FROM incoming AS i
+                    WHERE NOT EXISTS (SELECT 1 FROM existing AS e WHERE " + SameKey("e") + @")
+                )
+            ) > $11
+            THEN
+            (
+                (
+                    SELECT count(*)
+                    FROM collect.oversized_plan_backlog
+                    WHERE server_id = $1
+                    AND   " + NeverTriedPendingPredicate + @"
+                    AND   " + RecentPendingFilter + @"
+                )
+                +
+                (SELECT count(*) FROM incoming)
+            ) > $11
+            ELSE false
+        END AS over_cap
+)";
+
+    /// <summary>
+    /// #9452: the gate's decision alone, one row with <c>over_cap</c>, on the parameters of <see cref="RecordSightingsSql"/> ($12 unused).
+    /// It is the very CTEs the sightings statement runs, so a test can drive the gate across its thresholds without the ranking.
+    /// </summary>
+    public static readonly string GateDecisionSql = "WITH " + IncomingCtes + ",\n" + GateCtes + "\nSELECT g.over_cap FROM gate AS g;";
+
+    /// <summary>
+    /// The sightings of one collection cycle for one server, as ONE statement and so one transaction. $1 is the server, $2 the
+    /// collector, $3 to $9 the sightings as parallel arrays (plan handle, sql handle, start offset, end offset, database,
+    /// query hash, observed bytes), $10 the sighting time, $11 the pending cap and $12 the most rows a trim drops in one pass
+    /// (<c>OversizedPlanBacklogSweep.PendingRowsPerServerCap</c> and <c>MaxRowsDroppedPerServerPerTick</c>). It returns how many
+    /// new rows it did not insert, see below.
+    ///
+    /// <para><b>One upsert, as before.</b> <c>first_seen_at</c> and <c>last_seen_at</c> both take $10 on the insert, so a first
+    /// sighting reads as seen-once rather than as a row with an unknown age. A key given twice in one batch ends as the two
+    /// statements it used to be: the later observed bytes, and the later database and query hash that is not null.</para>
     ///
     /// <para><b><c>expired_at</c> is CLEARED on a re-sighting, and that is load-bearing.</b> A collector only
     /// sees a row while its plan is in cache, so a fresh sighting is positive evidence the handle resolves —
@@ -201,18 +373,233 @@ AND   statement_end_offset = $6";
     /// <para><c>captured_at</c> and <c>plan_xml</c> are deliberately left alone: the key pins the handle AND
     /// the offsets, so a row already captured describes the same document and there is nothing to go back
     /// for.</para>
+    ///
+    /// <para><b>A new row the trim would drop in the same pass is not inserted (#8789).</b> The statement runs the trim's two
+    /// rules (<see cref="SupersedeSql"/>, then <see cref="DropOverCapSql"/>) over the rows the table would hold after this
+    /// write, and leaves out the new rows the cap would drop. Inserting them only to have the next trim delete them
+    /// is what churned the table. The statement leaves a row in, and the trim
+    /// handles it as it always did, when leaving it out could change what the trim does to another row: when the
+    /// supersede or the cap would stop at the pass's drop limit, and when the row is the newest sighting of a query
+    /// whose older rows only it supersedes. It does none of this unless the server's pending rows plus the new ones are
+    /// past the cap, so a server under the cap pays one count (#9452: an index-only scan of <see cref="PendingIndexName"/>). It also skips it when no new row can rank past the cap (the gate CTE):
+    /// a new row ranks behind every pending row seen at or after the sighting time, so when those plus this cycle's rows are within
+    /// the cap, none is left out. In normal running every pending row was seen before this cycle, so the ranking runs only when one
+    /// cycle sees more rows than the cap, or rows carry a later sighting time.</para>
+    ///
+    /// <para><b>How many it left out is recorded, not counted.</b> The trim counted an over-cap plan once per sweep pass. A
+    /// collector cycle runs far more often than a pass (every minute on the Balanced preset, a pass every 15 minutes), and the
+    /// same plans are left out again each cycle, so adding to <c>collect.oversized_plan_backlog_drops</c> here would read about
+    /// 15 times too high, and the drops would never reach the sweep's run record. This statement instead overwrites one number
+    /// per server and collector in <c>collect.collector_state</c> (<see cref="LeftOutStateOwner"/>, state key the collector): the
+    /// rows it left out on its LATEST cycle. It writes 0 when a cycle leaves none out and the number was not 0, so a server
+    /// that drops back under the cap does not leave a stale number. The sweep takes the number once per pass
+    /// (<see cref="TakeLeftOutSql"/>).</para>
     /// </summary>
-    public const string UpsertSightingSql = @"
-INSERT INTO collect.oversized_plan_backlog AS b
-(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
- database_name, query_hash, observed_bytes, first_seen_at, last_seen_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog DO UPDATE SET
-    last_seen_at = EXCLUDED.last_seen_at,
-    observed_bytes = EXCLUDED.observed_bytes,
-    database_name = COALESCE(EXCLUDED.database_name, b.database_name),
-    query_hash = COALESCE(EXCLUDED.query_hash, b.query_hash),
-    expired_at = NULL;";
+    public static readonly string RecordSightingsSql = "WITH " + IncomingCtes + ",\n" + GateCtes + @",
+pending_after AS
+(
+    SELECT
+        t.collector_name,
+        t.plan_handle,
+        t.sql_handle,
+        t.statement_start_offset,
+        t.statement_end_offset,
+        t.database_name,
+        t.query_hash,
+        t.last_seen_at,
+        t.first_seen_at,
+        t.observed_bytes,
+        false AS is_new
+    FROM collect.oversized_plan_backlog AS t
+    WHERE (SELECT g.over_cap FROM gate AS g)
+    AND   t.server_id = $1
+    AND   " + NeverTriedPendingPredicate + @"
+    AND   NOT
+    (
+        t.collector_name = $2
+        AND EXISTS (SELECT 1 FROM incoming AS i WHERE " + SameKey("t") + @")
+    )
+    UNION ALL
+    SELECT
+        $2::text,
+        i.plan_handle,
+        i.sql_handle,
+        i.statement_start_offset,
+        i.statement_end_offset,
+        COALESCE(i.database_name, e.database_name),
+        COALESCE(i.query_hash, e.query_hash),
+        $10::timestamp,
+        COALESCE(e.first_seen_at, $10::timestamp),
+        i.observed_bytes,
+        e.plan_handle IS NULL
+    FROM incoming AS i
+    LEFT JOIN existing AS e
+      ON " + SameKey("e") + @"
+    WHERE (SELECT g.over_cap FROM gate AS g)
+    AND   (e.plan_handle IS NULL OR (e.captured_at IS NULL AND e.last_attempt_at IS NULL))
+),
+superseded AS
+(
+    SELECT
+        s.collector_name,
+        s.plan_handle,
+        s.sql_handle,
+        s.statement_start_offset,
+        s.statement_end_offset
+    FROM
+    (
+        SELECT
+            p.collector_name,
+            p.plan_handle,
+            p.sql_handle,
+            p.statement_start_offset,
+            p.statement_end_offset,
+            p.last_seen_at,
+            max(p.last_seen_at) OVER
+            (
+                PARTITION BY p.collector_name, p.database_name, p.query_hash
+            ) AS newest_sighting_at
+        FROM pending_after AS p
+        WHERE p.query_hash IS NOT NULL
+    ) AS s
+    WHERE s.last_seen_at < s.newest_sighting_at
+),
+ranked AS
+(
+    SELECT
+        r.*,
+        r.is_new
+        AND r.sighting_rank > $11
+        AND r.total_rows - $11 <= $12
+        AND (SELECT count(*) FROM superseded) < $12 AS would_drop
+    FROM
+    (
+        SELECT
+            p.*,
+            row_number() OVER (ORDER BY " + PendingRankOrder + @") AS sighting_rank,
+            count(*) OVER () AS total_rows
+        FROM pending_after AS p
+        WHERE NOT EXISTS
+        (
+            SELECT 1
+            FROM superseded AS s
+            WHERE s.collector_name = p.collector_name
+            AND   s.plan_handle = p.plan_handle
+            AND   s.sql_handle = p.sql_handle
+            AND   s.statement_start_offset = p.statement_start_offset
+            AND   s.statement_end_offset = p.statement_end_offset
+        )
+    ) AS r
+),
+unsafe_queries AS
+(
+    SELECT
+        q.collector_name,
+        q.database_name,
+        q.query_hash
+    FROM
+    (
+        SELECT
+            p.collector_name,
+            p.database_name,
+            p.query_hash,
+            p.last_seen_at,
+            COALESCE(r.would_drop, false) AS would_drop,
+            max(p.last_seen_at) OVER
+            (
+                PARTITION BY p.collector_name, p.database_name, p.query_hash
+            ) AS newest_sighting_at
+        FROM pending_after AS p
+        LEFT JOIN ranked AS r
+          ON  r.collector_name = p.collector_name
+          AND r.plan_handle = p.plan_handle
+          AND r.sql_handle = p.sql_handle
+          AND r.statement_start_offset = p.statement_start_offset
+          AND r.statement_end_offset = p.statement_end_offset
+        WHERE p.query_hash IS NOT NULL
+    ) AS q
+    GROUP BY
+        q.collector_name,
+        q.database_name,
+        q.query_hash
+    HAVING bool_and(q.would_drop) FILTER (WHERE q.last_seen_at = q.newest_sighting_at)
+    AND    bool_or(q.last_seen_at < q.newest_sighting_at)
+),
+skipped AS
+(
+    SELECT
+        r.plan_handle,
+        r.sql_handle,
+        r.statement_start_offset,
+        r.statement_end_offset
+    FROM ranked AS r
+    WHERE r.would_drop
+    AND   NOT EXISTS
+    (
+        SELECT 1
+        FROM unsafe_queries AS u
+        WHERE u.collector_name = r.collector_name
+        AND   u.database_name IS NOT DISTINCT FROM r.database_name
+        AND   u.query_hash = r.query_hash
+    )
+),
+written AS
+(
+    INSERT INTO collect.oversized_plan_backlog AS b
+    (server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
+     database_name, query_hash, observed_bytes, first_seen_at, last_seen_at)
+    SELECT
+        $1, $2, i.plan_handle, i.sql_handle, i.statement_start_offset, i.statement_end_offset,
+        i.database_name, i.query_hash, i.observed_bytes, $10, $10
+    FROM incoming AS i
+    WHERE NOT EXISTS
+    (
+        SELECT 1
+        FROM skipped AS s
+        WHERE s.plan_handle = i.plan_handle
+        AND   s.sql_handle = i.sql_handle
+        AND   s.statement_start_offset = i.statement_start_offset
+        AND   s.statement_end_offset = i.statement_end_offset
+    )
+    ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog DO UPDATE SET
+        last_seen_at = EXCLUDED.last_seen_at,
+        observed_bytes = EXCLUDED.observed_bytes,
+        database_name = COALESCE(EXCLUDED.database_name, b.database_name),
+        query_hash = COALESCE(EXCLUDED.query_hash, b.query_hash),
+        expired_at = NULL
+),
+left_out AS
+(
+    INSERT INTO collect.collector_state AS s
+    (server_id, collector_name, state_key, state_value, updated_at)
+    SELECT
+        $1,
+        '" + LeftOutStateOwner + @"',
+        $2,
+        c.n::text,
+        $10::timestamp
+    FROM
+    (
+        SELECT count(*) AS n
+        FROM skipped
+    ) AS c
+    WHERE c.n > 0
+    OR    EXISTS
+    (
+        SELECT 1
+        FROM collect.collector_state AS x
+        WHERE x.server_id = $1
+        AND   x.collector_name = '" + LeftOutStateOwner + @"'
+        AND   x.state_key = $2
+        AND   x.state_value <> '0'
+    )
+    ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
+        state_value = EXCLUDED.state_value,
+        updated_at = EXCLUDED.updated_at
+    WHERE s.state_value <> EXCLUDED.state_value
+)
+SELECT count(*)::integer
+FROM skipped;";
 
     /// <summary>
     /// How many already-tried rows one claim of <paramref name="limit"/> rows may take while there are never-tried
@@ -364,12 +751,41 @@ SET last_attempt_at = $7,
         AND   expired_at IS NULL
         AND   last_attempt_at IS NULL";
 
+    /// <summary>The store schema version of the rung that adds <see cref="PendingIndexName"/> (#9452).</summary>
+    public const int PendingIndexVersion = 310;
+
+    /// <summary>
+    /// #9452: the partial index of the rows <see cref="NeverTriedPendingPredicate"/> names, on <c>(server_id)</c> and nothing else.
+    /// <see cref="RecordSightingsSql"/> counts a server's pending rows on every collection cycle. Through
+    /// <c>idx_oversized_plan_backlog_server_bytes</c> that count fetched the heap row of every row the server has to test the three
+    /// columns, tens of thousands of rows and about 20,000 buffers a call, and almost all of them are pending. This index holds exactly
+    /// those rows, so the count is an index-only scan of it. It is built from the same predicate text the statements use, so the planner
+    /// can match them, and it carries no <c>last_seen_at</c>, as a key, an INCLUDE column or in the WHERE: a re-sighting writes that
+    /// column on every cycle, and an index on it would end the heap-only update the upsert gets today. None of the predicate's three
+    /// columns changes on a re-sighting of a waiting row (it clears an <c>expired_at</c> that is already null), so the update stays
+    /// heap-only. Only a row that enters or leaves the pending set writes an entry.
+    /// </summary>
+    public const string PendingIndexName = "idx_oversized_plan_backlog_pending";
+
+    /// <summary>The statement of the rung (<see cref="PendingIndexVersion"/>). Idempotent.</summary>
+    public const string CreatePendingIndexSql =
+        "CREATE INDEX IF NOT EXISTS " + PendingIndexName + " ON collect.oversized_plan_backlog (server_id) WHERE " + NeverTriedPendingPredicate + ";";
+
     /// <summary>
     /// #8691: the head of both trim statements: the rows they drop are deleted, and the statement goes on to count them
     /// (<see cref="DeleteAndCountDroppedRows"/>). Until #8691 a drop stamped <c>expired_at</c> and the row stayed a day so the read
     /// could count it. A held row never kept a plan from coming back: a re-sighting cleared the stamp and the row waited again, so
     /// a deleted row's re-sighting inserts it again as a new pending row and the backlog ends the same, except that the row's first
     /// sighting is the new one.
+    ///
+    /// <para><b>The rows are joined by <c>ctid</c>, not by key (#9452).</b> The statement used to join the table to the limited
+    /// subquery on the six key columns. On a table the planner has no statistics for, or none that match its pending rows, it
+    /// estimates one pending row, and with that estimate the new <see cref="PendingIndexName"/> made the cheapest join the one that
+    /// reads every pending row of the server and re-runs the whole window subquery for each of them. A 68,000-row backlog ran past
+    /// <see cref="CommandTimeoutSeconds"/> where the key join without that index took 0.3 seconds. Joined on <c>ctid</c> the cheapest
+    /// plan under any estimate is the subquery first and one TID fetch per row it names, and with real statistics a hash join.
+    /// A row a collector re-sighted between the subquery and the delete has a new ctid and is left alone, which is what the
+    /// still-waiting conditions of <see cref="DeleteAndCountDroppedRows"/> already ask for.</para>
     /// </summary>
     private const string DeleteDroppedRowsHead = @"
 WITH gone AS
@@ -388,12 +804,8 @@ USING
     /// rows it dropped.
     /// </summary>
     private const string DeleteAndCountDroppedRows = @") AS dropped
-WHERE b.server_id = $1
-AND   b.collector_name = dropped.collector_name
-AND   b.plan_handle = dropped.plan_handle
-AND   b.sql_handle = dropped.sql_handle
-AND   b.statement_start_offset = dropped.statement_start_offset
-AND   b.statement_end_offset = dropped.statement_end_offset
+WHERE b.ctid = dropped.row_id
+AND   b.server_id = $1
 AND   b.captured_at IS NULL
 AND   b.expired_at IS NULL
 AND   b.last_attempt_at IS NULL
@@ -458,17 +870,19 @@ FROM gone;";
     ///
     /// <para>A row with no <c>query_hash</c> is left alone: the module-grain collector describes none, and its
     /// fallbacks key on the handles, so each such row is a plan of its own. A dropped row is not gone for good:
-    /// a later sighting inserts it again (<see cref="UpsertSightingSql"/>) and it waits again.</para>
+    /// a later sighting inserts it again (<see cref="RecordSightingsSql"/>) and it waits again, except that the sighting
+    /// does not insert a new row this trim would drop at once (#8789).</para>
     ///
     /// <para>Oldest sighting first under the limit, so a server far over it sheds its stalest rows first and
     /// the rest on later passes.</para>
     /// </summary>
     public const string SupersedeSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             last_seen_at,
             max(last_seen_at) OVER
@@ -488,7 +902,8 @@ FROM gone;";
     /// <summary>
     /// #8567: drops, unfetched, the never-tried pending rows of one server ($1) past the pending cap ($4), least
     /// recently sighted first, at most $5 rows, and counts them at $2's hour (#8691: <see cref="DeleteAndCountDroppedRows"/>,
-    /// which also says what $3 is). Returns how many it dropped.
+    /// which also says what $3 is). Returns how many it dropped. Rows sighted at the same instant rank the longest-waiting
+    /// first (<see cref="PendingRankOrder"/>, #8789), so a row already in the table is not the one a new row replaces.
     ///
     /// <para>The claim takes never-tried rows largest first, so on a server whose distinct plans arrive faster
     /// than the claim drains them a small plan is never reached, and nothing but the retention horizon removed
@@ -499,15 +914,15 @@ FROM gone;";
     /// </summary>
     public const string DropOverCapSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             row_number() OVER
             (
-                ORDER BY last_seen_at DESC, first_seen_at DESC, observed_bytes DESC,
-                         collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset
+                ORDER BY " + PendingRankOrder + @"
             ) AS sighting_rank
         FROM collect.oversized_plan_backlog
         WHERE server_id = $1
@@ -634,13 +1049,16 @@ LIMIT 1;";
     /// <para>Never throws. A best-effort backlog that cannot be written is a lost opportunity to go back for
     /// a plan, not a reason to fail a collection cycle that stored every row it read.</para>
     /// </summary>
-    /// <returns>How many sightings were written, or 0 when none were attempted or the write failed.</returns>
+    /// <returns>How many sightings were written: the batch less the new rows the statement left out for the trim (#8789), all or nothing
+    /// in one transaction, or 0 when none were attempted or the write failed.</returns>
     public static async Task<int> RecordSightingsAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string collectorName,
         IReadOnlyList<OversizedPlanObservation> observations,
         DateTime sightingUtc,
+        int pendingRowCap,
+        int maxRowsDroppedPerPass,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -655,49 +1073,66 @@ LIMIT 1;";
         /* Naive-UTC storage: Npgsql 6+ infers timestamptz from Kind=Utc and silently zone-shifts — see
            PgCollectorRowWriter. */
         var seenAt = DateTime.SpecifyKind(sightingUtc, DateTimeKind.Unspecified);
-        var written = 0;
+
+        var count = observations.Count;
+        var planHandles = new string[count];
+        var sqlHandles = new string[count];
+        var startOffsets = new int[count];
+        var endOffsets = new int[count];
+        var databaseNames = new string?[count];
+        var queryHashes = new string?[count];
+        var observedBytes = new long[count];
+
+        for (var i = 0; i < count; i++)
+        {
+            var observation = observations[i];
+            planHandles[i] = observation.PlanHandle;
+            sqlHandles[i] = observation.SqlHandle;
+            startOffsets[i] = observation.StatementStartOffset;
+            endOffsets[i] = observation.StatementEndOffset;
+            databaseNames[i] = observation.DatabaseName;
+            queryHashes[i] = observation.QueryHash;
+            observedBytes[i] = observation.ObservedBytes;
+        }
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(UpsertSightingSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.OversizedPlanIntake, cancellationToken).ConfigureAwait(false);
+            await using var command = new NpgsqlCommand(RecordSightingsSql, connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
 
-            /* $1..$10 in statement order; the per-server values are set once, the per-row ones below. */
+            /* $1..$12 in statement order. One statement, so the whole batch is one transaction. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = collectorName });
-            var planHandle = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text });
-            var sqlHandle = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text });
-            var startOffset = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer });
-            var endOffset = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer });
-            var databaseName = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text });
-            var queryHash = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text });
-            var observedBytes = command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = planHandles });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sqlHandles });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = startOffsets });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = endOffsets });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = databaseNames });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = queryHashes });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = observedBytes });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = seenAt });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = pendingRowCap });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = maxRowsDroppedPerPass });
 
-            foreach (var observation in observations)
+            var notInserted = Convert.ToInt32(
+                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+
+            if (notInserted > 0)
             {
-                planHandle.Value = observation.PlanHandle;
-                sqlHandle.Value = observation.SqlHandle;
-                startOffset.Value = observation.StatementStartOffset;
-                endOffset.Value = observation.StatementEndOffset;
-                databaseName.Value = (object?)observation.DatabaseName ?? DBNull.Value;
-                queryHash.Value = (object?)observation.QueryHash ?? DBNull.Value;
-                observedBytes.Value = observation.ObservedBytes;
-
-                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                written++;
+                logger?.LogDebug(
+                    "Oversized-plan backlog: {Collector} on server {ServerId} did not insert {NotInserted} of {Total} new sighting(s) the trim would drop at once (#8789)",
+                    collectorName, serverId, notInserted, count);
             }
+
+            return count - notInserted;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug(
-                "Oversized-plan backlog: {Collector} on server {ServerId} recorded {Written} of {Total} sighting(s) before {Message}",
-                collectorName, serverId, written, observations.Count, ex.Message);
+                "Oversized-plan backlog: {Collector} on server {ServerId} recorded none of {Total} sighting(s): {Message}",
+                collectorName, serverId, count, ex.Message);
+            return 0;
         }
-
-        return written;
     }
 }

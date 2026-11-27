@@ -244,7 +244,7 @@ public sealed class QueryStoreHistoryLivePostgresTests
             Assert.Equal(3, points.GetArrayLength());
             Assert.Equal(new long[] { 7, 9, 7 }, Enumerable.Range(0, 3).Select(n => points[n].GetProperty("plan_id").GetInt64()));
             Assert.Equal(1002, points[0].GetProperty("execution_count").GetInt64());
-            Assert.Equal((1000 * 5.0 + 2 * 30_000.0) / 1002, points[0].GetProperty("avg_duration_ms").GetDouble(), 6);
+            Assert.Equal(Math.Round((1000 * 5.0 + 2 * 30_000.0) / 1002, 3), points[0].GetProperty("avg_duration_ms").GetDouble(), 6);
             Assert.Equal(40, points[1].GetProperty("execution_count").GetInt64());
             Assert.Equal((10 * 100.0 + 30 * 200.0) / 40, points[1].GetProperty("avg_duration_ms").GetDouble(), 6);
             Assert.Equal(6.0, points[2].GetProperty("avg_duration_ms").GetDouble(), 6);

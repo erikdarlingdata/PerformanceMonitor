@@ -6,10 +6,12 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Common;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Notifications;
 
@@ -236,9 +238,13 @@ public sealed record CustomAlertRuleDefinition(
         {
             root = JsonNode.Parse(definitionJson) as JsonObject;
         }
-        catch (Exception ex)
+        catch (JsonException ex)
         {
-            return (null, $"definition is not valid JSON: {ex.Message}");
+            return (null, JsonParseError.Describe("definition", ex));
+        }
+        catch (ArgumentException)
+        {
+            return (null, "definition is not valid JSON.");
         }
 
         if (root is null)

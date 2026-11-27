@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -32,6 +33,8 @@ public sealed class DarlingMcpPeopleTools
 {
     internal const string ToolName = "get_people";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_people"), Description(
         "Lists the people an administrator has named, with each person's identities and grants. A person has a display name and is enabled or disabled; a disabled person's grants do not count. An identity maps a sign-in to the person: kind web is a signed-in web sign-in, kind slack is a Slack user. Only the kind is shown here, never the sign-in key or the Slack ids. A grant names a capability (ask, request_level_2, request_level_3, approve, undo, decide_note, feedback), a scope (one server, one tag, or the fleet) and, for request_level_3 and approve, the server action kinds it covers. Removing a server or tag removes its grants. Grants are not yet checked by any gate. Read-only: only an administrator changes people, in the Viewer or the web dashboard.")]
     public static async Task<string> GetPeople(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)

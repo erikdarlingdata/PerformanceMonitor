@@ -135,7 +135,7 @@ WITH file_totals AS (
         COALESCE(SUM(delta_writes), 0) AS total_writes
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   (delta_reads > 0 OR delta_writes > 0)
     GROUP BY database_name, file_name

@@ -85,6 +85,12 @@ internal static class ComposeHybridColumns
         ["delta_elapsed_time"] = "elapsed_time",
         ["delta_execution_count"] = "execution_count",
     };
+
+    /// <summary>The sources whose hourly-raw-edges FROM item carries the raw restart-rows arm. <c>procedure_stats</c> does not (#9357):
+    /// see <c>ComposeCompiler.HourlyRawEdgesRelation</c> for why a restart row can add no value there.</summary>
+    private static readonly HashSet<string> s_restartRowArmSources = new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+
+    public static bool ReadsRestartRows(string source) => s_restartRowArmSources.Contains(source);
 }
 
 /// <summary>A window the hourly-raw-edges route could serve: the source, its interval-honest hourly successor,
@@ -201,10 +207,10 @@ public static class ComposeSourceRouter
     /// viewer's built-in tabs route off the same value.</summary>
     public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
 
-    /// <summary>The sources the hourly-raw-edges route is enabled for. Only <c>query_stats</c> has been measured
-    /// against its raw read, so <c>procedure_stats</c> (mapped in <see cref="ComposeHybridColumns"/>) stays out.</summary>
+    /// <summary>The sources the hourly-raw-edges route is enabled for: <c>query_stats</c> (#4605) and <c>procedure_stats</c> (#9357).
+    /// Each has an hour ledger that <see cref="IntervalRollupCountGuard"/> reads, and a mapping in <see cref="ComposeHybridColumns"/>.</summary>
     internal static readonly IReadOnlySet<string> HourlyRawEdgesEnabledSources =
-        new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+        new HashSet<string>(StringComparer.Ordinal) { "query_stats", "procedure_stats" };
 
     private static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
     private static readonly TimeSpan HourlyRawEdgesEndSlack = TimeSpan.FromMinutes(1);

@@ -99,7 +99,7 @@ public sealed class CollectionCaveatsTests : IDisposable
 
         var facts = await collector.CollectFactsAsync(context);
 
-        Assert.Equal(32, context.CollectionFamilyCount);
+        Assert.Equal(33, context.CollectionFamilyCount);
         var failure = Assert.Single(context.CollectionFailures);
         Assert.Equal("trace_flag", failure.Family);
         Assert.Equal("CollectTraceFlagFactsAsync", failure.Read);
@@ -142,7 +142,7 @@ public sealed class CollectionCaveatsTests : IDisposable
     /// benign wait every fifteen minutes so the window is observed and nothing fires — is analysed twice:
     /// first CLEAN, where the <c>empty</c> all-clear carries no <c>collection_caveats</c> and states its two
     /// fact counts; then with the <c>trace_flags</c> table dropped, where the same all-clear carries the block naming
-    /// <c>trace_flag</c>, <c>1 of 32</c>, and the caveat sentence in its message.
+    /// <c>trace_flag</c>, <c>1 of 33</c>, and the caveat sentence in its message.
     /// </summary>
     [Fact]
     public async Task AnAllClearOverAFailedFamily_SaysSo_AndACleanOneDoesNot()
@@ -168,7 +168,7 @@ public sealed class CollectionCaveatsTests : IDisposable
         Assert.DoesNotContain("COLLECTION CAVEAT", clean, StringComparison.Ordinal);
         Assert.Contains("All metrics are within normal ranges", clean, StringComparison.Ordinal);
         Assert.Empty(service.LastCollectionFailures);
-        Assert.Equal(32, service.LastCollectionFamilyCount);
+        Assert.Equal(33, service.LastCollectionFamilyCount);
 
         /* ── one family blind: same status, the block and the sentence. */
         await ExecuteAsync("DROP TABLE trace_flags");
@@ -177,11 +177,11 @@ public sealed class CollectionCaveatsTests : IDisposable
         {
             Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
             var message = doc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("All metrics are within normal ranges. COLLECTION CAVEAT: 1 of 32 fact families could not be read (trace_flag (error)), the absence of findings is not evidence", message, StringComparison.Ordinal);
+            Assert.Contains("All metrics are within normal ranges. COLLECTION CAVEAT: 1 of 33 fact families could not be read (trace_flag (error)), the absence of findings is not evidence", message, StringComparison.Ordinal);
 
             var caveats = doc.RootElement.GetProperty("hints").GetProperty("collection_caveats");
             Assert.Equal(1, caveats.GetProperty("families_failed").GetInt32());
-            Assert.Equal(32, caveats.GetProperty("families_total").GetInt32());
+            Assert.Equal(33, caveats.GetProperty("families_total").GetInt32());
             var entry = Assert.Single(caveats.GetProperty("entries").EnumerateArray());
             Assert.Equal("trace_flag", entry.GetProperty("family").GetString());
             Assert.Equal("CollectTraceFlagFactsAsync", entry.GetProperty("read").GetString());
@@ -203,10 +203,11 @@ public sealed class CollectionCaveatsTests : IDisposable
         using (var doc = JsonDocument.Parse(facts))
         {
             Assert.True(doc.RootElement.TryGetProperty("total_facts", out _), "the facts read returned data");
-            Assert.Contains("1 of 32 fact families could not be read (trace_flag (error))", doc.RootElement.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+            Assert.Contains("1 of 33 fact families could not be read (trace_flag (error))", doc.RootElement.GetProperty("caveat").GetString(), StringComparison.Ordinal);
             var caveats = doc.RootElement.GetProperty("collection_caveats");
             Assert.Equal("trace_flag", Assert.Single(caveats.GetProperty("entries").EnumerateArray()).GetProperty("family").GetString());
-            Assert.Equal("collection_caveats", doc.RootElement.EnumerateObject().Last().Name);
+            /* #9195: the budget keys (budget_truncated, budget_note) close every facts answer; the caveat block is still the last thing the pass itself adds. */
+            Assert.Equal("collection_caveats", doc.RootElement.EnumerateObject().Select(p => p.Name).Last(n => n is not ("budget_truncated" or "budget_note")));
         }
     }
 

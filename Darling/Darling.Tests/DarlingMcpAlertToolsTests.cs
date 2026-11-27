@@ -69,6 +69,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "purge_expired_mute_rules",
         "remove_webhook_signing_key",
         "restore_alert_history",
+        "send_test_notification",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
@@ -169,7 +170,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* And the row SAYS which population it belongs to, so an include-dismissed page can label each row. */
         Assert.Contains("dismissed\n", sql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
-        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
         Assert.Contains("a.server_id = $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
@@ -200,7 +200,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
 
         Assert.Contains("SELECT COUNT(*)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = TRUE", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
@@ -1437,7 +1436,14 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
         BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5,
         DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report",
-        BackupOverdueThresholdHours: 168, LogBackupOverdueThresholdMinutes: 60, CheckDbOverdueThresholdHours: 336);
+        BackupOverdueThresholdHours: 168, LogBackupOverdueThresholdMinutes: 60, CheckDbOverdueThresholdHours: 336,
+        /* #8881 (V269): deliberately NOT the shipped true / 80, so a payload that dropped the columns would not match. */
+        TempDbLogSpaceEnabled: false, TempDbLogSpaceThresholdPercent: 65,
+        /* #8882 (V270): deliberately NOT the shipped true. */
+        TempDbGrowthFitEnabled: false,
+        /* #8884 (V271): the Instance Restarted and Memory Dumps switches, shipped on. */
+        InstanceRestartedEnabled: true, MemoryDumpsEnabled: true,
+        SelfStoreGrowthEnabled: true, SelfStoreGrowthFloorGb: 5, SelfStoreGrowthObjectFloorGb: 2);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

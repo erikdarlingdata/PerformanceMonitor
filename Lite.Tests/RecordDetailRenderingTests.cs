@@ -418,21 +418,20 @@ public class RecordDetailRenderingTests
         Assert.DoesNotContain("#1 Database", text, StringComparison.Ordinal);
     }
 
-    /// <summary>Teams: one fact per record — name <c>#N</c>, value the summary over the text in inline code
-    /// — instead of one per attribute; three facts for three queries.</summary>
+    /// <summary>Teams: one fact per record — title <c>#N</c>, value the summary, the row's text under it in a
+    /// monospace run — instead of one per attribute; three facts for three queries.</summary>
     [Fact]
     public void Teams_RendersRecordsAsOneFactPerRow()
     {
         var context = FindingMessageFormatter.BuildContext(HighCpuFinding(), 1.5);
         var item = Assert.Single(context.Details, d => d.Heading == "Top Cpu Queries");
-        using var doc = JsonDocument.Parse(Teams(context));
+        var section = TeamsCard.Parse(Teams(context)).Section("Top Cpu Queries");
 
-        var section = Assert.Single(doc.RootElement.GetProperty("sections").EnumerateArray(),
-            s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Top Cpu Queries");
-        var facts = section.GetProperty("facts").EnumerateArray().ToList();
-        Assert.Equal(3, facts.Count);
-        Assert.Equal(new[] { "#1", "#2", "#3" }, facts.Select(f => f.GetProperty("name").GetString()));
-        Assert.Equal(item.Records[0].Summary + "  \n`" + QueryText(0) + "`", facts[0].GetProperty("value").GetString());
+        Assert.Equal(new[] { "#1", "#2", "#3" }, section.Facts.Select(f => f.Title));
+        Assert.Equal(item.Records[0].Summary, section.Facts[0].Value);
+        /* Each row's SQL is its own monospace TextRun, exactly as the text is. */
+        Assert.Equal(new[] { QueryText(0), QueryText(1), QueryText(2) }, section.Runs);
+        Assert.Empty(section.Texts);
     }
 
     /* ---------------- byte identity ---------------- */
@@ -478,10 +477,9 @@ public class RecordDetailRenderingTests
         Assert.Contains(slackRun[1..^1], Slack(context), StringComparison.Ordinal);
 
         /* Teams: one fact per field, per detail section. */
-        using var teams = JsonDocument.Parse(Teams(context));
-        var chain = Assert.Single(teams.RootElement.GetProperty("sections").EnumerateArray(), s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Blocking Chain 1");
+        var chain = TeamsCard.Parse(Teams(context)).Section("Blocking Chain 1");
         Assert.Equal(context.Details[3].Fields.Select(f => (f.Label, f.Value.Replace("*", @"\*", StringComparison.Ordinal))), /* #5654: markdown characters in card text are backslash-escaped */
-            chain.GetProperty("facts").EnumerateArray().Select(f => (f.GetProperty("name").GetString()!, f.GetProperty("value").GetString()!)));
+            chain.Facts);
 
         /* Email: the fields table, label column then value, the SQL-labelled ones in <pre>. */
         var (html, text) = Email(context);

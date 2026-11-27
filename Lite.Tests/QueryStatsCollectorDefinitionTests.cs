@@ -44,7 +44,11 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("sys.dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE N'%PerformanceMonitorLite%'", plan.Text, StringComparison.Ordinal);
-        Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
+        Assert.Equal("SO", plan.Parameters.Single(p => p.Name == "@excl_db_0").Value);
+
+        /* #9533: the read watermark parameters are always bound, NULL on a calculator that keeps none. */
+        Assert.Null(plan.Parameters.Single(p => p.Name == "@changed_since").Value);
+        Assert.Null(plan.Parameters.Single(p => p.Name == "@max_age_seconds").Value);
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
@@ -57,7 +61,9 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.DoesNotContain("dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);
         Assert.True(QueryStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
-        Assert.Empty(plan.Parameters);
+        /* #9533: the only parameters are the read watermark's, bound NULL on a calculator that keeps none. */
+        Assert.Equal(new[] { "@changed_since", "@max_age_seconds" }, plan.Parameters.Select(p => p.Name));
+        Assert.All(plan.Parameters, p => Assert.Null(p.Value));
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }

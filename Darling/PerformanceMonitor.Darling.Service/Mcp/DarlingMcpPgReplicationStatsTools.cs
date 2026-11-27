@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -41,7 +42,26 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgReplicationStatsTools
 {
-    [McpServerTool(Name = "get_pg_replication_stats"), Description("Gets CONNECTED PostgreSQL replica health from pg_stat_replication: attach state, sync_state, bytes behind on send/replay, and replay lag ms. Read the WORST value beside the latest; lag is spiky and the peak is what matters. sync_state: synchronous lag is also commit latency on the primary; asynchronous is not. Rows are SAMPLED, so empty is not proof no replica ever attached - check get_pg_replication_slots, whose slot retains WAL even with nothing connected. <<GUIDE>> Gets the health of CONNECTED PostgreSQL replicas from pg_stat_replication: which replicas are attached, their state and sync state, how many bytes behind they are on send and on replay, and replay lag in milliseconds - with the WORST value seen in the window beside the latest, because lag is spiky and the peak is the fact that matters. This is the counterpart of get_pg_replication_slots and answers a different question: a slot describes what the primary RETAINS for a replica and exists even when nothing is attached, which is the disk-filling case; this describes replicas that are actually connected. A replica that disappears from this tool while its slot persists is the dangerous combination. sync_state distinguishes synchronous replicas, where lag is also commit latency on the primary, from asynchronous ones where it is not. Rows are SAMPLED, so a replica that connected and left between captures may not appear.")]
+    /// <summary>
+    /// #8920: the claim and tail of an empty answer. Aurora readers read the shared storage volume and never appear in
+    /// <c>pg_stat_replication</c>, so on an Aurora target the empty answer is permanent and the "check the slots for a
+    /// missing replica" advice does not apply. Reader lag would need <c>aurora_replica_status()</c>, which no collector reads.
+    /// </summary>
+    internal static (string Factual, string CoveredClaim, string Tail) EmptyWords(bool isAurora, string displayName, string window) => isAurora
+        ? ($"No standby was streaming from {displayName} {window}",
+            ". On an Aurora target that is the expected answer.",
+            " Aurora readers use the shared storage volume instead of streaming replication, so they never appear in "
+            + "pg_stat_replication and this read is always empty on an Aurora writer. That is not a replication fault. "
+            + "Reader lag would need aurora_replica_status(), which Performance Monitor does not read.")
+        : ($"No replica was connected to {displayName} {window}",
+            ". On a server with no replicas that is the expected answer.",
+            " If a "
+            + "replica is supposed to be attached, check get_pg_replication_slots: a slot "
+            + "that persists with nothing connected to it retains WAL indefinitely, which is "
+            + "the case worth acting on.");
+
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_pg_replication_stats"), Description("Gets CONNECTED PostgreSQL replica health from pg_stat_replication: attach state, sync_state, bytes behind on send/replay, and replay lag ms. Read the WORST value beside the latest; lag is spiky and the peak is what matters. sync_state: synchronous lag is also commit latency on the primary; asynchronous is not. Rows are SAMPLED, so empty is not proof no replica ever attached - check get_pg_replication_slots, whose slot retains WAL even with nothing connected. <<GUIDE>> Gets the health of CONNECTED PostgreSQL replicas from pg_stat_replication: which replicas are attached, their state and sync state, how many bytes behind they are on send and on replay, and replay lag in milliseconds - with the WORST value seen in the window beside the latest, because lag is spiky and the peak is the fact that matters. This is the counterpart of get_pg_replication_slots and answers a different question: a slot describes what the primary RETAINS for a replica and exists even when nothing is attached, which is the disk-filling case; this describes replicas that are actually connected. A replica that disappears from this tool while its slot persists is the dangerous combination. sync_state distinguishes synchronous replicas, where lag is also commit latency on the primary, from asynchronous ones where it is not. Rows are SAMPLED, so a replica that connected and left between captures may not appear. On Aurora this read is always empty: Aurora readers use the shared storage volume instead of streaming replication, so they never appear in pg_stat_replication.")]
     public static async Task<string> GetPgReplicationStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -78,6 +98,10 @@ public sealed class DarlingMcpPgReplicationStatsTools
                     return notCollected;
                 }
 
+                /* #8920: an Aurora writer's grid is always empty, so its words must not read as a missing replica. */
+                var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
+                var emptyWords = EmptyWords(
+                    MonitoredEngineKind.IsAurora(engineKind), resolved.DisplayName, McpHelpers.InTheLast(CountText.Plural(hours_back, "hour")));
                 /* #4966: the empty answer carries the window floor under hints. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
@@ -85,13 +109,9 @@ public sealed class DarlingMcpPgReplicationStatsTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No replica was connected to {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}"
-                                + "",
-                            coveredClaim: ". On a server with no replicas that is the expected answer.",
-                            tail: " If a "
-                                + "replica is supposed to be attached, check get_pg_replication_slots: a slot "
-                                + "that persists with nothing connected to it retains WAL indefinitely, which is "
-                                + "the case worth acting on."),
+                            factual: emptyWords.Factual,
+                            coveredClaim: emptyWords.CoveredClaim,
+                            tail: emptyWords.Tail),
                         emptyNotice.AsHints()), emptyNotice), cancellationToken, windowStart);
             }
 

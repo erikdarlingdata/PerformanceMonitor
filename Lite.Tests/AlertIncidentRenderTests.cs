@@ -71,9 +71,9 @@ public class AlertIncidentRenderTests
     public void TeamsPayload_EachFieldsItem_GetsItsOwnLabeledSection()
     {
         /* #2108: the association between an item's fields IS the item boundary — a flat fact list
-           loses it. Each Fields-carrying detail item becomes its own MessageCard section, titled by
+           loses it. Each Fields-carrying detail item becomes its own section of the Teams card, titled by
            its heading and carrying ONLY its own facts; advice prose stays folded into the lead
-           section, because it is commentary on the whole alert. */
+           facts, because it is commentary on the whole alert. */
         var ctx = new AlertContext();
         ctx.Details.Add(new AlertDetailItem
         {
@@ -89,27 +89,20 @@ public class AlertIncidentRenderTests
 
         var payload = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
 
-        using var doc = System.Text.Json.JsonDocument.Parse(payload);
-        var sections = doc.RootElement.GetProperty("sections").EnumerateArray().ToList();
-        /* lead + one per Fields item + snooze-hint text section (Branding has none here → 3). */
-        Assert.Equal(3, sections.Count);
+        var card = TeamsCard.Parse(payload);
+        /* One section per Fields item, and no snooze footer (Branding has none here). */
+        Assert.Equal(2, card.Sections.Count);
 
-        var lead = sections[0];
-        Assert.Contains("Deadlocks Detected", lead.GetProperty("activityTitle").GetString());
-        Assert.Contains(lead.GetProperty("facts").EnumerateArray(),
-            f => f.GetProperty("name").GetString() == "Advice");
+        Assert.Contains("Deadlocks Detected", card.Title);
+        Assert.Contains(card.Facts, f => f.Title == "Advice");
 
-        var first = sections[1];
-        Assert.Equal("Deadlock 1 of 2", first.GetProperty("activityTitle").GetString());
-        var firstFacts = first.GetProperty("facts").EnumerateArray().ToList();
-        Assert.Equal(2, firstFacts.Count);
-        Assert.Equal("SalesDB", firstFacts[0].GetProperty("value").GetString());
-        Assert.Equal("aaa", firstFacts[1].GetProperty("value").GetString());
+        var first = card.Sections[0];
+        Assert.Equal("Deadlock 1 of 2", first.Heading);
+        Assert.Equal([("Database", "SalesDB"), ("Dedup Key", "aaa")], first.Facts);
 
-        var second = sections[2];
-        Assert.Equal("Deadlock 2 of 2", second.GetProperty("activityTitle").GetString());
-        Assert.Contains(second.GetProperty("facts").EnumerateArray(),
-            f => f.GetProperty("value").GetString() == "bbb");
+        var second = card.Sections[1];
+        Assert.Equal("Deadlock 2 of 2", second.Heading);
+        Assert.Contains(second.Facts, f => f.Value == "bbb");
     }
 
     /// <summary>
@@ -272,10 +265,9 @@ public class AlertIncidentRenderTests
         });
 
         var teams = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
-        using var teamsDoc = System.Text.Json.JsonDocument.Parse(teams);
-        var leadFacts = teamsDoc.RootElement.GetProperty("sections")[0].GetProperty("facts").EnumerateArray().ToList();
-        Assert.Contains(leadFacts, f => f.GetProperty("name").GetString() == "Resource" && f.GetProperty("value").GetString() == "SalesDB.dbo.Orders");
-        Assert.Contains(leadFacts, f => f.GetProperty("name").GetString() == "Database" && f.GetProperty("value").GetString() == "SalesDB");
+        var leadFacts = TeamsCard.Parse(teams).Facts;
+        Assert.Contains(("Resource", "SalesDB.dbo.Orders"), leadFacts);
+        Assert.Contains(("Database", "SalesDB"), leadFacts);
 
         var slack = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
         Assert.Contains("*Resource:*\\nSalesDB.dbo.Orders", slack);
@@ -288,7 +280,7 @@ public class AlertIncidentRenderTests
         var teams = WebhookAlertService.BuildTeamsPayload("High CPU", "S1", "97%", "90%", Branding);
         var slack = WebhookAlertService.BuildSlackPayload("High CPU", "S1", "97%", "90%", Branding);
 
-        Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+        Assert.DoesNotContain(TeamsCard.Parse(teams).Facts, f => f.Title == "Resource");
         Assert.DoesNotContain("Resource:", slack);
     }
 
@@ -306,7 +298,7 @@ public class AlertIncidentRenderTests
         AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("k", new[] { "" }) });
 
         var teams = WebhookAlertService.BuildTeamsPayload("Low Disk Space", "S1", "5%", "10%", Branding, context: ctx);
-        Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+        Assert.DoesNotContain(TeamsCard.Parse(teams).Facts, f => f.Title == "Resource");
     }
 
     /// <summary>

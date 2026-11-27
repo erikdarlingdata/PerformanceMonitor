@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 
 /// <summary>
 /// #8184: the opt-in health port for Kubernetes probes. It reads its own <c>health</c> block (file-only, a change needs a restart),
-/// runs a slim Kestrel app on its own port and serves <c>GET /livez</c> and <c>GET /readyz</c>, one word each, with no token, no
+/// runs a slim Kestrel app on its own port and serves <c>GET /livez</c> and <c>GET /readyz</c>, one word each (on a front door, <c>/readyz</c> adds a second line with the build object, #9431), with no token, no
 /// <c>allowFrom</c> and no TLS. Registered before the worker so it listens before migrations and before any ownership check can stop
 /// the start. It reads only the blocks it needs and resolves no secret, so a <c>darling.json</c> that fails <c>Validate()</c>, or
 /// names a store secret that cannot be resolved, still serves (<c>stopped</c>). A bad <c>health</c> block turns off only the port,
@@ -106,7 +107,12 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             /* #8184: the sibling hosts' pins. EnvironmentName: an ambient ASPNETCORE_ENVIRONMENT=Development must not put the developer
                exception page on an unauthenticated listener (#4281 review, finding 4). The empty Kestrel configuration: a
                Kestrel__Endpoints__* variable or an appsettings file must not add a second listener or fail the start (#5288). */
-            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+                /* #9837: not the working folder, which the builder would watch with every folder under it. */
+                ContentRootPath = DarlingHostBinding.ContentRoot,
+            });
             builder.Logging.ClearProviders();
             var listenAddress = address;
             builder.WebHost.ConfigureKestrel(options =>
@@ -116,9 +122,12 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
                 options.Listen(listenAddress, port, l => l.Protocols = HttpProtocols.Http1);
             });
             app = builder.Build();
-            MapRoutes(app, probe => isFrontDoor
-                ? DarlingHealthEndpoints.AnswerFrontDoor(probe, _collector.Read(), _frontDoor.Stores)
-                : DarlingHealthEndpoints.Answer(probe, _collector.Read()));
+            MapRoutes(
+                app,
+                probe => isFrontDoor
+                    ? DarlingHealthEndpoints.AnswerFrontDoor(probe, _collector.Read(), _frontDoor.Stores)
+                    : DarlingHealthEndpoints.Answer(probe, _collector.Read()),
+                isFrontDoor ? () => DarlingFrontDoorVersion.Describe(_frontDoor.Stores, DarlingFrontDoorVersion.ProcessStartUtc) : null);
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
 
             _app = app;
@@ -181,17 +190,20 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
         }
     }
 
-    internal static void MapRoutes(IEndpointRouteBuilder app, Func<HealthProbe, HealthAnswer> answer)
+    /// <summary>#9431: <paramref name="readyDetail"/> is the front door's build object (<see cref="DarlingFrontDoorVersion.Describe"/>). When it is
+    /// given, <c>/readyz</c> sends the word on the first line and the object as JSON on the second, so a probe that reads the first line or
+    /// only the status code sees what it saw before.</summary>
+    internal static void MapRoutes(IEndpointRouteBuilder app, Func<HealthProbe, HealthAnswer> answer, Func<JsonObject>? readyDetail = null)
     {
         app.MapGet("/livez", context => Write(context, answer(HealthProbe.Live)));
-        app.MapGet("/readyz", context => Write(context, answer(HealthProbe.Ready)));
+        app.MapGet("/readyz", context => Write(context, answer(HealthProbe.Ready), readyDetail));
     }
 
-    private static Task Write(HttpContext context, HealthAnswer answer)
+    private static Task Write(HttpContext context, HealthAnswer answer, Func<JsonObject>? detail = null)
     {
         context.Response.StatusCode = answer.StatusCode;
         context.Response.ContentType = "text/plain; charset=utf-8";
-        return context.Response.WriteAsync(answer.Word);
+        return context.Response.WriteAsync(detail is null ? answer.Word : answer.Word + "\n" + detail().ToJsonString());
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

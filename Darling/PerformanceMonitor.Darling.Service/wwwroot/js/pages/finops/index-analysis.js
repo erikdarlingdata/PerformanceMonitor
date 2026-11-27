@@ -46,6 +46,8 @@ const ROLLUP_COLUMNS = [
   { key: "indexes_to_merge", label: "To Merge", format: "int" },
   { key: "compressable_indexes", label: "Compressible", format: "int" },
   { key: "unused_indexes", label: "Unused", format: "int" },
+  // #8880: heaps listed as Heap REVIEW findings, in none of the other figures.
+  { key: "heaps", label: "Heaps", format: "int" },
   gbColumn("unused_size_gb", "Disable"),
   gbColumn("compression_min_savings_gb", "Compress Min"),
   gbColumn("compression_max_savings_gb", "Compress Max"),

@@ -58,10 +58,17 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         return (int)field!.GetRawConstantValue()!;
     }
 
+    /// <summary>The samples the newest lookup span reads in these tests. The all-servers search reads the newest samples first and the matched
+    /// texts only when samples are left after them, and the seed's 3,002 samples are fewer than that span reads by default, so the search would
+    /// end there with the texts never matched. At two samples the span ends at the newest collection time and the read under test (the probe,
+    /// or the lookup spans past the cap) has the rest of the window.</summary>
+    private const int NewestSpanRows = 2;
+
     private static Task<string> RunTool(NpgsqlDataSource data, string pattern, QueryTextTrigramIndexTracker tracker, int limit, CancellationToken ct) =>
         DarlingMcpFindQueriesByTextTools.FindQueriesByText(
             data, pattern, null, null, limit, McpDataDetail.Full,
-            DarlingMcpFindQueriesByTextTools.SourceBudget.Default, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct, tracker);
+            DarlingMcpFindQueriesByTextTools.SourceBudget.Default,
+            new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds) { SpanRows = NewestSpanRows }, ct, tracker);
 
     private static async Task<bool?> SampleIndexValidAsync(NpgsqlDataSource data, CancellationToken ct)
     {
@@ -111,6 +118,10 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Floor() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(1), DateTimeKind.Unspecified) });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = Array.Empty<int>() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
         return Convert.ToString(await explain.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
     }
 
@@ -237,6 +248,12 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         var tracker = new QueryTextTrigramIndexTracker();
         tracker.Configure(true);
         Assert.True((await DigestsOfAsync(data, "dbo.Orders_", ct)).Length > ProbeDigestCap(), "the fixture's pattern must match more texts than the cap");
+        /* #9150: the join runs a span at a time, and a span of a store nobody has analyzed yet is planned as a few rows, which the planner joins to the matched texts one text at a time. */
+        await using (var c = await data.OpenConnectionAsync(ct))
+        {
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE collect.query_text_dim");
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE query_stats");
+        }
 
         var reply = JsonDocument.Parse(await RunTool(data, "dbo.Orders_", tracker, DarlingMcpFindQueriesByTextTools.MaxLimit, ct)).RootElement;
 
@@ -365,7 +382,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
 
         Assert.Null(await SampleIndexValidAsync(data, ct));
     }
-    /// <summary>One budget covers the source: the sample statement runs under what the matched-digest read left of the 4 s, not the 4 s again. The
+    /// <summary>One budget covers the source: a sample statement runs under what the reads before it left of the 4 s, not the 4 s again. The
     /// clock is injected (1.5 s spent), so the remainder is a fixed 2.5 s, and the hook reads it back from the sample statement's connection.</summary>
     [Fact]
     public async Task TheSampleStatement_RunsUnderWhatIsLeftOfTheBudget()
@@ -379,6 +396,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         string? timeout = null;
         var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(4000)
         {
+            SpanRows = NewestSpanRows,
             ElapsedClock = () => TimeSpan.FromMilliseconds(1500),
             BeforeStatement = async (connection, transaction, token) =>
             {
@@ -395,7 +413,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         Assert.Equal(2500, TimeoutMilliseconds(timeout));
     }
 
-    /// <summary>A budget the matched-digest read spent leaves nothing for the sample statement: the source is stopped and the sample statement never runs.</summary>
+    /// <summary>A budget already spent leaves nothing for the sample statement: the source is stopped and the sample statement never runs.</summary>
     [Fact]
     public async Task ABudgetTheDigestReadSpent_StopsTheSource_BeforeTheSampleStatement()
     {

@@ -136,6 +136,7 @@ public static partial class DarlingWebEndpoints
         "/api/read/get_pvs_stats",
         "/api/read/get_index_usage",
         "/api/read/get_object_locking",
+        "/api/read/get_object_usage",
         "/api/read/get_table_index_sizes",
         "/api/read/get_cpu_scheduler_pressure",
         "/api/read/get_plan_cache_bloat",

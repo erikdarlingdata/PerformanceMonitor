@@ -44,7 +44,8 @@ public class CredentialTests : IDisposable
     {
         var name = Env(value!);
         var ex = Assert.Throws<CredentialException>(() => CredentialResolver.Resolve(new CredentialSpec("env", Name: name)));
-        Assert.Contains(name, ex.Message);
+        Assert.StartsWith("store.password: the environment variable it names", ex.Message);
+        Assert.DoesNotContain(name, ex.Message);
     }
 
     [Fact]
@@ -117,6 +118,7 @@ public class CredentialTests : IDisposable
         var unset = Env(null!);
         var ex = Assert.Throws<CredentialException>(() => CredentialResolver.Resolve(new CredentialSpec("connection_string_env", Name: unset)));
         Assert.Contains("store.connection_string_env", ex.Message);
+        Assert.DoesNotContain(unset, ex.Message);
     }
 
     [Fact]

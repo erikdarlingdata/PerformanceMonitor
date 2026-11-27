@@ -113,6 +113,10 @@ public partial class SettingsWindow : Window
         ArgumentNullException.ThrowIfNull(appSettingsStore);
 
         InitializeComponent();
+        /* Opens taller than a 768 screen's work area, so cap it to the work area of the monitor it is on the way the Add Server
+           dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
 
         _appSettingsStore = appSettingsStore;
         _appSettings = appSettingsStore.Load();
@@ -141,6 +145,12 @@ public partial class SettingsWindow : Window
         QueryStoreTextBudgetMbTextBox.Text = "64";
         MaxConcurrentSweepsTextBox.Text = "4";
         QueryStoreFetchTopNTextBox.Text = "100";
+        /* #9638: the three settings darling.json only seeds. The store read overwrites these. */
+        PlanXmlCompressionComboBox.ItemsSource = ServiceSeedSettings.CompressionChoices;
+        PlanContentRetentionDaysTextBox.Text = ServiceSeedSettings.DefaultRetentionDays.ToString(CultureInfo.InvariantCulture);
+        ComposeStatementTimeoutSecondsTextBox.Text = ServiceSeedSettings.DefaultTimeoutSeconds.ToString(CultureInfo.InvariantCulture);
+        PlanXmlCompressionComboBox.SelectedItem = ServiceSeedSettings.DefaultCompression;
+        ServiceSeedSettingsHelp.Text = ServiceSeedSettings.HelpText;
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -190,6 +200,9 @@ public partial class SettingsWindow : Window
                 QueryStoreTextBudgetMbTextBox.Text = sections.Service.QueryStoreTextBudgetMb.ToString(CultureInfo.InvariantCulture);
                 MaxConcurrentSweepsTextBox.Text = sections.Service.MaxConcurrentSweeps.ToString(CultureInfo.InvariantCulture);
                 QueryStoreFetchTopNTextBox.Text = sections.Service.QueryStoreFetchTopN.ToString(CultureInfo.InvariantCulture);
+                PlanContentRetentionDaysTextBox.Text = ServiceSeedSettings.EffectiveRetentionDays(sections.Service.PlanContentRetentionDays).ToString(CultureInfo.InvariantCulture);
+                ComposeStatementTimeoutSecondsTextBox.Text = ServiceSeedSettings.EffectiveTimeoutSeconds(sections.Service.ComposeStatementTimeoutSeconds).ToString(CultureInfo.InvariantCulture);
+                PlanXmlCompressionComboBox.SelectedItem = ServiceSeedSettings.EffectiveCompression(sections.Service.PlanXmlCompression);
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -543,8 +556,12 @@ public partial class SettingsWindow : Window
     /// with a bad port keeps its last-known value and does not block the save).</summary>
     private bool TryReadServiceFlags(
         out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort,
-        out int textBudgetMb, out int maxSweeps, out int fetchTopN)
+        out int textBudgetMb, out int maxSweeps, out int fetchTopN,
+        out int planRetentionDays, out int composeTimeoutSeconds, out string planXmlCompression)
     {
+        planRetentionDays = ServiceSeedSettings.DefaultRetentionDays;
+        composeTimeoutSeconds = ServiceSeedSettings.DefaultTimeoutSeconds;
+        planXmlCompression = ServiceSeedSettings.DefaultCompression;
         capturePlans = CapturePlansCheckBox.IsChecked == true;
         textBudgetMb = 64;
         maxSweeps = 4;
@@ -621,6 +638,22 @@ public partial class SettingsWindow : Window
             MessageBox.Show(
                 ServiceFlagLimits.FetchTopNMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        /* #9638: plan retention, the composed reads' timeout and the plan storage form. Always in force, like the knobs above. */
+        var seedRefusal = ServiceSeedSettings.TryRead(
+            PlanContentRetentionDaysTextBox.Text, ComposeStatementTimeoutSecondsTextBox.Text, PlanXmlCompressionComboBox.SelectedItem as string,
+            out planRetentionDays, out composeTimeoutSeconds, out planXmlCompression, out var seedBadField);
+        if (seedRefusal is not null)
+        {
+            SelectTabOf(seedBadField switch
+            {
+                ServiceSeedSettings.RetentionDaysField => PlanContentRetentionDaysTextBox,
+                ServiceSeedSettings.TimeoutSecondsField => ComposeStatementTimeoutSecondsTextBox,
+                _ => PlanXmlCompressionComboBox,
+            });
+            MessageBox.Show(seedRefusal, "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
@@ -924,6 +957,11 @@ public partial class SettingsWindow : Window
         AlertExcludedVolumesBox.Text = SettingsListText.Join(r.ExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
+        AlertTempDbLogSpaceCheckBox.IsChecked = r.TempDbLogSpaceEnabled;
+        AlertTempDbLogSpaceThresholdBox.Text = r.TempDbLogSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
+        AlertTempDbGrowthFitCheckBox.IsChecked = r.TempDbGrowthFitEnabled;
+        AlertInstanceRestartedCheckBox.IsChecked = r.InstanceRestartedEnabled;
+        AlertMemoryDumpsCheckBox.IsChecked = r.MemoryDumpsEnabled;
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
@@ -931,6 +969,9 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnGbBox.Text = r.SelfDiskFreeWarnGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfStoreGrowthCheckBox.IsChecked = r.SelfStoreGrowthEnabled;
+        AlertSelfStoreGrowthFloorGbBox.Text = r.SelfStoreGrowthFloorGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfStoreGrowthObjectFloorGbBox.Text = r.SelfStoreGrowthObjectFloorGb.ToString(CultureInfo.InvariantCulture);
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
@@ -1078,6 +1119,10 @@ public partial class SettingsWindow : Window
             LongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList(),
             LongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList(),
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
+            TempDbLogSpaceEnabled = AlertTempDbLogSpaceCheckBox.IsChecked == true,
+            TempDbGrowthFitEnabled = AlertTempDbGrowthFitCheckBox.IsChecked == true,
+            InstanceRestartedEnabled = AlertInstanceRestartedCheckBox.IsChecked == true,
+            MemoryDumpsEnabled = AlertMemoryDumpsCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
             FileGrowthEnabled = AlertFileGrowthCheckBox.IsChecked == true,
@@ -1190,6 +1235,8 @@ public partial class SettingsWindow : Window
             row.LongRunningQueryMaxResults = lrqMax;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb is > 0 and <= 100)
             row.TempDbSpaceThresholdPercent = tempDb;
+        if (int.TryParse(AlertTempDbLogSpaceThresholdBox.Text, out var tempDbLog) && tempDbLog is > 0 and <= 100)
+            row.TempDbLogSpaceThresholdPercent = tempDbLog;
         if (int.TryParse(AlertLowDiskThresholdPercentBox.Text, out var lowDiskPct) && lowDiskPct is >= 0 and <= 100)
             row.LowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
@@ -1205,6 +1252,12 @@ public partial class SettingsWindow : Window
            writer accepts ([0, int.MaxValue]) — 0 is IN range because it removes the floor. */
         if (int.TryParse(AlertSelfDiskWarnGbBox.Text, out var selfDiskGb) && selfDiskGb >= 0)
             row.SelfDiskFreeWarnGb = selfDiskGb;
+        /* #9000: a floor of 0 is in range because it removes that floor. */
+        row.SelfStoreGrowthEnabled = AlertSelfStoreGrowthCheckBox.IsChecked == true;
+        if (int.TryParse(AlertSelfStoreGrowthFloorGbBox.Text, out var growthFloorGb) && growthFloorGb >= 0)
+            row.SelfStoreGrowthFloorGb = growthFloorGb;
+        if (int.TryParse(AlertSelfStoreGrowthObjectFloorGbBox.Text, out var growthObjectFloorGb) && growthObjectFloorGb >= 0)
+            row.SelfStoreGrowthObjectFloorGb = growthObjectFloorGb;
         if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
             row.CollectionStaleMinutes = staleMin;
         if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
@@ -1420,6 +1473,7 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         AlertTempDbSpaceThresholdBox.Text = "80";
+        AlertTempDbLogSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
         /* #2107: the previously-hardcoded knobs reset to the constants they replaced. */
@@ -1430,6 +1484,10 @@ public partial class SettingsWindow : Window
            constant lives on the Service assembly the viewer does not reference, and the V126 rung test
            pins this literal equal to it. */
         AlertSelfDiskWarnGbBox.Text = "50";
+        /* #9000: the V276 defaults. */
+        AlertSelfStoreGrowthCheckBox.IsChecked = true;
+        AlertSelfStoreGrowthFloorGbBox.Text = "5";
+        AlertSelfStoreGrowthObjectFloorGbBox.Text = "2";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
         /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored default — it is
@@ -1597,10 +1655,18 @@ public partial class SettingsWindow : Window
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
+        if (AlertTempDbLogSpaceCheckBox.IsChecked == true)
+            parts.Add($"tempdb log > {AlertTempDbLogSpaceThresholdBox.Text}%");
+        if (AlertTempDbGrowthFitCheckBox.IsChecked == true)
+            parts.Add("tempdb growth will not fit");
         if (AlertLowDiskCheckBox.IsChecked == true)
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertInstanceRestartedCheckBox.IsChecked == true)
+            parts.Add("instance restarted");
+        if (AlertMemoryDumpsCheckBox.IsChecked == true)
+            parts.Add("memory dumps");
         if (AlertAgentAlertGapsCheckBox.IsChecked == true)
             parts.Add("Agent alert setup gaps");
         if (AlertBackupOverdueCheckBox.IsChecked == true)
@@ -1701,6 +1767,11 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceCheckBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbGrowthFitCheckBox.IsEnabled = enabled;
+        AlertInstanceRestartedCheckBox.IsEnabled = enabled;
+        AlertMemoryDumpsCheckBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;
@@ -1719,6 +1790,9 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalGbBox.IsEnabled = enabled;
         AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
         AlertSelfDiskWarnGbBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthCheckBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthFloorGbBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthObjectFloorGbBox.IsEnabled = enabled;
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
@@ -2540,7 +2614,8 @@ public partial class SettingsWindow : Window
         var errors = new SettingsValidationErrors();
         var mcpValid = TryReadServiceFlags(
             out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
-            out var textBudgetMb, out var maxSweeps, out var fetchTopN);
+            out var textBudgetMb, out var maxSweeps, out var fetchTopN,
+            out var planRetentionDays, out var composeTimeoutSeconds, out var planXmlCompression);
         var alertRow = BuildAlertRowFromControls(errors);
         SaveViewerLocalAlertFields(errors);
         var notifyRow = BuildNotificationRowFromControls(errors);
@@ -2643,7 +2718,8 @@ public partial class SettingsWindow : Window
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationCheckingSigningKeysAsync(notifyRow, (stored, ids) => SigningKeyRefusal(notifyRow, stored, ids));
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
-                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps, fetchTopN);
+                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps, fetchTopN,
+                    planRetentionDays, composeTimeoutSeconds, planXmlCompression);
                 if (routeValuesNeedEnteringAgain)
                 {
                     /* The settings were saved; the routes' sealed values were bound to the old proxy (#5366). */

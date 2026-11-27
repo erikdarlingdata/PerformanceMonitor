@@ -25,15 +25,17 @@ namespace Darling.Tests;
 ///
 /// <para><b>What the constant rests on.</b> <c>MigrateAsync</c> takes the advisory lock ONCE and holds
 /// it while <c>MigrateLockedAsync</c> applies EVERY pending rung in the same session, so the acquire's
-/// budget has to cover a whole multi-rung upgrade rather than one statement. #2888 sized it as
-/// <c>5 * MigrationCommandTimeoutSeconds</c> from a census: of the rungs in <c>PgMigrations.Scripts</c>,
-/// only a handful touch data an EARLIER rung created, the applier wraps each rung's whole SQL in ONE
-/// <c>NpgsqlCommand</c> (so <c>MigrationCommandTimeoutSeconds</c> is a per-RUNG bound, not a
-/// per-statement one), and four of those rungs target objects large enough to spend it. Four multiples
-/// of floor plus one of margin is the 5.</para>
+/// budget has to cover a whole multi-rung upgrade rather than one statement. It is sized from a census
+/// (#2888): of the rungs in <c>PgMigrations.Scripts</c>, only a handful touch data an EARLIER rung created,
+/// the applier wraps each rung's whole SQL in ONE <c>NpgsqlCommand</c> (so a rung's command timeout is a
+/// per-RUNG bound, not a per-statement one), and six of those rungs target objects large enough to spend
+/// it (V293, #9277, is the sixth). Each runs under the default <c>MigrationCommandTimeoutSeconds</c> unless
+/// <c>PgMigrations.DeclaredRungCommandTimeoutSeconds</c> gives it a longer bound (#9089). The budget is the larger of every
+/// floor-setting rung at the default plus one default of margin, and the longest declared bound plus one
+/// default of margin.</para>
 ///
 /// <para><b>Why a pin rather than a comment.</b> That derivation is a snapshot. Nothing in the build
-/// notices when a fifth data-moving rung lands, so the constant stops covering the ladder without
+/// notices when another data-moving rung lands, so the constant stops covering the ladder without
 /// anything going red — #2894's first residual, and the reason option 3 there was called worth doing
 /// regardless of which mechanism eventually wins. This scans every rung's SHIPPED SQL (the real
 /// <c>Scripts</c> strings, including the generator-built rungs, not a transcription) for data-moving
@@ -52,7 +54,9 @@ namespace Darling.Tests;
 /// ladder's 134 <c>CREATE INDEX</c> statements are that shape. An index on a table an EARLIER rung created
 /// is a btree over whatever has been collected since, which on this store is gigabytes. A pin that
 /// flagged both would be turned off, so every targeted shape resolves its table and is dropped when
-/// that table is created by the rung itself. Identity is the BARE table name, deliberately: V1 creates
+/// that table is created by the rung itself. An <c>INSERT INTO ... SELECT</c> is resolved a second time,
+/// by the tables it READS: a rung that creates a table and fills it from an earlier rung's table is free
+/// by its target and a full pass by its source (V281's backfill is that shape). Identity is the BARE table name, deliberately: V1 creates
 /// the collector tables unqualified in <c>public</c> and V8 moves them to <c>collect</c>, so
 /// <c>collect.query_stats</c> and <c>query_stats</c> are the same table and 37 bare names are created
 /// under both spellings.</para>
@@ -70,8 +74,8 @@ public sealed class MigrationDataMovingRungCensusPins
 {
     /// <summary>
     /// The census, as a register rather than a count. <c>SetsTheFloor</c> is the load-bearing field:
-    /// it is what <c>MigrationLockWaitTimeoutSeconds</c>' multiple is derived from, checked by
-    /// <see cref="TheLockWaitMultiple_IsOneMoreThanTheFloorContributingRungCount"/>. Sizes are from
+    /// it is what <c>MigrationLockWaitTimeoutSeconds</c> is derived from, checked by
+    /// <see cref="TheLockWaitBudget_CoversEveryFloorSettingRungAtTheDefault_AndTheLongestDeclaredBound"/>. Sizes are from
     /// #2894's measurements on a local PostgreSQL 17.11 / TimescaleDB 2.29.2 store and from the live
     /// 42-server store.
     /// </summary>
@@ -220,6 +224,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
             + "nowhere near the horizon in practice"),
         new(
+            167,
+            SetsTheFloor: false,
+            "INSERT ... SELECT into the new config.legacy_secret_pin_candidate (#5456) that reads config.config_monitored_servers "
+            + "twice and config.config_notification once (both created V17), and config.legacy_secret_pin_marker (created V165). "
+            + "The server registry holds one row per monitored server, and the other two hold one row each, so the read is a few "
+            + "hundred rows at most. It reads no collected data and spends none of the lock-wait budget, so the multiple does not move."),
+        new(
             169,
             SetsTheFloor: false,
             "ADD CONSTRAINT ... CHECK on config.config_monitored_servers (#5452) validates every existing row, and the "
@@ -351,14 +362,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "InvestigationRetentionDays (a year), and a report is at most one row per request. The rung's own measurement loaded a year "
             + "of requests at a production store's rate (73,000 rows) and a production store holds hundreds today, so each build "
             + "reads the table once and takes milliseconds. A different class from V104's collected hypertable. It does not move the "
-            + "lock-wait floor, so the multiple stays 5."),
+            + "lock-wait floor, so the multiple does not move."),
         new(
             216,
             SetsTheFloor: false,
             "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_alert_settings (created V17), the one-row settings "
             + "singleton (id = 1): turns the Client Timeouts alert on by default (#5736). V147's shape on the same kind of table. The "
             + "UPDATE's WHERE client_timeouts_enabled = FALSE touches at most one row, the SET DEFAULT is catalog-only, and neither reads "
-            + "any collected data, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+            + "any collected data, so the rung spends none of the lock-wait budget and the multiple does not move."),
         new(
             227,
             SetsTheFloor: false,
@@ -368,7 +379,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "against every stored row and the partial index (WHERE scope_tag_id IS NOT NULL) indexes nothing, because the column the "
             + "same rung adds is null on every stored row, so each statement reads the table once and takes milliseconds. The ADD "
             + "COLUMN is nullable with no default and the DROP NOT NULL on server_id is catalog-only, so neither rewrites a row. It does "
-            + "not move the lock-wait floor, so the multiple stays 5."),
+            + "not move the lock-wait floor, so the multiple does not move."),
         new(
             229,
             SetsTheFloor: false,
@@ -376,14 +387,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V131), the notification routes registry (#6928). The ADD COLUMN with a constant default is catalog-only. The CHECK "
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
-            + "the multiple stays 5."),
+            + "the multiple does not move."),
         new(
             231,
             SetsTheFloor: false,
             "Four nullable ADD COLUMNs plus one ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, #7040). The columns carry "
             + "no default, so they are catalog-only. The CHECK reads the table once to validate it, and the table is a hand-edited registry "
             + "of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads no collected "
-            + "data and spends none of the lock-wait budget, so the multiple stays 5."),
+            + "data and spends none of the lock-wait budget, so the multiple does not move."),
         new(
             233,
             SetsTheFloor: false,
@@ -391,20 +402,20 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V131), the notification routes registry (#6979). The ADD COLUMN with a constant default is catalog-only. The CHECK "
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
-            + "the multiple stays 5."),
+            + "the multiple does not move."),
         new(
             235,
             SetsTheFloor: false,
             "Three SET DEFAULT statements plus one UPDATE on config.config_alert_settings (created V17), the one-row alert settings "
             + "singleton (#7083). The SET DEFAULT is catalog-only. The UPDATE touches at most that one row. It reads no collected data and "
-            + "spends none of the lock-wait budget, so the multiple stays 5."),
+            + "spends none of the lock-wait budget, so the multiple does not move."),
         new(
             236,
             SetsTheFloor: false,
             "ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute' plus ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, "
             + "#7083). The ADD COLUMN with a constant default is catalog-only. The CHECK reads the table once to validate it, and the table is a "
             + "hand-edited registry of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads "
-            + "no collected data and spends none of the lock-wait budget, so the multiple stays 5."),
+            + "no collected data and spends none of the lock-wait budget, so the multiple does not move."),
         new(
             238,
             SetsTheFloor: false,
@@ -412,7 +423,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "COLUMN IF NOT EXISTS approval_single_person on config.config_notification_routes (created V131, #7109). The ADD COLUMNs with a "
             + "constant default are catalog-only. The CHECK and the UPDATE each read the table once, and the table is a hand-edited registry of at "
             + "most a few hundred routes, so both take milliseconds. The new proposals table starts empty. It reads no collected data and spends "
-            + "none of the lock-wait budget, so the multiple stays 5."),
+            + "none of the lock-wait budget, so the multiple does not move."),
         new(
             248,
             SetsTheFloor: false,
@@ -420,14 +431,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V219, #7730): the state row the background backfill reads, a single row. The trigger function body names a DELETE on "
             + "collect.query_store_self_keys, which is the function text and not a statement the rung runs. The rung scans no table and "
             + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
-            + "and the multiple stays 5."),
+            + "and the multiple does not move."),
         new(
             251,
             SetsTheFloor: false,
             "Replaces the compose-stamp trigger function and creates both row triggers again (#7762), with the threshold moved to the hour of the "
             + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
             + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
-            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
+            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple does not move."),
         new(
             254,
             SetsTheFloor: false,
@@ -435,7 +446,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "chat_thread_of, a column the same rung adds, so every existing row is NULL and the partial index holds no entry; and an index on "
             + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
             + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
-            + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+            + "sub-second, so the rung spends none of the lock-wait budget and the multiple does not move."),
         new(
             257,
             SetsTheFloor: false,
@@ -469,6 +480,106 @@ public sealed class MigrationDataMovingRungCensusPins
             + "rung itself executes none of them, so it reads and rewrites no row at migration time. What it does run is catalog work: three empty "
             + "tables, their owner-guard triggers and functions, one trigger on config.server_tags, and the hardening function's grant and revoke "
             + "statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            267,
+            SetsTheFloor: false,
+            "#8570: one CREATE INDEX IF NOT EXISTS over the populated collect.plan_regression_daily (created V168), a plain table: "
+            + "ix_plan_regression_daily_server_day (server_id, day), the two narrow columns the day-driven reads of the per-day plan totals "
+            + "filter on. The build reads the heap once. Measured on a 3,072,000-row table (462 MB heap, 529 MB unique key): 0.4 s, 20 MB of "
+            + "index. Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            280,
+            SetsTheFloor: false,
+            "#8570: CREATE INDEX over the populated collect.plan_correction hypertable (created V1), a partial index on the rows that carry a "
+            + "recommendation (idx_plan_correction_server_db_query_time). V150's and V220's case: compression leaves only the newest day or two "
+            + "uncompressed at migration time, and a compressed chunk's index is an empty shell, so the build reads only the uncompressed chunks. "
+            + "Measured on a rig of 10 servers, 31 daily chunks (28 compressed), about 3.3M rows: the build took 3.3 s and the index is 56 MB. "
+            + "A store many times that size still builds in seconds, far inside a MigrationCommandTimeoutSeconds window, so it does not move the multiple."),
+        new(
+            281,
+            SetsTheFloor: true,
+            "#9043: INSERT ... SELECT that reads every row of the populated collect.query_store_text (created V74) into the new "
+            + "collect.query_store_text_seen, then builds that table's primary key and validates its foreign key against the text table. "
+            + "The rung also puts a statement trigger on the text table; its function body names an INSERT into the seen table from the "
+            + "trigger's transition table, which is the function text and not a statement the rung runs. "
+            + "Measured on PostgreSQL 18.6 against 6.9M text rows (a 4.2 GB main heap, 8.8 GB with TOAST and indexes): the backfill is one "
+            + "sequential pass of the main heap, 3.7 s and 0.6 GB of WAL; the key builds in 2.3-2.4 s (243 MB); the foreign key validates in "
+            + "4.8-4.9 s; about 11 s in all, warm and on local NVMe. The time follows the text heap, which is one of the largest plain tables "
+            + "of a store that collects Query Store and is read cold at start, so it sets the floor as V22's and V39's index builds do. "
+            + "Loading before the constraints is what keeps it at about 11 s (51-55 s with the key in place first)."),
+        new(
+            288,
+            SetsTheFloor: false,
+            "#9151: CREATE INDEX over the populated collect.collection_log hypertable (created V2), V150's shape with INCLUDE (rows_collected): "
+            + "the covering index is built under idx_collection_log_watermark_new, the narrow idx_collection_log_watermark is dropped and the new one "
+            + "renamed to the old name, in the ladder's transaction. V257's case: compression leaves only the newest chunks uncompressed at migration "
+            + "time, and a compressed chunk's index is an empty shell, so the build reads only the uncompressed chunks. Measured on a seeded store of "
+            + "5 uncompressed six-hour chunks holding 1,700,000 rows (40 servers, 40 collector names) plus 135 compressed chunks: 3.2 to 3.3 s for "
+            + "the whole rung on PostgreSQL 18.7, every one of the 140 chunks ending with one covering index. Far inside one command timeout, so it "
+            + "does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            293,
+            SetsTheFloor: true,
+            "#9277: CREATE INDEX (partial, WHERE event_kind = 'count') over collect.attention_events (created V1). On a hypertable the build reads "
+            + "only the uncompressed chunks and is short. On a store without TimescaleDB, or one whose V277 swap has not taken its lock, the table "
+            + "is one plain heap of about 0.7 GB a day for 30 days, and the build reads all of it in one statement, so it sets the floor as V22's "
+            + "and V39's index builds do. It runs under V293CommandTimeoutSeconds, equal to V281's, so the lock-wait budget is unchanged."),
+        new(
+            294,
+            SetsTheFloor: false,
+            "#9284: CREATE INDEX on collect.aggregate_compression_order_history (created V279), the rung's sentinel and a read of one aggregate's "
+            + "latest outcome. The table gets one row per rung run that reached an ALTER and is never purged, so it holds a handful of rows on any "
+            + "store and the build is instant. The rung's other statement is a catalog-only ALTER of the corrected daily rollup's compression "
+            + "settings (no chunk is rewritten) and an INSERT of one history row. Far inside one command timeout, so it does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            298,
+            SetsTheFloor: true,
+            "#9304: for each of collect.query_text_dim and collect.query_plan_dim (created by the payload dimension rung), an INSERT ... SELECT "
+            + "that reads every row of the populated dimension into the new collect.{dimension}_seen, then builds that table's primary key, "
+            + "validates its foreign key against the dimension and builds its last_seen index, and last drops the dimension's own last_seen "
+            + "index. V281's shape for the same kind of table (a backfill of a narrow table from every row of a wide one, loaded before the "
+            + "constraints), so the rung also puts a statement trigger on each dimension and its function body names an INSERT into the seen "
+            + "table from the transition table, which is the function text and not a statement the rung runs. The backfill reads the "
+            + "dimension's main heap only, never its TOAST. It runs under V298CommandTimeoutSeconds (1,800 s, equal to V281's), because it is silent and reads about 18 GB of main heap on "
+            + "the largest store, so the lock-wait budget is unchanged. The rung's own timing is measured separately and is not part of this declaration."),
+        new(
+            302,
+            SetsTheFloor: false,
+            "#8570: CREATE INDEX over the populated collect.job_history hypertable (created V1/V24), a partial index on the failed job outcomes "
+            + "(step_id = 0 AND run_status = 0). V220's case on the same table, the failed-outcome twin of its success index: a compressed "
+            + "chunk's index is an empty shell, only the uncompressed newest chunks hold rows, and failure rows are rare, so the partial predicate "
+            + "keeps a small share of those. The build takes seconds on a large store, nowhere near a MigrationCommandTimeoutSeconds window, so "
+            + "this rung does not move the multiple"),
+        new(
+            310,
+            SetsTheFloor: false,
+            "#9452: one CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_pending (server_id), partial to the pending rows (never captured, never expired, never tried). "
+            + "The build reads the heap once and keeps the rows its predicate admits, so it is the same shape as V258's and V260's indexes "
+            + "on this table, whose measured builds took 58 ms at 2,000,000 rows and 7.2 s to 10.8 s at 3,000,000 rows. Not CONCURRENTLY, "
+            + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            315,
+            SetsTheFloor: false,
+            "#9434: CREATE UNIQUE INDEX on collect.read_latency (created V148), the new bucket key that also names the process start, after the "
+            + "primary key is dropped. V182's case on the same table: one row per hour per surface, route and outcome that was read, kept 90 days, "
+            + "so at most a few hundred thousand narrow rows and a build of about a second. The new nullable column is catalog-only. It does not "
+            + "move the lock-wait floor."),
+        new(
+            318,
+            SetsTheFloor: false,
+            "#9485: a partial CREATE INDEX over config.investigation_requests (created V184) on the new nullable held_window_id, which is NULL on every "
+            + "existing row, so the index is empty when it is built. V215's case on the same narrow control-plane table (one row per incident, kept a "
+            + "year), and cheaper, because the partial predicate keeps no existing row. The two ADD COLUMNs are nullable with no default and are "
+            + "catalog-only. The new window table and its index are created empty. The rung spends none of the lock-wait budget and the multiple does not move."),
+        new(
+            319,
+            SetsTheFloor: false,
+            "#9662: the advanced web access setter that names its caller. The UPDATE on config.web_access_advanced (created V262, a single row) sits inside the "
+            + "plpgsql function body of the new three argument set_web_access_advanced, which runs only when an administrator flips the switch later. The rung "
+            + "itself executes none of it, so it reads and rewrites no row at migration time. What it does run is catalog work: two function definitions and the "
+            + "hardening function's grant and revoke statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>
@@ -490,15 +601,18 @@ public sealed class MigrationDataMovingRungCensusPins
             "New data-moving migration rung(s) — the census "
             + "PgMigrations.MigrationLockWaitTimeoutSeconds is derived from no longer describes the "
             + "ladder.\n\n"
-            + "That constant (5 * MigrationCommandTimeoutSeconds = 1500 s) bounds the pg_advisory_lock "
+            + "That constant bounds the pg_advisory_lock "
             + "ACQUIRE, and the lock is taken ONCE and held while every pending rung applies in the same "
             + "session — so its floor is (rungs that touch data an earlier rung created) x "
-            + "MigrationCommandTimeoutSeconds, with one further multiple as margin. A rung nobody costed "
+            + "MigrationCommandTimeoutSeconds, or the longest declared rung bound if that is larger, with one "
+            + "further MigrationCommandTimeoutSeconds as margin. A rung nobody costed "
             + "spends that margin silently, and the failure is not graceful: the waiter throws out of "
             + "MigrateAsync into DarlingWorker's LogCritical-and-return, which takes that instance out of "
             + "the collection loop with no retry until an operator restarts it (#2894).\n\n"
             + "Cost the rung, then declare it in s_declared with SetsTheFloor saying whether it moves "
-            + "the multiple. If it does, re-derive MigrationLockWaitTimeoutSeconds in the same commit.\n\n"
+            + "the floor. If it does, decide whether the default command timeout covers it (a longer bound goes in "
+            + "PgMigrations.DeclaredRungCommandTimeoutSeconds) and re-derive MigrationLockWaitTimeoutSeconds "
+            + "in the same commit.\n\n"
             + Describe(findings.Where(f => undeclared.Contains(f.Version))));
 
         Assert.True(
@@ -518,12 +632,14 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
-    /// The multiple and the census cannot drift apart. Reads the two private constants out of the compiled product by
-    /// reflection, so the test follows the values the migrator runs with and not the way the source spells them (#5950): the
-    /// lock-wait budget has to be one command timeout per floor-setting rung, plus one of margin.
+    /// The budget and the census cannot drift apart. Reads the two constants out of the compiled product by
+    /// reflection, so the test follows the values the migrator runs with and not the way the source spells them (#5950).
+    /// The lock-wait budget is the larger of two sums: one default command timeout per floor-setting rung plus one of
+    /// margin, and the longest declared rung bound plus one default of margin (#9089). The second is asserted on its own
+    /// as well, so a waiter outlasts the longest rung whatever the first sum is.
     /// </summary>
     [Fact]
-    public void TheLockWaitMultiple_IsOneMoreThanTheFloorContributingRungCount()
+    public void TheLockWaitBudget_CoversEveryFloorSettingRungAtTheDefault_AndTheLongestDeclaredBound()
     {
         const BindingFlags constantFlags = BindingFlags.NonPublic | BindingFlags.Static;
         var lockWaitField = typeof(PgMigrations).GetField("MigrationLockWaitTimeoutSeconds", constantFlags);
@@ -532,7 +648,7 @@ public sealed class MigrationDataMovingRungCensusPins
         /* Positive control for the read itself: a rename makes the lookup miss, and a miss must not read as agreement. */
         Assert.True(
             lockWaitField is not null && commandField is not null,
-            "PgMigrations no longer declares MigrationLockWaitTimeoutSeconds and MigrationCommandTimeoutSeconds as private "
+            "PgMigrations no longer declares MigrationLockWaitTimeoutSeconds and MigrationCommandTimeoutSeconds as non-public "
             + "constants. They are the link between the lock-wait budget and the rung census (#2894); point this pin at "
             + "whatever expresses the budget now.");
 
@@ -542,17 +658,35 @@ public sealed class MigrationDataMovingRungCensusPins
             commandTimeout > 0 && lockWait % commandTimeout == 0,
             $"MigrationLockWaitTimeoutSeconds ({lockWait}) is not a whole multiple of MigrationCommandTimeoutSeconds "
             + $"({commandTimeout}): the budget must stay a multiple of one rung bound so the census can count it.");
-        var multiple = lockWait / commandTimeout;
+
         var floor = s_declared.Count(d => d.SetsTheFloor);
+        var everyFloorRungAtTheDefault = (floor + 1) * commandTimeout;
+
+        /* Positive control: the declared set is the applier's own map and is not empty, so "longest" is a real bound and
+           not the default standing in for an empty map. */
+        var declared = PgMigrations.DeclaredRungCommandTimeoutSeconds;
+        Assert.NotEmpty(declared);
+        var (longestVersion, longestDeclared) = declared.OrderByDescending(d => d.Value).Select(d => (d.Key, d.Value)).First();
+        var longestDeclaredAndMargin = longestDeclared + commandTimeout;
 
         Assert.True(
-            multiple == floor + 1,
-            $"MigrationLockWaitTimeoutSeconds is {multiple} * MigrationCommandTimeoutSeconds ({lockWait} s), but the "
-            + $"census declares {floor} floor-setting rung(s) "
-            + $"({string.Join(", ", s_declared.Where(d => d.SetsTheFloor).Select(d => "V" + d.Version.ToString(CultureInfo.InvariantCulture)))})"
-            + $", which derives {floor + 1} — {floor} multiples of floor plus one of margin, sized at one "
-            + "rung bound because one new data-moving rung is the granularity this ladder grows by. "
-            + "Either the multiple or the SetsTheFloor flags are stale; #2894 has the derivation.");
+            lockWait >= longestDeclaredAndMargin,
+            $"MigrationLockWaitTimeoutSeconds ({lockWait} s) does not cover the longest declared rung bound, "
+            + $"V{longestVersion.ToString(CultureInfo.InvariantCulture)} at {longestDeclared} s, plus one default bound of margin "
+            + $"({longestDeclaredAndMargin} s). A waiting instance would give up while that rung is still inside its own bound, "
+            + "and a waiter that gives up below this build's version leaves the collection loop until it is restarted (#2894).");
+
+        var derived = Math.Max(everyFloorRungAtTheDefault, longestDeclaredAndMargin);
+
+        Assert.True(
+            lockWait == derived,
+            $"MigrationLockWaitTimeoutSeconds is {lockWait} s, but the census derives {derived} s: the larger of "
+            + $"{everyFloorRungAtTheDefault} s ({floor} floor-setting rung(s), "
+            + $"{string.Join(", ", s_declared.Where(d => d.SetsTheFloor).Select(d => "V" + d.Version.ToString(CultureInfo.InvariantCulture)))}"
+            + $", at the {commandTimeout} s default plus one of margin) and {longestDeclaredAndMargin} s (the longest declared "
+            + $"bound, V{longestVersion.ToString(CultureInfo.InvariantCulture)} at {longestDeclared} s, plus one default of margin). "
+            + "The margin is one default rung bound because one new data-moving rung is the granularity this ladder grows by. "
+            + "Either the constant, the SetsTheFloor flags or the declared rung timeouts are stale; #2894 and #9089 have the derivation.");
     }
 
     /// <summary>
@@ -664,6 +798,8 @@ public sealed class MigrationDataMovingRungCensusPins
     [InlineData("REINDEX", "REINDEX TABLE CONCURRENTLY collect.old;")]
     [InlineData("CREATE INDEX with no index name", "CREATE INDEX ON collect.old (a);")]
     [InlineData("ALTER TABLE ONLY", "ALTER TABLE ONLY collect.old ADD PRIMARY KEY (a);")]
+    [InlineData("INSERT INTO ... SELECT reading an earlier table", "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a) SELECT o.a FROM collect.old AS o;")]
+    [InlineData("INSERT INTO ... SELECT joining an earlier table", "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a) SELECT g.a FROM generate_series(1, 3) AS g(a) JOIN collect.old AS o ON o.a = g.a;")]
     public void EveryDataMovingShape_FiresOnASyntheticRung(string label, string sql)
     {
         var findings = Classify(
@@ -676,6 +812,50 @@ public sealed class MigrationDataMovingRungCensusPins
             findings.Any(f => f.Version == 2),
             $"the {label} shape is not detected — a rung using it would land silently and "
             + $"MigrationLockWaitTimeoutSeconds' census would not notice. SQL:\n{sql}");
+    }
+
+    /// <summary>
+    /// The read side of an <c>INSERT INTO ... SELECT</c>, both ways. A rung that fills its own new table from an
+    /// earlier rung's table is a finding, named for the table it reads, and that is the only way the scan sees it:
+    /// its target is the rung's own. A rung that fills its own table from nothing an earlier rung created (a
+    /// function, another table of its own, a trigger's transition table inside a function body) stays free, or the
+    /// shape would flag every seed insert in the ladder.
+    /// </summary>
+    [Fact]
+    public void AnInsertSelectIntoTheRungsOwnTable_IsResolvedByWhatItReads()
+    {
+        var reads = Assert.Single(Classify(
+        [
+            new PgMigrations.Migration(1, "creates-old", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(
+                2,
+                "creates-and-fills",
+                "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a)\nSELECT o.a\nFROM collect.old AS o;"),
+        ]));
+
+        Assert.Equal(2, reads.Version);
+        Assert.Equal(InsertSelectReadingShape, reads.Shape);
+        Assert.Equal("collect.old", reads.Table);
+        Assert.Equal("V1", reads.CreatedBy);
+
+        Assert.Empty(Classify(
+        [
+            new PgMigrations.Migration(1, "creates-old", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(
+                2,
+                "fills-from-nothing-collected",
+                "CREATE TABLE collect.fresh (a int);\n"
+                + "CREATE TABLE collect.other (a int);\n"
+                + "INSERT INTO collect.fresh (a) SELECT g FROM generate_series(1, 3) AS g;\n"
+                + "INSERT INTO collect.fresh (a) SELECT x.a FROM collect.other AS x;\n"
+                + "CREATE FUNCTION collect.track() RETURNS trigger LANGUAGE plpgsql AS $f$\n"
+                + "BEGIN INSERT INTO collect.fresh (a) SELECT n.a FROM landed AS n; RETURN NULL; END $f$;"),
+        ]));
+
+        /* The real ladder's representative, so the shape is not only proven on a synthetic rung. */
+        Assert.Contains(
+            Classify(PgMigrations.Scripts),
+            f => f.Version == 281 && f.Shape == InsertSelectReadingShape && BareName(f.Table) == "query_store_text");
     }
 
     /// <summary>
@@ -740,76 +920,6 @@ public sealed class MigrationDataMovingRungCensusPins
                 + "CREATE TRIGGER trg AFTER INSERT OR UPDATE OR DELETE ON collect.old\n"
                 + "    FOR EACH STATEMENT EXECUTE FUNCTION config.bump();"),
         ]));
-    }
-
-    /// <summary>
-    /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
-    /// past <c>EXECUTE format(...)</c> or a parameterised <c>EXECUTE '...' USING ...</c>, so this name has
-    /// to be kept in sync by hand rather than derived. V152's <c>DO $$ ... $$</c> (#4503) uses both forms
-    /// against the catalog only: <c>EXECUTE '...' INTO ... USING v_view</c> reads a continuous aggregate's
-    /// materialization name from <c>timescaledb_information</c>, and <c>EXECUTE format('DROP INDEX IF
-    /// EXISTS %s', ...)</c> then drops a catalog index resolved via <c>pg_index</c>/<c>pg_attribute</c>
-    /// (metadata, not collected rows) — the opposite direction from every shape <see cref="s_declared"/>
-    /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
-    /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
-    /// spot to name.
-    ///
-    /// <para>V246 (#7609) is the exception that does build an index, so it is named here by hand too. Its <c>DO $$ ... $$</c> reads the
-    /// corrected hourly rollup's materialization name from <c>timescaledb_information</c> (that name is different on every store, so the DDL
-    /// cannot be written literally) and runs one non-concurrent <c>CREATE INDEX IF NOT EXISTS</c> on <c>(query_hash, bucket DESC)</c> over that
-    /// one hourly rollup. That is rollup rows at hourly grain, not the raw collector hypertables V22 and V39 build over, and the build is bounded
-    /// by the same <c>lock_timeout</c> V152 sets. It is not in <see cref="s_declared"/> because that register is derived from the scan, which cannot
-    /// see a dynamic statement, so a declaration here would fail the census equality check.</para>
-    ///
-    /// <para>V255 (#8106) builds the cadence wait baseline supply inside a <c>DO $$ ... $$</c> because the statement differs by store: on a store
-    /// with the extension whose <c>wait_stats</c> is already a hypertable it creates the continuous aggregate <c>WITH NO DATA</c> (the ensure sweep
-    /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
-    /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
-    /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
-    ///
-    /// <para>V261 and V262 (#7988) define the web access groups' and the advanced web access switch's hardening functions, whose bodies revoke
-    /// from and grant to roles named at call time (PUBLIC, the four product logins and any grantee the catalog shows on the rung's own objects)
-    /// through <c>EXECUTE format()</c>, and each rung calls its function once. Both are catalog-only: grants on the tables and functions the
-    /// rung itself created, no row read or rewritten. V261's own data-moving cost, the control-plane version bumps inside its function bodies,
-    /// is declared in <see cref="s_declared"/> because the scan sees those statements literally.</para>
-    /// </summary>
-    /* V259 (#8549) is V255's shape for the daily wait totals: a DO block that reads the catalog for the hypertable and creates the empty
-       aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
-    /* V263 (#8549) is V259's shape for the oldest-run rollup under the Job History note: a DO block that reads the catalog for the hypertable and creates the empty aggregate or the plain view through EXECUTE. Catalog-only, no row of job_history is read or written. */
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 261, 262, 263];
-
-    /// <summary>
-    /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has eight exempted rungs today (V152, V204, V246, V255, V259, V261, V262 and V263, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// each <c>DO $$ ... EXECUTE</c> or <c>EXECUTE format()</c> drops a catalog index or constraint, creates an empty aggregate or a view, or grants
-    /// and revokes on the rung's own objects, rather than moving data) and
-    /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
-    /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
-    /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves
-    /// no data) or to <see cref="s_declared"/> (if it does), and this is where that gets said.
-    /// </summary>
-    [Fact]
-    public void TheLadderStillContainsNoDynamicSql()
-    {
-        var offenders = PgMigrations.Scripts
-            .Where(m => s_dynamicSql.IsMatch(StripComments(m.Sql)))
-            .Where(m => !s_dynamicSqlExemptedRungs.Contains(m.Version))
-            .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
-            .ToList();
-
-        Assert.True(
-            offenders.Count == 0,
-            "Rung(s) build SQL dynamically, which the data-moving scan behind "
-            + "MigrationLockWaitTimeoutSeconds cannot read: "
-            + string.Join(", ", offenders)
-            + ". Cost the generated statement by hand and declare the rung in s_declared, or write the "
-            + "DDL literally so the census can see it.");
-
-        /* Positive control: the same pattern on a rung that DOES build DDL dynamically. Without this,
-           an over-narrow pattern reads as a clean ladder. */
-        Assert.Matches(
-            s_dynamicSql,
-            "DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON %I (a)', 'ix', 'old'); END $$;");
     }
 
     /// <summary>
@@ -941,10 +1051,6 @@ public sealed class MigrationDataMovingRungCensusPins
         + @"\s+)?ON\s+(?:ONLY\s+)?(?<t>" + Ident + ")",
         Opts);
 
-    private static readonly Regex s_dynamicSql = new(
-        @"\bEXECUTE\s+(?!FUNCTION\b|PROCEDURE\b)|\bformat\s*\(",
-        Opts);
-
     /// <summary>
     /// The cancel condition, by either spelling PostgreSQL accepts for it. Deliberately a TOKEN search
     /// rather than an attempt to parse a handler's condition list: a rung's executable SQL has no
@@ -1011,6 +1117,21 @@ public sealed class MigrationDataMovingRungCensusPins
         ("REINDEX", new Regex(@"(?:\A|[;\n])\s*REINDEX\b", Opts)),
     ];
 
+    /// <summary>
+    /// An <c>INSERT INTO ... SELECT</c> as a whole statement, and the tables its <c>FROM</c> and <c>JOIN</c> clauses
+    /// name. The target-resolved shape above drops the statement when the rung created the target, which is right
+    /// for the write and blind to the read: a new table filled from an earlier rung's table reads everything that
+    /// table has collected. A source counts only when an earlier rung created it, so a function in <c>FROM</c>, a
+    /// CTE and a trigger's transition table are not findings.
+    /// </summary>
+    private const string InsertSelectReadingShape = "INSERT INTO ... SELECT reading";
+
+    private static readonly Regex s_insertSelectStatement = new(
+        @"INSERT\s+INTO\s+" + Ident + @"[^;]*?\bSELECT\b[^;]*", Opts);
+
+    private static readonly Regex s_sourceTable = new(
+        @"\b(?:FROM|JOIN)\s+(?:ONLY\s+)?(?:LATERAL\s+)?(?<t>" + Ident + ")", Opts);
+
     private static string StripComments(string sql) =>
         s_lineComment.Replace(s_blockComment.Replace(sql, " "), " ");
 
@@ -1063,6 +1184,27 @@ public sealed class MigrationDataMovingRungCensusPins
                         createdBy.TryGetValue(bare, out var origin)
                             ? "V" + origin.ToString(CultureInfo.InvariantCulture)
                             : "(no rung creates it)"));
+                }
+            }
+
+            foreach (Match statement in s_insertSelectStatement.Matches(sql))
+            {
+                foreach (Match source in s_sourceTable.Matches(statement.Value))
+                {
+                    var table = source.Groups["t"].Value;
+                    var bare = BareName(table);
+
+                    if (itsOwn.Contains(bare) || !createdBy.TryGetValue(bare, out var origin))
+                    {
+                        continue;
+                    }
+
+                    findings.Add(new Finding(
+                        rung.Version,
+                        rung.Name,
+                        InsertSelectReadingShape,
+                        table,
+                        "V" + origin.ToString(CultureInfo.InvariantCulture)));
                 }
             }
 

@@ -42,6 +42,11 @@ public sealed partial class ViewerDataService
         return new PeopleReadResult(false, await PersonDirectory.ListAsync(_dataSource, cancellationToken));
     }
 
+    /// <summary>The ids of the people with history, which stops a delete (#8777). Null when this login cannot read the history (the admin role
+    /// and the store owner can) or the store has no history tables.</summary>
+    public Task<IReadOnlySet<long>?> ReadPeopleWithHistoryAsync(CancellationToken cancellationToken = default) =>
+        PersonDirectory.PeopleWithHistoryAsync(_dataSource, cancellationToken);
+
     /// <summary>Enqueues one people command, waits for its answer and removes the finished row (it holds no secret). A read-only role throws <see cref="ViewerReadOnlyException"/>.</summary>
     public Task<PersonCommandAnswer> SendPersonCommandAsync(string commandType, string argsJson, string login, CancellationToken cancellationToken = default) =>
         ViewerPersonCommands.SendAsync(RunPersonCommandAsync, commandType, argsJson, login, cancellationToken);
@@ -86,4 +91,7 @@ public sealed partial class ViewerDataService
 
     public Task<PersonCommandAnswer> RemovePersonGrantAsync(long grantId, string login, CancellationToken cancellationToken = default) =>
         SendPersonCommandAsync(ViewerPersonCommands.RemoveGrant, ViewerPersonCommands.RemoveGrantArgs(grantId), login, cancellationToken);
+
+    public Task<PersonCommandAnswer> DeletePersonAsync(long personId, string login, CancellationToken cancellationToken = default) =>
+        SendPersonCommandAsync(ViewerPersonCommands.DeletePerson, ViewerPersonCommands.DeletePersonArgs(personId), login, cancellationToken);
 }

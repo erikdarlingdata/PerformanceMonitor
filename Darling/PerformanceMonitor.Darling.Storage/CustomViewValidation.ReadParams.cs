@@ -19,9 +19,10 @@ public static partial class CustomViewValidation
     /// against its catalog through the <c>readParams</c> delegate; the Viewer has no catalog, so it validates against this table, and
     /// a test pins every entry equal to the catalog's, so both surfaces give one refusal text.
     /// </summary>
-    public static readonly IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> KnownReadParams =
+    private static readonly IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> SharedReadParams =
         new Dictionary<string, IReadOnlyList<ReadPanelParam>>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry) and one in Storage (ReadParams/, its parameters), #9477.
             ["audit_config"] = new ReadPanelParam[] { new("server", false) },
             ["compare_analysis"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("baseline_hours_back", false), new("as_of", false) },
             ["get_analysis_facts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("source", false), new("min_severity", false), new("as_of", false) },
@@ -34,7 +35,7 @@ public static partial class CustomViewValidation
             ["get_alert_settings"] = Array.Empty<ReadPanelParam>(),
             ["get_daily_health_report"] = new ReadPanelParam[] { new("date", false) },
             ["get_alert_details"] = new ReadPanelParam[] { new("server_id", true), new("metric_name", true), new("alert_time", true) },
-            ["list_investigation_requests"] = new ReadPanelParam[] { new("state", false), new("server", false), new("family", false), new("limit", false) },
+            ["list_investigation_requests"] = new ReadPanelParam[] { new("state", false), new("server", false), new("family", false), new("limit", false), new("held", false) },
             ["get_investigation_reports"] = new ReadPanelParam[] { new("server", false), new("request_id", false), new("hours", false) },
             ["get_mute_rules"] = new ReadPanelParam[] { new("enabled_only", false) },
             ["get_notification_routes"] = Array.Empty<ReadPanelParam>(),
@@ -143,16 +144,21 @@ public static partial class CustomViewValidation
             ["get_fleet_overview"] = new ReadPanelParam[] { new("hours", false), new("detail", false), new("worst_only", false), new("band", false) },
             ["get_sweep_reports"] = new ReadPanelParam[] { new("hours", false), new("as_of", false), new("sweep_id", false), new("watch_state", false) },
             ["get_ag_health"] = new ReadPanelParam[] { new("server", false), new("limit", false) },
-            ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false) },
-            ["get_store_log"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false) },
-            ["get_store_query_history"] = new ReadPanelParam[] { new("query_id", false), new("role", false), new("hours", false), new("top", false) },
+            ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false), new("wal_hours_back", false), new("table_activity", false), new("hours", false), new("rank_by", false), new("as_of", false) },
+            ["get_store_table_health"] = new ReadPanelParam[] { new("top", false), new("candidates_only", false), new("section", false) },
+            ["measure_store_table"] = new ReadPanelParam[] { new("table", false) },
+            ["get_store_log"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false), new("query_id", false) },
+            ["get_service_starts"] = new ReadPanelParam[] { new("limit", false), new("service_host", false), new("rung", false), new("hours_back", false) },
+            ["get_store_checkpoints"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false) },
+            ["get_store_pass_steps"] = new ReadPanelParam[] { new("hours", false), new("pass", false), new("step", false), new("limit", false), new("as_of", false) },
+            ["get_store_query_history"] = new ReadPanelParam[] { new("query_id", false), new("role", false), new("hours", false), new("top", false), new("order_by", false) },
             ["get_store_query_stats"] = new ReadPanelParam[] { new("role", false), new("order_by", false), new("top", false), new("full_text", false) },
-            ["get_store_host"] = Array.Empty<ReadPanelParam>(),
+            ["get_store_host"] = new ReadPanelParam[] { new("free_floor_percent", false) },
             ["get_collector_cost"] = new ReadPanelParam[] { new("days_back", false), new("collector_name", false) },
             ["get_collector_stall_probes"] = new ReadPanelParam[] { new("server", false), new("days_back", false), new("limit", false) },
             ["get_oversized_plan_backlog"] = new ReadPanelParam[] { new("server", false), new("include_rows", false), new("limit", false) },
             ["get_slow_reads"] = new ReadPanelParam[] { new("hours", false), new("server", false), new("surface", false), new("route", false), new("limit", false) },
-            ["get_read_latency"] = new ReadPanelParam[] { new("hours", false), new("surface", false), new("route", false), new("limit", false) },
+            ["get_read_latency"] = new ReadPanelParam[] { new("hours", false), new("surface", false), new("route", false), new("limit", false), new("split_at", false) },
             ["get_latch_stats"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("as_of", false) },
             ["get_spinlock_stats"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("as_of", false) },
             ["get_memory_grants"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("chart", false), new("bucket_minutes", false) },
@@ -163,6 +169,7 @@ public static partial class CustomViewValidation
             ["get_pvs_stats"] = new ReadPanelParam[] { new("server", false), new("trend_hours_back", false), new("database_name", false) },
             ["get_index_usage"] = new ReadPanelParam[] { new("server", false), new("database_name", false), new("limit", false) },
             ["get_object_locking"] = new ReadPanelParam[] { new("server", false), new("limit", false), new("database_name", false), new("detail_database", false), new("detail_schema", false), new("detail_table", false), new("detail_index", false) },
+            ["get_object_usage"] = new ReadPanelParam[] { new("server", false), new("days_back", false), new("include_paired_replica", false), new("limit", false), new("offset", false), new("database_name", false) },
             ["get_table_index_sizes"] = new ReadPanelParam[] { new("server", false), new("database_name", false) },
             ["get_cpu_scheduler_pressure"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_plan_cache_bloat"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
@@ -191,7 +198,38 @@ public static partial class CustomViewValidation
             ["get_finops"] = new ReadPanelParam[] { new("server", false), new("view", false), new("hours", false), new("limit", false), new("database_name", false), new("full_text", false), new("object_name", false) },
         };
 
+    /// <summary>The declared parameters of every read a v1 read panel may name: the shared list above plus the reads each tool registers in
+    /// its own file under <c>ReadParams/</c> (<see cref="IReadParamsRegistration"/>).</summary>
+    public static IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> KnownReadParams => Reads.Params;
+
     /// <summary>The declared parameters of one read from <see cref="KnownReadParams"/>, null when the name is not a known read.</summary>
     public static IReadOnlyList<ReadPanelParam>? ReadParams(string read) =>
         KnownReadParams.TryGetValue(read, out var declared) ? declared : null;
+
+    /// <summary>One consistent view of the known reads: the shared lists plus the registered ones.</summary>
+    private sealed class ReadSet
+    {
+        public ReadSet(IReadOnlyList<string> names, IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> parameters)
+        {
+            Names = names;
+            Set = new HashSet<string>(names, StringComparer.Ordinal);
+            Params = parameters;
+        }
+
+        public IReadOnlyList<string> Names { get; }
+
+        public HashSet<string> Set { get; }
+
+        public IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> Params { get; }
+    }
+
+    // Lazy, because the shared lists live in two partial files and C# gives no order between their static initializers. Built once, on
+    // first use, by reflection over this assembly, so no caller has to register anything first.
+    private static readonly Lazy<ReadSet> AllReads = new(() =>
+    {
+        var (names, parameters) = ReadParamsRegistrations.Merge(SharedReadNames, SharedReadParams, ReadParamsRegistrations.Discover());
+        return new ReadSet(names, parameters);
+    });
+
+    private static ReadSet Reads => AllReads.Value;
 }

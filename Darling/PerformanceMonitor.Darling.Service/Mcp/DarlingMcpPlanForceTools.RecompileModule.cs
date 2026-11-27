@@ -63,7 +63,7 @@ public sealed partial class DarlingMcpPlanForceTools
             }
 
             /* 2: SQL Server only (an Azure SQL Database has sp_recompile too). */
-            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
@@ -148,6 +148,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /* The tool method is the last member on purpose: the payload contract census reads a tool's span up to the next tool or the end of the file, and the
        body above has its own catch, which the census must not read as this one-line method's. */
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "recompile_module"), Description(
         "Agent arm, SQL Server only: marks ONE procedure, function or trigger for recompile with sys.sp_recompile, so its next run compiles a new plan. Dry run by default: returns the exact statement and what the object is, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's recompile_module switch and remediation login (with ALTER on the object); ships off. " +
         "<<GUIDE>>" +

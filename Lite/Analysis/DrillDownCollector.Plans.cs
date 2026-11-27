@@ -34,9 +34,12 @@ public partial class DrillDownCollector
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from DuckDB for this query_hash in the finding's database (#8317). Byte-identical
-        // to Darling's PlanHandleLookupSql.
+        // Look up plan_handle and the statement's offsets from DuckDB for this query_hash in the finding's database
+        // (#8317). The offsets come from the same newest row as the handle, so the pair names one statement of one
+        // plan (#9195). Byte-identical to Darling's PlanHandleLookupSql.
         string? planHandle = null;
+        int? statementStartOffset = null;
+        int? statementEndOffset = null;
         try
         {
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
@@ -45,7 +48,7 @@ public partial class DrillDownCollector
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT plan_handle
+SELECT plan_handle, statement_start_offset, statement_end_offset
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
@@ -60,7 +63,15 @@ LIMIT 1";
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
+            {
                 planHandle = reader.GetString(0);
+                /* A row collected before the offsets were stored has neither: the whole batch's plan is fetched. */
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
+                {
+                    statementStartOffset = reader.GetInt32(1);
+                    statementEndOffset = reader.GetInt32(2);
+                }
+            }
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -71,8 +82,11 @@ LIMIT 1";
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
-        // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
+        // Fetch plan XML live from SQL Server: the bad actor's own statement when its offsets are known, because a batch
+        // plan can carry many statements and megabytes of XML (#9195).
+        var planXml = statementStartOffset is { } start && statementEndOffset is { } end
+            ? await _planFetcher.FetchStatementPlanXmlAsync(context.ServerId, planHandle, start, end, context.CancellationToken)
+            : await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
         // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
         // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,
@@ -89,7 +103,7 @@ LIMIT 1";
                 return;
 
             // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
-            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken);
             PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
@@ -141,9 +155,11 @@ LIMIT 1";
     /// <summary>
     /// #4530: the drill-down's own store read for rule 38 (edition/MAXDOP), against the same DuckDB
     /// connection pattern the collector's other reads here use. Mirrors
-    /// <c>DarlingServerMetadataReader.ReadAsync</c>; a failure or no rows returns <c>null</c>.
+    /// <c>DarlingServerMetadataReader.ReadAsync</c>; a failure or no rows returns <c>null</c>. The properties row and the
+    /// MAXDOP capture are the newest at or before <paramref name="windowEndUtc"/>, the analysis window's end, so a pass as
+    /// of a past instant analyzes its plans against the server that instant had.
     /// </summary>
-    private async Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> ReadServerMetadataForPlanAnalysisAsync(int serverId, System.Threading.CancellationToken cancellationToken)
+    internal async Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> ReadServerMetadataForPlanAnalysisAsync(int serverId, DateTime windowEndUtc, System.Threading.CancellationToken cancellationToken)
     {
         try
         {
@@ -158,15 +174,17 @@ SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_me
         FROM v_server_config AS c
         WHERE c.server_id = $1
         AND   c.configuration_name = 'max degree of parallelism'
-        AND   c.capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
+        AND   c.capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1 AND capture_time <= $2)
         LIMIT 1) AS max_dop,
        p.engine_edition,
        p.vcore_count
 FROM v_server_properties AS p
 WHERE p.server_id = $1
+AND   p.collection_time <= $2
 ORDER BY p.collection_time DESC
 LIMIT 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = windowEndUtc });
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -235,7 +253,7 @@ LIMIT 1";
                 return;
 
             // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
-            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken);
             var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)

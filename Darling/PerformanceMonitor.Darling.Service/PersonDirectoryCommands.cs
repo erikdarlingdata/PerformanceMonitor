@@ -27,6 +27,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// agent token reaches this: the mcp role's command function takes five other command types only.
 /// <para>Each command's <c>args_json</c>:
 /// <c>add_person {display_name}</c>, <c>rename_person {person_id, display_name}</c>, <c>set_person_enabled {person_id, enabled}</c>,
+/// <c>delete_person {person_id}</c>,
 /// <c>add_person_identity {person_id, kind, external_id}</c>, <c>remove_person_identity {identity_id}</c>,
 /// <c>add_person_grant {person_id, capability, kinds?, scope_server_id?, scope_tag_id?}</c> and <c>remove_person_grant {grant_id}</c>.</para>
 /// </summary>
@@ -39,11 +40,12 @@ internal static class PersonDirectoryCommands
     public const string RemoveIdentity = "remove_person_identity";
     public const string AddGrant = "add_person_grant";
     public const string RemoveGrant = "remove_person_grant";
+    public const string DeletePerson = "delete_person";
 
     /// <summary>Every command type above.</summary>
     public static IReadOnlySet<string> Types { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
-        AddPerson, RenamePerson, SetPersonEnabled, AddIdentity, RemoveIdentity, AddGrant, RemoveGrant,
+        AddPerson, RenamePerson, SetPersonEnabled, AddIdentity, RemoveIdentity, AddGrant, RemoveGrant, DeletePerson,
     };
 
     /// <summary>One parsed write: run it with the owner source, the journal actor and the surface.</summary>
@@ -67,6 +69,7 @@ internal static class PersonDirectoryCommands
             RemoveIdentity => "remove_person_identity requires args_json {identity_id}",
             AddGrant => "add_person_grant requires args_json {person_id, capability, kinds?, scope_server_id?, scope_tag_id?}",
             RemoveGrant => "remove_person_grant requires args_json {grant_id}",
+            DeletePerson => "delete_person requires args_json {person_id}",
             _ => "unknown people directory command",
         };
         if (!Types.Contains(type) || string.IsNullOrWhiteSpace(argsJson))
@@ -103,6 +106,9 @@ internal static class PersonDirectoryCommands
                     return true;
                 case RemoveGrant when Id(root, "grant_id") is { } grant:
                     write = (o, a, s, ct) => PersonDirectory.RemoveGrantAsync(o, grant, a, s, ct);
+                    return true;
+                case DeletePerson when Id(root, "person_id") is { } person:
+                    write = (o, a, s, ct) => PersonDirectory.DeletePersonAsync(o, person, a, s, ct);
                     return true;
                 default:
                     return false;

@@ -127,7 +127,7 @@ public sealed class CollectionSweepCommandTimeoutTests
     private static readonly (string File, string Member)[] s_sweepMembers =
     {
         ("DarlingCollectorRunner.cs", "GetCollectorStateAsync"),
-        ("DarlingCollectorRunner.cs", "SaveCollectorStateAsync"),
+        ("DarlingCollectorRunner.cs", "SaveCollectorStateRowsAsync"),
         ("DarlingCollectorRunner.cs", "DeleteCollectorStateKeyAsync"),
         ("DarlingCollectorRunner.cs", "PruneOrphanedQueryStoreDatabaseStateAsync"),
         ("DarlingCollectorRunner.cs", "PruneForeignQueryStoreDatabaseStateAsync"),
@@ -170,8 +170,10 @@ public sealed class CollectionSweepCommandTimeoutTests
        registrations holding it; both carry the sweep deadline like the upsert.
        17 since #8013: PruneOrphanedQueryStoreDatabaseStateAsync resolves the newest database_states snapshot before its
        deletes, with a windowed probe (NewestDatabaseStateWindowedProbeSql) and, when the window is empty, an unbounded one
-       (NewestDatabaseStateFallbackProbeSql); both are built on the borrowed store connection and carry the sweep deadline. */
-    private const int ExpectedSweepCommandSites = 17;
+       (NewestDatabaseStateFallbackProbeSql); both are built on the borrowed store connection and carry the sweep deadline.
+       16 since #8988: TryRefreshPgStatementTextAsync hands its upsert to PgStatementText.WriteFetchAsync (a handoff site below), so
+       only its due check is built in the member. */
+    private const int ExpectedSweepCommandSites = 16;
 
     /// <summary>
     /// #8361: sweep-body members that hand their store command to a factory in the Storage project instead of building it.
@@ -183,10 +185,13 @@ public sealed class CollectionSweepCommandTimeoutTests
     private static readonly (string File, string Member, string Factory)[] s_sweepHandoffMembers =
     {
         ("DarlingWorker.Targets.cs", "QueryStoreHintsStandsDownAsync", "DarlingQueryStoreReadableSecondary"),
+        /* #8988: the statement-text refresh's upsert and fetch marker moved into PgStatementText.WriteFetchAsync, which sets the command's
+           timeout from the seconds it is given. */
+        ("DarlingWorker.cs", "TryRefreshPgStatementTextAsync", "PgStatementText"),
     };
 
     /// <summary>The factory calls the handoff members make, pinned like <see cref="ExpectedSweepCommandSites"/>.</summary>
-    private const int ExpectedSweepHandoffSites = 1;
+    private const int ExpectedSweepHandoffSites = 2;
 
     [Fact]
     public void EverySweepBodyStoreHandoff_PassesTheCollectionSweepDeadline()

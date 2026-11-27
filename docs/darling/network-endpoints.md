@@ -179,7 +179,7 @@ Add a `network` block to `web` (managed mode, or the compose container; `web.ena
 }
 ```
 
-When `listen` is a network address **and** a token is present **and** `allowFrom` is a valid CIDR list, the web host binds that interface behind two gates: an **in-app CIDR check** on the remote address and an **access token**. A browser presents the token ONCE through the login form (open `http://192.168.1.205:5153/` and paste it); the form POSTs it to `/auth/login`, the host validates it constant-time, sets an **HMAC-signed, HttpOnly, SameSite=Strict session cookie**, and 302-redirects to the page you were opening. Subsequent requests ride the cookie. A token in the address (`?token=`) signs no one in, whatever its value, because an address lands in history, bookmarks, proxy logs and Referer headers: a bookmark or link that carries one opens the login form, and the service log says why. The dashboard takes no bearer header either (that is the MCP endpoint). A script signs in the way the form does, by posting the token to `/auth/login` and then presenting the session cookie it gets back: `curl -c jar -d "token=<token>" http://192.168.1.205:5153/auth/login`, then `curl -b jar .../api/fleet`. A wrong token shows the login form again and keeps the page you were opening, so a right token on the next try lands there. Failed sign-ins are throttled per source address: three wrong tokens go without delay, the fourth starts a wait of 2 seconds, and each further wrong token doubles it, up to 5 minutes. During the wait every attempt from that address answers **429** with `Retry-After`, right token or wrong, and no token is compared. Each attempt is counted before its token is compared, so attempts that arrive together are counted one by one, and a sign-in that is held up only by attempts from the same address that are still being compared waits for them (at most 5 seconds) instead of being refused. A success gives back only its own attempt: other clients behind the same address keep their count. IPv6 addresses are counted by their /64, and every loopback address (`127.0.0.0/8`, `::1`) is one address. One total budget of 60 attempts an hour holds across all addresses that have not signed in during the last hour; an address that signed in during the last hour is not held by it, though its own wait still applies. When the total budget holds, the `429` says so: the wrong tokens came from other addresses, and restarting the service clears the hold. The wait is kept in memory, so restarting the service clears it. The sign-in POST must come from the dashboard's own page: a POST whose `Origin` (or `Referer`, when there is no `Origin`) names another host is refused with **403** and does not count. The body is read up to 4 KB whatever its framing, and only as `application/x-www-form-urlencoded`. The token itself must be at least **16 characters**, at least 6 of them different — `--configure-network` generates 32 random ones — or the service refuses to expose the dashboard at start (Critical line, loopback-only) rather than gate a network on a short one. On loopback a shorter token still signs a browser in, and the dashboard serves reads only until a longer one is set. **Loopback is exempt from the CIDR check only** — while the dashboard is exposed, a request from the box itself still has to present the token or a valid cookie. It used to pass tokenless on the grounds that the surface was read-only; the Custom Views composer's create / update / delete and `/api/compose/run` ended that, so in exposed mode the token *is* the loopback guard for any local process and sandboxed local sockets ([#1649](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1649)). A dashboard with **no** token configured does not start unless `web.allowTokenlessLoopback` is true, which serves local browsers with no token for reads only (a change gets **403** and a message naming the token setting); a `token` / `encryptedToken` with no network `listen` keeps it loopback-only and puts the same token gate on it, and a token that cannot be decrypted stops the dashboard from starting rather than serving it open. An out-of-CIDR request is refused with **403**, cookie or no cookie; an in-CIDR request with no credential gets the login form back as a **200**, not a 401. The cookie signing key is per-process, so a service restart invalidates open sessions (just re-present the token). Prefer `encryptedToken` (a DPAPI blob from `--encrypt-password`); a plaintext `token` works for dev but is warned. `env:NAME` and `file:PATH` references are for the compose and Linux setups. A Windows service uses `encryptedToken`. Set the same scoped firewall rule for the web port:
+When `listen` is a network address **and** a token is present **and** `allowFrom` is a valid CIDR list, the web host binds that interface behind two gates: an **in-app CIDR check** on the remote address and an **access token**. A browser presents the token ONCE through the login form (open `http://192.168.1.205:5153/` and paste it); the form POSTs it to `/auth/login`, the host validates it constant-time, sets an **HMAC-signed, HttpOnly, SameSite=Strict session cookie**, and 302-redirects to the page you were opening. Subsequent requests ride the cookie. A token in the address (`?token=`) signs no one in, whatever its value, because an address lands in history, bookmarks, proxy logs and Referer headers: a bookmark or link that carries one opens the login form, and the service log says why. The dashboard takes no bearer header either (that is the MCP endpoint). A script signs in the way the form does, by posting the token to `/auth/login` and then presenting the session cookie it gets back: `curl -c jar -d "token=<token>" http://192.168.1.205:5153/auth/login`, then `curl -b jar .../api/fleet`. The sign-in works only where `web.network.oidc.tokenSignIn` allows it: under `loopback` it works from the host and answers 403 from the network, and under `off` it answers 403 everywhere (see [Token sign-in mode](configuration-web.md#token-sign-in-mode)). A wrong token shows the login form again and keeps the page you were opening, so a right token on the next try lands there. Failed sign-ins are throttled per source address: three wrong tokens go without delay, the fourth starts a wait of 2 seconds, and each further wrong token doubles it, up to 5 minutes. During the wait every attempt from that address answers **429** with `Retry-After`, right token or wrong, and no token is compared. Each attempt is counted before its token is compared, so attempts that arrive together are counted one by one, and a sign-in that is held up only by attempts from the same address that are still being compared waits for them (at most 5 seconds) instead of being refused. A success gives back only its own attempt: other clients behind the same address keep their count. IPv6 addresses are counted by their /64, and every loopback address (`127.0.0.0/8`, `::1`) is one address. One total budget of 60 attempts an hour holds across all addresses that have not signed in during the last hour; an address that signed in during the last hour is not held by it, though its own wait still applies. When the total budget holds, the `429` says so: the wrong tokens came from other addresses, and restarting the service clears the hold. The wait is kept in memory, so restarting the service clears it. The sign-in POST must come from the dashboard's own page: a POST whose `Origin` (or `Referer`, when there is no `Origin`) names another host is refused with **403** and does not count. The body is read up to 4 KB whatever its framing, and only as `application/x-www-form-urlencoded`. The token itself must be at least **16 characters**, at least 6 of them different — `--configure-network` generates 32 random ones — or the service refuses to expose the dashboard at start (Critical line, loopback-only) rather than gate a network on a short one. On loopback a shorter token still signs a browser in, and the dashboard serves reads only until a longer one is set. **Loopback is exempt from the CIDR check only** — while the dashboard is exposed, a request from the box itself still has to present the token or a valid cookie. It used to pass tokenless on the grounds that the surface was read-only; the Custom Views composer's create / update / delete and `/api/compose/run` ended that, so in exposed mode the token *is* the loopback guard for any local process and sandboxed local sockets ([#1649](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1649)). A dashboard with **no** token configured does not start unless `web.allowTokenlessLoopback` is true, which serves local browsers with no token for reads only (a change gets **403** and a message naming the token setting); a `token` / `encryptedToken` with no network `listen` keeps it loopback-only and puts the same token gate on it, and a token that cannot be decrypted stops the dashboard from starting rather than serving it open. An out-of-CIDR request is refused with **403**, cookie or no cookie; an in-CIDR request with no credential gets the login form back as a **200**, not a 401. The cookie signing key is per-process, so a service restart invalidates open sessions (just re-present the token). Prefer `encryptedToken` (a DPAPI blob from `--encrypt-password`); a plaintext `token` works for dev but is warned. `env:NAME` and `file:PATH` references are for the compose and Linux setups. A Windows service uses `encryptedToken`. Set the same scoped firewall rule for the web port:
 
 ```
 New-NetFirewallRule -DisplayName "Darling Web" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5153 -RemoteAddress 192.168.1.0/24
@@ -251,7 +251,7 @@ The command follows these rules:
 - If the account already has Read, it says `Already granted` and changes nothing.
 - If an explicit Deny entry on the account covers Read, it stops and tells you to remove the Deny first.
 - When it succeeds, it names the account and the certificate's subject and thumbprint. It tells you to restart the service.
-- It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module.
+- It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module. For one, it opens no card or PIN prompt. It stops and prints the provider's message. It also shows how to find the key file with `certutil` and grant the account with `icacls` by hand.
 - `--store-location CurrentUser` grants on the key of a certificate in the store of the account that runs the command, which is the elevated operator. A service that runs under its own account reads that account's `CurrentUser` store, never the operator's, so the grant does nothing for it. Use `CurrentUser` only when the service runs as the same account that runs the command, for example a service you moved to your own account. Every other install wants the default, `LocalMachine`.
 
 #### When the newest certificate's key cannot be opened
@@ -319,7 +319,7 @@ With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1`
 | `GET /readyz` | 503 | `degraded` | A startup step failed and the service retries it. |
 | `GET /readyz` | 503 | `stopped` | A startup step failed for good, or the configuration has problems. |
 
-The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200.
+The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200. Its `/readyz` also sends the build, commit, start time and the count of stores that are up out of the total as one line of JSON after the word, the same object as the front door's `GET /version` ([The front door](front-door.md#check-the-build-and-the-stores-version)). A probe that reads only the status code or the first line sees what it saw before.
 
 The routes are matched the way ASP.NET Core routing matches every route: case-insensitively, with a trailing slash and a query string ignored, after percent-decoding and after `..` segments are resolved. So `/LIVEZ`, `/livez/`, `/livez?x=1` and `/%6civez` answer the same as `/livez`, and `/livez/../readyz` answers as `/readyz`. Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
 
@@ -327,7 +327,7 @@ The routes are matched the way ASP.NET Core routing matches every route: case-in
 
 No server name, no database name, no step name, no failure detail, no attempt count, no version, no metric and no store content. There is no JSON, no cookie, no `Server` header, and no header beyond the few Kestrel always adds (such as `Date`).
 
-The listener is tight because it has no token and, in a container, listens on every interface: HTTP/1 only (a kubelet probe is an HTTP/1.1 GET), no `Server` header, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body. When the port binds an address that is not loopback, the service logs one Warning that names why: `health.listen` when it is set, or `DOTNET_RUNNING_IN_CONTAINER` when `listen` is empty and the container default applied.
+The listener is tight because it has no token and, in a container, listens on every interface: HTTP/1 only (a kubelet probe is an HTTP/1.1 GET), no `Server` header, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body. When the port binds an address that is not loopback, the service logs one Warning that names why: `health.listen` when it is set, or `DOTNET_RUNNING_IN_CONTAINER` when `listen` is empty and the container default applied. On Docker Compose with `listen` empty, that Warning logs at every start and is expected: the release's compose file publishes no health port, so only the stack's own containers reach it, and a `ports:` entry that you add decides who else can.
 
 ### Why it has no token and no `allowFrom`
 
@@ -366,3 +366,144 @@ readinessProbe:
 ```
 
 Never use `/readyz` for liveness. A service that stopped on a configuration problem answers `/readyz` 503 `stopped` until someone fixes the file. A liveness probe on it would restart the pod in a loop, and the restart cannot fix the file.
+
+## The metrics port
+
+The metrics port is a Prometheus scrape endpoint ([#9013](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9013)). It is off by default. Turn it on with a `metrics` block in `darling.json`, and restart the service. See [`metrics`](configuration.md#metrics-object-optional) for the five settings (`enabled`, `port` 5155, `listen`, `token` and `allowFrom`). Lite does not have this port.
+
+```json
+"metrics": { "enabled": true, "token": "file:/etc/darling/metrics-token" }
+```
+
+The port serves one route, `GET /metrics`, as `text/plain; version=0.0.4; charset=utf-8`. Every metric is a gauge, with its `# HELP` and `# TYPE` lines and no sample timestamps. Any other path gets a 404 with an empty body. Any other method on `/metrics` gets a 405 with an empty body.
+
+### What the port serves and never serves
+
+It serves the numbers in the tables below, labeled with the server's display name. It never serves a query text, a database name, a login name, a host name or an application name, and no text from a monitored server reaches a label. Besides `server`, the labels take only the fixed values named below.
+
+The `server` label is the server's display name, the one the dashboard shows. When two enabled servers share a display name, each one's label becomes `<name> #<server_id>`, and the service logs one Information line per shared name when the shared names change, not at every refresh.
+
+### The token and `allowFrom`
+
+Every request is checked in this order:
+
+1. **Address.** When `metrics.allowFrom` is set and the client's address is outside it, the answer is 403 with an empty body, whatever token it sends. The address is the TCP peer's. Forwarded headers are never trusted. Loopback is always admitted, as on the web and MCP endpoints. With `allowFrom` empty, there is no address check.
+2. **Token.** A missing or wrong bearer token gets 401 with an empty body and the header `WWW-Authenticate: Bearer`. The token is compared in constant time.
+
+Wrong tokens are throttled per address, as on the MCP endpoint: three wrong bearer tokens from one address go without delay, the fourth starts a wait of 2 seconds, and each further wrong token doubles it, up to 5 minutes. During the wait the port answers every request from that address that carries a bearer token with `429` and a `Retry-After` header, and compares no token, so a correct token is refused too. A request with no bearer token does not count as a wrong one. The address check comes first, so an address outside `allowFrom` gets its 403 and is never counted. One total budget of 60 wrong tokens an hour holds across all addresses that have not presented a correct token during the last hour, and its `429` says so. The wait is kept in memory: restarting the service clears it.
+
+The service reads `metrics.token` once, at start. To rotate it, change the secret and restart the service. Each refusal is logged with the client's address and the reason, never the token, and a repeating refusal from one address is rate limited in the log.
+
+**TLS.** When `web.network.tls` is set, the metrics port serves HTTPS with that same certificate, and a scrape must use `https`. The service loads the certificate at start, as the web dashboard does, so a renewed certificate needs a restart. A certificate that cannot be used keeps the metrics port off, with one Critical line, and collection, web and MCP keep running. With no `web.network.tls`, the port serves plain HTTP, so the token crosses the network in clear text. Keep that port on a trusted network, or put a TLS-terminating proxy in front of it. Behind a proxy, every client reaches the port from the proxy's address, so they all share one throttle: one client that sends wrong tokens holds out the scraper too, until the wait ends. Keep the proxy's other clients off this route, or give the scraper its own path to the port. When the port binds an address that is not loopback, the service logs one Warning after it binds if the port serves plain HTTP, whatever `allowFrom` holds, because the token crosses the network unencrypted. It also warns when `allowFrom` is empty, because the token alone guards the port. Set `allowFrom` to the scraper's addresses, and set `web.network.tls` to serve HTTPS.
+
+### Limits
+
+The listener has the health port's limits: HTTP/1 only, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body.
+
+### How the numbers are refreshed
+
+A scrape never reads the store. It returns an in-memory snapshot, and one background refresh rebuilds that snapshot.
+
+- A scrape starts a refresh only when the snapshot is at least 55 seconds old and the last refresh attempt started at least 55 seconds ago. So the store sees at most one refresh a minute, also after a failed one, and only while something scrapes. A refresh that takes longer than 30 seconds is cancelled and counts as failed.
+- The first scrape starts the first refresh and answers at once, so it carries only `darling_metrics_last_refresh_success` (0). The next scrape after the refresh finishes has the rest. Until the service is collecting (after the store migrations), no refresh starts, and a scrape carries only that series.
+- The refresh is read-admitted as the web dashboard's fleet page is (`/api/fleet`): when the read is classed as long, it takes one `reads.maxHeavyReads` slot (see [`reads`](configuration.md#reads-optional) for the rule). A refresh that the limit refuses fails like any other.
+- A failed refresh keeps the last snapshot. Once the snapshot is 5 minutes old, a scrape drops every per-server series, and only the three `darling_metrics_*` series remain. The service logs one Warning for a streak of failures and one Information line when a refresh succeeds again. Alert on `darling_metrics_last_refresh_success == 0` or on a large `darling_metrics_snapshot_age_seconds`.
+- A server that has never collected gets only `darling_server_health_band`.
+- A rate is the change between a collector's newest two collections, divided by the seconds between them. A reading is absent, never 0, when that interval is 0 or unknown, or when the newest collection is older than its limit. The limit is three times the interval the collector is scheduled at on that server (the server's own `--set-collector-frequency` setting, else the fleet-wide one, else the shipped default; `0`, once on load, counts as its daily re-run), and never less than 15 minutes for the one-minute collectors, 30 minutes for the session summary and 3 hours for the database sizes. So a `wait_stats` scheduled every 30 minutes keeps its series for 90 minutes after a collection. A collector turned off on that server (`--disable-collector`) keeps only that minimum. A collector that stops makes its series disappear instead of repeating its last value.
+
+On a service-managed store the port reads as the read-only `viewer` login (the web dashboard uses its `web` login there). On any other store it takes, in this order: `postgres.webConnectionString` when it is set; otherwise, in a container (the compose distribution), the read-only `viewer` login this start provisioned, then the `viewer` credential an earlier start left, then the `web` credential an earlier start left, then the owner connection (`postgres.connectionString`); outside a container, the owner connection. A `postgres.webConnectionString` that is set but cannot be resolved, or resolves blank, fails the refresh. The port never falls back to the owner login in its place. The service resolves the login at the first refresh. A refresh with no login yet fails, and the next one tries again. The log lines about the login start "The metrics port" and appear once per streak of failures.
+
+### Not in front-door mode
+
+A front door (see [The front door](front-door.md)) has no store of its own, so it has nothing to read. With `frontDoor.enabled` set, the port stays off and the service logs one Critical line: "metrics needs a store; not served in front-door mode". Turn the port on at each store.
+
+### When the port does not open
+
+In each case collection, web and MCP keep running:
+
+- **A bad `metrics` block.** A missing or unusable token (unset, an `env:` or `file:` reference that cannot be resolved, too short or too repetitive), a port outside 1 to 65535, a port equal to `web.port`, `mcp.port` or an enabled `health.port`, a `listen` that is not an IP address, or an `allowFrom` that is not a comma-separated list of CIDRs. The service logs one Critical line that names each setting and never the token.
+- **A bind failure.** The port is taken by another process, or `metrics.listen` is an IP address that is not on this machine. The service logs one Error line that names the address and port.
+- **A `darling.json` that cannot be read or parsed.** The service logs one Error line, and the port stays off for the life of the process.
+
+### The metrics
+
+The meta series describe the port itself. A meta series is left out while it has no value:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_metrics_snapshot_age_seconds` | seconds | none | The port itself | Age of the snapshot at scrape time. Absent before the first snapshot. |
+| `darling_metrics_last_refresh_success` | 0 or 1 | none | The port itself | 1 when the last refresh succeeded. 0 before the first attempt. |
+| `darling_metrics_last_refresh_duration_seconds` | seconds | none | The port itself | How long the last refresh took. Absent before the first attempt. |
+
+The fleet metrics come from the same read as the dashboard's fleet page. A reading the fleet read does not have is left out:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_server_health_band` | 0 to 3 | `server` | Fleet read | 0 healthy, 1 warning, 2 critical, 3 offline. Present for every enabled server. |
+| `darling_server_cpu_percent` | percent | `server` | Fleet read | Total CPU. |
+| `darling_server_memory_mb` | MB | `server` | Fleet read | Server memory in use. |
+| `darling_server_buffer_pool_mb` | MB | `server` | Fleet read | Buffer pool size. |
+| `darling_server_blocking_events` | count | `server` | Fleet read | Blocking events in the last hour. |
+| `darling_server_deadlocks` | count | `server` | Fleet read | Deadlocks in the last hour. Absent when deadlocks are not measured for the server. |
+| `darling_server_workers_current` | count | `server` | Fleet read | Current worker threads. |
+| `darling_server_workers_max` | count | `server` | Fleet read | Maximum worker threads. |
+| `darling_server_last_collection_age_seconds` | seconds | `server` | Fleet read | Age of the server's newest collection, taken at scrape time. |
+| `darling_server_failing_collectors` | count | `server` | Fleet read | Collectors currently failing. |
+| `darling_server_collectors` | count | `server` | Fleet read | Collectors configured. |
+
+The server metrics each read the newest collection of one collector, for every enabled SQL Server. A PostgreSQL target has none of them. `file_type` is `data` or `log`, and `scope` is `user` or `tempdb`. `category` is one of `cpu`, `parallelism`, `storage`, `memory`, `network`, `locks`, `latches` and `other`:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_cpu_sql_percent` | percent | `server` | CPU ring buffer | SQL Server process CPU. |
+| `darling_cpu_other_percent` | percent | `server` | CPU ring buffer | Other processes on the host. |
+| `darling_scheduler_runnable_tasks` | count | `server` | CPU scheduler stats | Runnable tasks across the schedulers. |
+| `darling_batch_requests_per_second` | per second | `server` | Perfmon | Batch requests. |
+| `darling_compilations_per_second` | per second | `server` | Perfmon | SQL compilations. |
+| `darling_recompilations_per_second` | per second | `server` | Perfmon | SQL recompilations. |
+| `darling_transactions_per_second` | per second | `server` | Perfmon | Transactions. |
+| `darling_lock_waits_per_second` | per second | `server` | Perfmon | Lock waits. |
+| `darling_processes_blocked` | count | `server` | Perfmon | Processes blocked now. A gauge, not a rate. |
+| `darling_sessions` | count | `server`, `state` | Session summary | One series each for `running`, `sleeping`, `background` and `dormant`. |
+| `darling_memory_total_server_mb` | MB | `server` | Memory stats | Total server memory. |
+| `darling_memory_target_server_mb` | MB | `server` | Memory stats | Target server memory. |
+| `darling_memory_plan_cache_mb` | MB | `server` | Memory stats | Plan cache size. |
+| `darling_memory_os_available_mb` | MB | `server` | Memory stats | Physical memory available to the OS. |
+| `darling_memory_grants_pending` | count | `server` | Memory grants | Queries waiting for a grant, on the regular resource semaphore, summed over pools. |
+| `darling_memory_granted_mb` | MB | `server` | Memory grants | Memory granted to queries, on the regular resource semaphore, summed over pools. |
+| `darling_lazy_writes_per_second` | per second | `server` | Perfmon | Lazy writes. |
+| `darling_page_reads_per_second` | per second | `server` | Perfmon | Page reads. |
+| `darling_page_writes_per_second` | per second | `server` | Perfmon | Page writes. |
+| `darling_free_list_stalls_per_second` | per second | `server` | Perfmon | Free list stalls. |
+| `darling_disk_read_latency_ms` | ms | `server`, `file_type`, `scope` | File I/O | Average read latency. |
+| `darling_disk_write_latency_ms` | ms | `server`, `file_type`, `scope` | File I/O | Average write latency. |
+| `darling_disk_read_mb_per_second` | MB per second | `server`, `file_type`, `scope` | File I/O | Read throughput. |
+| `darling_disk_write_mb_per_second` | MB per second | `server`, `file_type`, `scope` | File I/O | Write throughput. |
+| `darling_disk_reads_per_second` | per second | `server`, `file_type`, `scope` | File I/O | Reads. |
+| `darling_disk_writes_per_second` | per second | `server`, `file_type`, `scope` | File I/O | Writes. |
+| `darling_log_flushes_per_second` | per second | `server` | Perfmon | Log flushes. |
+| `darling_log_bytes_flushed_per_second` | bytes per second | `server` | Perfmon | Log bytes flushed. |
+| `darling_disk_volume_min_free_percent` | percent | `server` | Database sizes | Free space on the fullest volume of the server. |
+| `darling_wait_ms_per_second` | ms per second | `server`, `category` | Wait stats | Wait time by category. One series per category that waited in the interval. |
+| `darling_signal_wait_percent` | percent | `server` | Wait stats | Signal wait time as a share of all wait time. |
+| `darling_tempdb_used_mb` | MB | `server`, `kind` | tempdb stats | One series each for `user_objects`, `internal_objects` and `version_store`. |
+| `darling_tempdb_unallocated_mb` | MB | `server` | tempdb stats | Unallocated space. |
+| `darling_tempdb_log_used_percent` | percent | `server` | tempdb stats | tempdb log space used. |
+
+### Prometheus scrape config
+
+Put the token in a file that only Prometheus can read, and point `credentials_file` at it. The file holds the token and nothing else.
+
+```yaml
+scrape_configs:
+  - job_name: darling
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/darling-metrics-token
+    # scheme: https   # when web.network.tls is set
+    static_configs:
+      - targets: ['darling.example:5155']
+```
+
+A scrape interval of 60 seconds or more matches the refresh. A shorter interval returns the same numbers until the next refresh.

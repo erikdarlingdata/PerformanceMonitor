@@ -267,7 +267,7 @@ CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_markers
         }
 
         var now = Now();
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         await using (var lockCommand = Command(connection, transaction,
@@ -400,7 +400,7 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
     public async Task<Dictionary<string, DateTime>> GetMarksAsync(int serverId, CancellationToken cancellationToken = default)
     {
         var marks = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var command = Command(connection, null, "SELECT source, mark FROM config.change_watch_marks WHERE server_id = $1", serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -420,7 +420,7 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
             return;
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var command = Command(connection, null, @"
 INSERT INTO config.change_watch_marks (server_id, source, mark)
 SELECT $1, s.source, s.mark FROM unnest($2::text[], $3::timestamptz[]) AS s(source, mark)
@@ -441,7 +441,7 @@ ON CONFLICT (server_id, source) DO UPDATE SET mark = greatest(config.change_watc
     /// </summary>
     public async Task<int?> ClaimAsync(Guid watchId, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var claim = Command(connection, null, @"
 UPDATE config.change_watches
 SET state = 'evaluating', claimed_at = $2, attempts = attempts + 1
@@ -459,7 +459,7 @@ RETURNING attempts", watchId, Now(), Now() - StaleClaim);
     /// </summary>
     public async Task<bool> FailAttemptAsync(Guid watchId, string error, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var command = Command(connection, null, @"
 UPDATE config.change_watches
 SET state = 'failed', closed_at = $2, result = 'failed', result_json = $3
@@ -484,7 +484,7 @@ WHERE watch_id = $1 AND state = 'evaluating' AND attempts >= $4",
     /// <summary>The request already opened for this watch (its dedup key is the watch id), or null: a pass that took over a stale claim reads it instead of opening a second.</summary>
     public async Task<Guid?> FindRequestAsync(Guid watchId, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var command = Command(connection, null,
             "SELECT request_id FROM config.investigation_requests WHERE trigger_kind = 'change_watch' AND first_dedup_key = $1", RequestKey(watchId));
         return await command.ExecuteScalarAsync(cancellationToken) is Guid id ? id : null;
@@ -501,7 +501,7 @@ WHERE watch_id = $1 AND state = 'evaluating' AND attempts >= $4",
     /// </summary>
     public async Task<bool> IsAgentOnlyAsync(Guid watchId, TimeSpan reach, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var command = Command(connection, null, @"
 SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
    AND NOT EXISTS (
@@ -525,7 +525,7 @@ SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
 
     private async Task<IReadOnlyList<ChangeWatchRow>> ReadAsync(string where, object?[] parameters, int limit, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         var rows = new List<(Guid, int, string, DateTime, DateTime, DateTime, string, string?, Guid?, DateTime?, string?)>();
         await using (var command = Command(connection, null, $@"
 SELECT w.watch_id, w.server_id, w.server_name, w.first_change_at, w.last_change_at, w.window_ends_at, w.state, w.result, w.request_id, w.closed_at, w.result_json
@@ -573,7 +573,7 @@ ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
     /// <summary>Closes an open watch with its result. False when it was not open (another pass closed it first).</summary>
     public async Task<bool> CloseAsync(Guid watchId, string result, Guid? requestId, string resultJson, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         await using var close = Command(connection, null, @"
 UPDATE config.change_watches
 SET state = 'closed', closed_at = $2, result = $3, request_id = $4, result_json = $5

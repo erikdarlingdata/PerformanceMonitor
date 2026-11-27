@@ -28,7 +28,7 @@ public partial class DuckDbFactCollector
         // Latest value PER configuration_name (ROW_NUMBER, not LIMIT N): server_config accumulates
         // a row per capture, so LIMIT-N-ORDER-BY-time returns the newest N ROWS — which collapses to
         // one config when captures are frequent, silently dropping settings. Partition by name and
-        // take rn = 1 so each requested setting is its latest value.
+        // take rn = 1 so each requested setting is its latest value at or before $2, the analysis window's end.
         cmd.CommandText = @"
 WITH latest AS (
     SELECT
@@ -37,6 +37,7 @@ WITH latest AS (
         ROW_NUMBER() OVER (PARTITION BY configuration_name ORDER BY capture_time DESC) AS rn
     FROM v_server_config
     WHERE server_id = $1
+    AND   capture_time <= $2
     AND   configuration_name IN (
         'cost threshold for parallelism',
         'max degree of parallelism',
@@ -52,6 +53,7 @@ FROM latest
 WHERE rn = 1";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         // max/min server memory are read alongside the rooted CONFIG_* facts so the
         // narrow-memory derivation below can compare them without a second query.
@@ -121,10 +123,12 @@ SELECT engine_edition,
        CAST(SPLIT_PART(product_version, '.', 1) AS INTEGER) AS major_version
 FROM v_server_properties
 WHERE server_id = $1
+AND   collection_time <= $2
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -162,7 +166,13 @@ LIMIT 1";
                one, and a per-database latest-ever read kept counting it (and its auto_shrink, its recovery
                model) until its old captures aged out. The drill-down that lists these databases
                (DrillDownCollector.CollectConfigIssues) was already anchored this way. No lookback bound: an
-               on-load capture is as old as the app's last start. */
+               on-load capture is as old as the app's last start. The newest capture is the newest at or before $2,
+               the analysis window's end, so a pass as of a past instant reads the capture that existed then.
+
+               #9587: master, msdb, model, tempdb and rdsadmin are left out of every count. rdsadmin is the platform's
+               own database on Amazon RDS for SQL Server: the customer cannot change its settings, so an RCSI-off
+               count that included it would raise DB_CONFIG on a server whose user databases are all fine. The
+               drill-down (DrillDownCollector.ConfigIssuesSql) leaves out the same five. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -173,7 +183,7 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
     FROM v_database_config
     WHERE server_id = $1
-    AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
+    AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time <= $2)
     /*SEC*/
 )
 SELECT
@@ -188,12 +198,13 @@ SELECT
     COUNT(CASE WHEN recovery_model = 'SIMPLE' THEN 1 END) AS simple_recovery_count,
     COUNT(CASE WHEN is_query_store_on THEN 1 END) AS query_store_on_count
 FROM latest WHERE rn = 1
-AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
+AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb', 'rdsadmin')";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
             /* #5558: a database this node holds only as a secondary copy is the primary's to report (and drops out
                of every count here, database_count included). */
-            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 2);
+            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 3);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -404,10 +415,12 @@ SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, 
        lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count, engine_edition
 FROM v_server_properties
 WHERE server_id = $1
+AND   collection_time <= $2
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

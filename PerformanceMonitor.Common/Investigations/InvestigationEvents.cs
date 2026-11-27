@@ -22,6 +22,14 @@ public static class InvestigationEvents
 {
     public const string Opened = "opened";
 
+    /// <summary>#9485: a request held by a planned change window (<c>InvestigationChangeWindows</c>) was released because an alert joined it after the
+    /// window's tail ended. It is an event like <see cref="Opened"/>, so the long-poll and the signed POST give the request to the runner then.</summary>
+    public const string HoldReleased = "hold_released";
+
+    /// <summary>#9485: the one summary row journaled when a change window's tail ends (or the window is cleared): the held count, the counts by
+    /// family and by server, and the reason. It belongs to no request and is audit only: no reader delivers it.</summary>
+    public const string ChangeWindowClosed = "change_window_closed";
+
     /// <summary>A join that brought a new metric or a higher severity (D6). Any other join is <see cref="QuietJoin"/>.</summary>
     public const string Joined = "joined";
 
@@ -74,7 +82,7 @@ public static class InvestigationEvents
 
     /// <summary>Every event kind, in the order D6 lists them.</summary>
     public static IReadOnlyList<string> Kinds { get; } =
-        [Opened, Joined, Resolved, Expired, ClaimsExhausted, EvidenceReady, FollowUp, DeadlockDigest];
+        [Opened, Joined, Resolved, Expired, ClaimsExhausted, EvidenceReady, FollowUp, DeadlockDigest, HoldReleased];
 
     /// <summary>The severities a request's <c>max_severity</c> holds, lowest first.</summary>
     public const string Warning = "warning", Critical = "critical";
@@ -99,6 +107,9 @@ public static class InvestigationEvents
 
     /// <summary>The once key of an expired request's fallback.</summary>
     public static string FallbackOnceKey(Guid requestId) => "fallback:" + requestId.ToString("D");
+
+    /// <summary>The once key of a request's <c>hold_released</c> row (#9485): one per request, because a hold is released once.</summary>
+    public static string HoldReleasedOnceKey(Guid requestId) => "hold_released:" + requestId.ToString("D");
 
     /// <summary>The once key of a report's notice (#6979): one per request, so a report is announced at most once whatever replays the pass.</summary>
     public static string ReportNoticeOnceKey(Guid requestId) => "report_notice:" + requestId.ToString("D");
@@ -125,6 +136,8 @@ public static class InvestigationEvents
         /* #6005: the digest names signatures (a hash) and counts, never object names or statements. */
         [DeadlockDigest] = ["window_hours", "total", "signatures"],
         [FollowUp] = ["follow_up_of", "trigger", "force_check_of", "check_no"],
+        /* #9485: the joining alert's metric and time and the window that held the request. */
+        [HoldReleased] = ["window_id", "metric", "alert_time"],
     };
 
     /// <summary>

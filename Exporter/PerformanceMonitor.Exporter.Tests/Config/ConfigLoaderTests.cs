@@ -323,4 +323,39 @@ public class ConfigLoaderTests
     [InlineData("", false)]
     [InlineData(null, false)]
     public void Store_name_rule(string? name, bool valid) => Assert.Equal(valid, ExportOptions.IsValidStoreName(name));
+
+    // ---- a duplicate key is refused by the loader, once, for every verb ----
+
+    [Theory]
+    [InlineData("""{ "config_version": 1, "config_version": 2, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" } }""", "config_version")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "name": "t", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" } }""", "store.name")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW", "name": "OTHER" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" } }""", "store.password.name")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" }, "destination": { "type": "s3", "bucket": "lab-first-value", "bucket": "lab-second-value" } }""", "destination.bucket")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" }, "destination": { "type": "s3", "bucket": "b", "credentials": { "secret_access_key_env": "lab-first-value", "secret_access_key_env": "lab-second-value" } } }""", "destination.credentials.secret_access_key_env")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" }, "destination": { "type": "s3", "bu\u0063ket": "lab-first-value", "bucket": "lab-second-value" } }""", "destination.bucket")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" }, "post_run": { "name": "x", "command": [ "a", { "k": "lab-first-value", "k": "lab-second-value" } ] } }""", "post_run.command[1].k")]
+    [InlineData("""{ "config_version": 1, "store": { "name": "s", "password": { "source": "env", "name": "PW" } }, "paths": { "out": "/o", "state": "/s", "logs": "/l" }, "destination": { "type": "local", "path": "/p", "a\nb": "lab-first-value", "a\u000ab": "lab-second-value" } }""", "destination.a?b")]
+    public void A_duplicate_key_is_a_config_error_that_names_the_key_path_and_no_value(string json, string path)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(json, isWindows: false));
+
+        Assert.Equal($"{path}: duplicate key", ex.Message);
+        Assert.DoesNotContain("lab-first-value", ex.Message);
+        Assert.DoesNotContain("lab-second-value", ex.Message);
+    }
+
+    [Fact]
+    public void The_same_key_in_different_objects_and_array_elements_is_not_a_duplicate()
+    {
+        var c = ConfigLoader.Parse("""
+            { "config_version": 1,
+              "store": { "name": "s", "password": { "source": "env", "name": "PW" } },
+              "paths": { "out": "/o", "state": "/s", "logs": "/l" },
+              "destination": { "type": "s3", "bucket": "b", "credentials": { "access_key_id_env": "AK", "secret_access_key_env": "SK" } },
+              "post_run": { "name": "x", "command": [ "a", "b" ] } }
+            """, isWindows: false);
+
+        Assert.Equal("s", c.Store.Name);
+        Assert.Equal("x", c.PostRun!.Name);
+    }
 }

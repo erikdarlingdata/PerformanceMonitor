@@ -91,7 +91,7 @@ public static class DarlingPgColumnStatsReader
                    top_value_frequency, common_value_count, collection_time
             FROM pg_column_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, column_name, collection_time DESC
         ) AS latest
@@ -179,7 +179,7 @@ SELECT
             FROM collection_log
             WHERE server_id = $1
             AND   collector_name = 'pg_table_bloat_stats'
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   status IN (" + EvidenceStatusList + @")
         )
@@ -193,7 +193,7 @@ FROM (
            heap_pages, estimate_unavailable
     FROM pg_table_bloat_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     ORDER BY database_name, schema_name, table_name, collection_time DESC
 ) AS latest";

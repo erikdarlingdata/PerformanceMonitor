@@ -114,24 +114,29 @@ else {
 #
 # Matched by the shared DisplayName PREFIX rather than by rebuilding each port-specific name, so a store/MCP/
 # web rule left over from a PREVIOUS port is removed too - reconstructing names from the current darling.json
-# would strand those, and darling.json may not even be readable at this point. The C# side pins this literal
-# against all three real rule-name builders (DarlingFirewallCheck.RuleNamePrefix), so a rename cannot silently
-# orphan rules here. A wildcard that matches nothing is not an error (verified), but the try/catch keeps a
-# firewall hiccup from aborting the rest of an uninstall under ErrorActionPreference = 'Stop'.
-try {
-    $rules = @(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue)
-    if ($rules.Count -gt 0) {
-        Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction Stop
-        Write-Host "Removed $($rules.Count) scoped firewall rule(s)."
+# would strand those, and darling.json may not even be readable at this point. A test runs this function over the
+# rule names all three real builders (DarlingFirewallCheck.RuleNamePrefix) produce for several ports, so a rename
+# cannot silently orphan rules here. A wildcard that
+# matches nothing is not an error (verified), but the try/catch keeps a firewall hiccup from aborting the rest of an
+# uninstall under ErrorActionPreference = 'Stop'. The firewall cmdlets are looked up by name, so a test can stand in for them.
+function Remove-DarlingFirewallRules {
+    try {
+        $rules = @(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue)
+        if ($rules.Count -gt 0) {
+            Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction Stop
+            Write-Host "Removed $($rules.Count) scoped firewall rule(s)."
+        }
+        else {
+            Write-Host 'No Darling firewall rules to remove.'
+        }
     }
-    else {
-        Write-Host 'No Darling firewall rules to remove.'
+    catch {
+        Write-Host "Could not remove the firewall rules ($($_.Exception.Message)). Remove them by hand:" -ForegroundColor Yellow
+        Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
     }
 }
-catch {
-    Write-Host "Could not remove the firewall rules ($($_.Exception.Message)). Remove them by hand:" -ForegroundColor Yellow
-    Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
-}
+
+Remove-DarlingFirewallRules
 
 # The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
 # returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
@@ -280,12 +285,40 @@ $operatorGroupName = 'PerformanceMonitor Darling Operators'
 try { Remove-DarlingDirectOperatorGrants $operatorConfigPath $operatorStoreFolder $operatorGroupName }
 catch { Write-Host "Could not check for direct operator grants ($($_.Exception.Message))." -ForegroundColor Yellow }
 
+# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
+# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
+# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
+function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
+    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
+}
+
+# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
+# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
+# The same check as install-darling.ps1 (#9342).
+function Test-DarlingInteractiveHost {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } }
+    catch { return $false }
+    foreach ($argument in [Environment]::GetCommandLineArgs()) {
+        if ($argument -match '^[-/]NonI') { return $false }
+    }
+    return $true
+}
+
 # Whether the store may be deleted. -ConfirmPurge is the answer already given; a caller that cannot be asked (-MsiUninstall) and gave
-# none keeps the store; otherwise the person types DELETE, as before. The question is a parameter so a test can answer it.
+# none keeps the store, and so does a host nobody can answer on (remoting, redirected input, -NonInteractive), which would throw or
+# hang at the prompt (#9342); otherwise the person types DELETE, as before. The question is a parameter so a test can answer it.
 function Test-DarlingPurgeConfirmed([bool]$ConfirmPurge, [bool]$CannotAsk, [scriptblock]$ReadAnswer = $null) {
     if ($ConfirmPurge) { return $true }
     if ($CannotAsk) { return $false }
-    if (-not $ReadAnswer) { $ReadAnswer = { Read-Host "Type the word DELETE to confirm" } }
+    if (-not $ReadAnswer) {
+        if (-not (Test-DarlingInteractiveHost)) {
+            Write-Host 'Not asking: this session cannot be answered, so the store is kept. Pass -ConfirmPurge to delete it without a question.' -ForegroundColor Yellow
+            return $false
+        }
+        $ReadAnswer = { Read-Host "Type the word DELETE to confirm" }
+    }
     return ((& $ReadAnswer) -ceq 'DELETE')
 }
 

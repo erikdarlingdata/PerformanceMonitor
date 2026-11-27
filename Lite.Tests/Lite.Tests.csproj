@@ -8,10 +8,11 @@
     <!-- #2347: xunit.v3 under Microsoft.Testing.Platform builds the suite as its own executable. -->
     <OutputType>Exe</OutputType>
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
-         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
-         ambient token through every call. -->
-    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
-    <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
+         hundreds of short-lived test calls (still fires in about 1000 places); suppressed rather than
+         threading the ambient token through every call.
+         NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build.
+         CS4014 no longer fires here, so it is no longer suppressed. -->
+    <NoWarn>$(NoWarn);NU1701;xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -34,7 +35,7 @@
          larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
          fails, with the same message, rather than hanging the suite. The shipped app declares nothing
          here and keeps LocalDataService.DefaultWriteLockBudget. -->
-    <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
+    <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="150" />
     <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
          registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
          own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever
@@ -111,6 +112,8 @@
     <!-- system_health event samples (one per feeder event; shapes per sp_HealthParser xpath) for the
          System Events reader round-trip tests. Mirrors Darling.Tests' Fixtures\SystemHealth set. -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- A Lite 3.13.0 store (schema v81) as a script: its DDL, rows, archive files and views, which Lite313StoreUpgradeTests climbs. -->
+    <None Include="Fixtures\StoreV81\*.sql" CopyToOutputDirectory="PreserveNewest" />
     <!-- The three services that build DuckDB COPY/read_parquet path literals, so DataImportPathEscapingTests
          can pin that none of them interpolates a path without EscapeSqlPath. DataImportService was the one
          that had drifted from its siblings, and a forgotten call is only visible in the source. -->
@@ -123,8 +126,13 @@
          it. A hand-maintained key list here would be a third thing to keep in sync, and would rot
          exactly the way the sample it guards did. -->
     <None Include="..\Lite\config\settings.sample.json" Link="Fixtures\settings.sample.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9744: the schedule file the zip ships and a fresh install seeds into its config folder. ShippedScheduleFileTests loads it through ScheduleManager. -->
+    <None Include="..\Lite\config\collection_schedule.json" Link="Fixtures\collection_schedule.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9611: the sample Teams payloads the tools\teams-test-card script posts. TeamsTestCardSampleTests builds the same
+         alerts with the shared builder and compares, so a committed sample cannot drift from what is sent. -->
+    <None Include="..\tools\teams-test-card\*.teams.json" Link="Fixtures\TeamsTestCard\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <!-- Lite's windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->

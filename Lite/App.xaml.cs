@@ -49,6 +49,9 @@ public partial class App : Application
     private const string ExitForUpgradeEventName = "PerformanceMonitorLite_ExitForUpgrade";
     private SingleInstanceCoordinator? _instanceCoordinator;
 
+    /// <summary>#9184: cancelled when the exit channel (<c>--stop</c> or an upgrade handoff) asks this instance to shut down.</summary>
+    private readonly CancellationTokenSource _stopRequested = new();
+
     /* Single-instance "surface the window" channel (#769, #1050). A second launch signals this named
        event and exits; the owning instance restores its window through WPF's own Show() path
        (MainWindow.RestoreFromTray). The old approach poked the HWND with raw Win32 ShowWindow, which
@@ -57,6 +60,15 @@ public partial class App : Application
     private const string ShowWindowEventName = "PerformanceMonitorLite_ShowWindow";
     private SingleInstanceSignal? _instanceSignal;
     private MainWindow? _mainWindow;
+
+    /// <summary>#9142: what this start does (--headless, --stop), read once from the command line.</summary>
+    private LiteStartupPlan _startupPlan = new(Headless: false, Stop: false);
+
+    /// <summary>#9142: the plan of this process, for the parts of the app that build the tray and the window.</summary>
+    internal static LiteStartupPlan StartupPlan { get; private set; } = new(Headless: false, Stop: false);
+
+    /// <summary>#9142: true when this process runs with no window and no tray icon (<c>--headless</c>).</summary>
+    public static bool IsHeadless => HeadlessUi.IsHeadless;
 
     /// <summary>
     /// Gets the application data directory where config and data files are stored.
@@ -271,7 +283,12 @@ public partial class App : Application
        rule). Empty by default; persisted as the alert_excluded_volumes array, edited on the Alerts tab. */
     public static List<string> AlertExcludedVolumes { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
+    public static bool AlertTempDbGrowthFitEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
+    public static bool AlertTempDbLogSpaceEnabled { get; set; } = true;
+    public static int AlertTempDbLogSpaceThresholdPercent { get; set; } = 80;
+    public static bool AlertInstanceRestartedEnabled { get; set; } = true;
+    public static bool AlertMemoryDumpsEnabled { get; set; } = true;
     public static bool AlertLowDiskEnabled { get; set; } = true;
     public static int AlertLowDiskThresholdPercent { get; set; } = 10; // Alert when a volume's free space < X% (0 disables this check)
     public static int AlertLowDiskThresholdGb { get; set; } = 5;        // Alert when a volume's free space < X GB (0 disables this check)
@@ -598,6 +615,35 @@ public partial class App : Application
     {
         SetCurrentProcessExplicitAppUserModelID("DarlingData.PerformanceMonitor.Lite");
 
+        _startupPlan = LiteStartupPlan.FromArgs(e.Args);
+        StartupPlan = _startupPlan;
+        HeadlessUi.IsHeadless = _startupPlan.Headless;
+        HeadlessUi.Info = message => AppLogger.Info("Headless", message);
+
+        /* #9142: --stop asks the running instance to shut down through the exit channel the upgrade handoff uses, so it runs
+           its real shutdown (DuckDB close, MCP unbind) where a scheduled task's End would end the process with none of it. It
+           starts nothing: no mutex, no window, no data folder. The exit code says what happened (0 stopped, 1 nothing was
+           listening, 2 still running after the wait). */
+        if (_startupPlan.Stop)
+        {
+            var stopCode = StopCommand.Run(
+                () => SingleInstanceSignal.TrySignal(ExitForUpgradeEventName),
+                () => StopCommand.OtherInstanceRunning("PerformanceMonitorLite"),
+                TimeSpan.FromSeconds(60),
+                System.Threading.Thread.Sleep,
+                msg =>
+                {
+                    System.Diagnostics.Debug.WriteLine(msg);
+                    AppLogger.Info("Stop", msg);
+                });
+            /* #9142: a Release build has no debugger to read Debug.WriteLine, so the outcome goes to the Lite log too, when the log
+               folder exists. --stop starts nothing, so it never creates the data folder. */
+            StopCommand.FlushLog(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Services.DataRootMigration.DataRootName, "logs"));
+            Shutdown(stopCode);
+            return;
+        }
+
         /* Single-instance with upgrade handoff. Runs synchronously, at the top of OnStartup before
            base.OnStartup and any window/data init, so we only open the shared DuckDB / bind the MCP
            port after any older instance has released them. A newer build closes an older tray-resident
@@ -609,14 +655,32 @@ public partial class App : Application
             ProcessName = "PerformanceMonitorLite",
             ExitEventName = ExitForUpgradeEventName,
             SurfaceRunningInstance = () => SingleInstanceSignal.TrySignal(ShowWindowEventName),
-            GracefulSelfExit = () => Dispatcher.BeginInvoke(new Action(Shutdown)),
-            Prompts = new MessageBoxHandoffPrompts("Performance Monitor Lite"),
-            AutoConfirm = Array.Exists(e.Args, a => string.Equals(a, HandoffArgs.AutoConfirm, StringComparison.OrdinalIgnoreCase)),
+            GracefulSelfExit = () => Dispatcher.BeginInvoke(new Action(RequestShutdown)),
+            /* #9142: a headless start has no one to answer a dialog, so it takes over from an older instance without asking and
+               never raises a prompt. */
+            Prompts = _startupPlan.Headless ? new HeadlessHandoffPrompts() : new MessageBoxHandoffPrompts("Performance Monitor Lite"),
+            AutoConfirm = _startupPlan.ConfirmsHandoffWithoutAsking
+                || Array.Exists(e.Args, a => string.Equals(a, HandoffArgs.AutoConfirm, StringComparison.OrdinalIgnoreCase)),
             Log = msg => { try { AppLogger.Info("SingleInstance", msg); } catch { /* logger not yet initialized */ } },
         });
 
         if (!_instanceCoordinator.TryBecomeOwner())
         {
+            /* #9197: the mutex could not be created or opened and no other instance is running. That is a failed start, not a
+               hand-off to a running Lite: it leaves a reason in the log (AppLogger.Initialize has not run, so the log folder is
+               created here) and ends with the init-failed code, where a quiet exit 0 would read as success to a scheduled task.
+               A start with a window also shows the reason once. */
+            if (_instanceCoordinator.FailureReason is { } startFailure)
+            {
+                var failureRoot = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                StartFailureLog.Write(startFailure, Services.DataRootMigration.LogDirectoryForStart(
+                    Path.Combine(failureRoot, Services.DataRootMigration.LegacyRootName),
+                    Path.Combine(failureRoot, Services.DataRootMigration.DataRootName)));
+                Shutdown(_startupPlan.ExitCodeAfterOwnershipFailure(
+                    startFailure, reason => MessageBoxHandoffPrompts.ShowStartFailed("Performance Monitor Lite", reason)));
+                return;
+            }
+
             Shutdown();
             return;
         }
@@ -704,6 +768,7 @@ public partial class App : Application
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
         LoadDuckDbMemoryLimit();
+        LoadHotStoreResetLimit();
         LoadDefaultTimeRange();
         LoadAlertSettings();
         /* An SMTP setup saved before the settings window warned about it is named in the log when it loads. */
@@ -737,7 +802,8 @@ public partial class App : Application
         SharedConfigDirectory = ResolveSharedConfigDirectory(ConfigDirectory);
         Helpers.MethodProfiler.Initialize(logDirectory);
         Helpers.QueryLogger.Initialize(logDirectory);
-        AppLogger.Info("App", $"Starting PerformanceMonitorLite v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}");
+        /* #9745: the informational version names a nightly ("3.14.0-nightly.20261126.750"), which the assembly version (3.14.0.0) cannot tell from the release. */
+        AppLogger.Info("App", $"Starting PerformanceMonitorLite v{PerformanceMonitorLite.Database.BuildHistory.CurrentBuild().FullVersion}");
         AppLogger.Info("App", $"Data directory: {DataDirectory}");
 
         // Register global exception handlers
@@ -762,7 +828,18 @@ public partial class App : Application
 
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
-        _mainWindow.Show();
+        if (_startupPlan.ShowsMainWindow)
+        {
+            _mainWindow.Show();
+        }
+        else
+        {
+            /* #9142: headless. MainWindow also hosts the collection, alert and MCP wiring, so it is built as that host and
+               never shown: no window handle exists, no tray icon is created, and its Loaded event (which would start the
+               wiring) never fires, so the wiring is started directly. */
+            AppLogger.Info("App", "Headless start: no window is shown and no tray icon is created.");
+            _ = _mainWindow.StartHeadlessAsync();
+        }
 
         /* #2425. The log line for this was written back in LoadDefaultTimeRange/LoadAlertSettings and has
            been sitting in AppLogger's buffer since; this is the visible half, and it is here rather than
@@ -789,6 +866,13 @@ public partial class App : Application
     {
         var app = Current;
         var dispatcher = app?.Dispatcher;
+
+        /* #9142: nobody is there to read the code, so the sign-in cannot finish. Cancelling now beats waiting three minutes. */
+        if (HeadlessUi.Skips("the Entra device-code sign-in prompt (sign-in is cancelled)"))
+        {
+            attempt.Cancel();
+            return;
+        }
 
         if (app is null || dispatcher is null)
         {
@@ -902,15 +986,82 @@ public partial class App : Application
     /// </summary>
     private void OnSurfaceWindowRequested()
     {
+        /* #9142: a headless instance has no window to surface. A second normal start finds this one running and asks for it;
+           showing a window here would put the headless instance's UI on a desktop nobody is signed in to. */
+        if (HeadlessUi.Skips("the request from a second start to show the window"))
+            return;
+
         Dispatcher.BeginInvoke(new Action(() => _mainWindow?.RestoreFromTray()));
     }
+
+    /// <summary>
+    /// The shutdown the exit channel asks for (an upgrade handoff or <c>--stop</c>). With a window this is
+    /// <see cref="Application.Shutdown()"/>, which closes the window and runs its closing cleanup, as before. A headless
+    /// instance has no window to close, so it runs that same cleanup itself and then shuts the application down (#9142).
+    /// </summary>
+    private async void RequestShutdown()
+    {
+        if (_startupPlan.Headless)
+            AppLogger.Info("App", "Headless instance asked to shut down.");
+
+        /* #9184: a headless start that is waiting to retry its store open ends here, without another attempt. */
+        _stopRequested.Cancel();
+
+        await ShutDownAsync(exitCode: 0);
+    }
+
+    /// <summary>
+    /// #9142: ends a headless start whose initialization failed, with a nonzero exit code, so Task Scheduler sees a failure
+    /// and its restart-on-failure setting works. Returns true when it did (a start with a window returns false and keeps its
+    /// error dialog). The exception is already in the log.
+    /// </summary>
+    internal bool EndStartAfterInitFailure() =>
+        _startupPlan.EndsStartAfterInitFailure(code =>
+        {
+            AppLogger.Error("App", $"The headless start failed to initialize, so Lite is exiting with code {code}.");
+            _ = ShutDownAsync(code);
+        });
+
+    /// <summary>
+    /// With a window, <see cref="Application.Shutdown(int)"/> closes the window and runs its closing cleanup. A headless
+    /// instance has no window to close, so it runs that same cleanup itself first. Cleanup that throws is logged and the
+    /// shutdown goes on: <see cref="Application.Shutdown(int)"/> closes the never-shown window with its Closing cancel ignored
+    /// (WPF's <c>Window.InternalClose(shutdown: true, ignoreCancel: true)</c>), so a cleanup that never finished cannot hold
+    /// the process open (#9142).
+    /// </summary>
+    private async Task ShutDownAsync(int exitCode)
+    {
+        if (_startupPlan.Headless && _mainWindow is { } host)
+        {
+            try
+            {
+                await host.RunShutdownCleanupAsync();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("App", "Headless shutdown cleanup failed", ex);
+            }
+        }
+
+        Shutdown(exitCode);
+    }
+
+    /// <summary>#9184: ends a headless start's retry wait when the instance is asked to shut down.</summary>
+    internal CancellationToken StopRequested => _stopRequested.Token;
 
     /// <summary>
     /// Opens the upgrade-handoff "exit" channel once startup is past its risky init (DuckDB ready).
     /// Called by <see cref="MainWindow"/> after initialization so a newer build won't signal/kill us
     /// mid-init (#single-instance-upgrade-handoff). Safe to call more than once.
+    /// <para>#9184: a headless start also calls it before each wait to retry the store open, so <c>--stop</c> reaches it.</para>
     /// </summary>
     public void EnableUpgradeHandoff() => _instanceCoordinator?.EnableUpgradeHandoff();
+
+    /// <summary>
+    /// Closes the channel <see cref="EnableUpgradeHandoff"/> opened. A headless start that retries its store open keeps it
+    /// open only while it waits, so a newer build never kills a start that is in the middle of opening the store (#9184).
+    /// </summary>
+    public void DisableUpgradeHandoff() => _instanceCoordinator?.DisableUpgradeHandoff();
 
     protected override void OnExit(ExitEventArgs e)
     {
@@ -935,7 +1086,7 @@ public partial class App : Application
     /// shared servers.json exists yet; the old file is left in place as a backup.
     /// Credentials remain per-user in Windows Credential Manager.
     /// </summary>
-    private static string ResolveSharedConfigDirectory(string perUserConfigDirectory)
+    internal static string ResolveSharedConfigDirectory(string perUserConfigDirectory)
     {
         string sharedDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -1115,6 +1266,9 @@ public partial class App : Application
             return;
         }
 
+        if (HeadlessUi.Skips("the settings.json could-not-be-read dialog (the log holds the same text)"))
+            return;
+
         MessageBox.Show(
             "settings.json could not be read, so Performance Monitor Lite started with default settings.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n{problem}\n\n" +
@@ -1146,6 +1300,9 @@ public partial class App : Application
         {
             return;
         }
+
+        if (HeadlessUi.Skips("the dialog that names the setting values that could not be read"))
+            return;
 
         MessageBox.Show(
             $"{CountText.Plural(s_badSettingValues.Count, "setting")} in settings.json could not be read and {(s_badSettingValues.Count == 1 ? "is at its" : "are at their")} " +
@@ -1324,6 +1481,16 @@ public partial class App : Application
         var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
         Services.DuckDbMemoryLimitSetting.LoadAtStartup(
             settings.State == SettingsFileState.Unreadable ? null : settings.Text);
+    }
+
+    /// <summary>
+    /// #9238: installs the hot store reset point (settings.json hot_store_reset_mb) before the background service and the
+    /// store-health readers are built. An unreadable settings.json is reported by LoadDefaultTimeRange, so this takes the default.
+    /// </summary>
+    private static void LoadHotStoreResetLimit()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        Services.HotStoreResetSetting.LoadAtStartup(settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
     /// <summary>
@@ -1511,6 +1678,11 @@ public partial class App : Application
             }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);
+            if (read.TryGetProperty("alert_tempdb_log_space_enabled", out v)) AlertTempDbLogSpaceEnabled = v.Bool(AlertTempDbLogSpaceEnabled);
+            if (read.TryGetProperty("alert_tempdb_log_space_threshold_percent", out v)) AlertTempDbLogSpaceThresholdPercent = v.WholeNumber(AlertTempDbLogSpaceThresholdPercent, 1, 100);
+            if (read.TryGetProperty("alert_tempdb_growth_fit_enabled", out v)) AlertTempDbGrowthFitEnabled = v.Bool(AlertTempDbGrowthFitEnabled);
+            if (read.TryGetProperty("alert_instance_restarted_enabled", out v)) AlertInstanceRestartedEnabled = v.Bool(AlertInstanceRestartedEnabled);
+            if (read.TryGetProperty("alert_memory_dumps_enabled", out v)) AlertMemoryDumpsEnabled = v.Bool(AlertMemoryDumpsEnabled);
             if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
             if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.WholeNumber(AlertLowDiskThresholdPercent, 0, 100);
             if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.WholeNumber(AlertLowDiskThresholdGb, 0, int.MaxValue);
@@ -1541,6 +1713,8 @@ public partial class App : Application
                     MuteRuleDefaultExpiration = exp;
             }
             if (read.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.Bool(LogAlertDismissals);
+            /* #9195: a diagnostic, off unless an operator turns it on. DuckDB writes an operator profile of the slow reads to the logs folder. */
+            if (read.TryGetProperty("duckdb_profile_slow_reads", out v)) PerformanceMonitorLite.Database.DuckDbReadProfile.Enabled = v.Bool(PerformanceMonitorLite.Database.DuckDbReadProfile.Enabled);
 
             /* Connection settings */
             if (read.TryGetProperty("connection_timeout_seconds", out v))
@@ -1821,6 +1995,9 @@ public partial class App : Application
         AppLogger.Error("AppDomain", "Unhandled exception (terminating=" + e.IsTerminating + ")", exception);
         AppLogger.Flush();
 
+        if (HeadlessUi.Skips("the fatal-error dialog (the log holds the exception)"))
+            return;
+
         MessageBox.Show(
             ErrorDialogText.Fatal(exception, AppLogger.GetCurrentLogFile()),
             "Fatal Error",
@@ -1842,6 +2019,12 @@ public partial class App : Application
 
         AppLogger.Error("Dispatcher", "Unhandled exception", e.Exception);
         AppLogger.Flush();
+
+        if (HeadlessUi.Skips("the error dialog (the log holds the exception)"))
+        {
+            e.Handled = true;
+            return;
+        }
 
         MessageBox.Show(
             ErrorDialogText.Recoverable(e.Exception, AppLogger.GetCurrentLogFile()),

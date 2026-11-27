@@ -98,7 +98,7 @@ WITH per_query AS (
         delta_execution_count
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
     AND   {metricExpr} IS NOT NULL{dbClause}
@@ -191,7 +191,7 @@ SELECT
         SELECT 1
         FROM v_query_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
     ) AS has_in_window";
 

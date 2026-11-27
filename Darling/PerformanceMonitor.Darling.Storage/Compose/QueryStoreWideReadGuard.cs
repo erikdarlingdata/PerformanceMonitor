@@ -338,10 +338,18 @@ WHERE b.daily_rows IS NOT NULL
     internal static string? RawCollectorFor(string sourceTable, ComposeRoute route) =>
         route.Tier == ComposeSourceTier.Raw && sourceTable is "query_stats" or "procedure_stats" ? sourceTable : null;
 
-    /// <summary>The raw-route limit for a collector (#5811): <see cref="ComposeLimits.MaxRawQueryStatsRows"/> or
-    /// <see cref="ComposeLimits.MaxRawProcedureStatsRows"/>.</summary>
-    internal static long RawLimitFor(string collector) =>
-        collector == "procedure_stats" ? ComposeLimits.MaxRawProcedureStatsRows : ComposeLimits.MaxRawQueryStatsRows;
+    /// <summary>The raw-route limit for a collector (#5811): <see cref="ComposeLimits.MaxRawQueryStatsRows"/>, or for
+    /// <c>procedure_stats</c> <see cref="ComposeLimits.MaxRawProcedureStatsRows"/>, or <see cref="ComposeLimits.MaxRawFilteredProcedureStatsRows"/>
+    /// when the statement carries an <c>eq</c> filter (<paramref name="filters"/>, the statement's own; #9357).</summary>
+    internal static long RawLimitFor(string collector, IReadOnlyList<ComposeFilter>? filters = null) =>
+        collector != "procedure_stats" ? ComposeLimits.MaxRawQueryStatsRows
+        : HasEqFilter(filters) ? ComposeLimits.MaxRawFilteredProcedureStatsRows
+        : ComposeLimits.MaxRawProcedureStatsRows;
+
+    /// <summary>True when a statement carries at least one <c>eq</c> filter (one value or a multi-select list, so also the
+    /// <c>in</c> form) on any dimension. The raw estimate counts the collector's rows and cannot see filters.</summary>
+    internal static bool HasEqFilter(IReadOnlyList<ComposeFilter>? filters) =>
+        filters is not null && filters.Any(f => f.Op == ComposeFilterOp.Eq);
 
     /// <summary>
     /// Reads the raw-route estimate (#5811) for <paramref name="collector"/> and the servers in <paramref name="serverScope"/>. With
@@ -420,10 +428,10 @@ WHERE b.daily_rows IS NOT NULL
     internal static async Task<string?> CheckRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
         DateTime countedStart, DateTime countedEnd, ILogger? logger,
-        int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        int commandTimeoutSeconds, CancellationToken cancellationToken, IReadOnlyList<ComposeFilter>? filters = null) =>
         RawRefusal(
             await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, commandTimeoutSeconds, cancellationToken),
-            collector, countedStart, countedEnd, RawLimitFor(collector));
+            collector, countedStart, countedEnd, RawLimitFor(collector, filters));
 
     /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
     private static async Task<Estimate?> ReadEstimateAsync(

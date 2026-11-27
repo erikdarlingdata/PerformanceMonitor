@@ -129,6 +129,18 @@ public partial class App : Application
 
         if (!_instanceCoordinator.TryBecomeOwner())
         {
+            /* #9197: the mutex could not be created or opened and no other instance is running. Not a hand-off to a
+               running viewer: log the reason, show it in one dialog and exit non-zero, where a quiet exit 0 would look
+               like a start that worked and then closed. */
+            if (_instanceCoordinator.FailureReason is { } startFailure)
+            {
+                ViewerLogger.Error("SingleInstance", $"Start failed: {startFailure}");
+                ViewerLogger.Flush();
+                MessageBoxHandoffPrompts.ShowStartFailed("Performance Monitor Darling", startFailure);
+                Shutdown(1);
+                return;
+            }
+
             Shutdown();
             return;
         }

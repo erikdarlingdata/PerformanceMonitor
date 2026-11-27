@@ -69,6 +69,18 @@ namespace PerformanceMonitor.Collectors;
 /// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
 /// file read that reached the end of what the file holds (a pass the cap stopped does not, #6453), <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
 /// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544). On Managed Instance every read uses the bare pattern (#6897), so this measurement does not describe how many files were read there.</para>
+///
+/// <para><b>The bookmark's file first, the target lookup only when that yields nothing (#9528).</b> Finding the file the
+/// target is writing means reading <c>sys.dm_xe_session_targets</c>, and for system_health that builds the session's own
+/// ring buffer XML (about 4 MB when full) on every pass, even by address (#9517): measured on SQL Server 2022 with the ring
+/// buffer full, a pass that skips the lookup takes about 0.6 of the time of one that runs it. A pass with a usable bookmark does not need the answer while the
+/// bookmark's file still has events past the bookmark, so it reads that file by its exact path first and runs the lookup
+/// only when that read stores nothing and does not move the bookmark (a quiet minute, a file that rolled over, a bookmark
+/// the server refuses). When the lookup then shows the bookmark's file is still the one being written, the read already
+/// made is the answer and is not made a second time, so a quiet pass costs one read and one lookup, as it does without
+/// the first read. The run records which attempt answered (<c>event_file_attempt</c>) and the milliseconds the lookup,
+/// the file read and the XML cast each took (<c>event_file_lookup_ms</c>, <c>event_file_read_ms</c>,
+/// <c>event_file_shred_ms</c>).</para>
 /// </summary>
 public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<SystemHealthEventsCollector.Row>
 {
@@ -111,6 +123,36 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
 
     /// <summary>1 on a pass that read every <c>&lt;stem&gt;_0_*.xel</c> file because the bookmark's file is no longer the one the target is writing (#6544). A pass whose bookmark is in the current file, or that has no bookmark, reads that one file and writes nothing. On Managed Instance every read uses the bare pattern (#6897), so this measurement does not describe how many files were read there. Written only then.</summary>
     internal const string EventFileWildcardMeasurement = "event_file_wildcard";
+
+    /// <summary>
+    /// The attempt that answered a file read (#9528): 0 for the bookmark's own file, read by its exact path before any target
+    /// lookup; 1 for the read from the bookmark after the lookup (the current file by its exact path, or every rollover file,
+    /// which <see cref="EventFileWildcardMeasurement"/> tells apart); 2 for the current file alone from its start, on a pass with
+    /// no bookmark or one whose bookmark the server refused. 0 with no
+    /// <see cref="EventFileLookupMsMeasurement"/> means the pass ran no <c>sys.dm_xe_session_targets</c> lookup. 0 with it is a
+    /// quiet pass: the bookmark's file had nothing to store, the lookup showed it is still the file being written, and the
+    /// read was not made a second time. Written on every pass the event_file answered, never on a ring buffer fallback.
+    /// </summary>
+    internal const string EventFileAttemptMeasurement = "event_file_attempt";
+
+    /// <summary>
+    /// Milliseconds the target lookup took (#9528): finding the session's address, reading the event_file target's
+    /// <c>target_data</c> and taking the file name from it. Written only on a pass that ran the lookup, a ring buffer fallback
+    /// included, so a pass without it skipped the lookup.
+    /// </summary>
+    internal const string EventFileLookupMsMeasurement = "event_file_lookup_ms";
+
+    /// <summary>
+    /// Milliseconds spent in <c>sys.fn_xe_file_target_read_file</c> (#9528), summed over every raw read the pass ran: each
+    /// attempt, a read the server refused, and the one-buffer re-read. Written on every pass that started a file read.
+    /// </summary>
+    internal const string EventFileReadMsMeasurement = "event_file_read_ms";
+
+    /// <summary>
+    /// Milliseconds spent casting the kept events to XML and splitting them into rows (#9528), summed over the attempts that got
+    /// that far. Written on every pass whose file read reached the cast.
+    /// </summary>
+    internal const string EventFileShredMsMeasurement = "event_file_shred_ms";
 
     /// <summary>
     /// The multiple of the cap the single-buffer re-read reads (#6564): <c>TOP (cap x this)</c> raw events, then the cast of
@@ -186,7 +228,7 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        past), while the CONVERT form is evaluated on the rows the function returns and gives the right count. The
        predicate drops events older than the cutoff before the XML cast, which is the expensive step.
 
-       Only the read from a bookmark (attempt 1) filters in the WHERE, where the TOP counts only newer events: the
+       Only the reads from a bookmark (attempts 0 and 1) filter in the WHERE, where the TOP counts only newer events: the
        buffers after a bookmark are mostly newer than the watermark. The current-file read with no bookmark (attempt 2)
        can meet a whole file of older events (a first connect, a lost bookmark), and a filter inside the TOP made it read
        the whole file before it found @max_events newer ones (a 99 MB file took 23 s idle, about double under load). So
@@ -199,8 +241,11 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
         @"AND CONVERT(datetime2(7), x.timestamp_utc) > @read_cutoff";
 
     /* One read of the raw events, capped at @read_top in file order BEFORE the XML cast. @keep_file / @keep_offset, when
-       set, keep the text of that one buffer's events only (the re-read of a buffer the cap cut, below). */
+       set, keep the text of that one buffer's events only (the re-read of a buffer the cap cut, below). The read is timed
+       into @read_ms (#9528); @read_start stays set while it runs, so the CATCH can add the time of a read that failed. */
     private static string RawReadSql(bool hasTimestampUtc) => $@"
+        SET @read_start = SYSUTCDATETIME();
+
         INSERT
             @raw_events
         (
@@ -238,7 +283,10 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
         {(hasTimestampUtc ? TimestampUtcWhereSql : string.Empty)}
         OPTION(RECOMPILE);
 
-        SET @raw_rows = @@ROWCOUNT;";
+        SET @raw_rows = @@ROWCOUNT;
+
+        SET @read_ms = ISNULL(@read_ms, 0) + DATEDIFF(MILLISECOND, @read_start, SYSUTCDATETIME());
+        SET @read_start = NULL;";
 
     /* On-prem / Azure MI / AWS RDS: the built-in system_health session. #6441: the event_file target is read first,
        because the ring buffer's XML is cut at about 4 MB and keeps the OLDEST events (see the class doc); the ring
@@ -248,6 +296,22 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        same normalised text on either source — no shredding here (Stage 2 owns that). Timestamp watermark
        (> @cutoff_time) stops events being collected twice. Azure SQL DB is gated out by AppliesTo, so only
        server-scoped reaches here.
+
+       Attempt 0 (#9528) comes before the target is looked up at all. The lookup reads sys.dm_xe_session_targets, and for
+       system_health that builds the session's own ring buffer XML too, about 4 MB when full, even by address (#9517):
+       measured on SQL Server 2022 with the ring buffer full, a steady pass that skips the lookup takes about 0.6 of the
+       time of one that runs it (120 alternating passes, the same rows from both). With a bookmark
+       the answer is only needed when the bookmark's file has nothing more to give, so attempt 0 reads the bookmark's own
+       file by its exact path from the bookmark, the same read attempt 1 makes of a bookmark in the current file. When it
+       keeps at least one event to store, or the cap stops it (the scan position then moves the bookmark), the pass is
+       done and the lookup never runs. When it stores nothing and moves nothing, or the server refuses it, the lookup runs
+       and attempt 1 follows exactly as it does without attempt 0, so a file that rolled over is crossed one pass after
+       its last event was read and no event is lost. When the lookup shows the bookmark's file is still the one being
+       written, attempt 1 would repeat attempt 0's read exactly, so the pass ends there with nothing to store and the
+       file is read once. The test is a stored event, not a raw one: on SQL Server 2016 the
+       raw read has no time filter, and a rolled-over file whose remaining events are all older than the cutoff would
+       otherwise answer every pass, store nothing, and never reach the next file. Managed Instance has no attempt 0: its
+       read is the bare pattern whatever the bookmark (#6897), and that path stays whole.
 
        The file path: the target's current file name gives the directory and the session's file-name stem
        (<stem>_0_<FILETIME>.xel). Attempt 1 reads from the bookmark (@bookmark_file, @bookmark_offset), which skips every
@@ -272,7 +336,10 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        kept: when every event there is older than the cutoff no row carries it, and the host still moves the bookmark to
        it, or the next pass would read the same old events again and never get past them. A read from the bookmark uses
        the cutoff inclusively (the bookmark's own buffer is skipped by position, so an event that shares the watermark's
-       time in a later buffer is not lost); the current-file read keeps it exclusive. */
+       time in a later buffer is not lost); the current-file read keeps it exclusive.
+
+       The lookup, the raw reads and the XML cast are each timed with SYSUTCDATETIME() and returned in the trailing row
+       (#9528), because the run's duration alone does not say which of the three a slow pass spent its time in. */
     private static string BuildQueryText(bool hasTimestampUtc) => $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -304,6 +371,7 @@ DECLARE
     @event_file_ok bit = 0,
     @event_file_error integer,
     @bookmark_refused bit = 0,
+    @bookmark_quiet bit = 0,
     @event_file_name nvarchar(260),
     @event_file_stem nvarchar(260),
     @event_file_left nvarchar(260),
@@ -326,76 +394,118 @@ DECLARE
     @scan_offset bigint,
     @buffer_cut bit = 0,
     @read_wildcard bit = 0,
-    @attempt integer;
+    @attempt integer,
+    @lookup_start datetime2(7),
+    @lookup_ms integer,
+    @read_start datetime2(7),
+    @read_ms integer,
+    @shred_start datetime2(7),
+    @shred_ms integer;
 
 {RingBufferXml.DeclareSql}
 
-SELECT
-    @event_file_name = TRY_CAST(xet.target_data AS xml).value('(EventFileTarget/File/@name)[1]', 'nvarchar(260)')
-FROM sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'system_health'
-AND   xet.target_name = N'event_file'
-OPTION(RECOMPILE);
-
-/* The target names the file it is writing, <directory>system_health_0_<FILETIME>.xel. Everything the read needs comes
-   from that name; a name that does not have the shape leaves @event_file_path NULL and the ring buffer is read.
-   The pattern is <stem>_0_*.xel, so another session's files (a user session named system_health_copy) are not read. */
-IF  @event_file_name LIKE N'%.xel'
-AND CHARINDEX(N'_', @event_file_name) > 0
-BEGIN
-    SET @event_file_stem = LEFT(@event_file_name, LEN(@event_file_name) - 4);
-
-    SET @event_file_last_underscore =
-        CASE
-            WHEN CHARINDEX(N'_', @event_file_stem) > 0
-            THEN LEN(@event_file_stem) - CHARINDEX(N'_', REVERSE(@event_file_stem)) + 1
-        END;
-
-    SET @event_file_left = LEFT(@event_file_stem, @event_file_last_underscore - 1);
-
-    SET @event_file_base_underscore =
-        CASE
-            WHEN CHARINDEX(N'_', @event_file_left) > 0
-            THEN LEN(@event_file_left) - CHARINDEX(N'_', REVERSE(@event_file_left)) + 1
-        END;
-
-    SET @event_file_ticks = TRY_CONVERT(bigint, SUBSTRING(@event_file_stem, @event_file_last_underscore + 1, 20));
-
-    IF  @event_file_base_underscore > 1
-    AND @event_file_ticks > 0
-    BEGIN
-        SET @event_file_path = @event_file_left + N'_*.xel';
-    END;
-END;
-
-/* #6897: Managed Instance refuses every path with a directory in it and the `_0_` pattern (error 40538), so there the
-   read always uses the bare pattern the host passes. The target must still name a file, or there is no event_file to read.
-   The SET below is a readiness flag, not a path: it exists to open the `WHILE @event_file_path IS NOT NULL` guard on
-   Managed Instance. The path the read uses comes from the override arm of the CASE that sets @read_path, and the `.xel`,
-   `_0_` and FILETIME shape checks above do not gate the read there. */
-IF  @read_path_override IS NOT NULL
-AND @event_file_name IS NOT NULL
-BEGIN
-    SET @event_file_path = @read_path_override;
-END;
-
+/* #9528: a pass with a bookmark starts at attempt 0, the bookmark's own file with no target lookup in front of it. Managed
+   Instance starts at attempt 1 (#6897: its read is the bare pattern, and that path stays whole), and a pass with no bookmark
+   at attempt 2, both after the lookup. */
 SET @attempt =
     CASE
-        WHEN @bookmark_file IS NOT NULL
-        AND  @bookmark_offset IS NOT NULL
-        THEN 1
-        ELSE 2
+        WHEN @bookmark_file IS NULL
+        OR   @bookmark_offset IS NULL
+        THEN 2
+        WHEN @read_path_override IS NULL
+        THEN 0
+        ELSE 1
     END;
 
-WHILE  @event_file_path IS NOT NULL
-AND    @event_file_ok = 0
+WHILE  @event_file_ok = 0
 AND    @attempt <= 2
 BEGIN
+    /* The target lookup, once, in front of the first attempt that needs the file the target is writing. A pass attempt 0
+       answers never gets here. @lookup_ms is NULL until the lookup has run. */
+    IF  @attempt > 0
+    AND @lookup_ms IS NULL
+    BEGIN
+        SET @lookup_start = SYSUTCDATETIME();
+
+/* #9517: system_health is found by name once, and its event_file and ring_buffer targets are read by that address, so neither
+   read builds every other running session's target rows. */
+{RingBufferXml.ResolveAddressSql(false, "system_health")}
+
+SELECT
+    @event_file_name = TRY_CAST(xet.target_data AS xml).value('(EventFileTarget/File/@name)[1]', 'nvarchar(260)')
+{RingBufferXml.TargetFromSql(false, "event_file")}
+OPTION(RECOMPILE);
+
+        /* The target names the file it is writing, <directory>system_health_0_<FILETIME>.xel. Everything the read needs comes
+           from that name; a name that does not have the shape leaves @event_file_path NULL and the ring buffer is read.
+           The pattern is <stem>_0_*.xel, so another session's files (a user session named system_health_copy) are not read. */
+        IF  @event_file_name LIKE N'%.xel'
+        AND CHARINDEX(N'_', @event_file_name) > 0
+        BEGIN
+            SET @event_file_stem = LEFT(@event_file_name, LEN(@event_file_name) - 4);
+
+            SET @event_file_last_underscore =
+                CASE
+                    WHEN CHARINDEX(N'_', @event_file_stem) > 0
+                    THEN LEN(@event_file_stem) - CHARINDEX(N'_', REVERSE(@event_file_stem)) + 1
+                END;
+
+            SET @event_file_left = LEFT(@event_file_stem, @event_file_last_underscore - 1);
+
+            SET @event_file_base_underscore =
+                CASE
+                    WHEN CHARINDEX(N'_', @event_file_left) > 0
+                    THEN LEN(@event_file_left) - CHARINDEX(N'_', REVERSE(@event_file_left)) + 1
+                END;
+
+            SET @event_file_ticks = TRY_CONVERT(bigint, SUBSTRING(@event_file_stem, @event_file_last_underscore + 1, 20));
+
+            IF  @event_file_base_underscore > 1
+            AND @event_file_ticks > 0
+            BEGIN
+                SET @event_file_path = @event_file_left + N'_*.xel';
+            END;
+        END;
+
+        /* #6897: Managed Instance refuses every path with a directory in it and the `_0_` pattern (error 40538), so there the
+           read always uses the bare pattern the host passes. The target must still name a file, or there is no event_file to read.
+           The SET below is a readiness flag, not a path: it exists to pass the `@event_file_path IS NULL` exit below on
+           Managed Instance. The path the read uses comes from the override arm of the CASE that sets @read_path, and the `.xel`,
+           `_0_` and FILETIME shape checks above do not gate the read there. */
+        IF  @read_path_override IS NOT NULL
+        AND @event_file_name IS NOT NULL
+        BEGIN
+            SET @event_file_path = @read_path_override;
+        END;
+
+        SET @lookup_ms = DATEDIFF(MILLISECOND, @lookup_start, SYSUTCDATETIME());
+    END;
+
+    /* No event_file target to read (none on the session, or a file name without the shape): the ring buffer answers. */
+    IF  @attempt > 0
+    AND @event_file_path IS NULL
+    BEGIN
+        BREAK;
+    END;
+
+    /* #9528: attempt 0 read the bookmark's file and kept nothing. When the lookup shows that file is the one the target
+       is still writing, attempt 1 would make the same read (same path, offset and cutoff), so attempt 0's read is the
+       answer: the pass ends with nothing to store, and a quiet pass reads the file once. A bookmark in a file that
+       rolled over goes on to attempt 1's wildcard read. */
+    IF  @attempt = 1
+    AND @bookmark_quiet = 1
+    AND @bookmark_file COLLATE Latin1_General_100_CI_AS = @event_file_name COLLATE Latin1_General_100_CI_AS
+    BEGIN
+        SET @attempt = 0;
+        SET @event_file_ok = 1;
+
+        BREAK;
+    END;
+
     /* #6544: the wildcard makes the function open every rollover file (about 2 s for 8 files, 330 MB, on sql2019, whatever
        the number of events returned), and it is only needed when the bookmark's file is not the one being written, so the
-       read has to cross into a later file. A bookmark in the current file reads that file by its exact path (about 0.1 s). */
+       read has to cross into a later file. A bookmark in the current file reads that file by its exact path (about 0.1 s).
+       Attempt 0 never uses it: it reads one file, the bookmark's. */
     SET @read_wildcard =
         CASE
             WHEN @attempt = 1
@@ -409,15 +519,17 @@ BEGIN
             CASE
                 WHEN @read_path_override IS NOT NULL
                 THEN @read_path_override
+                WHEN @attempt = 0
+                THEN @bookmark_file
                 WHEN @read_wildcard = 1
                 THEN @event_file_path
                 ELSE @event_file_name
             END,
-        @read_file = CASE WHEN @attempt = 1 THEN @bookmark_file END,
-        @read_offset = CASE WHEN @attempt = 1 THEN @bookmark_offset END,
+        @read_file = CASE WHEN @attempt < 2 THEN @bookmark_file END,
+        @read_offset = CASE WHEN @attempt < 2 THEN @bookmark_offset END,
         @read_cutoff =
             CASE
-                WHEN @attempt = 1
+                WHEN @attempt < 2
                 THEN DATEADD(NANOSECOND, -100, CONVERT(datetime2(7), @cutoff_time))
                 ELSE CONVERT(datetime2(7), @cutoff_time)
             END,
@@ -512,6 +624,8 @@ BEGIN
         FROM @raw_events AS r
         WHERE r.event_data IS NULL;
 
+        SET @shred_start = SYSUTCDATETIME();
+
         INSERT
             @file_events
         (
@@ -533,15 +647,57 @@ BEGIN
         WHERE evt.exist('@timestamp[. > sql:variable(""@read_cutoff"")]') = 1
         OPTION(RECOMPILE);
 
-        SET @event_file_ok = 1;
+        SET @shred_ms = ISNULL(@shred_ms, 0) + DATEDIFF(MILLISECOND, @shred_start, SYSUTCDATETIME());
+        SET @shred_start = NULL;
+
+        /* #9528: attempt 0 answers the pass only when it has an event to store or the cap stopped it (the scan position
+           then moves the bookmark). Otherwise the bookmark's file may have rolled over, and only the lookup can tell:
+           the pass goes on to the lookup with nothing kept, and @bookmark_quiet says this read completed. */
+        IF  @attempt = 0
+        AND @scan_file IS NULL
+        AND NOT EXISTS
+            (
+                SELECT
+                    1/0
+                FROM @file_events AS fe
+            )
+        BEGIN
+            SET @bookmark_quiet = 1;
+            SET @attempt = 1;
+        END;
+        ELSE
+        BEGIN
+            SET @event_file_ok = 1;
+        END;
     END TRY
     BEGIN CATCH
         /* A refused bookmark (attempt 1) goes on to attempt 2; a refused current-file read goes on to the ring buffer.
            25717 and 25722 are the two refusals of a bookmark the server cannot use (its file is gone, its offset is not
-           a buffer start); the host drops such a bookmark when nothing replaces it. */
+           a buffer start); the host drops such a bookmark when nothing replaces it. A refusal of attempt 0 goes on to
+           the lookup and attempt 1, which meets the same refusal and is the one that records it: attempt 0's error is
+           not kept, so a pass that ends in the ring buffer reports the error of the read the lookup led to. When the
+           lookup then finds no file path, no read follows and the fallback reports no error, the same as a
+           pass that never reached a read. */
         DELETE @raw_events;
         DELETE @file_events;
-        SET @event_file_error = ERROR_NUMBER();
+
+        /* The step the error stopped still took its time. */
+        IF @read_start IS NOT NULL
+        BEGIN
+            SET @read_ms = ISNULL(@read_ms, 0) + DATEDIFF(MILLISECOND, @read_start, SYSUTCDATETIME());
+            SET @read_start = NULL;
+        END;
+
+        IF @shred_start IS NOT NULL
+        BEGIN
+            SET @shred_ms = ISNULL(@shred_ms, 0) + DATEDIFF(MILLISECOND, @shred_start, SYSUTCDATETIME());
+            SET @shred_start = NULL;
+        END;
+
+        IF @attempt > 0
+        BEGIN
+            SET @event_file_error = ERROR_NUMBER();
+        END;
 
         IF  @attempt = 1
         AND @event_file_error IN (25717, 25722)
@@ -555,12 +711,8 @@ END;
 
 SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
-    @ring_session = xes.name
-FROM sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'system_health'
-AND   xet.target_name = N'ring_buffer'
+    @ring_session = @xe_name
+{RingBufferXml.TargetFromSql(false, "ring_buffer")}
 AND   @event_file_ok = 0
 OPTION(RECOMPILE);
 
@@ -621,7 +773,8 @@ END;
 /* #6441: whether SQL Server truncated the buffer's XML (ring-buffer path only, all NULL on the file path), then which
    source answered, the error that stopped a file read (NULL when none did), whether the bookmark was refused as
    unusable, the scan position of a capped file read (NULL when the cap did not bind), and whether a buffer was cut.
-   Read by ReadAsync after the event rows. */
+   #9528: then the attempt that answered (NULL on the ring-buffer path) and the milliseconds the lookup, the raw reads and
+   the XML cast took, each NULL when that step never ran. Read by ReadAsync after the event rows. */
 SELECT
     {RingBufferXml.TruncationColumnsSql},
     event_file_read = @event_file_ok,
@@ -630,7 +783,11 @@ SELECT
     scan_file = CASE WHEN @event_file_ok = 1 THEN @scan_file END,
     scan_offset = CASE WHEN @event_file_ok = 1 THEN @scan_offset END,
     event_file_buffer_cut = CASE WHEN @event_file_ok = 1 THEN @buffer_cut END,
-    event_file_wildcard = CASE WHEN @event_file_ok = 1 THEN @read_wildcard END;";
+    event_file_wildcard = CASE WHEN @event_file_ok = 1 THEN @read_wildcard END,
+    event_file_attempt = CASE WHEN @event_file_ok = 1 THEN @attempt END,
+    event_file_lookup_ms = @lookup_ms,
+    event_file_read_ms = @read_ms,
+    event_file_shred_ms = @shred_ms;";
 
     private static readonly string s_queryTextXmlTime = BuildQueryText(hasTimestampUtc: false);
 
@@ -825,6 +982,28 @@ SELECT
             {
                 context.Measure(EventFileWildcardMeasurement, 1);
             }
+
+            /* #9528: which attempt answered, and what the lookup, the raw reads and the XML cast each cost. A step that
+               never ran is NULL and writes nothing, so a pass with no event_file_lookup_ms skipped the lookup. */
+            if (StepValue(reader, 10) is { } attempt)
+            {
+                context.Measure(EventFileAttemptMeasurement, attempt);
+            }
+
+            if (StepValue(reader, 11) is { } lookupMs)
+            {
+                context.Measure(EventFileLookupMsMeasurement, lookupMs);
+            }
+
+            if (StepValue(reader, 12) is { } readMs)
+            {
+                context.Measure(EventFileReadMsMeasurement, readMs);
+            }
+
+            if (StepValue(reader, 13) is { } shredMs)
+            {
+                context.Measure(EventFileShredMsMeasurement, shredMs);
+            }
         }
 
         /* Resume the next pass at the last buffer this pass read. A pass that read nothing new keeps the
@@ -856,6 +1035,16 @@ SELECT
 
         return rows;
     }
+
+    /// <summary>
+    /// One of the trailing row's #9528 integers (the attempt, a step's milliseconds), or null when the batch left it NULL or
+    /// the reader has no such column (a test fake, an older batch). Never negative: a clock that stepped back between
+    /// two reads of it would give a negative span, and the run note's readers accept no leading minus.
+    /// </summary>
+    private static long? StepValue(DbDataReader reader, int ordinal) =>
+        reader.FieldCount > ordinal && !reader.IsDBNull(ordinal)
+            ? Math.Max(0, reader.GetInt32(ordinal))
+            : null;
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

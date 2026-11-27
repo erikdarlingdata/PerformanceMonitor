@@ -105,6 +105,19 @@ public static class DarlingRetention
     }
 
     /// <summary>
+    /// The days the purge keeps <c>query_store_stats</c>' raw rows for (#9221): the retention of the collector whose target table it is,
+    /// through <see cref="EffectivePurgeRetentionDays"/>, which is the argument <see cref="PurgeAsync"/> builds for that catalog entry. The
+    /// collector is named <c>query_store</c> and its table <c>query_store_stats</c>, and the schedule rows and defaults are keyed by the
+    /// collector, so a caller that passes the table name finds no default and throws. Taking the name from the catalog keeps the
+    /// hourly clutter step on the purge's own horizon.
+    /// </summary>
+    internal static int QueryStoreStatsPurgeRetentionDays(IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var collector = CollectorCatalog.All.Single(c => string.Equals(c.TargetTable, "query_store_stats", StringComparison.Ordinal)).Name;
+        return EffectivePurgeRetentionDays(collector, StoreConfigProvider.ResolveFleetRetentionDays(collector, overrides));
+    }
+
+    /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
     /// History tab and the get_alert_history MCP tool) is a plain <c>config</c>-schema registry table — NOT a
     /// collector (so it has no <see cref="CollectorScheduleDefaults"/> horizon) and NOT a hypertable (so it
@@ -231,6 +244,13 @@ public static class DarlingRetention
     /// </summary>
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
 
+    /// <summary>How long a dead personal MCP token (revoked, or past its expiry) stays in <c>config.mcp_personal_token</c> (#8737).</summary>
+    internal const int PersonalTokenRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>A token is dead from the earlier of its revocation and its expiry; every row dead before <c>$1</c> goes.</summary>
+    internal const string PersonalTokenPurgeSql =
+        "DELETE FROM config.mcp_personal_token WHERE least(coalesce(revoked_at, expires_at), expires_at) < $1";
+
     /// <summary>
     /// config.external_alert_pending (the queue of alerts other services submit, #5654) keeps its FINISHED rows this long.
     /// Like the command queue it is not an audit surface: the alert history row is the record of an alert, and the queue
@@ -308,6 +328,15 @@ public static class DarlingRetention
     /// stops. The table holds one small row per server, signature and day, so one statement is the whole purge.</summary>
     internal const string PurgeInvestigationSignatureDaysSql =
         "DELETE FROM config.investigation_signature_days WHERE day < $1::date";
+
+    /// <summary>
+    /// The planned change windows (config.investigation_change_windows, V318, #9485) a request still points at are never deleted, so a window
+    /// ages out no earlier than the requests it held. A window goes when it ended before the cutoff (<c>$1</c>, the same year as the requests)
+    /// and no request names it. A request that is still open or claimed is kept by the request purge, and so keeps its window here.
+    /// </summary>
+    internal const string PurgeInvestigationChangeWindowsSql =
+        "DELETE FROM config.investigation_change_windows AS w WHERE w.ends_at < $1 "
+        + "AND NOT EXISTS (SELECT 1 FROM config.investigation_requests AS r WHERE r.held_window_id = w.window_id)";
 
     /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
@@ -417,12 +446,17 @@ public static class DarlingRetention
     /// gate, so the prune runs at most once in 24 hours even when budget-stopped passes follow each other within the hour.
     /// Null (the on-demand <c>purge_now</c> command, and every test that predates the rule) prunes on every pass.
     /// </param>
+    /// <param name="livenessAdopt">
+    /// Where the adopt step is in each liveness table (<see cref="LivenessAdoptState"/>). The worker hands in its own, so
+    /// a pass goes on from the key the pass before it stopped at, and after a restart from the key the last finished pass
+    /// stopped at. Null starts every table at its first key and keeps no cursor in the store.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
         string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null,
-        QueryTextPruneGate? queryTextPruneGate = null)
+        QueryTextPruneGate? queryTextPruneGate = null, LivenessAdoptState? livenessAdopt = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -437,7 +471,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate, livenessAdopt);
     }
 
     /// <summary>
@@ -449,8 +483,13 @@ public static class DarlingRetention
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
-        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null)
+        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null, LivenessAdoptState? livenessAdopt = null)
     {
+        /* No state handed in: one for this pass alone, from the first key of every table, kept in memory only. */
+        livenessAdopt ??= new LivenessAdoptState(
+            LivenessAdoptState.DefaultSliceKeys, LivenessAdoptState.DefaultSliceKeysFloor, LivenessAdoptState.DefaultBudget,
+            LivenessAdoptState.DefaultSliceTimeoutSeconds);
+
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
            store-unreachable boot the worker passes darling.json's RAW value, and a file value of 1-6
@@ -560,18 +599,20 @@ public static class DarlingRetention
                         continue;
                     }
 
-                    /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
-                       a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
-                       away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                    /* #5640: a catalog entry that stays a plain table has no chunks to drop, so on a TimescaleDB store it takes
+                       the same time-sliced DELETE a plain-PostgreSQL store runs, straight away, instead of a drop_chunks call
+                       that fails and warns once per sweep before falling back. The attention table is not one of them since
+                       #8967: it is a hypertable on a TimescaleDB store, so it takes drop_chunks here, and it still falls back to
+                       the DELETE below while it is a plain table. The swapped-out collect.attention_events_legacy table is not in
+                       the catalog, so no sweep purges it: the copy that empties it drops it. */
                     if (timescaleAvailable && !definition.StaysPlainTable)
                     {
-                        var dropped = await DropChunksOneAsync(
-                            postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
-                            logger, cancellationToken);
-                        if (dropped is not null)
+                        var (outcome, dropped) = await DropChunksOneAsync(
+                            postgres, definition.TargetTable, retentionDays, logger, cancellationToken);
+                        if (outcome == DropChunksOutcome.Dropped)
                         {
                             tablesPurged++;
-                            totalChunksDropped += dropped.Value;
+                            totalChunksDropped += dropped;
 
                             /* #8549: the oldest-run rollup is dropped with the raw chunks it summarizes, at the same horizon. */
                             if (string.Equals(definition.TargetTable, "job_history", StringComparison.Ordinal))
@@ -579,6 +620,14 @@ public static class DarlingRetention
                                 await DropJobHistoryOldestDailyAsync(postgres, retentionDays, logger, cancellationToken);
                             }
 
+                            continue;
+                        }
+
+                        if (outcome == DropChunksOutcome.GaveWay)
+                        {
+                            /* #9102: another session held a lock on one of the expired chunks through every try (warned). The
+                               table is a hypertable and its chunks are whole, so the DELETE below is not for it: the next pass
+                               drops them. Counted as neither purged nor failed. */
                             continue;
                         }
 
@@ -607,6 +656,16 @@ public static class DarlingRetention
                 }
             }
 
+            /* #9349: the object usage chain tables are derived from index_object_stats and follow ITS horizon, the one the loop above
+               resolved for it (a per-collector override included), so a derived row never outlives the raw rows it was computed from.
+               The closed rows of collect.object_usage_runs go in the same call (a plain table, so by the time-sliced DELETE). */
+            var objectUsageChain = await PurgeObjectUsageChainAsync(
+                postgres, timescaleAvailable, retentionDaysFor, utcNow, logger, cancellationToken, walPacer);
+            tablesPurged += objectUsageChain.TablesPurged;
+            totalRowsDeleted += objectUsageChain.RowsDeleted;
+            totalChunksDropped += objectUsageChain.ChunksDropped;
+            tablesFailed += objectUsageChain.TablesFailed;
+
             /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
                of each distinct query text / plan XML; the fact rows carry only a digest. They must be
                bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
@@ -615,8 +674,9 @@ public static class DarlingRetention
                The obvious sweep (delete dim rows no live fact references) is an anti-join against two
                hypertables per dim row and is not affordable at this size. Instead the write path stamps
                last_seen on every cycle that references a digest, so last_seen is never older than the newest
-               fact row pointing at it, and the GC is an index range scan on last_seen — run through the SAME
-               time-sliced DELETE every sibling purge uses, rather than one unbounded statement. That matters
+               fact row pointing at it, and the GC is an index range scan on the stamp table's last_seen (V298, #9304:
+               collect.{dim}_seen holds the stamp, the dimension row's own last_seen is no longer indexed) — run through a
+               row-capped, cursored DELETE rather than one unbounded statement. That matters
                most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
                expired content to clear: unsliced, that is a single transaction holding a lock and generating
                WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
@@ -628,27 +688,14 @@ public static class DarlingRetention
                one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
                every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
                dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
-               to 6 by #4503 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
-               per touch on one production store), and the Query Store liveness touch at
+               to 6 by #4503 to cut non-HOT WAL on the then-indexed dimension last_seen column — measured at ~42 KB of
+               WAL per touch on one production store; since V298 the touch writes the narrow stamp row instead), and the Query Store liveness touch at
                QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
                this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
                already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
                no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
                a future guard change that outgrows it fails loudly rather than silently). */
-            var widestFactRetentionDays = 1;
-            foreach (var definition in CollectorCatalog.All)
-            {
-                if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
-                {
-                    continue;
-                }
-
-                var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
-                    ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
-                        ? dimSchedule.RetentionDays
-                        : 1));
-                widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
-            }
+            var widestFactRetentionDays = WidestDimensionFactRetentionDays(retentionDaysFor);
 
             /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
                legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
@@ -690,7 +737,7 @@ public static class DarlingRetention
             {
                 try
                 {
-                    await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                    await using var floorConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
 
                     DateTime? floor = null;
                     if (timescaleAvailable)
@@ -812,18 +859,31 @@ public static class DarlingRetention
                     tablesFailed++;
                 }
 
-                /* #2150: query_store statement text, same shape and same direction of margin as the two
-                   above — it must outlive the facts that reference it, because text retired early reads as a
-                   statement that never had text rather than as one whose text expired. */
+                /* #2150: query_store statement text, the same direction of margin as the two above — it must
+                   outlive the facts that reference it, because text retired early reads as a statement that
+                   never had text rather than as one whose text expired. #9043: the prune reads the liveness
+                   stamp from collect.query_store_text_seen and retires a text only when that stamp and the
+                   text row's own are both behind the cutoff (QueryStoreTextSeen.PruneSql). The cascade of the
+                   seen table's foreign key removes the seen row with the text row. */
                 var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
                 if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
                 {
                     var queryTextCutoff = utcNow.AddDays(
                         -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
+                    /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
+                       judges it by that stamp instead of never finding it. Keys against keys, a slice of the key at a time,
+                       no pass over the text heap (QueryStoreTextSeen.AdoptSlice). It inserts rows and deletes none, so it
+                       is not one of the pass's purged tables and its rows are not rows deleted: only its failure is
+                       counted. */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, QueryStoreTextSeen.AdoptSlice, livenessAdopt, queryTextCutoff, logger, walPacer, cancellationToken))
+                    {
+                        tablesFailed++;
+                    }
+
                     var queryTextDeleted = await PurgeOneAsync(
                         postgres, QueryStoreTextStore.TableName,
-                        UnorderedRowCappedDeleteSql(
-                            QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                        QueryStoreTextSeen.PruneSql(livenessTouchedTablePruneRowCap),
                         queryTextCutoff, logger, cancellationToken,
                         batchSize: livenessTouchedTablePruneRowCap,
                         pacer: walPacer);
@@ -867,30 +927,34 @@ public static class DarlingRetention
                        is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
                        break "text stays analyzable for the facts' full retention", which is half the knob's
                        own justification. The router is pure so the scoping is pinned by tests. */
-                    /* #2386: the plan dim is capped by ROWS, every other dim keeps the one-day slice.
-                       Only this table carries multi-kilobyte TOAST payloads, so only this one has a day
-                       that cannot be deleted inside the command timeout — query_text_dim is ~40 MB
-                       total and drains in a single slice. Scoped rather than global so a table that is
-                       fine keeps the compressed-chunk-safe shape it needs. */
-                    var isPlanDim = string.Equals(
-                        dimTable, PayloadDimensions.QueryPlanDimTable, StringComparison.Ordinal);
+                    /* #9304: both dimensions are capped by ROWS, ordered by the stamp table's own index
+                       (PayloadDimensions.CursoredDeleteSql), because the dimension row no longer carries an index on
+                       last_seen. The delete cascades to the stamp row. #2386 is why a row cap and not a one-day slice:
+                       the plan dim's TOAST payloads make a day that cannot be deleted inside the command timeout. */
+                    var dimCutoff = ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff);
+
+                    /* A dimension row with no stamp row gets one first, stamped with its own last_seen, so the delete below
+                       judges it by that stamp, a slice of the key at a time (PayloadDimensionSeen.AdoptSlice). */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, PayloadDimensionSeen.AdoptSlice(dimTable), livenessAdopt,
+                            dimCutoff, logger, walPacer, cancellationToken))
+                    {
+                        tablesFailed++;
+                    }
 
                     var dimDeleted = await PurgeOneAsync(
                         postgres,
                         dimTable,
-                        /* Illustrative at the CEILING cap when isPlanDim — PurgeOneAsync rebuilds this
-                           same statement per attempt at whatever cap #4130's adaptive sizing has chosen
-                           once adaptiveRowCapTimeColumn is set below, so this exact string is never the
-                           one executed for that table. */
-                        isPlanDim
-                            ? RowCappedDeleteSql("collect." + dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
-                            : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
+                        /* Illustrative at the CEILING cap: PurgeOneAsync rebuilds the statement per attempt at whatever cap
+                           #4130's adaptive sizing has chosen, so this exact string is never the one executed. */
+                        PayloadDimensions.CursoredDeleteSql(dimTable, PlanDimDeleteRowCap, hasCursor: false),
+                        dimCutoff,
                         logger,
                         cancellationToken,
-                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1,
-                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null,
-                        pacer: walPacer);
+                        batchSize: PlanDimDeleteRowCap,
+                        adaptiveRowCapTimeColumn: PayloadDimensions.LastSeenColumn,
+                        pacer: walPacer,
+                        cursoredSql: (attemptCap, hasCursor) => PayloadDimensions.CursoredDeleteSql(dimTable, attemptCap, hasCursor));
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -903,17 +967,22 @@ public static class DarlingRetention
                 }
             }
 
-            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the fact tables
-               that carry query statistics, so it is kept as long as the longest raw retention of those tables
-               (widestFactRetentionDays, resolved above through the same resolver the fact purge uses) and no longer. last_seen is
-               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. Only this table is aged: the
+            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the rows of a
+               collector that writes sightings, so it is kept as long as the longest raw retention of any such collector and no
+               longer (#9705). The writers are the definitions that override DescribeQueryTagSightings (ICollectorSchemaInfo.
+               WritesQueryTagSightings), not only the two with payload dimensions, and each retention resolves through the same
+               resolver the fact purge uses, so a retention raised on any writer keeps its keys tagged as long as its rows. The
+               horizon is never narrower than widestFactRetentionDays (QueryTagSightingsRetentionDays). last_seen is
+               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. A re-sighted key's stamp trails by at
+               most QueryTagSightingWriter.ReSightingRefreshWidth (6 hours, #9456) plus its backdate, against a cutoff at least a day
+               back, so a live key is never purged. Only this table is aged: the
                tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
                them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
                Failure-isolated like every sibling. */
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
                 TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen"),
-                utcNow.AddDays(-widestFactRetentionDays), logger, cancellationToken,
+                utcNow.AddDays(-QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor)), logger, cancellationToken,
                 pacer: walPacer);
             if (sightingsDeleted is not null)
             {
@@ -931,24 +1000,29 @@ public static class DarlingRetention
                On plain PostgreSQL, or if its hypertable conversion failed, it falls back to the batched DELETE so
                the horizon is ALWAYS honored. Failure-isolated like every sibling. The FleetServerId=0 retention
                run-record sentinel is a genuine collection_log row and lives in a chunk normally. */
-            var logPurged = false;
+            var logTakesDelete = true;
             if (timescaleAvailable)
             {
-                var droppedLog = await DropChunksOneAsync(
-                    postgres, "collection_log", DropChunksSqlFor("collection_log", CollectionLogRetentionDays),
-                    logger, cancellationToken);
-                if (droppedLog is not null)
+                var (logOutcome, droppedLog) = await DropChunksOneAsync(
+                    postgres, "collection_log", CollectionLogRetentionDays, logger, cancellationToken);
+                if (logOutcome == DropChunksOutcome.Dropped)
                 {
                     tablesPurged++;
-                    totalChunksDropped += droppedLog.Value;
-                    logPurged = true;
+                    totalChunksDropped += droppedLog;
+                    logTakesDelete = false;
+                }
+                else if (logOutcome == DropChunksOutcome.GaveWay)
+                {
+                    /* #9102: a lock holder kept the expired chunks through every try (warned). They are whole chunks of a
+                       hypertable, so the next pass drops them and no DELETE runs in their place. */
+                    logTakesDelete = false;
                 }
 
                 /* drop_chunks failed (warned) — most likely collection_log's conversion failed and it is still
                    plain. Fall through to the extension-free DELETE so it still honors its horizon. */
             }
 
-            if (!logPurged)
+            if (logTakesDelete)
             {
                 var logDeleted = await PurgeOneAsync(
                     postgres, "collection_log", TimeSlicedDeleteSql("collection_log", "collection_time"),
@@ -1091,6 +1165,24 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* config.mcp_personal_token (#8737): a token stays PersonalTokenRetentionDays after it died, that is after the earlier of its
+               revocation and its expiry, so the list still shows what ended and why. Live rows are never touched. One statement: the table
+               holds a few rows per person. Schema-qualified like config.config_command. The owner-only triggers pass this, because the
+               purge runs on the owner connection. Failure-isolated like every sibling. */
+            var personalTokensDeleted = await PurgeOneAsync(
+                postgres, "config.mcp_personal_token", PersonalTokenPurgeSql,
+                utcNow.AddDays(-PersonalTokenRetentionDays), logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (personalTokensDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += personalTokensDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* config.external_alert_pending (#5654): the queue of alerts other services submit. Finished rows go at
                ExternalAlertRetentionDays; pending and claimed rows are never touched, however old (expiry and the
                reaper finish them, retention does not). SCHEMA-QUALIFIED like config.config_command: a bare name would
@@ -1170,10 +1262,17 @@ public static class DarlingRetention
                 PurgeInvestigationSignatureDaysSql,
                 utcNow.AddDays(-InvestigationSignatureDayRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
+            /* config.investigation_change_windows (V318, #9485): a window is pruned a year after it ended, and only once no request names it, so
+               it outlives the requests it held (the request purge runs first, above). Failure-isolated like its siblings. */
+            var investigationChangeWindowsDeleted = await PurgeOneAsync(
+                postgres, "config.investigation_change_windows",
+                PurgeInvestigationChangeWindowsSql,
+                utcNow.AddDays(-InvestigationRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             foreach (var investigationResult in new[]
             {
                 investigationsDeleted, investigationJournalDeleted, investigationBriefsCleared,
-                investigationEvidenceCleared, investigationSignatureDaysDeleted,
+                investigationEvidenceCleared, investigationSignatureDaysDeleted, investigationChangeWindowsDeleted,
             })
             {
                 if (investigationResult is not null)
@@ -1285,6 +1384,67 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #8798: collect.column_stats (the current column statistics rows) is NOT purged by age. A row is replaced in place when its
+               statistic is read again, and a statistic nobody has updated for months is still the current one, so its last_updated and
+               read_at say nothing about whether the row is live. The schema histories' rule applies: the rows go only when no
+               collect.column_stats_state row of ANY server points at their (history key, database) with a last_seen_in_scope_at inside
+               the collector's retention horizon (ColumnStatsStaleCutoff): a dropped database, a removed or switched-off server, a
+               database that left the collector's scope, once no run of any server has stamped it for that long. A server that cannot be
+               reached for a day or two keeps its rows. An availability group's rows stay while any of its servers still sees the
+               database. The run itself deletes a dropped or out-of-scope database's rows on a server it still reaches; this sweep is
+               the backstop for what no run reaches. The rows go first, then the state rows: a failed row purge is retried by the next
+               sweep, because the keep list counts only state stamped inside the window, so the stale state still leaves those rows
+               unkept. collect.column_stats_runs is a catalogue table and is purged by the loop above. */
+            var columnStatsCutoff = ColumnStatsStaleCutoff(utcNow, retentionDaysFor);
+            var staleColumnStatsDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats", StaleColumnStatsDeleteSql, columnStatsCutoff, logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            var staleColumnStatsStateDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats_state",
+                "DELETE FROM collect.column_stats_state WHERE last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1",
+                columnStatsCutoff, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsStateDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsStateDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* #8784 follow-up, #9706: the daily lists of databases the server no longer has, dependencies and object inventory. The
+               loop above keeps each database's newest list however old (DeleteSqlFor's ObjectListSliceDeleteSql), so this is the only
+               way a dropped database's list goes. One statement per table; the horizon is that collector's own retention. */
+            foreach (var (listTable, listCollector) in ObjectListTables)
+            {
+                var droppedDatabaseListDeleted = await PurgeOneAsync(
+                    postgres, listTable, DroppedDatabaseObjectListDeleteSql(listTable),
+                    utcNow.AddDays(-EffectivePurgeRetentionDays(
+                        listCollector,
+                        retentionDaysFor?.Invoke(listCollector) ?? CollectorScheduleDefaults.All[listCollector].RetentionDays)),
+                    logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+                if (droppedDatabaseListDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += droppedDatabaseListDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
@@ -1309,6 +1469,24 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += hourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.procedure_stats_hour_ledger (#9357, V300): the same ledger for procedure_stats, pruned the same way and at the same
+               horizon (the procedure hourly rollup keeps TimescaleSupport.HourlyRetentionSpan too), single-shot and failure-isolated. */
+            var procedureHourLedgerDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsHourLedger.LedgerTable,
+                ProcedureStatsHourLedger.PruneSql,
+                utcNow - TimescaleSupport.HourlyRetentionSpan, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (procedureHourLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += procedureHourLedgerDeleted.Value;
             }
             else
             {
@@ -1394,6 +1572,31 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += procedureTotalsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+            /* collect.query_stats_collection (#9147, V286): the per-collection summary of query_stats that the duration trend reads for a window
+               its oldest row covers. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
+               It ages with the raw collector it summarises, at the same resolved days as query_stats (EffectivePurgeRetentionDays, so a
+               per-collector override moves both), in the same pass as the raw purge above, so the read never shows a collection raw has dropped:
+               raw holds a chunk past that cutoff when a purge gate holds it, which only leaves raw with MORE than the summary, and a window the
+               summary no longer covers reads raw. A plain table with a plain time-sliced DELETE on both store kinds; about one row per database per
+               collection, so a slice is a small fraction of a raw slice. Failure-isolated like every sibling. */
+            var queryStatsSummaryDays = EffectivePurgeRetentionDays(
+                "query_stats",
+                retentionDaysFor?.Invoke("query_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("query_stats", out var queryStatsSchedule) ? queryStatsSchedule.RetentionDays : DataRetentionBaseDays));
+            var queryStatsSummaryDeleted = await PurgeOneAsync(
+                postgres, QueryStatsCollectionSummary.Table,
+                TimeSlicedDeleteSql(QueryStatsCollectionSummary.Table, "collection_time"),
+                utcNow.AddDays(-queryStatsSummaryDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (queryStatsSummaryDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += queryStatsSummaryDeleted.Value;
             }
             else
             {
@@ -1642,6 +1845,193 @@ public static class DarlingRetention
             : "Manual purge (purge_now)";
 
     /// <summary>
+    /// The retention horizon of the object usage chain tables (#9349): the one <see cref="PurgeWithPacerAsync"/> resolves for
+    /// <c>index_object_stats</c>, from the same per-collector retention and the same clamp, so the chain never keeps a day the raw table
+    /// has dropped. A store whose collector set has no <c>index_object_stats</c> schedule gets the clamp floor, which keeps no derived day
+    /// beyond a day the source could not have either.
+    /// </summary>
+    internal static int ObjectUsageChainRetentionDays(Func<string, int>? retentionDaysFor)
+    {
+        var source = ObjectUsageChain.SourceCollector;
+        var configured = retentionDaysFor?.Invoke(source)
+            ?? (CollectorScheduleDefaults.All.TryGetValue(source, out var schedule) ? schedule.RetentionDays : 1);
+        return EffectivePurgeRetentionDays(source, configured);
+    }
+
+    /// <summary>
+    /// Purges <c>collect.object_usage_snapshots</c> and <c>collect.object_usage_deltas</c> at <see cref="ObjectUsageChainRetentionDays"/> (#9349):
+    /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
+    /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V300)
+    /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
+    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than both the horizon and the oldest raw chunk still stored) are deleted in the same call, and so are the
+    /// open runs of a pair with no raw row left; the open runs of a live pair never are.
+    /// </summary>
+    internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, Func<string, int>? retentionDaysFor, DateTime utcNow, ILogger? logger,
+        CancellationToken cancellationToken, RetentionWalPacer? walPacer = null)
+    {
+        var retentionDays = ObjectUsageChainRetentionDays(retentionDaysFor);
+        var tablesPurged = 0;
+        var rowsDeleted = 0;
+        var chunksDropped = 0;
+        var tablesFailed = 0;
+        foreach (var bare in ObjectUsageChain.PerSnapshotTables)
+        {
+            var table = "collect." + bare;
+            if (timescaleAvailable)
+            {
+                var (outcome, dropped) = await DropChunksOneAsync(postgres, table, retentionDays, logger, cancellationToken);
+                if (outcome == DropChunksOutcome.Dropped)
+                {
+                    tablesPurged++;
+                    chunksDropped += dropped;
+                    continue;
+                }
+
+                if (outcome == DropChunksOutcome.GaveWay)
+                {
+                    continue;
+                }
+
+                /* drop_chunks failed (warned): the table is most likely still plain, so the DELETE below keeps its horizon. */
+            }
+
+            var deleted = await PurgeOneAsync(
+                postgres, table, TimeSlicedDeleteSql(table, ObjectUsageChain.TimeColumn),
+                utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+            if (deleted is null)
+            {
+                tablesFailed++;
+            }
+            else
+            {
+                tablesPurged++;
+                rowsDeleted += deleted.Value;
+            }
+        }
+
+        /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) goes once its last
+           snapshot is older than the horizon AND older than the oldest raw chunk still stored. The second bound is load-bearing: drop_chunks keeps
+           a raw chunk until ALL of its range is past the horizon, so a chunk that straddles the horizon keeps raw rows past it, and the full fold
+           still reads them. How far past depends on that chunk's own width, and a table narrowed from 24 h to 6 h keeps its older 24 h chunks, so
+           no single interval gives the bound. The oldest surviving range_start does, whatever the interval history and whether or not the raw drop
+           ran earlier in this pass: a closed run that ended before every surviving raw row covers none of them. A run purged earlier would leave
+           those rows with no run, an answer with no fallback. The statement is sliced on last_time. */
+        var horizon = utcNow.AddDays(-retentionDays);
+        var oldestRawChunkStart = await ReadOldestRawChunkStartAsync(postgres, timescaleAvailable, logger, cancellationToken);
+        var runsCutoff = oldestRawChunkStart is DateTime chunkStart ? (chunkStart < horizon ? chunkStart : horizon) : horizon - RunsFallbackMargin;
+        var runsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
+            runsCutoff, logger, cancellationToken, pacer: walPacer);
+        if (runsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            tablesPurged++;
+            rowsDeleted += runsDeleted.Value;
+        }
+
+        /* A run still open (last_time NULL) means the index is present through the pair's newest snapshot, so it stays while the pair has
+           raw rows. A pair collected no longer has none left once its raw chunks are dropped, and nothing closes its runs: they go here. */
+        var deadPairRunsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, OpenRunsOfDeadPairsDeleteSql,
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+        if (deadPairRunsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            /* Counted like the runs purge above: the pass takes every table the spent budget kept from starting back out of the count
+               (TablesNotReached, one per paced statement), so a paced statement that is not counted here makes the count too low. */
+            tablesPurged++;
+            rowsDeleted += deadPairRunsDeleted.Value;
+        }
+
+        return (tablesPurged, rowsDeleted, chunksDropped, tablesFailed);
+    }
+
+    /// <summary>
+    /// The open runs (<c>last_time</c> NULL) of every (server, database) pair that has no <c>index_object_stats</c> row left (#9349). <c>$1</c> is the
+    /// raw horizon: a run first seen after it belongs to a pair whose raw rows the horizon cannot have dropped, so it is never looked at. Each pair is
+    /// probed once, on the prefix of <c>idx_index_object_stats_object</c> (<c>server_id, database_name</c>): a live pair stops at its first row and a
+    /// dead pair has no row to find, so the probe costs one index descent per pair and not one per run. The probe is a <c>LATERAL</c> with <c>LIMIT 1</c> on purpose:
+    /// written as <c>NOT EXISTS</c> the planner chose a hash anti join that read every raw row of the table.
+    /// </summary>
+    internal const string OpenRunsOfDeadPairsDeleteSql = @"
+WITH open_pairs AS
+(
+    SELECT DISTINCT
+        r.server_id,
+        r.database_name
+    FROM collect.object_usage_runs AS r
+    WHERE r.last_time IS NULL
+    AND   r.first_time < $1
+),
+dead_pairs AS
+(
+    SELECT
+        p.server_id,
+        p.database_name
+    FROM open_pairs AS p
+    LEFT JOIN LATERAL
+    (
+        SELECT
+            1 AS present
+        FROM collect.index_object_stats AS s
+        WHERE s.server_id = p.server_id
+        AND   s.database_name = p.database_name
+        LIMIT 1
+    ) AS probe
+      ON true
+    WHERE probe.present IS NULL
+)
+DELETE FROM collect.object_usage_runs AS r
+USING dead_pairs AS d
+WHERE r.last_time IS NULL
+AND   r.server_id = d.server_id
+AND   r.database_name = d.database_name";
+
+    /// <summary>How long past the raw horizon a closed run is kept when the oldest raw chunk cannot be read (no TimescaleDB, no hypertable, no chunk, or the read failed): TimescaleDB's default chunk width, the safe side (a run kept longer never gives a wrong answer).</summary>
+    internal static readonly TimeSpan RunsFallbackMargin = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The <c>range_start</c> of the oldest chunk <c>collect.index_object_stats</c> still has (#9349), as naive UTC, read from
+    /// <c>timescaledb_information.chunks</c>: no raw row is older than it. Null where the store has no TimescaleDB, the table is no hypertable or has no
+    /// chunk, or the read fails (warned); the caller then keeps closed runs <see cref="RunsFallbackMargin"/> past the raw horizon.
+    /// </summary>
+    internal static async Task<DateTime?> ReadOldestRawChunkStartAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (!timescaleAvailable)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC every stored timestamp follows. */
+            using var command = new NpgsqlCommand(@"
+SELECT
+    min(c.range_start) AT TIME ZONE 'UTC'
+FROM timescaledb_information.chunks AS c
+WHERE c.hypertable_schema = 'collect'
+AND   c.hypertable_name = $1", connection) { CommandTimeout = DeleteTimeoutSeconds };
+            command.Parameters.AddWithValue(ObjectUsageChain.SourceCollector);
+            return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Retention purge could not read the oldest chunk of {Table}; its object usage runs are kept {Days} days past the raw horizon instead.",
+                ObjectUsageChain.SourceCollector, RunsFallbackMargin.TotalDays);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time
     /// on the definition's own prefix time column ("collection_time" almost everywhere; the config snapshots
     /// purge on "capture_time"), executed in a loop until the table is drained (<see cref="PurgeOneAsync"/>).
@@ -1650,9 +2040,190 @@ public static class DarlingRetention
     /// (DarlingCollectorRunner.GetLastCollectedTimeAsync).
     /// </summary>
     internal static string DeleteSqlFor(ICollectorSchemaInfo schema)
-        => schema is AttentionCollector
-            ? ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName)
-            : TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName);
+        => schema switch
+        {
+            AttentionCollector => ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
+            ObjectDependenciesCollector => ObjectListSliceDeleteSql(ObjectDependenciesTable),
+            ObjectInventoryCollector => ObjectListSliceDeleteSql(ObjectInventoryTable),
+            _ => TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
+        };
+
+    /// <summary>The dependency list table (#8784 part 2), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseObjectListDeleteSql"/> name it.</summary>
+    internal const string ObjectDependenciesTable = "collect.object_dependencies";
+
+    /// <summary>The object list table (#8784), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseObjectListDeleteSql"/> name it.</summary>
+    internal const string ObjectInventoryTable = "collect.object_inventory";
+
+    /// <summary>
+    /// The daily per-database list tables with the collector that owns each (#9706): the tables <see cref="ObjectListSliceDeleteSql"/> and
+    /// <see cref="DroppedDatabaseObjectListDeleteSql"/> run over, each at its own collector's retention.
+    /// </summary>
+    internal static readonly (string Table, string Collector)[] ObjectListTables =
+    [
+        (ObjectDependenciesTable, "object_dependencies"),
+        (ObjectInventoryTable, "object_inventory"),
+    ];
+
+    /// <summary>
+    /// #8784 follow-up, #9706: the time-sliced purge of a daily per-database list table, <see cref="ObjectDependenciesTable"/> or
+    /// <see cref="ObjectInventoryTable"/>. Every read takes only a database's NEWEST capture: a view a database's dependency list names
+    /// counts as used, and a database's object list is what <c>get_object_usage</c> reports. A list must not age out while it is still the
+    /// newest one: a database whose capture fails for longer than the retention (a lost grant, the database leaving
+    /// <c>index_object_stats</c>'s scope, a collector failing there) would otherwise read as having no list, and another database's view that
+    /// only it named would read "Not used in window". So an expired row goes only while a newer capture of the same (server, database)
+    /// exists. A dropped database's list goes through <see cref="DroppedDatabaseObjectListDeleteSql"/>. A removed server's last lists stay,
+    /// one capture per database: no read looks at them, and the same server added again (the same server_id) finds them until its first
+    /// capture replaces them.
+    /// <para>Each (server_id, database_name) pair is listed with a skip scan over the table's <c>(server_id, database_name, collection_time)</c>
+    /// index (<c>idx_object_dependencies_database</c>, <c>idx_object_inventory_database</c>), and its newest capture is one backward seek on
+    /// the same index. Written as <c>EXISTS (newer capture)</c> inside <see cref="TimeSlicedDeleteSql"/>, the planner turns the test into a
+    /// hash semi join on (server_id, database_name) with the time test as a join filter, so every row the EXISTS rejects walks its whole hash
+    /// bucket, and a kept list of R rows costs about R squared checks (a 150,000-row list runs past 180 s, and a list can reach 200,000 rows,
+    /// <c>MaxRowsPerDatabase</c>). Here the newest time is found once per pair.</para>
+    /// <para>The slice is the shape <see cref="TimeSlicedDeleteSql"/> writes: the oldest expired day that has a row to delete, one
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> wide, per execution. <c>slice_start</c> is taken over the deletable rows only, so a
+    /// kept row never anchors an empty slice. When none is left it is NULL, every comparison is unknown, nothing is deleted, and the drain
+    /// loop stops as it does for every other table. <c>$1</c> is the cutoff.</para>
+    /// </summary>
+    /// <param name="table">One of <see cref="ObjectListTables"/>' tables, schema-qualified. A catalog constant, never user input, so
+    /// interpolating it is safe.</param>
+    internal static string ObjectListSliceDeleteSql(string table) => $@"
+WITH RECURSIVE
+    pairs AS
+(
+    (
+        SELECT o.server_id, o.database_name
+        FROM {table} AS o
+        WHERE o.database_name IS NOT NULL
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT nx.server_id, nx.database_name
+    FROM pairs AS p
+    CROSS JOIN LATERAL
+    (
+        SELECT o.server_id, o.database_name
+        FROM {table} AS o
+        WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    ) AS nx
+),
+    newest AS MATERIALIZED
+(
+    SELECT
+        p.server_id,
+        p.database_name,
+        (
+            SELECT max(o.collection_time)
+            FROM {table} AS o
+            WHERE o.server_id = p.server_id
+            AND   o.database_name = p.database_name
+        ) AS newest_time
+    FROM pairs AS p
+),
+    slice AS MATERIALIZED
+(
+    SELECT min(d.collection_time) AS slice_start
+    FROM {table} AS d
+    JOIN newest AS n ON n.server_id = d.server_id AND n.database_name = d.database_name
+    WHERE d.collection_time < $1
+    AND   d.collection_time < n.newest_time
+)
+DELETE FROM {table} AS d
+USING newest AS n, slice AS s
+WHERE n.server_id = d.server_id
+AND   n.database_name = d.database_name
+AND   d.collection_time < $1
+AND   d.collection_time < n.newest_time
+AND   d.collection_time >= s.slice_start
+AND   d.collection_time < s.slice_start + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+
+    /// <summary>
+    /// #8784 follow-up, #9706: the rows of a database the server no longer has, in a daily per-database list table
+    /// (<see cref="ObjectDependenciesTable"/> or <see cref="ObjectInventoryTable"/>). A kept newest list (<see cref="ObjectListSliceDeleteSql"/>)
+    /// of a dropped database would stay for good, and a dependency list would keep its references alive, so it goes once both hold: it is
+    /// past the retention cutoff ($1), and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c>
+    /// read, every minute by default) is newer than the list and does not name the database. The cutoff keeps a database that is briefly
+    /// gone (detached and attached again, renamed and renamed back) until its next capture replaces the list.
+    /// <para>Each server's newest <c>database_states</c> capture is found with one backward seek on the (server_id, collection_time) index.
+    /// Its names are read once, behind the MATERIALIZED and <c>OFFSET 0</c> fence. The keep or drop decision is made per (server_id,
+    /// database_name) pair, never per row, and only the dropped pairs' rows are deleted, by a range on the table's
+    /// <c>(server_id, database_name, collection_time)</c> index. Testing NOT EXISTS against <c>database_states</c> for every expired row
+    /// makes the planner build a hash anti join over every <c>database_states</c> row (millions on a large store, decompressed and spilled
+    /// to disk on TimescaleDB).</para>
+    /// <para>The <c>u</c> EXISTS keeps every list on a server whose newest capture names no user database (<c>database_id</c> above 4).
+    /// That is what a login that lost VIEW ANY DATABASE sees: <c>sys.databases</c> then shows only master, tempdb and the databases the
+    /// login owns, and without the check every list on that server would drop once it passed the cutoff, the lost-grant case this purge
+    /// exists to survive. A server with no <c>database_states</c> rows (that collector off, or Azure SQL Database, where it does not run)
+    /// has no <c>newest</c> row, so it keeps its lists too: that errs toward "used".</para>
+    /// </summary>
+    /// <param name="table">One of <see cref="ObjectListTables"/>' tables, schema-qualified. A catalog constant, never user input, so
+    /// interpolating it is safe.</param>
+    internal static string DroppedDatabaseObjectListDeleteSql(string table) => $@"
+WITH RECURSIVE
+    pairs AS
+(
+    (
+        SELECT o.server_id, o.database_name
+        FROM {table} AS o
+        WHERE o.database_name IS NOT NULL
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT nx.server_id, nx.database_name
+    FROM pairs AS p
+    CROSS JOIN LATERAL
+    (
+        SELECT o.server_id, o.database_name
+        FROM {table} AS o
+        WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    ) AS nx
+),
+    newest AS MATERIALIZED
+(
+    SELECT sv.server_id, s.collection_time
+    FROM (SELECT DISTINCT p.server_id FROM pairs AS p) AS sv
+    CROSS JOIN LATERAL
+    (
+        SELECT st.collection_time
+        FROM collect.database_states AS st
+        WHERE st.server_id = sv.server_id
+        ORDER BY st.collection_time DESC
+        LIMIT 1
+    ) AS s
+),
+    named AS MATERIALIZED
+(
+    SELECT n.server_id, st.database_name, st.database_id
+    FROM newest AS n
+    CROSS JOIN LATERAL
+    (
+        SELECT st.database_name, st.database_id
+        FROM collect.database_states AS st
+        WHERE st.server_id = n.server_id
+        AND   st.collection_time = n.collection_time
+        OFFSET 0
+    ) AS st
+),
+    gone AS MATERIALIZED
+(
+    SELECT p.server_id, p.database_name, n.collection_time AS state_time
+    FROM pairs AS p
+    JOIN newest AS n ON n.server_id = p.server_id
+    WHERE EXISTS (SELECT 1 FROM named AS u WHERE u.server_id = n.server_id AND u.database_id > 4)
+    AND   NOT EXISTS (SELECT 1 FROM named AS m WHERE m.server_id = p.server_id AND m.database_name = p.database_name)
+)
+DELETE FROM {table} AS d
+USING gone AS g
+WHERE d.server_id = g.server_id
+AND   d.database_name = g.database_name
+AND   d.collection_time < $1
+AND   d.collection_time < g.state_time";
 
     /// <summary>
     /// #8719: <see cref="TimeSlicedDeleteSql"/> for a plain table whose only index is <c>(server_id, {col})</c> and whose
@@ -1758,6 +2329,32 @@ WHERE NOT EXISTS
 )";
 
     /// <summary>
+    /// #8798: <c>$1</c> for the column statistics sweep, the rule the schema histories use: now less the <c>column_stats</c> retention
+    /// (<paramref name="retentionDaysFor"/>, the fleet override or the shipped default, through <see cref="EffectivePurgeRetentionDays"/>, so
+    /// never under one day). A database no run of any server stamped since then is out of every server's scope.
+    /// </summary>
+    internal static DateTime ColumnStatsStaleCutoff(DateTime utcNow, Func<string, int>? retentionDaysFor) =>
+        utcNow.AddDays(-EffectivePurgeRetentionDays(
+            "column_stats", retentionDaysFor?.Invoke("column_stats") ?? CollectorScheduleDefaults.All["column_stats"].RetentionDays));
+
+    /// <summary>
+    /// #8798: every current column statistics row of a (history key, database) that no <c>collect.column_stats_state</c> row of any server
+    /// points at with a <c>last_seen_in_scope_at</c> at or after <c>$1</c>. Both tables carry the same <c>history_key</c> text (the run
+    /// log's: 'server:' and the server id, or 'ag:' and the group id), and the rows are keyed by it, so the join is the primary key's prefix.
+    /// </summary>
+    internal const string StaleColumnStatsDeleteSql = @"
+DELETE FROM collect.column_stats AS o
+WHERE NOT EXISTS
+(
+    SELECT
+        1
+    FROM collect.column_stats_state AS s
+    WHERE s.history_key = o.history_key
+    AND   s.database_name = o.database_name
+    AND   s.last_seen_in_scope_at >= $1
+)";
+
+    /// <summary>
     /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a
     /// fixed batch size any more. <see cref="NextPlanDimBatchCap"/> adapts the actual cap toward
     /// <see cref="PlanDimBatchTargetSeconds"/> between <see cref="PlanDimDeleteRowFloor"/> and this value,
@@ -1827,7 +2424,7 @@ WHERE NOT EXISTS
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             await QueryStoreIntervalPartitions.DropExpiredAsync(
                 connection, table, utcNow, logger ?? NullLogger.Instance, cancellationToken);
         }
@@ -1907,7 +2504,7 @@ WHERE NOT EXISTS
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             var state = await QueryStoreIntervalPartitions.ReadStateAsync(connection, table, cancellationToken);
             return state.Promoted && state.LegacyExists && state.LegacyUpper.HasValue;
         }
@@ -1924,7 +2521,7 @@ WHERE NOT EXISTS
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             await using var command = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection) { CommandTimeout = 30 };
             command.Parameters.AddWithValue(qualifiedName);
             return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
@@ -1988,10 +2585,13 @@ WHERE NOT EXISTS
     /// </summary>
     internal static async Task<(int Deleted, DateTime? MaxDeleted)> ExecuteCursoredBatchAsync(
         NpgsqlConnection connection, string table, string timeColumn, int cap, DateTime cutoff, DateTime? cursor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Func<int, bool, string>? cursoredSql = null)
     {
         using var command = new NpgsqlCommand(
-            CursoredRowCappedDeleteSql(table, timeColumn, cap, cursor is not null), connection)
+            cursoredSql is null
+                ? CursoredRowCappedDeleteSql(table, timeColumn, cap, cursor is not null)
+                : cursoredSql(cap, cursor is not null),
+            connection)
         { CommandTimeout = DeleteTimeoutSeconds };
         command.Parameters.AddWithValue(cutoff);
         if (cursor is not null)
@@ -2017,11 +2617,13 @@ WHERE NOT EXISTS
 
     /// <summary>
     /// A row-capped purge with NO <c>ORDER BY</c> (#4250 item 3) — the sibling of
-    /// <see cref="RowCappedDeleteSql"/> for the two tables whose V149 migration dropped their
-    /// <c>last_seen</c> btree (<see cref="QueryStorePlanMap"/>, <see cref="QueryStoreTextStore"/>): with no
+    /// <see cref="RowCappedDeleteSql"/> for a table with no <c>last_seen</c> btree
+    /// (<see cref="QueryStorePlanMap"/>, whose V149 migration dropped it): with no
     /// index, <c>ORDER BY {timeColumn}</c> forces a sort of every row under the cutoff before the
     /// <c>LIMIT</c> can apply, which is a second full pass over exactly the rows the seq scan already read.
     /// Dropping it removes that pass; the row cap and the drain contract are unchanged.
+    /// <see cref="QueryStoreTextStore"/>'s prune (<see cref="QueryStoreTextSeen.PruneSql"/>) is capped and
+    /// unordered for the same reason, over its narrow seen table.
     ///
     /// <para><b>Why dropping the ordering is still correct here, unlike the case
     /// <see cref="RowCappedDeleteSql"/>'s own doc warns against.</b> That doc's "an unordered cap would
@@ -2048,7 +2650,8 @@ WHERE NOT EXISTS
     ///
     /// <para>The <c>ctid</c> idiom itself requires a plain table — reading <c>ctid</c> through
     /// TimescaleDB's transparent decompression is unsupported (#1564) — and both
-    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> are plain
+    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> (which
+    /// <see cref="QueryStoreTextSeen.PruneSql"/> deletes from by <c>ctid</c>) are plain
     /// tables, never hypertables (no <c>create_hypertable</c> call anywhere in their migrations), so that
     /// constraint never applies to either.</para>
     /// </summary>
@@ -2070,6 +2673,52 @@ WHERE NOT EXISTS
     /// </summary>
     internal static DateTime ComputeStatementTextCutoff(DateTime utcNow, int widestFactRetentionDays) =>
         utcNow.AddDays(-(Math.Max(widestFactRetentionDays, BaselineMath.BaselineWindowDays) + PgStatementText.PruneMarginDays));
+
+    /// <summary>
+    /// The widest raw retention of the collectors whose tables carry payload dimensions (<c>query_stats</c> and <c>procedure_stats</c>
+    /// today), at least one day, each resolved through <paramref name="retentionDaysFor"/> and falling back to
+    /// <see cref="CollectorScheduleDefaults"/>. It is the horizon the dimension, map and statement-text cutoffs assume their facts
+    /// reach. Pure, so a test can drive a raised override through it.
+    /// </summary>
+    internal static int WidestDimensionFactRetentionDays(Func<string, int>? retentionDaysFor)
+    {
+        var widest = 1;
+        foreach (var definition in CollectorCatalog.All)
+        {
+            if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
+            {
+                continue;
+            }
+
+            var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
+                ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
+                    ? dimSchedule.RetentionDays
+                    : 1));
+            widest = Math.Max(widest, factRetentionDays);
+        }
+
+        return widest;
+    }
+
+    /// <summary>
+    /// The collectors that write query-tag sightings (#9705): every catalog definition whose
+    /// <see cref="ICollectorSchemaInfo.WritesQueryTagSightings"/> is true, which the definition derives from overriding
+    /// <c>DescribeQueryTagSightings</c>, so a new writer is counted without anyone editing a list here.
+    /// </summary>
+    internal static IReadOnlyList<string> QueryTagSightingFeeders() =>
+        CollectorCatalog.All.Where(definition => definition.WritesQueryTagSightings).Select(definition => definition.Name).ToList();
+
+    /// <summary>
+    /// The days the purge keeps a <c>collect.query_tag_sightings</c> row after its <c>last_seen</c> (#9705): the widest horizon
+    /// the purge applies to any collector that writes sightings (<see cref="QueryTagSightingFeeders"/>, through
+    /// <see cref="WidestEffectiveRetentionDays"/>), and never less than <paramref name="widestFactRetentionDays"/>, the widest
+    /// retention of the payload-dimension collectors. A key's tags read against rows that live as long as their collector's
+    /// retention, so a sighting that ages out sooner leaves those rows untagged. At the shipped defaults every feeder keeps 30
+    /// days except <c>query_snapshots</c> (7), so the result equals <paramref name="widestFactRetentionDays"/>. Pure, so a test
+    /// can drive a raised override through it.
+    /// </summary>
+    internal static int QueryTagSightingsRetentionDays(int widestFactRetentionDays, Func<string, int>? retentionDaysFor) =>
+        Math.Max(widestFactRetentionDays, WidestEffectiveRetentionDays(QueryTagSightingFeeders(), retentionDaysFor));
 
     /// <summary>
     /// The widest horizon the purge applies to any of <paramref name="collectorNames"/>: each one's resolved retention,
@@ -2210,6 +2859,73 @@ WHERE NOT EXISTS
         => $"SELECT drop_chunks('{table}', older_than => make_interval(days => {retentionDays}))";
 
     /// <summary>
+    /// How long one <c>drop_chunks</c> waits for a lock before it gives way, in milliseconds (#9102). The expired chunks' own
+    /// locks are taken without waiting (<see cref="DropChunksGivingWaySql"/>); this bounds the wait for any other lock the drop
+    /// needs while it holds them. It is half of PostgreSQL's default <c>deadlock_timeout</c> (one second), so a drop that is
+    /// the first to wait leaves before its deadlock check runs. A store whose <c>deadlock_timeout</c> is set below this value
+    /// can still pick the drop as the victim, which <see cref="ExecuteDropChunksWithDeadlockRetryAsync"/> retries.
+    /// </summary>
+    internal const int DropChunksLockTimeoutMilliseconds = 500;
+
+    /// <summary>How many times one pass tries a table's <c>drop_chunks</c> when each try gives way to a lock holder (#9102).</summary>
+    internal const int DropChunksLockAttempts = 3;
+
+    /// <summary>The pause between two tries of one table's <c>drop_chunks</c> after a try gave way (#9102): long enough for a
+    /// short read to finish, short enough that one table does not hold up a pass over all of them.</summary>
+    internal static readonly TimeSpan DropChunksLockRetryPause = TimeSpan.FromSeconds(1);
+
+    /// <summary>What <see cref="DropChunksGivingWaySql"/> answers when the drop gave way to a lock holder and dropped nothing.</summary>
+    internal const int DropChunksGaveWay = -1;
+
+    /// <summary>The transaction-local setting that carries <see cref="DropChunksGivingWaySql"/>'s answer from its block to the read after it.</summary>
+    private const string DropChunksAnswerSetting = "performance_monitor.drop_chunks";
+
+    /// <summary>
+    /// One table's <c>drop_chunks</c> (<see cref="DropChunksSqlFor(string, int)"/>) as one command of two statements that gives
+    /// way to a lock holder instead of waiting behind it (#9102). A read through a hypertable holds AccessShare on its chunks,
+    /// and <c>drop_chunks</c> takes AccessExclusive on each expired chunk in turn and keeps the ones it has until it commits. A
+    /// drop that waits for one chunk while it holds another closes a lock cycle with a reader that holds the first and asks for
+    /// the second, and PostgreSQL cancels whichever of the two began waiting first. So the block takes AccessExclusive on every
+    /// expired chunk with <c>NOWAIT</c> before it drops any (<c>show_chunks</c> with the drop's own arguments names them): it
+    /// never waits for a chunk's lock, so it never waits for one while it holds another. Any other lock the drop needs is
+    /// waited for at most <see cref="DropChunksLockTimeoutMilliseconds"/>. Either refusal is <c>lock_not_available</c>, which the
+    /// block catches: that undoes the block and releases every lock it took. The read after it answers the number of chunks
+    /// dropped (<c>drop_chunks</c> returns one row per chunk), or <see cref="DropChunksGaveWay"/>. The refusal is caught in the
+    /// block because giving way is not a failure, and an error PL/pgSQL catches writes no ERROR to the store's own log. Every
+    /// other error leaves the block as it would leave the bare statement. Both settings are transaction-local, and the command
+    /// is one implicit transaction.
+    /// </summary>
+    internal static string DropChunksGivingWaySql(string table, int retentionDays) => $@"DO $do$
+DECLARE
+    expired regclass;
+    dropped integer;
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '{DropChunksLockTimeoutMilliseconds}ms', true);
+    FOR expired IN SELECT show_chunks('{table}', older_than => make_interval(days => {retentionDays})) LOOP
+        EXECUTE pg_catalog.format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE NOWAIT', expired);
+    END LOOP;
+    SELECT count(*) INTO dropped FROM ({DropChunksSqlFor(table, retentionDays)}) AS chunk;
+    PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', dropped::text, true);
+EXCEPTION WHEN lock_not_available THEN
+    PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', '{DropChunksGaveWay}', true);
+END
+$do$;
+SELECT pg_catalog.current_setting('{DropChunksAnswerSetting}')::integer";
+
+    /// <summary>What one table's <c>drop_chunks</c> came to in a pass.</summary>
+    private enum DropChunksOutcome
+    {
+        /// <summary>The statement ran; the count is the chunks it dropped, zero when none had expired.</summary>
+        Dropped,
+
+        /// <summary>Every try met a lock another session holds (warned). Nothing was dropped.</summary>
+        GaveWay,
+
+        /// <summary>The statement failed for any other reason (warned).</summary>
+        Failed,
+    }
+
+    /// <summary>
     /// <c>drop_chunks</c> for <c>collect.job_history_oldest_daily</c> (#8549), at <c>job_history</c>'s own horizon, so the rollup keeps no
     /// bucket the raw table has aged out of for long (its reader does not trust the bucket on raw's oldest day, but the rollup should not grow
     /// past the table it summarizes). A no-op where the relation is absent or the plain view a store without a hypertable carries: the DO block
@@ -2221,7 +2937,7 @@ WHERE NOT EXISTS
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             using var command = new NpgsqlCommand(DropJobHistoryOldestDailySql(retentionDays), connection) { CommandTimeout = DeleteTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -2251,30 +2967,62 @@ END
 $do$";
 
     /// <summary>
-    /// One table's drop_chunks; returns the number of chunks dropped, or null when it failed
-    /// (warned; the caller falls back to DELETE for that table). drop_chunks returns one row per
-    /// dropped chunk, so the count comes from reading the result set.
+    /// One table's drop_chunks, run through <see cref="DropChunksGivingWaySql"/> so it gives way to a lock holder instead of
+    /// waiting behind it (#9102). A try that gives way is tried again after
+    /// <see cref="DropChunksLockRetryPause"/>, <see cref="DropChunksLockAttempts"/> tries in all; a reader's statement is over
+    /// long before that. <see cref="DropChunksOutcome.Dropped"/> carries the number of chunks dropped.
+    /// <see cref="DropChunksOutcome.GaveWay"/> means a session held its lock through every try: the caller leaves the table
+    /// for the next pass and does not fall back to DELETE, which is for a table that has no chunks.
+    /// <see cref="DropChunksOutcome.Failed"/> is any other failure (warned); the caller falls back to DELETE for that table.
     /// </summary>
-    private static Task<int?> DropChunksOneAsync(
+    private static async Task<(DropChunksOutcome Outcome, int ChunksDropped)> DropChunksOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
-        string dropChunksSql,
+        int retentionDays,
         ILogger? logger,
         CancellationToken cancellationToken)
-        => ExecuteDropChunksWithDeadlockRetryAsync(async () =>
+    {
+        var givingWaySql = DropChunksGivingWaySql(tableName, retentionDays);
+        for (var attempt = 1; ; attempt++)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(dropChunksSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-
-            var chunksDropped = 0;
-            using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            var dropped = await ExecuteDropChunksWithDeadlockRetryAsync(async () =>
             {
-                chunksDropped++;
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+                using var command = new NpgsqlCommand(givingWaySql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+                var answer = await command.ExecuteScalarAsync(cancellationToken);
+                if (answer is null or DBNull)
+                {
+                    /* No answer is not "dropped nothing": say it failed, so the caller does not count a drop that may not have run. */
+                    throw new InvalidOperationException("the drop_chunks command returned no answer.");
+                }
+
+                return Convert.ToInt32(answer, CultureInfo.InvariantCulture);
+            }, tableName, logger);
+
+            if (dropped is null)
+            {
+                return (DropChunksOutcome.Failed, 0);
             }
 
-            return chunksDropped;
-        }, tableName, logger);
+            if (dropped.Value != DropChunksGaveWay)
+            {
+                return (DropChunksOutcome.Dropped, dropped.Value);
+            }
+
+            if (attempt >= DropChunksLockAttempts)
+            {
+                logger?.LogWarning(
+                    "Retention purge (drop_chunks) for {Table} gave way to another session's lock {Attempts} times; its expired chunks stay until the next retention pass.",
+                    tableName, DropChunksLockAttempts);
+                return (DropChunksOutcome.GaveWay, 0);
+            }
+
+            logger?.LogInformation(
+                "Retention purge (drop_chunks) for {Table} met a lock another session holds and gave way; try {Attempt} of {Attempts}, the next in {PauseMilliseconds} ms.",
+                tableName, attempt, DropChunksLockAttempts, (int)DropChunksLockRetryPause.TotalMilliseconds);
+            await Task.Delay(DropChunksLockRetryPause, cancellationToken);
+        }
+    }
 
     /// <summary>
     /// Runs one table's drop_chunks with a SINGLE immediate retry on deadlock (#2143). 40P01 is transient
@@ -2325,25 +3073,8 @@ $do$";
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            if (!await TimescaleSupport.DetectAsync(connection, cancellationToken))
-            {
-                return new HashSet<string>(StringComparer.Ordinal);
-            }
-
-            await using var command = new NpgsqlCommand(
-                "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1)",
-                connection) { CommandTimeout = DeleteTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = TimescaleSupport.RawRelations.ToArray() });
-
-            var gated = new HashSet<string>(StringComparer.Ordinal);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                gated.Add(reader.GetString(0));
-            }
-
-            return gated;
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            return await TimescaleSupport.ReadRawHypertablesAsync(connection, DeleteTimeoutSeconds, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2387,7 +3118,7 @@ $do$";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             return await TimescaleSupport.IsRawTierDropSafeAsync(connection, tableName, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2396,6 +3127,285 @@ $do$";
                 "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
                 tableName, ex.Message);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// What an adopt slice reports as its cap to <see cref="DrainBatchesAsync"/> while slices are left for this pass: no
+    /// row count is under it, so the drain runs the next slice. The last slice of a pass reports
+    /// <see cref="SingleShotStatement"/>, which no row count reaches, and the drain ends.
+    /// </summary>
+    private const int AdoptSliceGoesOn = 0;
+
+    /// <summary>
+    /// The adopt step of a liveness table (the Query Store text's seen table and the two payload dimensions' stamp tables):
+    /// gives every source row with no liveness row one, a keyset slice of the key at a time
+    /// (<see cref="LivenessAdoptSlice"/>), from the cursor <paramref name="state"/> holds for the table. Returns false when
+    /// it failed (warned, and the pass goes on to the prune, which cannot find a row with no liveness row until a later pass
+    /// adopts it).
+    ///
+    /// <para><b>How far one pass goes.</b> Slices run until the end of the keys or until their own run time reaches
+    /// <see cref="LivenessAdoptState.Budget"/>. A pass that stops on the budget leaves the cursor where it is and the next
+    /// pass goes on from it. A pass that reaches the end clears the cursor, so the next one starts at the first key. The
+    /// worker's state also keeps the cursor in <c>collect.collector_state</c>, read once after a restart and written after
+    /// every pass whose slices moved it, so a restart goes on from where the last finished pass stopped. A pass cut short by
+    /// a service stop writes nothing, because a stop does not wait on the store: the slices it ran are run again by the next
+    /// start, at most one pass of <see cref="LivenessAdoptState.Budget"/> per table.</para>
+    ///
+    /// <para><b>A slice that times out.</b> Each statement of a slice has <see cref="LivenessAdoptState.SliceTimeoutSeconds"/>
+    /// as its command timeout. A slice that runs into it is not a failure: the cursor stays, the next slice is half the
+    /// size, and the pass goes on while the budget lasts. Any other error ends the step with a warning and counts as a
+    /// failed table.</para>
+    ///
+    /// <para>It deletes nothing, so it is kept out of the purge's table accounting: the caller does not count it as a
+    /// purged table, its rows are logged as adopted, and the wall budget's gate never records it as a table not reached or
+    /// left. A pass whose wall budget is spent does not start it, and the prune that follows records the stop at its own
+    /// entry. Every slice is a batch of the drain loop, so it waits for collection, pauses and pays for its WAL like any
+    /// purge batch, and stops at a slice boundary when the pass's wall budget runs out.</para>
+    /// </summary>
+    private static async Task<bool> AdoptMissingSeenRowsAsync(
+        NpgsqlDataSource postgres,
+        LivenessAdoptSlice slice,
+        LivenessAdoptState state,
+        DateTime cutoff,
+        ILogger? logger,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
+    {
+        if (pacer?.Yield is { BudgetSpent: true })
+        {
+            return true;
+        }
+
+        var tableName = slice.LivenessTable;
+        var keysRead = 0L;
+        var slices = 0;
+        var timedOut = 0;
+        var reachedEnd = false;
+        var sliceSeconds = 0.0;
+        NpgsqlConnection? connection = null;
+        if (state.KeepsCursorInStore && !state.CursorLoaded(tableName))
+        {
+            state.NoteCursorLoaded(tableName, await ReadAdoptCursorAsync(postgres, slice, logger, cancellationToken));
+        }
+
+        try
+        {
+            var adopted = await DrainBatchesAsync(
+                async ct =>
+                {
+                    connection ??= await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, ct);
+                    var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
+                    var sliceKeys = state.SliceKeysOf(tableName);
+                    var cursor = state.CursorOf(tableName);
+                    var started = state.NowSeconds;
+                    var rows = 0;
+                    try
+                    {
+                        var (upperKey, keys) = await ReadAdoptSliceUpperKeyAsync(
+                            connection, slice, cursor, sliceKeys, state.SliceTimeoutSeconds, ct);
+                        if (upperKey is not null)
+                        {
+                            rows = await InsertAdoptSliceAsync(
+                                connection, slice, cursor, upperKey, cutoff, state.SliceTimeoutSeconds, ct);
+                        }
+
+                        var seconds = state.NowSeconds - started;
+                        sliceSeconds += seconds;
+                        slices++;
+                        keysRead += keys;
+                        reachedEnd = keys < sliceKeys;
+                        state.NoteSliceRan(tableName, reachedEnd ? null : upperKey, seconds);
+                    }
+                    catch (Exception ex) when (IsPlanDimBatchTimeout(ex, ct))
+                    {
+                        sliceSeconds += state.NowSeconds - started;
+                        timedOut++;
+                        state.NoteSliceTimedOut(tableName);
+                        logger?.LogDebug(
+                            "Retention's adopt slice of {Table} at {Keys} key(s) hit its {Timeout} s command timeout ({Failure}); the next slice is {NextKeys} key(s)",
+                            tableName, sliceKeys, state.SliceTimeoutSeconds, DescribePurgeFailure(ex), state.SliceKeysOf(tableName));
+
+                        /* The connection of a command that timed out is not used again: the next slice opens its own. */
+                        await connection.DisposeAsync();
+                        connection = null;
+                        return (0, sliceSeconds < state.Budget.TotalSeconds ? AdoptSliceGoesOn : SingleShotStatement, 0L);
+                    }
+
+                    var walBytes = pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, walBefore, ct);
+                    var goesOn = !reachedEnd && sliceSeconds < state.Budget.TotalSeconds;
+                    return (rows, goesOn ? AdoptSliceGoesOn : SingleShotStatement, walBytes);
+                },
+                pacer,
+                cancellationToken);
+
+            logger?.LogInformation(
+                "Retention's adopt of {Table} read {Keys} key(s) in {Slices} slice(s) and adopted {Rows} row(s) that had no liveness row; {TimedOut} slice(s) timed out; {Place}",
+                tableName, keysRead, slices, adopted, timedOut,
+                reachedEnd
+                    ? "it reached the end of the keys, and the next pass starts at the first key"
+                    : "it stopped before the end of the keys, and the next pass goes on from there");
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Retention could not write the missing liveness rows of {Table}; a row with none is kept until a later pass adopts it: {Failure}",
+                tableName, DescribePurgeFailure(ex));
+            return false;
+        }
+        finally
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            /* A slice that ran moved the cursor, a pass that failed part way included. */
+            if (state.KeepsCursorInStore && slices > 0)
+            {
+                await WriteAdoptCursorAsync(postgres, tableName, state.CursorOf(tableName), logger, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>The command timeout of the cursor's read and write in <c>collect.collector_state</c>, in seconds.</summary>
+    private const int AdoptCursorTimeoutSeconds = 10;
+
+    /// <summary>
+    /// Reads the table's adopt cursor back from <c>collect.collector_state</c> (<see cref="LivenessAdoptState.DecodeCursor"/>).
+    /// Null, so the table starts at its first key, when there is none, it does not fit the key, or the read fails: a lost
+    /// cursor costs a pass over keys already adopted, never the table.
+    /// </summary>
+    private static async Task<IReadOnlyList<object>?> ReadAdoptCursorAsync(
+        NpgsqlDataSource postgres, LivenessAdoptSlice slice, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            await using var command = new NpgsqlCommand(
+                "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
+                connection) { CommandTimeout = AdoptCursorTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = LivenessAdoptState.CursorStateCollectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = slice.LivenessTable });
+            var text = await command.ExecuteScalarAsync(cancellationToken) as string;
+            var cursor = LivenessAdoptState.DecodeCursor(text, slice.KeyColumnCount);
+            if (cursor is null && !string.IsNullOrEmpty(text))
+            {
+                logger?.LogDebug("Retention's adopt cursor of {Table} in the store does not fit its key; the adopt starts at the first key", slice.LivenessTable);
+            }
+
+            return cursor;
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogDebug(
+                "Retention could not read the adopt cursor of {Table} from the store ({Failure}); the adopt starts at the first key",
+                slice.LivenessTable, DescribePurgeFailure(ex));
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Writes the table's adopt cursor to <c>collect.collector_state</c> (an empty value when the pass reached the end of the
+    /// keys). A failed write is logged and left: this state still holds the cursor, and the next pass writes it again.
+    /// </summary>
+    private static async Task WriteAdoptCursorAsync(
+        NpgsqlDataSource postgres, string tableName, IReadOnlyList<object>? cursor, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested || LivenessAdoptState.EncodeCursor(cursor) is not { } text)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            await using var command = new NpgsqlCommand(
+                @"INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at",
+                connection) { CommandTimeout = AdoptCursorTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = LivenessAdoptState.CursorStateCollectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = tableName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = text });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            });
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogDebug(
+                "Retention could not write the adopt cursor of {Table} to the store ({Failure}); the next pass writes it again",
+                tableName, DescribePurgeFailure(ex));
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="LivenessAdoptSlice.UpperKeySql"/>: the key the next slice ends at and how many keys it holds, or no
+    /// key and zero when no key is left after <paramref name="cursor"/>.
+    /// </summary>
+    private static async Task<(IReadOnlyList<object>? UpperKey, long Keys)> ReadAdoptSliceUpperKeyAsync(
+        NpgsqlConnection connection,
+        LivenessAdoptSlice slice,
+        IReadOnlyList<object>? cursor,
+        int sliceKeys,
+        int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(slice.UpperKeySql(cursor is not null), connection) { CommandTimeout = timeoutSeconds };
+        AddKeyParameters(command, cursor);
+        command.Parameters.AddWithValue(sliceKeys);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, 0);
+        }
+
+        var upperKey = new object[slice.KeyColumnCount];
+        for (var i = 0; i < upperKey.Length; i++)
+        {
+            upperKey[i] = reader.GetValue(i);
+        }
+
+        return (upperKey, reader.GetInt64(slice.KeyColumnCount));
+    }
+
+    /// <summary>Runs <see cref="LivenessAdoptSlice.InsertSql"/> for the keys after <paramref name="cursor"/> up to <paramref name="upperKey"/>.</summary>
+    private static async Task<int> InsertAdoptSliceAsync(
+        NpgsqlConnection connection,
+        LivenessAdoptSlice slice,
+        IReadOnlyList<object>? cursor,
+        IReadOnlyList<object> upperKey,
+        DateTime cutoff,
+        int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(slice.InsertSql(cursor is not null), connection) { CommandTimeout = timeoutSeconds };
+        command.Parameters.AddWithValue(cutoff);
+        AddKeyParameters(command, cursor);
+        AddKeyParameters(command, upperKey);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static void AddKeyParameters(NpgsqlCommand command, IReadOnlyList<object>? key)
+    {
+        if (key is null)
+        {
+            return;
+        }
+
+        foreach (var value in key)
+        {
+            command.Parameters.AddWithValue(value);
         }
     }
 
@@ -2429,7 +3439,8 @@ $do$";
         int batchSize = 1,
         string? adaptiveRowCapTimeColumn = null,
         RetentionWalPacer? pacer = null,
-        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null)
+        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
+        Func<int, bool, string>? cursoredSql = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -2449,7 +3460,7 @@ $do$";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
 
             /* Deleting a whole expired slice from a COMPRESSED chunk (the drop_chunks-failed fallback)
                decompresses every affected segment, and TimescaleDB caps that at 100k tuples per DML
@@ -2541,7 +3552,7 @@ $do$";
                                 batches++;
                                 var (affected, maxDeleted) = await ExecuteCursoredBatchAsync(
                                     connection, qualifiedTable, adaptiveRowCapTimeColumn, attemptCap, cutoff, cursor,
-                                    attemptCt);
+                                    attemptCt, cursoredSql);
                                 deleted += affected;
                                 if (maxDeleted is not null)
                                 {
@@ -2882,9 +3893,10 @@ public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, in
 }
 
 /// <summary>
-/// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. Each prune statement is a full serial scan of the
-/// table's heap (about 33 seconds on the production store with 42 SQL Server servers), because the table has no
-/// <c>last_seen</c> index on purpose (it would stop the liveness touch from updating in place). A retention pass is due daily,
+/// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. Each prune statement is a full serial scan of
+/// <c>collect.query_store_text_seen</c>, the narrow table that holds the liveness stamp (about 1/28 of the text heap: 209 MB
+/// against 5,958 MB at 3.45 million texts), because neither table has a <c>last_seen</c> index on purpose (it would stop the
+/// liveness touch from updating in place). A retention pass is due daily,
 /// but a pass the wall budget stops brings the next one forward to within the hour, and each service start runs one at once, so
 /// the passes themselves are not a daily cadence. The gate holds the time of the last prune that finished, in memory, so the
 /// worker's passes share it. A restart forgets it, which costs one extra prune. A day's backlog is far under the prune's

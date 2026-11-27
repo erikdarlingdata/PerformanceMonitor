@@ -119,6 +119,59 @@ public sealed class LatestValueLookbackTests : IClassFixture<SharedDuckDbFixture
     }
 
     /// <summary>
+    /// #9049: the total is each file's row in the newest of three snapshots of the lookback that holds it: the newest,
+    /// the one just before it, and the oldest. A file missing from the newest snapshot counts at the size the snapshot
+    /// before it holds, else at the size the oldest one holds; a file in none of the three is not counted. The same
+    /// statement as Darling's, so both editions answer alike on the same rows.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSize_TakesAFileMissingFromTheNewestSnapshot_FromTheOneBeforeIt_ElseFromTheOldest()
+    {
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        DateTime At(int minutesAgo) => end.AddMinutes(-minutesAgo);
+        await SeedAsync(async connection =>
+        {
+            foreach (var minutesAgo in new[] { 1380, 900, 600, 30, 5 })
+            {
+                await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(minutesAgo), "LiveDb", "LiveDb_data", 100 + minutesAgo);
+            }
+
+            /* In the oldest snapshot and in the one before the newest: the one before the newest wins. */
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(1380), "PrevDb", "PrevDb_data", 500);
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(30), "PrevDb", "PrevDb_data", 800);
+
+            /* In the oldest snapshot, last seen between the two: the oldest snapshot's size, not the last one. */
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(1380), "OldDb", "OldDb_data", 2000);
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(900), "OldDb", "OldDb_data", 2700);
+
+            /* Seen only between the two: not counted. */
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, At(600), "BetweenDb", "BetweenDb_data", 40_000);
+        });
+
+        var facts = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(LiveServerId, end))).ToDictionary(f => f.Key);
+
+        Assert.Equal(105.0 + 800 + 2000, facts["DATABASE_TOTAL_SIZE_MB"].Value, precision: 6);
+    }
+
+    /// <summary>One snapshot in the lookback, and then no row at all: the newest snapshot alone is the answer, and no row is no fact.</summary>
+    [Fact]
+    public async Task TheDatabaseSize_OfASingleSnapshot_IsItsSum_AndOfNoSnapshot_IsNoFact()
+    {
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, end.AddMinutes(-5), "LiveDb", "LiveDb_data", 10);
+            await LatestValueSeed.InsertFileIoAsync(connection, LiveServerId, end.AddMinutes(-5), "LiveDb", "LiveDb_log", 20);
+        });
+
+        var single = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(LiveServerId, end))).ToDictionary(f => f.Key);
+        Assert.Equal(30.0, single["DATABASE_TOTAL_SIZE_MB"].Value, precision: 6);
+
+        var none = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(StaleServerId, end));
+        Assert.DoesNotContain(none, f => f.Key == "DATABASE_TOTAL_SIZE_MB");
+    }
+
+    /// <summary>
     /// The cadence-aware half, through the resolver production wires (<see cref="ScheduleManager.GetFrequencyForStorageServer"/>
     /// over a real <see cref="ServerManager"/>, so the storage-hash to connection-GUID match is under test too).
     /// A server whose database_size_stats an operator scheduled daily keeps its facts for two intervals — a

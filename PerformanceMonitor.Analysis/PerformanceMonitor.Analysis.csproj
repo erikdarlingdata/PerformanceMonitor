@@ -18,6 +18,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- #8784: the view usage read parses Query Store statement text to find the tables and views each statement names. -->
+    <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
     <InternalsVisibleTo Include="Lite.Tests" />
     <!-- Darling's PgFactCollector reconstructs blocking chains through the same internal

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -305,7 +306,7 @@ ORDER BY t.growth_bytes DESC NULLS LAST, t.index_bytes DESC";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PgTargetTableBloatTrendSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -428,7 +429,7 @@ ORDER BY t.growth_bytes DESC NULLS LAST, t.index_bytes DESC";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PgTargetIndexBloatTrendSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);

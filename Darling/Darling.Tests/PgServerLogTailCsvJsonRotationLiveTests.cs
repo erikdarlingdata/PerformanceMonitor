@@ -17,7 +17,7 @@ namespace Darling.Tests;
 /// <c>logging_collector = on</c>, a UTC <c>log_timezone</c>, <c>log_lock_waits = on</c> and a short
 /// <c>deadlock_timeout</c>. Set <c>DARLING_TEST_PG_LOGROTATE_CSV</c> to a target whose <c>log_destination</c> is
 /// <c>csvlog</c>, and <c>DARLING_TEST_PG_LOGROTATE_JSON</c> to one whose is <c>jsonlog</c> (a superuser or
-/// pg_monitor plus pg_read_server_files). Each test runs the shipped query through the collector's own read and
+/// pg_monitor plus EXECUTE on pg_read_file(text, bigint, bigint)). Each test runs the shipped query through the collector's own read and
 /// carries the staged state into the next cycle the way the runner does after a successful write.
 /// </summary>
 [Collection("pg-log-rotation")]

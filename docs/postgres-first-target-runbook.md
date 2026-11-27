@@ -94,18 +94,14 @@ installing the extension let the service reconnect to move up a tier.
 ### Self-hosted: the log-reader grants (plan capture, deadlocks, log events)
 
 `pg_deadlocks`, `pg_plan_capture` and `pg_log_events` read the server log with `pg_read_file()`, and that is the one read
-in this step `pg_monitor` does not cover. It takes BOTH halves — the role does not carry the function's
-EXECUTE, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566; granting the role
-alone changes nothing) — and the EXECUTE half lives in each database's own catalog, so **run this in the
-database Darling connects to**, not in `postgres` for good measure:
+in this step `pg_monitor` does not cover. It needs an explicit EXECUTE on the function, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566). `pg_monitor` already covers the `pg_ls_logdir()` listing and the `log_directory` setting the read builds its path from. The `pg_read_server_files` role is not needed: EXECUTE reads any file under the data directory or under an absolute `log_directory`, even one outside the data directory, while the role widens the login to every file the server's OS user can read, so leave it off. A relative `log_directory` that leads out of the data directory, such as `../pglog`, is the one place PostgreSQL refuses the read without the role (`path must be in or below the data directory` (`the current directory` on PostgreSQL 13)), so give such a server an absolute `log_directory`. The EXECUTE grant lives in each database's own catalog, so **run this in the database Darling connects to**, not in `postgres` for good measure:
 
 ```sql
-GRANT pg_read_server_files TO darling_monitor;
-GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text, bigint, bigint) TO darling_monitor;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling_monitor;
 ```
 
-The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
+The second grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
 `pg_read_file()` returns `text`, which PostgreSQL validates against the database encoding before this
 process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
 login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
@@ -120,20 +116,20 @@ still fail it, and the grant does not help there. The fault message says so, and
 [#4062](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4062) tracks a fix.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
-identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
+identical. This was measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
 `PERMISSIONS` to `SUCCESS` on the next cycle, no restart needed. Self-hosted only: on Aurora/RDS there
-is no filesystem, `pg_read_server_files` is not grantable, and all three collectors take the RDS log API
-route instead — that is the IAM subsection below.
+is no filesystem to read, and all three collectors take the RDS log API
+route instead, which is the IAM subsection below.
 
 **Proof:** as the monitoring login, in the same database, mirror the collectors' own read:
 
 ```sql
-SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1;
+SELECT pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1;
 ```
 
-A log line comes back. `permission denied for function pg_read_file` means the EXECUTE half is missing
-*in this database*; until both halves are in place, all three collectors fail every cycle as `PERMISSIONS`,
-with an `error_message` naming this exact pair and the database to run it in.
+A log line comes back. `permission denied for function pg_read_file` means the EXECUTE grant is missing
+*in this database*. Until it is in place, all three collectors fail every cycle as `PERMISSIONS`,
+with an `error_message` naming the grant and the database to run it in.
 
 ### Windows only: the pg_file_settings grants (pg_server_config's pending_restart)
 
@@ -516,7 +512,7 @@ All 29, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_lock_stats` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_deadlocks` | 5 min | 5 min | the first deadlock reported — an event log, not a counter |
-| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
+| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set (on PostgreSQL 19 and later that covers vacuum runs only: automatic analyze runs need `log_autoanalyze_min_duration` as well), and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
 | `pg_cpu_utilization` | 5 min | 5 min | 5 min (Performance Insights backfills the 1-minute points) |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
@@ -589,12 +585,12 @@ them; more than 30 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_top_queries` | top query shapes by total time, wherever `pg_stat_statements` is installed; Aurora adds the storage-vs-cache I/O split and per-statement peak memory |
 | `get_pg_plans` | captured execution plans from `auto_explain`, grouped by plan shape, literals redacted before storage |
 | `get_pg_plan_capture_readiness` | whether the target can capture plans at all, facet by facet in causal order, with the remedy for each unmet step |
-| `get_pg_logging_audit` | whether the target's logging settings (`log_lock_waits`, `log_temp_files`, `log_autovacuum_min_duration`, `log_checkpoints`, `log_connections`/`log_disconnections`, `log_min_duration_statement`) are producing the lines they could — per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in your hosting flavour's syntax; judged from the stored `pg_server_config` snapshot, so it answers once `pg_server_config` has its first snapshot (step 7: 60 min) |
+| `get_pg_logging_audit` | whether the target's logging settings (`log_lock_waits`, `log_temp_files`, `log_autovacuum_min_duration` (with `log_autoanalyze_min_duration` on PostgreSQL 19 and later), `log_checkpoints`, `log_connections`/`log_disconnections`, `log_min_duration_statement`) are producing the lines they could — per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in your hosting flavour's syntax; judged from the stored `pg_server_config` snapshot, so it answers once `pg_server_config` has its first snapshot (step 7: 60 min) |
 | `get_pg_wraparound_risk` | XID and MultiXact freeze headroom — how close to a write outage |
 | `get_pg_xmin_horizon` | *why* vacuum is reclaiming nothing, attributed to the specific holder |
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
 | `get_pg_replication_stats` | the CONNECTED replicas: send/replay lag, with the window's worst beside the latest |
-| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs` — what its automatic vacuums and analyzes cost, from the `log_autovacuum_min_duration` reports in `pg_log_events` (#3603) |
+| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs` — what its automatic vacuums and analyzes cost, from the `log_autovacuum_min_duration` reports in `pg_log_events` (#3603; `log_autoanalyze_min_duration` supplies the analyze reports on PostgreSQL 19 and later) |
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why (PostgreSQL 16+) |
 | `get_pg_io_trend` | one (backend type, context) pair's rates and hit ratio over time |
 | `get_pg_cpu_utilization` | instance CPU from AWS Performance Insights (Aurora/RDS only) |
@@ -784,7 +780,8 @@ the running service picks the change up on its next sweep, no restart:
 | `Blocking Detected` | `pg_blocking` | `blockingEnabled` — shared | **`pgBlockingCountThreshold`** (`blocking.pg_count_threshold`): distinct ROOT blockers inside the rolling one-hour window; default 3 since #7083 (V235 moves a store still at 1), floor 1 (#3444, V122). Pages when that many roots exist and the worst victim wait is 15 seconds or more, or when one root's worst victim waited `blockingWaitSecondsThreshold` (60 s by default; 0 turns that route off). A count at the bar with every wait under 15 seconds writes one held digest row for that burst, and another only when a newer capture arrives after the cooldown |
 | `Long-Running Query` | `pg_session_states` | `longRunningQueryEnabled` — shared | `longRunningQueryThresholdMinutes` — the shared value, judged against the most recent capture |
 | `Poison Wait` | `pg_wait_stats` (Aurora only — the IPC pair `BtreePage` / `BufferIo`) | `poisonWaitEnabled` — shared | the shared accumulation bars: one backend continuously stuck across the ten-minute window warns, ten is critical; no per-engine knob, by the same reasoning as the trio. On PostgreSQL a warning also needs the previous ten-minute window at or over the same bar, 20 minutes in all (#7082). Critical does not A warning that has not held for two windows writes one digest row for the daily digest and pages nothing. |
-| `High CPU` | `pg_cpu_utilization` (Aurora/RDS only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, sustained across the same consecutive-sample gate SQL Server uses. A sample counts only when both capacity use (percent of the ACU ceiling) and instance CPU are at or over it (#7082) Capacity at the ceiling with instance CPU under the bar pages nothing and writes at most one digest row per cooldown per server (reason: capacity at ceiling, instance CPU N%). A sample with no capacity figure counts on instance CPU alone only when the target is known to be provisioned: its oldest stored sample in the last 7 days is at least an hour old and none of them carries a capacity figure, which is what a provisioned (non-serverless) instance gives. The alert text then says instance CPU only. On a serverless instance a sample with no capacity figure is left out of the gate (neither a breach nor a clear). |
+| `High CPU` | `pg_cpu_utilization` (Aurora/RDS only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, sustained across the same consecutive-sample gate SQL Server uses. A sample counts only when both capacity use (percent of the ACU ceiling) and instance CPU are at or over it (#7082) Capacity at the ceiling with instance CPU under the bar writes no High CPU row of any kind: it feeds the `Capacity at ceiling` alert below. A sample with no capacity figure counts on instance CPU alone only when the target is known to be provisioned: its oldest stored sample in the last 7 days is at least an hour old and none of them carries a capacity figure, which is what a provisioned (non-serverless) instance gives. The alert text then says instance CPU only. On a serverless instance a sample with no capacity figure is left out of the gate (neither a breach nor a clear). |
+| `Capacity at ceiling` | `pg_cpu_utilization` (a serverless target only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, applied to capacity use. Opens one Warning alert when capacity is at or over it while instance CPU is under it for 5 consecutive samples, and clears after 2 samples that are not held. A sample with both over the bar is High CPU's and counts as not held, so an open alert clears while High CPU takes over. A sample with no capacity figure neither counts nor clears. The text shows capacity, current and maximum ACU, instance CPU, and free plus cached memory at the start of the run and now. After a service restart during a held run it says `since at least HH:mm UTC`. A mute rule or route on `High CPU` does not cover it. |
 
 The two PostgreSQL count knobs are deliberately **not** their SQL Server neighbours
 (`deadlockCountThreshold`, `blockingCountThreshold`), and a store that upgrades without touching them
@@ -823,7 +820,7 @@ says which kind it is. A missing extension a collector declares gets its own `EX
 | `status` | `error_message` says | Actually means | Fix |
 |---|---|---|---|
 | `PERMISSIONS` | a missing grant | it is one | `GRANT pg_monitor` (step 1) |
-| `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant pair | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
+| `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
 | `EXTENSION_MISSING` | names the extension, "NOT a missing grant" | that extension never created where the collector connects | `CREATE EXTENSION` per the message (step 1's optional half), or leave it uninstalled and accept the gap |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |

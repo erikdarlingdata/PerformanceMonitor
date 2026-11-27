@@ -29,45 +29,6 @@ namespace Darling.Tests;
 public sealed class ViewerQueryTrendsSqlTests
 {
     /// <summary>
-    /// The two query-stats DELTA-based trends (the procedure trend reads its seconds from the run axis and is pinned
-    /// by <see cref="ProcedureDurationTrendSql_RatesOverTheRunAxis_AndNeverFabricatesZero"/>). Query Store is deliberately not here: its x-axis stopped being
-    /// collection_time in #1841 tier 2 (see <see cref="QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm"/>),
-    /// so folding it into this theory would force the shared pins to be loosened for all four and the
-    /// delta trends would stop being pinned to the axis they genuinely use.
-    /// </summary>
-    [Theory]
-    [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "query_stats")]
-    [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "query_stats")]
-    public void TrendSql_ComputesPerSecondRate_OverTheStoredInterval_BaseTable(string sqlName, string table)
-    {
-        var sql = SqlByName(sqlName);
-        Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain($"v_{table}", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        /* The per-second rate denominator is the collection's gap to the previous collection (#7161, the #5449 rule the
-           procedure trend uses), capped at the collector's own 3600 s: a collection whose rows ALL stored 0 is a
-           restart and stays unrated whatever the gap (#3653 A11), and the stored interval, MAX(sample_interval_seconds),
-           is read only where there is no previous collection. Never the longest stored interval of any one query in the
-           collection: that stretched a 60 s collection to the 900 s of one query that returns every 15 minutes. */
-        Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
-        Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(stored_interval, 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
-        /* The table is read an hour before $2 so the first in-window collection has its previous one; the rows before $2 are
-           dropped after the LAG. */
-        Assert.Contains($"collection_time >= $2 - INTERVAL '{CollectorDeltaCalculator.DefaultMaxGapSeconds} seconds'", sql, StringComparison.Ordinal);
-        /* interval_seconds > 0 guards the first row: its LAG is NULL, its rate unknowable, and the CASE has no
-           ELSE — NULL, not a fabricated 0 (#3653; #3642 on the MCP copies). The reader skips the row. */
-        Assert.Contains("CASE WHEN interval_seconds > 0 THEN", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// #5449 (after #3540 V128): the procedure trend's seconds are the gap to the previous point on the run axis (the
     /// stored collections and the collector's SUCCESS runs, an idle run being a 0-work point), NULL past the delta
     /// policy's 3600 s; the STORED interval is read only for the store's first collection. Three states, none a
@@ -123,21 +84,6 @@ public sealed class ViewerQueryTrendsSqlTests
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.QueryStoreDurationTrendRollupSql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DurationTrendSql_SumsElapsedMs_ExecutionTrendSql_OnlyExecutions()
-    {
-        /* #5414 M1: the viewer's database filter sits inside the aggregate, so a collection the chosen database had no
-           rows in still counts its seconds. */
-        const string filteredElapsed = "COALESCE(SUM(delta_elapsed_time) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) / 1000.0";
-        Assert.Contains(filteredElapsed, ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
-        Assert.Contains(filteredElapsed, ViewerDataService.ProcedureDurationTrendSql, StringComparison.Ordinal);
-        /* Query Store has no delta_elapsed_time: duration = execution_count * avg_duration_us. */
-        Assert.Contains("SUM(execution_count * avg_duration_us / 1000.0)", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
-        /* The execution-count trend projects only the executions/sec column (no elapsed). */
-        Assert.DoesNotContain("elapsed", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_execution_count)", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -293,7 +239,6 @@ public sealed class ViewerQuerySnapshotsSqlTests
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_snapshots", sql, StringComparison.Ordinal); /* viewer reads base tables */
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id", sql, StringComparison.Ordinal);

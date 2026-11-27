@@ -163,7 +163,8 @@ public sealed class McpQueryTagTools
         "Dry run, writes nothing: runs a saved rule (rule_id) or a draft rule (field, pattern, tag_id, priority) over the recent query sightings of one server or every server and reports " +
         "what it would tag: how many keys the rule matches, how many of those a hand assignment or a rule that ranks ahead already holds (so the rule would not change them), " +
         "and up to 25 samples with the matched field and value. It uses the same matcher the tag map builder runs. A disabled saved rule is tested as if it were enabled. " +
-        "A draft is tested as a new rule would rank: its priority, and last among equals. Sightings are what the collectors saw in the window; keys not yet sighted are not tested.")]
+        "A draft is tested as a new rule would rank: its priority, and last among equals. Sightings are what the collectors saw in the window; keys not yet sighted are not tested. " +
+        "A sighting's last-seen stamp moves at most every 6 hours, so a window under 7 hours is widened to 7 and the answer says so.")]
     public static Task<string> TestQueryTagRule(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -173,7 +174,7 @@ public sealed class McpQueryTagTools
         [Description("Draft: the tag the rule applies; omit for text_tag.")] int? tag_id = null,
         [Description("Draft: the rule priority (lower first); default 100.")] int priority = DefaultPriority,
         [Description("Test against this server's sightings (from list_servers); omit for every server.")] int? server_id = null,
-        [Description("How far back to look at sightings, in hours (1-8760); default 168.")] int window_hours = DefaultWindowHours)
+        [Description("How far back to look at sightings, in hours (1-8760); default 168. A window under 7 is widened to 7 (a sighting's stamp moves every 6 hours).")] int window_hours = DefaultWindowHours)
     {
         return TestRuleCore(dataService, serverManager.GetKnownServerIds(), rule_id, field, pattern, tag_id, priority, server_id, window_hours);
     }
@@ -668,6 +669,14 @@ public sealed class McpQueryTagTools
                 return Refusal("invalid", "invalid_window", string.Create(CultureInfo.InvariantCulture, $"window_hours must be between 1 and {MaxWindowHours}."));
             }
 
+            /* #9456: a re-sighted key's stamp moves at most every six hours, so a shorter window would drop a key that is still being seen.
+               It is widened and the answer says so. */
+            var requestedHours = windowHours;
+            windowHours = Math.Max(windowHours, QueryTagSightingBuffer.MinTestWindowHours);
+            var widenedNote = windowHours == requestedHours
+                ? string.Empty
+                : string.Create(CultureInfo.InvariantCulture, $" Window widened to {windowHours} hours: a sighting's stamp moves every {(int)QueryTagSightingBuffer.ReSightingRefreshWidth.TotalHours} hours.");
+
             var allRules = await data.GetQueryTagRulesAsync();
             var tags = await data.GetQueryTagsAsync();
             QueryTagRule testRule;
@@ -761,8 +770,8 @@ public sealed class McpQueryTagTools
             {
                 ["status"] = keys == 0 && !truncated ? "empty" : "ok",
                 ["message"] = keys == 0 && !truncated
-                    ? "No query sightings in the window, so there is nothing to test against. Sightings are recorded by the collectors as they see queries."
-                    : "Nothing was written. Saving the rule changes the tag map on the next map pass." + cutNote,
+                    ? "No query sightings in the window, so there is nothing to test against. Sightings are recorded by the collectors as they see queries." + widenedNote
+                    : "Nothing was written. Saving the rule changes the tag map on the next map pass." + cutNote + widenedNote,
                 ["draft"] = draft,
                 ["rule"] = ruleNode,
                 ["server_id"] = serverId,
@@ -879,7 +888,7 @@ public sealed class McpQueryTagTools
 
     private const string UnknownFieldCode = "unknown_field";
 
-    private static (TagTreeEdit? Edit, string? Error, string? Code) ParseTagChanges(string? changesJson)
+    internal static (TagTreeEdit? Edit, string? Error, string? Code) ParseTagChanges(string? changesJson)
     {
         if (string.IsNullOrWhiteSpace(changesJson))
         {
@@ -891,9 +900,13 @@ public sealed class McpQueryTagTools
         {
             root = JsonNode.Parse(changesJson);
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        catch (JsonException ex)
         {
-            return (null, "changes_json is not valid JSON: " + ex.Message, null);
+            return (null, JsonParseError.Describe("changes_json", ex), null);
+        }
+        catch (ArgumentException)
+        {
+            return (null, "changes_json is not valid JSON.", null);
         }
 
         if (root is not JsonObject body)

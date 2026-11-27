@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Text;
 using PerformanceMonitor.Common;
 
@@ -132,6 +133,25 @@ public sealed class CollectorContext
     /// server major when it is not there.
     /// </summary>
     public IReadOnlyDictionary<string, string>? PgExtensionVersions { get; set; }
+
+    /// <summary>
+    /// Names of functions that <c>pg_buffercache</c> owns, read from <c>pg_proc</c> and <c>pg_depend</c> in the same catalog
+    /// read as <see cref="PgExtensionSchemas"/> (#9508). Null until the host has read it. The extension's catalog version
+    /// is not the test: a function is only usable when <c>pg_proc</c> shows it, and a query that names a missing function
+    /// fails at parse time, so the choice has to be made before the query is built.
+    /// </summary>
+    public IReadOnlySet<string>? PgExtensionMemberFunctions { get; set; }
+
+    /// <summary>True when <paramref name="functionName"/> is one the host found owned by the extension; false when it was not found or not read.</summary>
+    public bool PgExtensionHasFunction(string functionName) =>
+        PgExtensionMemberFunctions is not null && PgExtensionMemberFunctions.Contains(functionName);
+
+    /// <summary>
+    /// The pool-size cap for <c>pg_buffer_usage</c>, in buffers, when a caller needs a different one (#9508). Null is the
+    /// collector's own <see cref="PgBufferUsageCollector.PoolCapBuffers"/>. A test drives the gate with a small cap here
+    /// instead of building a 16 GB pool.
+    /// </summary>
+    public long? PgBufferUsagePoolCapBuffers { get; set; }
 
     /// <summary>The <c>extversion</c> of <paramref name="extensionName"/> in the connected database, or null when not read or not created.</summary>
     public string? PgExtensionVersion(string extensionName) =>
@@ -618,6 +638,12 @@ public sealed class CollectorContext
     public bool DeferTextFetch { get; init; }
 
     /// <summary>
+    /// #9533: the read watermark <c>QueryStatsCollector.BuildQuery</c> took for this run (null when it took none), left for the same
+    /// run's read to judge against the server's own clock and to refresh. Set by the definition, once per query it builds.
+    /// </summary>
+    internal ReadWatermark? ReadWatermarkTaken { get; set; }
+
+    /// <summary>
     /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
     /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
     /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the
@@ -868,6 +894,32 @@ public sealed class CollectorContext
     /// SQL DB anyway, so the lookup would return NULL for exactly the rows the placeholder survives on.</para>
     /// </summary>
     public List<ProcPlaceholderId> ProcPlaceholderIds { get; } = new();
+
+    /// <summary>
+    /// #8865: the SQL Server error log read <c>database_protection</c> decided on, set by its <c>ReadAsync</c> and drained by its
+    /// <c>BuildSupplementalQuery</c>, so the supplemental reads exactly the logs the primary pass planned. Null when there is
+    /// nothing to read: a platform-managed target (Azure SQL Database, Managed Instance), or a pass that listed no databases.
+    ///
+    /// <para>Like <see cref="ProcPlaceholderIds"/> it lives on the single-connection path only: the Azure SQL DB per-database loops
+    /// never set it, so no supplemental runs there and the rows keep the state the read gave them.</para>
+    /// </summary>
+    public DatabaseProtectionErrorLogState.ErrorLogPlan? DatabaseProtectionErrorLogPlan { get; set; }
+
+    /// <summary>
+    /// #9529: the host's store of the estimated plans <c>query_snapshots</c> fetched recently, so a statement that
+    /// is still running is not asked for the same plan every minute. Only that definition reads it. Null (the
+    /// default, and what the on-demand live reads leave it at) means nothing is reused: every plan is fetched,
+    /// under the per-run cap, and the SQL binds no plan-key parameters.
+    /// </summary>
+    public QuerySnapshotPlanCache? SnapshotPlanCache { get; init; }
+
+    /// <summary>
+    /// #9529: the plans <c>query_snapshots</c> named as already held when it built this run's query, keyed by plan
+    /// key. Set by its <c>BuildQuery</c> from <see cref="SnapshotPlanCache"/> and read by its <c>ReadAsync</c>,
+    /// so a row the target was told to skip is filled from exactly the set the query named, whatever another run
+    /// does to the cache in between. Null when no cache was supplied.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? SnapshotKnownPlans { get; set; }
 
     /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
@@ -1215,6 +1267,14 @@ public sealed class CollectorContext
     /// WARNING.
     /// </summary>
     public DateTime? PerItemShippedBoundary { get; set; }
+
+    /// <summary>
+    /// #9359: a write the Darling store runs on the batch's own connection and transaction, after the rows and every side write and
+    /// just before the commit. Set by the Query Store backfill so a slice's state commits with its rows; a fault in it rolls the rows
+    /// back. Null for every other caller, where it changes nothing. Typed on the provider-neutral base classes so this project does
+    /// not reference the store driver.
+    /// </summary>
+    public Func<DbConnection, DbTransaction, System.Threading.CancellationToken, System.Threading.Tasks.Task>? StoreTransactionWrite { get; set; }
 
     /// <summary>
     /// Catch-up signal (#1836): set by a definition whose cutoff computation floored a stale watermark

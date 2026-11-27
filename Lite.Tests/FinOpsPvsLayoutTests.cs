@@ -24,7 +24,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #8220: FinOps > Version Store (PVS) hosted the way the main window hosts it. The trend chart keeps a plot of at least 120 DIPs,
 /// the grid under it keeps its space and sits fully inside the window, and the chart does not leave the grid a sliver.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsPvsLayoutTests
 {
     private readonly ITestOutputHelper _output;

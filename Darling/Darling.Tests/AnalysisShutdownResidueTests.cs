@@ -180,11 +180,11 @@ public sealed class AnalysisShutdownResidueTests
         Assert.Equal(1, Count(drillDown, contextFilter));
         Assert.Contains("context.CancellationToken.ThrowIfCancellationRequested();", drillDown, StringComparison.Ordinal);
 
-        /* The service: the ONE Information line a stop is allowed to cost, and the data-span probe must
-           not convert shutdown residue into a bogus "0 hours of history" skip. */
+        /* The service: the ONE Information line a stop is allowed to cost, and the data-span probe and the
+           retention-boundary probe (#8910) must not convert shutdown residue into a bogus answer. */
         var service = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs"));
         Assert.Equal(1, Count(service, "AnalysisShutdown.Classify(ex, context.ShutdownToken, context.CancellationToken)"));
-        Assert.Equal(1, Count(service, "when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
+        Assert.Equal(2, Count(service, "when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
         Assert.Contains("Analysis abandoned at shutdown", service, StringComparison.Ordinal);
 
         /* The worker: the pass must RECEIVE the stopping token (an uncancellable pass makes every filter

@@ -37,13 +37,7 @@ public sealed class CollectionLogStatusTimeIndexRungTests
     [Fact]
     public void TheRungIsRegisteredOnADenseLadder()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Contains(RungVersion, versions);
         Assert.Equal("collection-log-status-time", Rung.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion <= StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>ONE additive, idempotent index, status between the server and the time: no table, no column, no GRANT, no view.</summary>

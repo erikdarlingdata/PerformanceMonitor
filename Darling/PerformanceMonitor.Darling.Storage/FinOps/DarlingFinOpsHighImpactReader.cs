@@ -161,7 +161,8 @@ LEFT JOIN LATERAL (
     AND   qs.query_hash = h.query_hash
     AND   qs.collection_time >= $2
     AND   ((qs.query_text IS NOT NULL AND qs.query_text != '') OR qs.query_text_digest IS NOT NULL)
-    ORDER BY qs.delta_execution_count DESC NULLS LAST
+    ORDER BY qs.delta_execution_count DESC NULLS LAST, qs.collection_time DESC, qs.creation_time DESC NULLS LAST,
+             qs.query_text, qs.query_text_digest
     LIMIT 1) AS t ON true
 LEFT JOIN query_text_dim AS td ON td.digest = t.query_text_digest
 LEFT JOIN LATERAL (

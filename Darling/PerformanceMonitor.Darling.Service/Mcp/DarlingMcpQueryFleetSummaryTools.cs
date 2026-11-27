@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -89,7 +90,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                    MIN(date_trunc('hour', q.collection_time)) AS first_hour, MAX(date_trunc('hour', q.collection_time)) AS last_hour
             FROM query_stats AS q
             WHERE q.query_hash = $1
-            AND   q.collection_time >= $4
+            AND   q.collection_time > $4
             AND   q.collection_time <= $3
             AND   q.collection_time >= $2
             GROUP BY q.server_id, q.database_name
@@ -268,7 +269,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                    MIN(date_trunc('hour', q.collection_time)) AS first_hour, MAX(date_trunc('hour', q.collection_time)) AS last_hour
             FROM query_stats AS q
             WHERE q.query_hash = $1
-            AND   q.collection_time >= $4
+            AND   q.collection_time > $4
             AND   q.collection_time <= $3
             AND   q.collection_time >= $2
             GROUP BY q.server_id, q.database_name
@@ -297,13 +298,25 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     public const int QueryStoreMaxHours = 168;
 
     /// <summary>#8570: the deduped raw arm and its per-pair sums, shared by the one-relation and the daily-mid Query Store statements so the two
-    /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window, $4 the instant raw takes over.</summary>
-    private const string QueryStoreTailCtes = """
+    /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window (start inclusive, end exclusive: an interval belongs to the window its
+    /// start falls in, so the interval that starts at $3 is the next window's, #9100), $4 the instant raw takes over.
+    /// <para>#9223: the raw tier has no index led by <c>query_hash</c> alone, so the interval-placed arm, one filter over every server's rows, read the
+    /// whole newest raw chunk (about 244k blocks on a busy store). With <paramref name="byServerIndex"/> the arm runs once per row of <c>servers</c>, with
+    /// <c>server_id = sv.server_id</c>, which is the leading key of <see cref="PgTableTuning.QueryStoreServerHashIndexName"/>, so on every supported
+    /// PostgreSQL the read is one index range per server and does not depend on PostgreSQL 18's index skip scan. The window function stays inside the
+    /// lateral and partitions by <c>server_id</c> as before, so each server's rows are numbered exactly as the one-filter shape numbers them and the
+    /// result is the same rows. Without the index (it is built at the next service start) the arm keeps its one-filter shape. The legacy arm below
+    /// has its own partial index and is the same in both.</para></summary>
+    private static string QueryStoreTailCtes(bool byServerIndex)
+    {
+        var open = byServerIndex ? "servers AS sv CROSS JOIN LATERAL (" : "(";
+        var serverBound = byServerIndex ? "server_id = sv.server_id AND " : "";
+        return $"""
         placed AS
         (
-            SELECT server_id, database_name, interval_start_time_utc AS point_time, execution_count, avg_duration_us, avg_cpu_time_us
-            FROM
-            (
+            SELECT identified.server_id, identified.database_name, identified.interval_start_time_utc AS point_time,
+                   identified.execution_count, identified.avg_duration_us, identified.avg_cpu_time_us
+            FROM {open}
                 SELECT server_id, database_name, interval_start_time_utc, execution_count, avg_duration_us, avg_cpu_time_us,
                        ROW_NUMBER() OVER
                        (
@@ -311,15 +324,15 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                            ORDER BY collection_time DESC, execution_count DESC
                        ) AS rn
                 FROM query_store_stats
-                WHERE query_hash = $1
+                WHERE {serverBound}query_hash = $1
                 AND   interval_start_time_utc >= $2
                 AND   interval_start_time_utc >= $4
-                AND   interval_start_time_utc <= $3
+                AND   interval_start_time_utc < $3
                 AND   collection_time >= GREATEST($2, $4) - interval '1 hour'
                 AND   collection_time <= $3 + interval '1 day'
                 AND   interval_start_time_utc IS NOT NULL
             ) AS identified
-            WHERE rn = 1
+            WHERE identified.rn = 1
 
             UNION ALL
 
@@ -328,7 +341,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             WHERE query_hash = $1
             AND   collection_time >= $2
             AND   collection_time >= $4
-            AND   collection_time <= $3
+            AND   collection_time < $3
             AND   interval_start_time_utc IS NULL
         ),
         tail AS
@@ -342,6 +355,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             GROUP BY server_id, database_name
         ),
         """;
+    }
 
     /// <summary>
     /// The Query Store fleet statement (#7609), same row shape as <see cref="BuildSql"/>: server_name, display_name, database_name, executions,
@@ -354,7 +368,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// to the dedup partition because this read has no server filter. That arm is welded to its own <c>server_id = $1</c> filter, optional database
     /// filter and column list, so sharing it would mean reshaping the statement <c>get_query_store_duration_trend</c> runs (#7667).</para>
     /// </summary>
-    public static string BuildQueryStoreSql(bool useRollup)
+    public static string BuildQueryStoreSql(bool useRollup, bool byServerIndex = false)
     {
         var hourly = useRollup
             ? $"""
@@ -376,7 +390,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
         return $"""
         WITH {hourly}
-        {QueryStoreTailCtes}
+        {QueryStoreTailCtes(byServerIndex)}
         pairs AS
         (
             SELECT server_id, database_name,
@@ -430,7 +444,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// hourly <see cref="BuildMidSql"/> makes. On a compressed store each hourly arm is a ColumnarScan that decompresses a chunk to keep the
     /// rows of one hash, the cost the daily rollup (24 times fewer rows) takes out of the days between the edges.
     /// </summary>
-    public static string BuildQueryStoreMidSql()
+    public static string BuildQueryStoreMidSql(bool byServerIndex = false)
     {
         var hourlyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f";
         var dailyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedDailyView} AS d";
@@ -497,7 +511,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 ORDER BY f.bucket DESC LIMIT 1
             ) AS lh ON true
         ),
-        {QueryStoreTailCtes}
+        {QueryStoreTailCtes(byServerIndex)}
         pairs AS
         (
             SELECT server_id, database_name,
@@ -517,6 +531,103 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     }
 
     private sealed record FleetRow(string Server, string? Display, string Database, string Source, long Executions, long CpuUs, long ElapsedUs, DateTime First, DateTime Last);
+
+    /// <summary>
+    /// The plan-cache source: the hourly tier <paramref name="tier"/> names, with whole closed days from the daily tier when every guard
+    /// holds (<see cref="PlanDailyMid"/>, <see cref="DailyHasNoHoleAsync"/>) and the newest hours the rollup has not built from the raw rows.
+    /// </summary>
+    private static async Task<(List<FleetRow> Rows, int Pairs)> ReadPlanCacheSourceAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, RetentionTier tier, string hash, DateTime start, DateTime windowEnd, int limit,
+        CancellationToken cancellationToken)
+    {
+        string? hourlyRelation = null;
+        var ceilingClause = "";
+        DailyMidPlan? mid = null;
+        var rawFrom = start;
+        if (tier != RetentionTier.Raw)
+        {
+            hourlyRelation = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", start, RollupCoverage.StitchTier.Hourly);
+            if (coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, start) is DateTime ceiling)
+            {
+                ceilingClause = RollupCoverage.HourlyCeilingClause(4);
+                rawFrom = ceiling > start ? ceiling : start;
+
+                /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
+                   (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
+                   fails leaves the hourly read alone. The re-read guard measures against the real clock, not the as_of window end:
+                   the daily refresh policy runs on the real clock, so a day is settled by when the policy last ran. */
+                mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, TimeProvider.System.GetUtcNow().UtcDateTime);
+                if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
+                {
+                    mid = null;
+                }
+            }
+            else
+            {
+                /* No measured ceiling means no bound on the rollup, so raw adds nothing. */
+                rawFrom = windowEnd.AddHours(1);
+            }
+        }
+
+        return await ReadFleetAsync(
+            postgres, mid is null ? BuildSql(hourlyRelation, ceilingClause) : BuildMidSql(hourlyRelation!, mid.DailyRelation),
+            PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken, mid);
+    }
+
+    /// <summary>
+    /// #7609: the Query Store source, over a window already capped at seven days. It reads the corrected hourly rollup below the rollup's
+    /// boundary and the deduped raw rows from it up, the split get_query_store_duration_trend makes, and returns the route so the answer can
+    /// say what history it could not serve.
+    /// </summary>
+    private static async Task<(QueryStoreTrendRouting.QueryStoreTrendRoute Route, List<FleetRow> Rows, int Pairs)> ReadQueryStoreSourceAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, string hash, DateTime qsStart, DateTime windowEnd, int limit,
+        CancellationToken cancellationToken)
+    {
+        var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
+
+        /* #8570: the Query Store source reads whole closed days from the corrected daily rollup, the way the plan-cache source does. Any
+           guard that fails (no daily ceiling, fewer than two settled whole days, a day with no daily row) leaves the corrected hourly read alone. */
+        DailyMidPlan? qsMid = null;
+        if (qsRoute.UseRollup)
+        {
+            qsMid = PlanQueryStoreDailyMid(coverage, qsStart, windowEnd, qsRoute.RawStartUtc, TimeProvider.System.GetUtcNow().UtcDateTime);
+            if (qsMid is not null && !await DailyHasNoHoleAsync(postgres, qsMid, cancellationToken))
+            {
+                qsMid = null;
+            }
+        }
+
+        var (rows, pairs) = await ReadFleetAsync(
+            postgres, await BuildQueryStoreStatementAsync(postgres, qsRoute.UseRollup, qsMid is not null, cancellationToken), QueryStoreSource, hash, qsStart, windowEnd,
+            qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
+        return (qsRoute, rows, pairs);
+    }
+
+    /// <summary>
+    /// #9223: the Query Store statement the call runs: the daily-mid one when <paramref name="mid"/>, else the one-relation one, with the raw tail read per
+    /// server through <see cref="PgTableTuning.QueryStoreServerHashIndexName"/> when the service's tuning pass has built it, and in its one-filter shape when not.
+    /// </summary>
+    internal static async Task<string> BuildQueryStoreStatementAsync(NpgsqlDataSource postgres, bool useRollup, bool mid, CancellationToken cancellationToken)
+    {
+        var byServerIndex = await QueryStoreHashIndexIsReadyAsync(postgres, cancellationToken);
+        return mid ? BuildQueryStoreMidSql(byServerIndex) : BuildQueryStoreSql(useRollup, byServerIndex);
+    }
+
+    /// <summary>
+    /// #9223: whether <see cref="PgTableTuning.QueryStoreServerHashIndexName"/> exists on <c>collect.query_store_stats</c> and is valid. The service builds it at a
+    /// start (the large indexes share one build time budget per start, so a store whose builds use it up gets this one at a later start), and an interrupted build can leave an invalid
+    /// one; until it is valid the tail keeps its one-filter shape, which is correct and only slower. One catalog row, read per call, so a build that finishes
+    /// while the service runs is used by the next call.
+    /// </summary>
+    internal static async Task<bool> QueryStoreHashIndexIsReadyAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_index i ON i.indexrelid = c.oid "
+            + "WHERE n.nspname = 'collect' AND c.relname = $1 AND i.indisvalid)");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddText(command, PgTableTuning.QueryStoreServerHashIndexName);
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
 
     private static async Task<(List<FleetRow> Rows, int Pairs)> ReadFleetAsync(
         NpgsqlDataSource postgres, string sql, string source, string hash, DateTime start, DateTime windowEnd, DateTime rawFrom, int limit,
@@ -550,13 +661,50 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         return (rows, pairs);
     }
 
-    [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. A statement that ran nowhere in the window answers status empty.")]
-    public static async Task<string> GetQueryFleetSummary(
+    /// <summary>
+    /// Waits on both source reads. When one read is cancelled (the caller cancelled, or the deadline cut the call) and the
+    /// other faulted, <see cref="Task.WhenAll(Task[])"/> surfaces the fault; this surfaces the cancellation instead, so a
+    /// cut call reaches the caller as a cancellation and not as a tool error.
+    /// </summary>
+    internal static async Task AwaitBothReadsAsync(Task planRead, Task qsRead)
+    {
+        try
+        {
+            await Task.WhenAll(planRead, qsRead);
+        }
+        catch (Exception) when (planRead.IsCanceled || qsRead.IsCanceled)
+        {
+            await (planRead.IsCanceled ? planRead : qsRead);
+        }
+    }
+
+    /// <summary>The limit's note: how many of the pairs the reply lists. The budget hook restates it for the rows it keeps, so the note never names a count the reply does not list.</summary>
+    private static string LimitCutNote(int limit, int shown, int pairs) =>
+        $"limit {limit} cut the list: {shown} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more.";
+
+    /// <summary>#8942: said beside the engine status, and beside <c>empty</c> on a mixed store: PostgreSQL statements are not in this read, and get_pg_top_queries is where they are.</summary>
+    internal const string FleetSqlServerOnlySentence =
+        "get_query_fleet_summary covers SQL Server statements only, so a PostgreSQL statement is not in it. For PostgreSQL statements use get_pg_top_queries.";
+
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. The answer is held to the 32,768-byte response budget: when entries were left off the end (the lightest by CPU), budget_truncated is true, budget_note says how many fit, and rows_returned and servers_returned count what is listed. A statement that ran nowhere in the window answers status empty.")]
+    public static Task<string> GetQueryFleetSummary(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu, get_query_store_top or a plan.")] string query_hash,
         [Description("Hours of history. Default 168.")] int hours_back = DefaultHoursBack,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Maximum server and database rows, ranked by CPU. Default 50, most 200.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default) =>
+        GetQueryFleetSummary(postgres, query_hash, hours_back, as_of, limit, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_query_fleet_summary under an explicit <paramref name="responseByteBudget"/> (#8812): the MCP tool passes the shared 32 KB budget
+    /// and answers cut to it with <c>budget_truncated</c> and <c>budget_note</c>, entry count and server count following the cut. The web
+    /// viewer's <c>/api/read</c> mirror passes none and keeps every entry <c>limit</c> allows.
+    /// </summary>
+    internal static async Task<string> GetQueryFleetSummary(
+        NpgsqlDataSource postgres, string query_hash, int hours_back, string? as_of, int limit, int? responseByteBudget,
         CancellationToken cancellationToken = default)
     {
         var hash = (query_hash ?? string.Empty).Trim();
@@ -586,60 +734,16 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 start, rollups.QueryGrainHourly,
                 coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-            string? hourlyRelation = null;
-            var ceilingClause = "";
-            DailyMidPlan? mid = null;
-            var rawFrom = start;
-            if (tier != RetentionTier.Raw)
-            {
-                hourlyRelation = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", start, RollupCoverage.StitchTier.Hourly);
-                if (coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, start) is DateTime ceiling)
-                {
-                    ceilingClause = RollupCoverage.HourlyCeilingClause(4);
-                    rawFrom = ceiling > start ? ceiling : start;
-
-                    /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
-                       (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
-                       fails leaves the hourly read alone. The re-read guard measures against the real clock, not the as_of window end:
-                       the daily refresh policy runs on the real clock, so a day is settled by when the policy last ran. */
-                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, TimeProvider.System.GetUtcNow().UtcDateTime);
-                    if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
-                    {
-                        mid = null;
-                    }
-                }
-                else
-                {
-                    /* No measured ceiling means no bound on the rollup, so raw adds nothing. */
-                    rawFrom = windowEnd.AddHours(1);
-                }
-            }
-
-            var (planRows, planPairs) = await ReadFleetAsync(
-                postgres, mid is null ? BuildSql(hourlyRelation, ceilingClause) : BuildMidSql(hourlyRelation!, mid.DailyRelation),
-                PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken, mid);
-
-            /* #7609: the Query Store source, capped at seven days. It reads the corrected hourly rollup below the rollup's boundary and the
-               deduped raw rows from it up, the split get_query_store_duration_trend makes. */
+            /* #8570: the two sources share nothing but the window, so they run together, each its own commands on its own pooled
+               connections, and the call waits on the slower of the two rather than their sum. Both are awaited before either is used, so a
+               failed read never leaves the other running past the call. */
             var qsHours = hours_back > QueryStoreMaxHours ? QueryStoreMaxHours : hours_back;
             var qsStart = windowEnd.AddHours(-qsHours);
-            var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
-
-            /* #8570: the Query Store source reads whole closed days from the corrected daily rollup, the way the plan-cache source does. Any
-               guard that fails (no daily ceiling, fewer than two settled whole days, a day with no daily row) leaves the corrected hourly read alone. */
-            DailyMidPlan? qsMid = null;
-            if (qsRoute.UseRollup)
-            {
-                qsMid = PlanQueryStoreDailyMid(coverage, qsStart, windowEnd, qsRoute.RawStartUtc, TimeProvider.System.GetUtcNow().UtcDateTime);
-                if (qsMid is not null && !await DailyHasNoHoleAsync(postgres, qsMid, cancellationToken))
-                {
-                    qsMid = null;
-                }
-            }
-
-            var (qsRows, qsPairs) = await ReadFleetAsync(
-                postgres, qsMid is null ? BuildQueryStoreSql(qsRoute.UseRollup) : BuildQueryStoreMidSql(), QueryStoreSource, hash, qsStart, windowEnd,
-                qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
+            var planRead = ReadPlanCacheSourceAsync(postgres, coverage, tier, hash, start, windowEnd, limit, cancellationToken);
+            var qsRead = ReadQueryStoreSourceAsync(postgres, coverage, hash, qsStart, windowEnd, limit, cancellationToken);
+            await AwaitBothReadsAsync(planRead, qsRead);
+            var (planRows, planPairs) = await planRead;
+            var (qsRoute, qsRows, qsPairs) = await qsRead;
             var qsCut = hours_back > QueryStoreMaxHours;
             var qsUnservedBefore = QueryStoreTrendRouting.UnservedBefore(qsRoute, qsStart);
 
@@ -653,14 +757,23 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 : null;
             if (rows.Count == 0)
             {
+                /* #8942: both sources read SQL Server tables. On a store with no SQL Server target the true negative would be false (a PostgreSQL
+                   statement is not in them at all), so the answer is the engine status the other gated reads use, and it does not send the caller to a
+                   SQL Server read. A mixed store keeps the true negative and says what it cannot see. */
+                if (await DarlingEngineCapability.FleetNotCollectedMessageAsync(postgres, "query_stats", cancellationToken) is { } engineGap)
+                {
+                    return McpHelpers.Status("not_collected", $"{engineGap} {FleetSqlServerOnlySentence}");
+                }
+
+                var postgresNote = await DarlingEngineCapability.AnyPostgresTargetAsync(postgres, cancellationToken) ? " " + FleetSqlServerOnlySentence : "";
                 return McpHelpers.Status(
                     "empty",
                     $"query_hash '{hash}' has no plan-cache or Query Store history on any monitored server in the {hours_back} hours ending {windowEnd:yyyy-MM-ddTHH:mm:ssZ} " +
                     $"(the plan-cache {sourceWord} tier was read; Query Store was read for {qsHours} hours). " +
-                    "Confirm the hash with get_top_queries_by_cpu before concluding the statement did not run." + (qsNote is null ? "" : " " + qsNote));
+                    "Confirm the hash with get_top_queries_by_cpu before concluding the statement did not run." + postgresNote + (qsNote is null ? "" : " " + qsNote));
             }
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 query_hash = hash,
                 hours_back,
@@ -683,9 +796,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 limit,
                 truncated = pairs > rows.Count,
                 ordering = "cpu_ms descending",
-                note = pairs > rows.Count
-                    ? $"limit {limit} cut the list: {rows.Count} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more."
-                    : null,
+                note = pairs > rows.Count ? LimitCutNote(limit, rows.Count, pairs) : null,
                 servers = rows.Select(r => new
                 {
                     server_name = r.Server,
@@ -700,7 +811,26 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     first_hour = r.First.ToString("o", CultureInfo.InvariantCulture),
                     last_hour = r.Last.ToString("o", CultureInfo.InvariantCulture),
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #8812: an answer over the response budget ends at the last whole entry that fits it, heaviest CPU first, and says so
+               under its own keys: truncated and note stay the limit's cut. The counts follow the entries listed. */
+            return responseByteBudget is int byteBudget
+                ? McpResponseBudget.CapArray(
+                    payload, "servers", "heaviest by CPU first", "server and database entries",
+                    _ => "Narrow hours_back to list only the servers that ran the statement in a shorter window.", byteBudget,
+                    "budget_truncated", "budget_note",
+                    (node, kept) =>
+                    {
+                        node["rows_returned"] = kept;
+                        /* The limit's note counts the rows shown, so a budget cut under the limit restates it for the rows kept. */
+                        if (node["note"] is not null)
+                        {
+                            node["note"] = LimitCutNote(limit, kept, pairs);
+                        }
+                        node["servers_returned"] = rows.Take(kept).Select(r => r.Server).Distinct(StringComparer.Ordinal).Count();
+                    })
+                : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

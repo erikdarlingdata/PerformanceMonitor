@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -148,7 +149,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     {
         ArgumentException.ThrowIfNullOrEmpty(stateKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, cancellationToken);
         using var command = new NpgsqlCommand(GetSql, connection) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FleetServerId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StateCollectorName });
@@ -178,7 +179,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     {
         ArgumentException.ThrowIfNullOrEmpty(stateKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, cancellationToken);
         using var command = new NpgsqlCommand(UpsertSql, connection) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FleetServerId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StateCollectorName });

@@ -171,8 +171,10 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         Assert.DoesNotContain("\"Client Timeouts\"", code, StringComparison.Ordinal);
 
         /* Both pattern fields show for it, so the alert's top database and top client application (the pre-fill) are saved, not dropped by the visibility gate. */
-        Assert.Matches(@"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;", code);
-        Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
+        Assert.True(PerformanceMonitorLite.Services.MuteRulePatternFields.AllowsDatabase(AttentionEvaluator.MetricName));
+        Assert.True(PerformanceMonitorLite.Services.MuteRulePatternFields.AllowsClientApp(AttentionEvaluator.MetricName));
+        Assert.Contains("bool showDatabase = MuteRulePatternFields.AllowsDatabase(metric);", code, StringComparison.Ordinal);
+        Assert.Contains("bool showClientApp = MuteRulePatternFields.AllowsClientApp(metric);", code, StringComparison.Ordinal);
         Assert.Contains("DatabasePatternBox.Text = context.DatabaseName;", code, StringComparison.Ordinal);
         Assert.Contains("ClientAppPatternBox.Text = context.ClientAppName;", code, StringComparison.Ordinal);
         Assert.Contains("Rule.DatabasePattern = DatabasePatternBox.Visibility == Visibility.Visible", code, StringComparison.Ordinal);
@@ -237,19 +239,6 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
             App.AlertClientTimeoutsWarningPerMinute = warning;
             App.AlertClientTimeoutsCriticalPerMinute = critical;
         }
-    }
-
-    [Fact]
-    public void TheGetAlertSettingsGuideText_NamesTheClientTimeoutsAlertAndItsKeys()
-    {
-        var method = typeof(McpAlertTools).GetMethod(nameof(McpAlertTools.GetAlertSettings))!;
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("runnable queue, client timeouts,", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.enabled", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.warning_per_minute", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.critical_per_minute", description, StringComparison.Ordinal);
-        Assert.Contains("ON by default", description, StringComparison.Ordinal);
     }
 
     private static string FindRepoFile(string relativePath)

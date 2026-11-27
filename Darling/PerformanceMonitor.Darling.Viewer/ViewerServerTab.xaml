@@ -30,6 +30,7 @@
             <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
         </Style>
         <local:PgBytesConverter x:Key="PgBytes"/>
+        <local:PgUtcTimeConverter x:Key="PgUtcTime"/>
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
@@ -683,7 +684,7 @@
                     <!-- Performance Trends (Lite ServerTab.xaml:259-282): 2x2 grid of per-second trend
                          charts (query / procedure / Query Store duration + execution count). -->
                     <TabItem Header="Performance Trends">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+                        <ScrollViewer AutomationProperties.AutomationId="PerformanceTrendsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
                         <ui:ChartGridPanel MaxColumns="2">
                             <ui:ChartPanel Title="Query Duration">
                                 <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
@@ -4744,6 +4745,7 @@
                         <DataGridTextColumn Header="Unit" Binding="{Binding Unit}" Width="70"/>
                         <DataGridTextColumn Header="Scope" Binding="{Binding Scope}" Width="160"/>
                         <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="80"/>
+                        <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="160"/>
                         <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
                         <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="150"/>
                         <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" MinWidth="200" Width="*"/>
@@ -4925,7 +4927,7 @@
                                       MouseDoubleClick="PgDeadlocksGrid_MouseDoubleClick"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, Converter={StaticResource PgUtcTime}}" SortMemberPath="OccurredAtUtc" Width="150"/>
                                     <!-- The session the server cancelled. It is the end whose application saw an error,
                                          which is usually the only end anybody noticed. -->
                                     <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
@@ -4957,7 +4959,7 @@
                             <DataGrid Grid.Row="6" x:Name="PgLogEventsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, Converter={StaticResource PgUtcTime}}" SortMemberPath="OccurredAtUtc" Width="150"/>
                                     <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="90"/>
                                     <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" Width="80"/>
                                     <DataGridTextColumn Header="SQLSTATE" Binding="{Binding SqlState}" Width="80"/>
@@ -5020,6 +5022,8 @@
                         </Grid>
                     </TabItem>
                     <TabItem Header="Query Shapes">
+                        <ScrollViewer x:Name="PgQueryShapesScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                      PreviewMouseWheel="PgQueryShapesScroll_PreviewMouseWheel">
                         <Grid Margin="0,8,0,0">
                             <Grid.RowDefinitions>
                                 <!-- Each section under the statement grid is a triple - a bold header, its note, then its
@@ -5028,19 +5032,20 @@
                                      rather than throwing, so the note and the grid land in one cell and the build stays
                                      green. XamlGridRowRangeTests is what catches that now (#3049). -->
                                 <RowDefinition Height="Auto"/>
-                                <!-- The statement grid is the primary panel and gets twice the height: the
-                                     per-database counters below it are the follow-up question (did this
-                                     spill?), not a second list of equal standing. -->
-                                <RowDefinition Height="2*"/>
+                                <!-- #8917: star rows gave each grid whatever the wrapped notes and the other grids left, and on a
+                                     short window the per-database counters grid was a header strip with no rows. Every
+                                     row is Auto now and each grid has a MinHeight (a header and about six rows) and a
+                                     MaxHeight (inner scroll), so the page scrolls, as Vacuum (#6133) and Storage (#8663) do. -->
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <StackPanel Grid.Row="0">
                                 <TextBlock x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
@@ -5051,6 +5056,7 @@
                                            Background="#22FFAA00"/>
                             </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgTopQueriesGrid" Style="{StaticResource DarkGrid}"
+                                      MinHeight="200" MaxHeight="360"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" SortMemberPath="QueryIdSort" Width="170"/>
@@ -5084,6 +5090,7 @@
                                            Background="#22FFAA00"/>
                             </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDatabaseStatsGrid" Style="{StaticResource DarkGrid}"
+                                      MinHeight="200" MaxHeight="300"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
@@ -5114,6 +5121,7 @@
                                            Background="#22FFAA00"/>
                             </StackPanel>
                             <DataGrid Grid.Row="7" x:Name="PgKernelStatsGrid" Style="{StaticResource DarkGrid}"
+                                      MinHeight="200" MaxHeight="300"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
@@ -5151,6 +5159,7 @@
                                            Background="#22FFAA00"/>
                             </StackPanel>
                             <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
+                                      MinHeight="200" MaxHeight="360"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
@@ -5182,6 +5191,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                     <!-- #6385: the web's Database Trend and Query Duration Trend, as charts. Built in code
                          (ViewerServerTab.PgTrends.cs) into the two hosts below; the notes name the subject followed. -->
@@ -5830,7 +5840,7 @@
                         <DataGridTextColumn Header="Table" Binding="{Binding FullName}" Width="200"/>
                         <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
                         <DataGridTextColumn Header="Size" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="100"/>
-                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" SortMemberPath="ScansInWindowSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" SortMemberPath="ScansInWindowSort" Width="130"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding ScansInWindowNote}"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn>
                         <DataGridTextColumn Header="Lifetime Scans" Binding="{Binding TotalScans}" SortMemberPath="TotalScansSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Last Scan" Binding="{Binding LastScan}" Width="140" SortMemberPath="LastScanUtc"/>
                         <DataGridTextColumn Header="Blocks" Binding="{Binding BlockAccesses}" SortMemberPath="BlockAccessesSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>

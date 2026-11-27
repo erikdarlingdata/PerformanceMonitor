@@ -34,7 +34,10 @@ public sealed class DarlingMcpInstructionsBudgetTests
        headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
        crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
        the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
-    private const int InstructionsBudget = 8_000;
+    /* Raised from 8,000 to 8,500 on purpose (#9642): the settings paragraph names every server admin tool, so a test can check the text
+       against the set (DarlingMcpWriteGateTextTests), and the set grew by the alert source login tools, the personal token tools and the
+       web access group tools, which put the writes-on text 55 characters over 8,000. */
+    internal const int InstructionsBudget = 8_500;
 
     [Fact]
     public void Instructions_AreWithinTheD2Budget()
@@ -113,6 +116,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var writes = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
 
         Assert.True(served.Count < catalog.Count, "the writes-off configuration should serve fewer tools than the catalog");
         var investigations = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
@@ -121,9 +125,9 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: the write tools are off, so the {writes + admin} that change " +
-            $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
+            $"monitoring configuration or list personal tokens are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
             $"`mcp.allowInvestigations` with a token adds the {investigations} investigation tools. " +
-            $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: thirty-five are the " +
+            $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: {postgres} are the " +
             "PostgreSQL reads (`get_pg_*`), plus the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
@@ -137,21 +141,22 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var catalog = Catalog();
         var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: false));
         var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
 
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so the " +
-            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, or switch agent actions, are not served; " +
+            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, switch agent actions, or make, revoke and list personal tokens, are not served; " +
             $"the {catalog.Count(DarlingMcpWritePolicy.IsInvestigation)} investigation tools stay off while `mcp.allowWrites` is on (one token " +
             $"cannot tell an agent from a person). {shared} are the same names Lite exposes. The remaining " +
-            $"{served.Count - shared} are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
+            $"{served.Count - shared} are unique to Darling: {postgres} are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
             "custom-alert-rule, alert-tuning, server/query-tag and investigation-wait tools, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.True(text.Length <= InstructionsBudget, $"the writes-on instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
     }
 
-    /// <summary>Everything served: the rendered census is exactly the catalog census <see cref="DarlingMcpInstructions.Text"/>
-    /// carries, so the constant cannot drift from the registered tools or from the Lite overlap.</summary>
+    /// <summary>Everything served: <see cref="DarlingMcpInstructions.Text"/> carries a census computed from the registered tools
+    /// (#9474), so its figures must equal the host's own catalog and the Lite overlap, and the text is what the host renders.</summary>
     [Fact]
     public void ServedCensus_EverythingOn_IsTheCatalogCensus()
     {
@@ -163,8 +168,37 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
         var census = DarlingMcpInstructions.ToolCensus(catalog, served);
         Assert.StartsWith($"This server exposes {catalog.Count} tools. ", census, StringComparison.Ordinal);
-        Assert.Contains(census, DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        var shared = catalog.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        Assert.StartsWith(
+            $"This server exposes {catalog.Count} tools. {shared} are the same names Lite exposes. The remaining {catalog.Count - shared} are unique to Darling: ",
+            DarlingMcpInstructions.Text.Substring(DarlingMcpInstructions.Text.IndexOf("This server exposes", StringComparison.Ordinal)),
+            StringComparison.Ordinal);
         Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
+    }
+
+    /// <summary>The whole catalog served, no peers: the census equals <see cref="DarlingMcpInstructions.Text"/>'s whatever
+    /// <c>mcp.allowAgentMuteRules</c> says (every tool is served, so the census has no agent action sentence to vary), so the
+    /// rendering reaches the fixed-text path with the setting on and must leave it with the setting off: the instructions then
+    /// carry no mention of the mute rule tools writing without an <c>agent_action</c>.</summary>
+    [Fact]
+    public void Build_OverTheWholeCatalog_WithAgentMuteRulesOff_SaysNothingOfTheMuteRuleToolsWritingWithoutAnAgentAction()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true, Investigations: true));
+        Assert.Equal(catalog.Count, served.Count);
+        Assert.Equal(DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: true),
+            DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: false));
+
+        var on = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: true);
+        Assert.Equal(DarlingMcpInstructions.Text, on);
+        Assert.Contains(DarlingMcpAgentMuteDirect.SettingName, on, StringComparison.Ordinal);
+
+        var off = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: false);
+        Assert.NotEqual(DarlingMcpInstructions.Text, off);
+        Assert.DoesNotContain(DarlingMcpAgentMuteDirect.SettingName, off, StringComparison.Ordinal);
+        Assert.DoesNotContain("mute and digest rules", off, StringComparison.Ordinal);
+        Assert.DoesNotContain("without an agent_action", off, StringComparison.Ordinal);
+        Assert.True(off.Length <= InstructionsBudget, $"the instructions are {off.Length} characters; D2's budget is {InstructionsBudget}");
     }
 
     /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
@@ -184,6 +218,16 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
         Assert.True(named.Count(catalog.Contains) > 10, "the scan found almost no tool names; the backtick pattern no longer matches the text");
         Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
+    }
+
+    /// <summary>#9474: the names the instructions count come from the service's tool attributes, and they are exactly the host's
+    /// registered catalog (less <c>call_tool</c>), so the census never needs a hand edit when a tool is added.</summary>
+    [Fact]
+    public void RegisteredToolNames_AreTheHostCatalog()
+    {
+        Assert.Equal(
+            Catalog().OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            DarlingMcpInstructions.RegisteredToolNames().OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary><see cref="DarlingMcpInstructions.LiteToolNames"/> is exactly the set of tool names Lite registers,

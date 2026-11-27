@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -31,16 +32,17 @@ public sealed class StoreStatementHistoryLiveTests
 CREATE TABLE public.fake_stats
 (
     role_name text, queryid bigint, calls bigint, total_exec_ms double precision, max_exec_ms double precision,
-    rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint
+    rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint,
+    shared_blks_dirtied bigint, shared_blks_written bigint, wal_bytes numeric, wal_fpi bigint
 );
 CREATE TABLE public.fake_info (stats_reset timestamptz, dealloc bigint);
 INSERT INTO public.fake_info VALUES (NULL, 0);
-CREATE FUNCTION config.store_statement_stats()
-RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision,
-               max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint,
-               shared_blks_read bigint, temp_blks_written bigint, query text)
-LANGUAGE sql AS $$ SELECT f.role_name, f.queryid, f.calls, f.total_exec_ms, f.total_exec_ms / NULLIF(f.calls, 0), f.max_exec_ms,
-                          0::double precision, f.rows_returned, f.shared_blks_hit, f.shared_blks_read, f.temp_blks_written, NULL::text
+CREATE FUNCTION config.store_statement_stats_v2()
+RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, max_exec_ms double precision,
+               rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint,
+               shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric)
+LANGUAGE sql AS $$ SELECT f.role_name, f.queryid, f.calls, f.total_exec_ms, f.max_exec_ms, f.rows_returned, f.shared_blks_hit,
+                          f.shared_blks_read, f.temp_blks_written, f.shared_blks_dirtied, f.shared_blks_written, f.wal_fpi, f.wal_bytes
                    FROM public.fake_stats f $$;
 CREATE FUNCTION config.store_statement_stats_info()
 RETURNS TABLE (stats_reset timestamptz, dealloc bigint)
@@ -324,7 +326,7 @@ SET search_path = fakeset, pg_catalog, public;";
             await SetStats(c, "('owner', 1, 100, 1000, 20, 10, 5, 1, 0)", ct);
             await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
             await SetStats(c, "('owner', 1, 130, 1300, 20, 10, 5, 1, 0)", ct);
-            await ExecAsync(c, "DROP FUNCTION config.store_statement_stats(); CREATE FUNCTION config.store_statement_stats() RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, query text) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'planted' USING ERRCODE = '55000'; END $$", ct);
+            await ExecAsync(c, "DROP FUNCTION config.store_statement_stats_v2(); CREATE FUNCTION config.store_statement_stats_v2() RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, max_exec_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'planted' USING ERRCODE = '55000'; END $$", ct);
 
             var ex = await Assert.ThrowsAsync<PostgresException>(() => StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct));
             Assert.Equal("55000", ex.SqlState);
@@ -361,6 +363,118 @@ SET search_path = fakeset, pg_catalog, public;";
             Assert.Equal(
                 await ScalarAsync(c, "SELECT interval_seconds FROM collect.store_statement_history", ct),
                 await ScalarAsync(c, "SELECT interval_seconds FROM collect.store_statement_captures WHERE outcome = 'ok'", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private const string FullRow = "('owner', {0}, {1}, {2}, 20, 10, 5, 1, 0, {3}, {4}, {5}, {6})";
+
+    private static string Full(long id, long calls, double ms, long dirtied, long written, long walBytes, long fpi) =>
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, FullRow, id, calls, ms, dirtied, written, walBytes, fpi);
+
+    /// <summary>#9410: the four write counters are differenced against the baseline like the rest, and a statement that ran but wrote nothing carries 0, not NULL.</summary>
+    [Fact]
+    public async Task TheWriteCounterDeltas_AreCurrentMinusBaseline_AndAQuietWriterCarriesZero()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            await SetStats(c, Full(1, 10, 100, 50, 40, 1000, 3) + ", " + Full(2, 10, 100, 0, 0, 0, 0), ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+            await SetStats(c, Full(1, 15, 150, 80, 70, 4096, 5) + ", " + Full(2, 15, 150, 0, 0, 0, 0), ct);
+            var result = await StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct);
+
+            Assert.Equal(StoreStatementHistory.OutcomeOk, result.Outcome);
+            Assert.Equal(30L, await ScalarAsync(c, "SELECT delta_shared_blks_dirtied FROM collect.store_statement_history WHERE queryid = 1", ct));
+            Assert.Equal(30L, await ScalarAsync(c, "SELECT delta_shared_blks_written FROM collect.store_statement_history WHERE queryid = 1", ct));
+            Assert.Equal(3096m, await ScalarAsync(c, "SELECT delta_wal_bytes FROM collect.store_statement_history WHERE queryid = 1", ct));
+            Assert.Equal(2L, await ScalarAsync(c, "SELECT delta_wal_fpi FROM collect.store_statement_history WHERE queryid = 1", ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT delta_shared_blks_dirtied FROM collect.store_statement_history WHERE queryid = 2", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9410: with more statements than the time cap, a quick statement that dirtied pages is kept by the dirtied ranking, and a statement that
+    /// dirtied nothing and spent little is dropped. 105 statements: ids 1 to 100 spend the most time and dirty nothing, id 101 spends little and
+    /// dirties the most, ids 102 to 105 spend little and dirty nothing.
+    /// </summary>
+    [Fact]
+    public async Task AQuickStatementOutsideTheTimeTop_ButInTheDirtiedTop_IsKept()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            var baseline = string.Join(", ", Enumerable.Range(1, 105).Select(i => Full(i, 1, 1, 0, 0, 0, 0)));
+            await SetStats(c, baseline, ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+
+            var rows = Enumerable.Range(1, 105).Select(i => i switch
+            {
+                <= 100 => Full(i, 11, 1000 + i, 0, 0, 0, 0),
+                101 => Full(i, 11, 2, 9000, 8000, 5000000, 40),
+                _ => Full(i, 11, 2, 0, 0, 0, 0),
+            });
+            await SetStats(c, string.Join(", ", rows), ct);
+            var result = await StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct);
+
+            Assert.Equal(105, result.StatementsSeen);
+            Assert.Equal(StoreStatementHistory.TopStatements + 1, result.StatementsKept);
+            Assert.Equal(1L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_history WHERE queryid = 101", ct));
+            Assert.Equal(9000L, await ScalarAsync(c, "SELECT delta_shared_blks_dirtied FROM collect.store_statement_history WHERE queryid = 101", ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_history WHERE queryid IN (102, 103, 104, 105)", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9410: a baseline row written before the write counters existed holds NULL for them. The first hour after the upgrade stores NULL for that
+    /// statement's write deltas (unknown) and not its whole lifetime, keeps its other deltas, and the next hour has real numbers.
+    /// </summary>
+    [Fact]
+    public async Task ABaselineFromBeforeTheMigration_GivesNullWriteDeltas_ThenRealOnes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            await SetStats(c, Full(1, 10, 100, 50, 40, 1000, 3), ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+            await ExecAsync(c, "UPDATE config.store_statement_baseline SET shared_blks_dirtied = NULL, shared_blks_written = NULL, wal_bytes = NULL, wal_fpi = NULL", ct);
+
+            await SetStats(c, Full(1, 15, 150, 80, 70, 4096, 5), ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct);
+            Assert.Equal(5L, await ScalarAsync(c, "SELECT delta_calls FROM collect.store_statement_history WHERE capture_time = '2026-03-01 11:00'", ct));
+            Assert.Equal(DBNull.Value, await ScalarAsync(c, "SELECT delta_shared_blks_dirtied FROM collect.store_statement_history WHERE capture_time = '2026-03-01 11:00'", ct));
+            Assert.Equal(DBNull.Value, await ScalarAsync(c, "SELECT delta_wal_bytes FROM collect.store_statement_history WHERE capture_time = '2026-03-01 11:00'", ct));
+
+            await SetStats(c, Full(1, 20, 200, 100, 75, 5096, 6), ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0.AddHours(2), null, ct);
+            Assert.Equal(20L, await ScalarAsync(c, "SELECT delta_shared_blks_dirtied FROM collect.store_statement_history WHERE capture_time = '2026-03-01 12:00'", ct));
+            Assert.Equal(1000m, await ScalarAsync(c, "SELECT delta_wal_bytes FROM collect.store_statement_history WHERE capture_time = '2026-03-01 12:00'", ct));
             ok = true;
         }
         finally

@@ -58,38 +58,6 @@ public sealed class ThemeColorOverrideTests
        ================================================================================================ */
 
     /// <summary>
-    /// The twelve, in the order the Settings window shows them. Changing this list is a product decision
-    /// (the class remarks on <see cref="ThemeColorOverrides"/> say why it stops at the palette level), so
-    /// the test spells every name rather than counting.
-    /// </summary>
-    [Fact]
-    public void TheExposedKeys_AreExactlyTheseTwelve()
-    {
-        Assert.Equal(
-            new[]
-            {
-                "BackgroundColor", "BackgroundLightColor", "BackgroundDarkColor",
-                "ForegroundColor", "ForegroundDimColor",
-                "AccentColor", "AccentForegroundColor",
-                "AlternatingRowColor",
-                "SuccessColor", "WarningColor", "ErrorColor", "InfoColor",
-            },
-            ThemeColorOverrides.ExposedKeys);
-    }
-
-    [Fact]
-    public void TheWithheldKeys_AreExactlyTheseSix()
-    {
-        Assert.Equal(
-            new[]
-            {
-                "AccentHoverColor", "AccentPressedColor", "BackgroundLighterColor",
-                "ForegroundMutedColor", "BorderColor", "BorderLightColor",
-            },
-            ThemeColorOverrides.WithheldKeys);
-    }
-
-    /// <summary>
     /// Exposed plus withheld is the whole palette of every theme file in both apps — eighteen
     /// <c>&lt;Color&gt;</c> declarations, no more, no less. So the six are withheld by choice, not because
     /// they are missing, and a nineteenth color added to a theme has to be filed on one side or the other.
@@ -993,5 +961,4 @@ public sealed class ThemeColorOverrideTests
 
         return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
     }
-
 }

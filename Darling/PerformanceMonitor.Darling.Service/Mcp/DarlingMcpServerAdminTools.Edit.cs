@@ -22,6 +22,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -31,8 +32,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>edit_server</c> (#5240): changes one monitored server's settings IN PLACE. The row keeps its
 /// <c>server_id</c> (the #2158 rule the desktop Edit already follows), so tags, collected history and every
 /// per-id setting stay attached; only a fixed list of columns is ever written, and never <c>server_id</c>,
-/// <c>engine</c>, <c>is_enabled</c>, <c>excluded_databases</c>, <c>capture_plans</c>,
-/// <c>alert_delivery_mode_override</c>, <c>plan_force_bot_enabled</c> or the <c>remediation_*</c> columns.
+/// <c>engine</c>, <c>is_enabled</c>, <c>excluded_databases</c>, <c>plan_force_bot_enabled</c> or the <c>remediation_*</c> columns.
+/// <c>capture_plans</c> and <c>alert_delivery_mode_override</c> (#9635) are plain per-server settings the Viewer's Add and Edit
+/// Server dialog also sets: this surface writes them with a column UPDATE in the edit's own transaction (the <c>mcp</c> role
+/// holds that grant), and the web edit route, whose role holds no such grant, still refuses them.
 ///
 /// <para><b>Credentials.</b> The stored secret cannot be read back (the <c>mcp</c> role has no SELECT on
 /// <c>encrypted_password</c>), so the edit cannot probe with "keep the stored password". A change to how a SQL or
@@ -71,11 +74,18 @@ public sealed partial class DarlingMcpServerAdminTools
         "expected_modified_at",
     ];
 
+    /// <summary>The two per-server settings only the MCP surface may set (#9635): the web route's role cannot write them.</summary>
+    internal static readonly string[] EditSettingKeys = ["capture_plans", "alert_delivery_mode_override"];
+
+    /// <summary>The values the Viewer's dialog stores for <c>alert_delivery_mode_override</c>: the <see cref="AlertNotificationMode"/> names.
+    /// Null means "inherit the global mode".</summary>
+    private static readonly string[] AlertDeliveryOverrideValues = [nameof(AlertNotificationMode.Summary), nameof(AlertNotificationMode.PerEvent)];
+
     /// <summary>Keys that name a column this surface never writes. Named in the refusal, so a caller learns that it
     /// is a rule and not a typo.</summary>
     private static readonly string[] EditRefusedKeys =
     [
-        "server_id", "engine", "is_enabled", "excluded_databases", "xe_session_databases", "capture_plans", "alert_delivery_mode_override",
+        "server_id", "engine", "is_enabled", "excluded_databases", "xe_session_databases",
         "plan_force_bot_enabled",
     ];
 
@@ -98,6 +108,8 @@ public sealed partial class DarlingMcpServerAdminTools
         ["monthly_cost_usd"] = "monthly_cost_usd",
         ["aws_role_arn"] = "aws_role_arn",
         ["aws_external_id"] = "aws_external_id",
+        ["capture_plans"] = "capture_plans",
+        ["alert_delivery_mode_override"] = "alert_delivery_mode_override",
     };
 
     private const string EditNoteSweep = "The service applies this within one sweep.";
@@ -107,9 +119,46 @@ public sealed partial class DarlingMcpServerAdminTools
 
     internal const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
 
-    /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
-    /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
-    internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
+    /// <summary>The refusal when an edit switches a server to SQL authentication and sends no password.</summary>
+    internal const string EditSwitchToSqlNeedsPasswordText = "Switching to SQL authentication needs the password.";
+
+    /// <summary>The refusal when an edit switches a server to service-principal authentication and sends no client secret.</summary>
+    internal const string EditSwitchToServicePrincipalNeedsSecretText = "Switching to ServicePrincipal authentication needs the client secret as password.";
+
+    /// <summary>
+    /// True when <paramref name="answerJson"/> is an edit refused only because it sent no password: a change to how a SQL or
+    /// service-principal server is reached, or a switch into one of those modes. Nothing was probed or written. The
+    /// <c>--edit-server</c> verb (#9693) reads this to ask for the password and send the same edit again with it.
+    /// </summary>
+    internal static bool IsPasswordNeededAnswer(string answerJson)
+    {
+        try
+        {
+            return JsonNode.Parse(answerJson) is JsonObject answer
+                && answer["status"] is JsonValue status && status.TryGetValue<string>(out var statusText) && statusText == EditStatus.Invalid
+                && answer["message"] is JsonValue message && message.TryGetValue<string>(out var text)
+                && text is EditPasswordNeededText or EditSwitchToSqlNeedsPasswordText or EditSwitchToServicePrincipalNeedsSecretText;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The answer when an edit is given an <c>env:</c> or <c>file:</c> reference as the password (#9693), from the
+    /// plan before any connection, from the store's own check at the write, and from the <c>--edit-server</c> prompt. It says
+    /// what an edit does with a reference, which is not what registering a server does: an edit saves a password itself and
+    /// never a reference, a typed password replaces a stored reference, a switch to an authentication that takes no password
+    /// removes it, and a reference is set on the server's entry in the configuration file. It names no value.</summary>
+    internal const string EditReferenceRefusedText =
+        "That is an env: or file: reference, and an edit saves only the password itself, never a reference. "
+        + "An edit can drop a stored reference: give the password itself and it replaces the reference, or switch the server to an authentication that takes no password and the reference is removed. "
+        + "To use or change a reference, edit the server's entry in the configuration file.";
+
+    /// <summary>The refusal for a password an edit was given: <see cref="ValidateSecret"/>, with the edit's own sentence for a
+    /// reference in place of the one a new registration gets.</summary>
+    internal static string? EditSecretRefusal(string? secret, PasswordKeyStatus key, bool isServicePrincipal) =>
+        DarlingSecretSource.IsReference(secret) ? EditReferenceRefusedText : ValidateSecret(secret, key, isServicePrincipal);
 
     /// <summary>The store's own answer when an edit sends an empty value for a required field, or one the store's field rules do not accept: nothing is saved.</summary>
     internal const string EditInvalidValueText = "One of the values in this edit is empty or is not accepted for its field, so nothing was saved. Check the fields you changed and try again.";
@@ -153,20 +202,21 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /* ─────────────────────────────── the tool ─────────────────────────────── */
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
-        "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +
-        "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
-        "enabled state and excluded databases cannot change here (use disable_server / enable_server, set_server_excluded_databases, set_server_xe_session_databases). Returns updated, unchanged, or " +
+        "TLS, cost, plan capture or alert delivery. The server keeps its id, tags and history. A change to how it is reached is " +
+        "probed first and saved only if the server answers. Engine, " +
+        "enabled state and excluded databases cannot change here (see disable_server, enable_server, set_server_excluded_databases, set_server_xe_session_databases). Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
-        "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
+        "The service applies a saved change within one sweep. SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
         "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) is scoped to the server, by its id, one of its tags or a tag above one (a route with no scope does not count): that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
         "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and so is a change to another connection field that reaches it, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica, monthly_cost_usd, " +
-        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). Naming engine, is_enabled, " +
+        "aws_role_arn, aws_external_id, capture_plans, alert_delivery_mode_override, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). capture_plans is true (capture plans on this server), false (never), or null (follow the service-wide capture_plans flag, the Viewer's \"Use the service setting\"); alert_delivery_mode_override is \"Summary\", \"PerEvent\", or null (inherit the global delivery mode), the same values the Viewer's Edit Server dialog stores. Both are plain settings: no probe and no reconnect, and the service applies them on its next config poll without a restart. Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
@@ -186,15 +236,55 @@ public sealed partial class DarlingMcpServerAdminTools
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
         "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note, previous, undo, undo_note}; previous holds the changed fields as they were and undo is the edit_server call that sets them back (guarded by the new modified_at); the password and AWS external ID cannot be read back, so undo never carries them and undo_note says what to add (undo is null when nothing else changed); reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
-        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it, with two differences: a name that is the display name or the storage name of more than one definition is always ambiguous, and id:<server_id> names one definition.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
-        [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
+        [Description("The monitored server to edit: its display name or storage name / address, or id:<server_id>. A partial name is accepted only when it matches exactly one definition.")] string server_name,
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool guide for the keys.")] string changes_json,
         DarlingMcpAddServersPolicy policy,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, policy: policy);
+
+    /// <summary>The word before a server's id in a name that picks a server by its id, as in <c>id:42</c>.</summary>
+    internal const string ServerIdNamePrefix = "id:";
+
+    /// <summary>
+    /// The registrations a name answers to for an edit (#9693): the one rule <c>edit_server</c> and <c>--edit-server</c> share.
+    /// A name answers for every registration that has it as its display name or its storage name, capitals aside, and for the
+    /// registration whose id it gives as <c>id:&lt;server_id&gt;</c>. A registration that matches in more than one of those ways is
+    /// one match. Two or more matches are all returned as <c>exact</c> and the caller refuses: an edit can change where a saved
+    /// password is sent, so a storage name does not win here over another registration's display name. The id form is the name
+    /// that always picks one registration, because a plain registration's storage name is the display name its read-only and
+    /// per-database registrations get by default. A name that is none of those is matched as a part of a name
+    /// (<see cref="ResolveForRemoval"/>), except the id form, which never matches a part of a name.
+    /// </summary>
+    internal static ServerNameMatch ResolveForEdit(IReadOnlyList<RegisteredServer> servers, string serverName)
+    {
+        var name = (serverName ?? string.Empty).Trim();
+        if (name.Length == 0)
+        {
+            return new ServerNameMatch(Array.Empty<RegisteredServer>(), "none");
+        }
+
+        int? id = name.StartsWith(ServerIdNamePrefix, StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(name.AsSpan(ServerIdNamePrefix.Length), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        var exact = servers
+            .Where(s => s.ServerId == id
+                     || string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (exact.Count > 0)
+        {
+            return new ServerNameMatch(exact, "exact");
+        }
+
+        return id is null
+            ? ResolveForRemoval(servers, name, nameClash: NameClash.Refuse)
+            : new ServerNameMatch(Array.Empty<RegisteredServer>(), "none");
+    }
 
     /// <summary>The tool's body with the probe and the platform injected, so a test drives the product's own path
     /// (parse, resolve, core, store) without a reachable server.</summary>
@@ -211,7 +301,7 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             /* Validate the body BEFORE any store access: a malformed request never reads the table. */
-            var (changes, parseError) = ParseEditChanges(changes_json);
+            var (changes, parseError) = ParseEditChanges(changes_json, allowSettings: true);
             if (parseError != null)
             {
                 return Outcome(EditStatus.Invalid, parseError);
@@ -219,7 +309,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
-            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
+            var target = ResolveForEdit(definitions.Select(d => d.Server).ToList(), server_name);
             if (target.Candidates.Count == 0)
             {
                 if (definitions.Count == 0)
@@ -237,11 +327,11 @@ public sealed partial class DarlingMcpServerAdminTools
                 {
                     status = "ambiguous",
                     message = $"'{server_name}' matches {target.Candidates.Count} defined servers " +
-                              $"({(target.MatchedBy == "exact" ? "the same name on more than one definition" : "as a partial name")}); " +
-                              "nothing was changed. Re-issue edit_server with ONE candidate's full name.",
+                              $"({(target.MatchedBy == "exact" ? "as the display name or the storage name of more than one definition" : "as a partial name")}); " +
+                              $"nothing was changed. Re-issue edit_server with ONE candidate: its server_id as {ServerIdNamePrefix}<server_id>, or a display name or storage name that no other definition has.",
                     matched_by = target.MatchedBy,
                     matched_in = "config_monitored_servers",
-                    candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+                    candidates = target.Candidates.Select(c => new { server_id = c.ServerId, server = c.ServerName, display_name = c.DisplayName }),
                 }, McpHelpers.JsonOptions);
             }
 
@@ -253,8 +343,8 @@ public sealed partial class DarlingMcpServerAdminTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A probe or driver that throws can carry the submitted secret in its message: redact the whole envelope. */
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
+            /* A probe or driver that throws can carry the submitted secret in its message: such a message is withheld whole. */
+            ex = new InvalidOperationException(FailureTextOf(ex, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -308,7 +398,7 @@ LIMIT 1";
     /// The web edit route's entry (#5240): the core over a store and the real probe, for a row already resolved to
     /// <paramref name="serverId"/>. Pass <c>null</c> for <paramref name="logger"/> when the caller writes its own audit
     /// line (the web route does, with the signed-in principal). A fault that escapes the core becomes the error
-    /// envelope with the submitted secret redacted, because a driver's message can quote it.
+    /// envelope, and a message that repeats the submitted secret is withheld whole, because a driver's message can quote it.
     /// </summary>
     internal static async Task<string> EditServerByIdAsync(
         NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken,
@@ -329,7 +419,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
+            ex = new InvalidOperationException(FailureTextOf(ex, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -398,7 +488,7 @@ LIMIT 1";
         if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))
             && webScreen.Refusal(plan.ProbeConfig) is { } webRefusal)
         {
-            return Outcome(EditStatus.Invalid, RedactEditSecret(webRefusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
+            return Outcome(EditStatus.Invalid, RuleRefusalText(webRefusal, plan.PlaintextSecret, plan.PlaintextExternalId));
         }
 
         /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the
@@ -444,7 +534,7 @@ LIMIT 1";
             var refusal = policy?.Refusal(plan.ProbeConfig);
             if (refusal is not null)
             {
-                return Outcome(EditStatus.Invalid, RedactEditSecret(refusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
+                return Outcome(EditStatus.Invalid, RuleRefusalText(refusal, plan.PlaintextSecret, plan.PlaintextExternalId));
             }
 
             var probeResult = await probe(plan.ProbeConfig, cancellationToken);
@@ -553,7 +643,8 @@ LIMIT 1";
 
         logger?.LogInformation("Server edited through edit_server: id {ServerId}, fields {Fields}", serverId, string.Join(",", plan.ChangedFields));
 
-        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt));
+        var undoName = await UndoServerNameAsync(store, serverId, plan, logger, cancellationToken);
+        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt), undoName);
         return JsonSerializer.Serialize(new
         {
             status = EditStatus.Updated,
@@ -580,7 +671,7 @@ LIMIT 1";
     /// cannot be read, so neither is ever in <c>previous</c> or the undo, and the note says what the caller must add. An edit that changed nothing
     /// else (a password-only edit) has nothing a call can restore: <c>undo</c> is null and the note says why.
     /// </summary>
-    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt)
+    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt, string undoName)
     {
         var previous = new JsonObject();
         foreach (var field in plan.ChangedFields)
@@ -599,6 +690,8 @@ LIMIT 1";
                 case "multi_subnet_failover": previous[field] = row.MultiSubnetFailover; break;
                 case "query_store_replica": previous[field] = row.QueryStoreReplica; break;
                 case "monthly_cost_usd": previous[field] = row.MonthlyCostUsd; break;
+                case "capture_plans": previous[field] = row.CapturePlans; break;
+                case "alert_delivery_mode_override": previous[field] = row.AlertDeliveryModeOverride; break;
                 case "aws_role_arn": previous[field] = row.AwsRoleArn; break;
             }
         }
@@ -655,16 +748,64 @@ LIMIT 1";
         changes["expected_modified_at"] = newModifiedAt;
         return (previous, DarlingMcpUndoShape.Call("edit_server", new JsonObject
         {
-            ["server_name"] = plan.NewStorageKey,
+            ["server_name"] = undoName,
             ["changes_json"] = changes.ToJsonString(),
         }), note);
     }
 
+    /// <summary>
+    /// The name the printed undo gives the edited server (#9693): its storage name while that name picks this registration
+    /// alone, else <c>id:&lt;server_id&gt;</c>. A storage name another registration has as its display name answers for both,
+    /// and <see cref="ResolveForEdit"/> refuses a name that answers for two, so an undo that named it could not be run.
+    /// <paramref name="others"/> is every other registration, and the edited one is judged by the names the edit left it.
+    /// </summary>
+    internal static string UndoServerName(IReadOnlyList<RegisteredServer> others, int serverId, string storageKey, string displayName)
+    {
+        List<RegisteredServer> registrations = [.. others.Where(o => o.ServerId != serverId), new RegisteredServer(serverId, storageKey, displayName)];
+        return ResolveForEdit(registrations, storageKey).Candidates.Count == 1 ? storageKey : ServerIdName(serverId);
+    }
+
+    private static string ServerIdName(int serverId) => ServerIdNamePrefix + serverId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <see cref="UndoServerName"/> over the store's other registrations. The edit is already committed when this reads, so a
+    /// read that fails does not fail the answer: the undo names the server by its id, the name that always picks one.
+    /// </summary>
+    private static async Task<string> UndoServerNameAsync(IServerEditStore store, int serverId, ServerEditPlan plan, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return UndoServerName(await store.LoadOtherRegistrationsAsync(serverId, cancellationToken), serverId, plan.NewStorageKey, plan.NewName);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("edit_server could not list the other registrations for the undo of id {ServerId} ({Error}): the undo names the server by its id",
+                serverId, ex.GetType().Name);
+            return ServerIdName(serverId);
+        }
+    }
+
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
-    /// with "Not added" turned into "Not saved", the secret redacted. One shape for the check before the write and the
-    /// check under the lock.</summary>
+    /// with "Not added" turned into "Not saved". A text that repeats a typed secret (a database named like the password) is
+    /// withheld whole. One shape for the check before the write and the check under the lock.</summary>
     private static string ActualCollisionOutcome(string collisionText, params string?[] secrets) =>
-        Outcome(EditStatus.Collides, RedactEditSecret(collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal), secrets));
+        Outcome(EditStatus.Collides, RepeatsTypedSecret(collisionText, secrets)
+            ? "Not saved: this connection lands in a database that another monitored server already covers. " + WithheldText("The sentence that names the databases", null)
+            : collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal));
+
+    /// <summary>A rule's refusal of the server as it would be saved (the MCP caller's policy, the web route's Windows
+    /// authentication rule), with "Not added" turned into "Not saved". A sentence that repeats a typed secret is withheld whole.</summary>
+    private static string RuleRefusalText(string refusal, params string?[] secrets) =>
+        RepeatsTypedSecret(refusal, secrets)
+            ? "Not saved: a rule of this service refuses the server as it would be saved. " + WithheldText("The rule's sentence", null)
+            : refusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal);
+
+    /// <summary>The message of a fault that escaped the edit: its own text, or the withheld sentence with the failure's kind
+    /// (<see cref="DarlingServerConnector.FailureKindOf"/>) when the text repeats a typed secret.</summary>
+    private static string FailureTextOf(Exception failure, string?[] secrets) =>
+        RepeatsTypedSecret(failure.Message, secrets)
+            ? WithheldText("The failure's text", DarlingServerConnector.FailureKindOf(failure))
+            : failure.Message;
 
     private static string OccupiedAnswer(string storageKey) =>
         JsonSerializer.Serialize(new
@@ -701,6 +842,8 @@ LIMIT 1";
         multi_subnet_failover = row.MultiSubnetFailover,
         query_store_replica = row.QueryStoreReplica,
         monthly_cost_usd = row.MonthlyCostUsd,
+        capture_plans = row.CapturePlans,
+        alert_delivery_mode_override = row.AlertDeliveryModeOverride,
         aws_role_arn = row.AwsRoleArn,
         aws_external_id_set = row.AwsExternalIdSet,
         modified_at = ModifiedAtToken(row.ModifiedAt),
@@ -718,19 +861,34 @@ LIMIT 1";
     /// survive a trip through a client that cannot hold them in a date type.</summary>
     internal static string ModifiedAtToken(DateTime modifiedAt) => modifiedAt.ToString("o", CultureInfo.InvariantCulture);
 
-    /// <summary>The text with every typed secret removed: the password and the AWS external ID (#5452).</summary>
-    private static string RedactEditSecret(string text, params string?[] secrets)
+    /// <summary>True when <paramref name="text"/> repeats a typed secret: the password or the AWS external ID (#5452).</summary>
+    internal static bool RepeatsTypedSecret(string? text, params string?[] secrets)
     {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
         foreach (var secret in secrets)
         {
-            if (!string.IsNullOrEmpty(secret))
+            if (!string.IsNullOrEmpty(secret) && text.Contains(secret, StringComparison.Ordinal))
             {
-                text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+                return true;
             }
         }
 
-        return text;
+        return false;
     }
+
+    /// <summary>
+    /// #9693: the sentence that stands in for a text that repeats a typed secret. The text is withheld whole and never
+    /// rewritten: a text with the secret cut out shows which of its words was the secret (a password equal to the login name
+    /// prints the login as the missing word). A text that does not repeat a secret is passed on as it was written.
+    /// <paramref name="kind"/> names the failure without its text: an error number, a SqlState or an exception's type.
+    /// </summary>
+    internal static string WithheldText(string what, string? kind) =>
+        $"{what} is withheld because it repeats the password or the AWS external ID sent with this request"
+        + (string.IsNullOrEmpty(kind) ? "." : $" ({kind}).");
 
     /* ─────────────────────────────── parse (pure) ─────────────────────────────── */
 
@@ -751,6 +909,14 @@ LIMIT 1";
         public bool? TrustServerCertificate { get; set; }
         public bool? MultiSubnetFailover { get; set; }
         public decimal? MonthlyCostUsd { get; set; }
+
+        /// <summary>True when the request names <c>capture_plans</c> (#9635): null in <see cref="CapturePlans"/> then means "follow the service setting".</summary>
+        public bool HasCapturePlans { get; set; }
+        public bool? CapturePlans { get; set; }
+
+        /// <summary>True when the request names <c>alert_delivery_mode_override</c> (#9635): null in <see cref="AlertDeliveryModeOverride"/> then means "inherit the global mode".</summary>
+        public bool HasAlertDeliveryModeOverride { get; set; }
+        public string? AlertDeliveryModeOverride { get; set; }
 
         /// <summary>True when the request names the Query Store replica (#6254): <see cref="QueryStoreReplica"/> null then means
         /// "remove it". A replica left out keeps the stored one.</summary>
@@ -774,7 +940,7 @@ LIMIT 1";
     /// by name; any other unknown key is refused with the editable keys listed. Every message is a fixed sentence
     /// that never repeats a value, so a password sent under a wrong key is not echoed.
     /// </summary>
-    internal static (ServerEditChanges? Changes, string? Error) ParseEditChanges(string? changesJson)
+    internal static (ServerEditChanges? Changes, string? Error) ParseEditChanges(string? changesJson, bool allowSettings = false)
     {
         if (string.IsNullOrWhiteSpace(changesJson))
         {
@@ -807,6 +973,7 @@ LIMIT 1";
 
         var keys = body.Select(p => p.Key).ToList();
         if (keys.FirstOrDefault(k => EditRefusedKeys.Contains(k, StringComparer.Ordinal)
+                                  || (!allowSettings && EditSettingKeys.Contains(k, StringComparer.Ordinal))
                                   || k.StartsWith("remediation_", StringComparison.Ordinal)) is { } refused)
         {
             var refusedName = refused.StartsWith("remediation_", StringComparison.Ordinal) ? "remediation_*" : TruncateKey(refused);
@@ -815,12 +982,13 @@ LIMIT 1";
                 "is_enabled" => " To take a server out of collection or bring it back, call disable_server or enable_server.",
                 "excluded_databases" => " To change a server's excluded databases, call set_server_excluded_databases.",
                 "xe_session_databases" => " To change the list of databases that get Extended Events sessions, call set_server_xe_session_databases.",
+                "capture_plans" or "alert_delivery_mode_override" => " The web edit cannot set it: use the Viewer's Edit Server dialog or the edit_server MCP tool.",
                 _ => string.Empty,
             };
             return (null, $"'{refusedName}' cannot be changed here: it is the server's identity or a setting kept in the desktop app.{elsewhere} Nothing was changed.");
         }
 
-        if (keys.FirstOrDefault(k => !EditableKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
+        if (keys.FirstOrDefault(k => !EditableKeys.Contains(k, StringComparer.Ordinal) && !EditSettingKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
         {
             return (null, $"'{TruncateKey(unknown)}' is not an editable field. The editable fields are: {string.Join(", ", EditableKeys)}.");
         }
@@ -842,12 +1010,22 @@ LIMIT 1";
                         return (null, "display_name must be text.");
                     }
 
+                    if (ServerFieldText.Refusal("display_name", displayName) is { } displayNameRefusal)
+                    {
+                        return (null, displayNameRefusal);
+                    }
+
                     changes.DisplayName = displayName.Trim();
                     break;
                 case "host":
                     if (!TryEditString(node, out var host) || string.IsNullOrWhiteSpace(host))
                     {
                         return (null, "host must be non-blank text.");
+                    }
+
+                    if (ServerFieldText.Refusal("host", host) is { } hostRefusal)
+                    {
+                        return (null, hostRefusal);
                     }
 
                     changes.Host = host.Trim();
@@ -865,6 +1043,11 @@ LIMIT 1";
                     if (node is not null && !TryEditString(node, out _))
                     {
                         return (null, "database must be text, or null to clear it.");
+                    }
+
+                    if (ServerFieldText.Refusal("database", TryGetString(body, "database")) is { } databaseRefusal)
+                    {
+                        return (null, databaseRefusal);
                     }
 
                     changes.HasDatabase = true;
@@ -917,6 +1100,11 @@ LIMIT 1";
                         return (null, "username must be text, or null to clear it.");
                     }
 
+                    if (ServerFieldText.Refusal("username", TryGetString(body, "username")) is { } usernameRefusal)
+                    {
+                        return (null, usernameRefusal);
+                    }
+
                     changes.HasUsername = true;
                     changes.Username = node is null || string.IsNullOrWhiteSpace(TryGetString(body, "username")) ? null : TryGetString(body, "username")!.Trim();
                     break;
@@ -954,6 +1142,26 @@ LIMIT 1";
                     }
 
                     changes.MonthlyCostUsd = cost;
+                    break;
+                case "capture_plans":
+                    var (captureValue, captureError) = ParseCapturePlansSetting(node);
+                    if (captureError is not null)
+                    {
+                        return (null, captureError);
+                    }
+
+                    changes.HasCapturePlans = true;
+                    changes.CapturePlans = captureValue;
+                    break;
+                case "alert_delivery_mode_override":
+                    var (deliveryValue, deliveryError) = ParseAlertDeliveryOverrideSetting(node);
+                    if (deliveryError is not null)
+                    {
+                        return (null, deliveryError);
+                    }
+
+                    changes.HasAlertDeliveryModeOverride = true;
+                    changes.AlertDeliveryModeOverride = deliveryValue;
                     break;
                 case "query_store_replica":
                     if (node is not null && !TryEditString(node, out _))
@@ -1018,6 +1226,42 @@ LIMIT 1";
     }
 
     private static string TruncateKey(string key) => key.Length <= 40 ? key : key[..40] + "...";
+
+    /// <summary>
+    /// #9635: the one parse of <c>capture_plans</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the values the Viewer's dialog stores,
+    /// on (true), off (false), or the service setting (null, which an absent key also is). A string or a number is refused.
+    /// </summary>
+    internal static (bool? Value, string? Error) ParseCapturePlansSetting(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return (null, null);
+        }
+
+        return node is JsonValue capture && capture.TryGetValue<bool>(out var on)
+            ? (on, null)
+            : (null, "capture_plans must be true, false, or null (follow the service setting).");
+    }
+
+    /// <summary>
+    /// #9635: the one parse of <c>alert_delivery_mode_override</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the
+    /// <see cref="AlertNotificationMode"/> name in its stored spelling, or null (which an absent key also is) to inherit the global mode.
+    /// Matched against the names, never <c>Enum.TryParse</c>, which would also take a number.
+    /// </summary>
+    internal static (string? Value, string? Error) ParseAlertDeliveryOverrideSetting(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return (null, null);
+        }
+
+        var matched = TryEditString(node, out var text)
+            ? AlertDeliveryOverrideValues.FirstOrDefault(v => string.Equals(v, text?.Trim(), StringComparison.OrdinalIgnoreCase))
+            : null;
+        return matched is null
+            ? (null, "alert_delivery_mode_override must be \"Summary\", \"PerEvent\", or null (inherit the global setting).")
+            : (matched, null);
+    }
 
     private static bool TryEditString(JsonNode? node, out string? value)
     {
@@ -1195,7 +1439,7 @@ LIMIT 1";
             }
         }
 
-        if (secretMode && c.Password is not null && (ValidateSecret(c.Password, key, isSp) ?? SealableTextRefusal(c.Password, host, database, username)) is { } secretRefusal)
+        if (secretMode && c.Password is not null && (EditSecretRefusal(c.Password, key, isSp) ?? SealableTextRefusal(c.Password, host, database, username)) is { } secretRefusal)
         {
             return (null, secretRefusal);
         }
@@ -1208,9 +1452,7 @@ LIMIT 1";
         if (secretMode && c.Password is null && (authSwitched || connectionChanged))
         {
             return (null, authSwitched
-                ? (isSp
-                    ? "Switching to ServicePrincipal authentication needs the client secret as password."
-                    : "Switching to SQL authentication needs the password.")
+                ? (isSp ? EditSwitchToServicePrincipalNeedsSecretText : EditSwitchToSqlNeedsPasswordText)
                 : EditPasswordNeededText);
         }
 
@@ -1249,6 +1491,13 @@ LIMIT 1";
         Set("multi_subnet_failover", NpgsqlDbType.Boolean, multi, multi != row.MultiSubnetFailover);
         Set("query_store_replica", NpgsqlDbType.Text, replica, QueryStoreReplicaSetting.Differ(replica, row.QueryStoreReplica));
         Set("monthly_cost_usd", NpgsqlDbType.Numeric, cost, cost != row.MonthlyCostUsd);
+
+        /* #9635: the two per-server settings. They never need a probe and never reconnect the server: neither is part of the definition
+           the worker compares. The store writes them by column UPDATE, in the same transaction as the function call. */
+        var capturePlans = c.HasCapturePlans ? c.CapturePlans : row.CapturePlans;
+        Set("capture_plans", NpgsqlDbType.Boolean, capturePlans, capturePlans != row.CapturePlans);
+        var deliveryOverride = c.HasAlertDeliveryModeOverride ? c.AlertDeliveryModeOverride : row.AlertDeliveryModeOverride;
+        Set("alert_delivery_mode_override", NpgsqlDbType.Text, deliveryOverride, !string.Equals(deliveryOverride, row.AlertDeliveryModeOverride, StringComparison.OrdinalIgnoreCase));
 
         Set("aws_role_arn", NpgsqlDbType.Text, newRole, !string.Equals(newRole, row.AwsRoleArn, StringComparison.Ordinal));
 
@@ -1330,6 +1579,8 @@ LIMIT 1";
         ReadOnlyIntent = c.ReadOnlyIntent, StoreAuth = c.StoreAuth, HasUsername = c.HasUsername, Username = c.Username,
         Password = null, EncryptMode = c.EncryptMode, TrustServerCertificate = c.TrustServerCertificate,
         MultiSubnetFailover = c.MultiSubnetFailover, MonthlyCostUsd = c.MonthlyCostUsd, ExpectedModifiedAt = c.ExpectedModifiedAt,
+        HasCapturePlans = c.HasCapturePlans, CapturePlans = c.CapturePlans,
+        HasAlertDeliveryModeOverride = c.HasAlertDeliveryModeOverride, AlertDeliveryModeOverride = c.AlertDeliveryModeOverride,
         HasAwsRole = c.HasAwsRole, AwsRoleArn = c.AwsRoleArn, HasAwsExternalId = c.HasAwsExternalId, AwsExternalId = c.AwsExternalId,
         HasQueryStoreReplica = c.HasQueryStoreReplica, QueryStoreReplica = c.QueryStoreReplica,
     };
@@ -1340,7 +1591,8 @@ LIMIT 1";
     internal sealed record ServerEditRow(
         int ServerId, string Name, string Host, int Port, string? Database, bool ReadOnlyIntent, string Engine, string Auth,
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
-        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false, string? QueryStoreReplica = null);
+        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false, string? QueryStoreReplica = null,
+        bool? CapturePlans = null, string? AlertDeliveryModeOverride = null);
 
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
@@ -1360,6 +1612,13 @@ LIMIT 1";
         /// <summary>The storage key of every OTHER definition.</summary>
         Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken);
 
+        /// <summary>
+        /// Every OTHER definition as a name is resolved against it: its id, storage name and display name. A store that
+        /// holds no other definition answers with none.
+        /// </summary>
+        Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<RegisteredServer>>([]);
+
         /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), then
         /// <c>config.edit_monitored_server</c>, which locks the row, compares <c>modified_at</c> with
         /// <paramref name="expectedModifiedAt"/>, refuses a move of host or port that keeps the stored secret, and writes
@@ -1378,7 +1637,7 @@ LIMIT 1";
     internal const string ReadEditRowSql = @"
 SELECT server_id, name, host, port, database, read_only_intent, engine, auth, username, encrypt_mode,
        trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at, aws_role_arn, aws_external_id_set,
-       query_store_replica
+       query_store_replica, capture_plans, alert_delivery_mode_override
 FROM config_monitored_servers WHERE server_id = $1";
 
     internal const string OtherServersSql =
@@ -1426,7 +1685,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         {
             new NpgsqlParameter<int> { TypedValue = serverId }, // $1
             new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expectedModifiedAt }, // $2
-            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sets.Select(s => s.Column).ToArray() }, // $3
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sets.Select(s => s.Column).Where(c => !IsSettingColumn(c)).ToArray() }, // $3
         };
         foreach (var (column, dbType) in EditFunctionColumns)
         {
@@ -1436,6 +1695,16 @@ FROM config_monitored_servers WHERE server_id = $1";
 
         return parameters;
     }
+
+    /// <summary>The two columns the edit writes by UPDATE instead of through the function (#9635): the function knows neither.</summary>
+    private static bool IsSettingColumn(string column) =>
+        EditSettingKeys.Contains(column, StringComparer.Ordinal);
+
+    /// <summary>#9635: the per-server settings, written under the edit's transaction after the function has locked the row, checked
+    /// <c>modified_at</c> and stamped it. The <c>mcp</c> role holds UPDATE on both columns. <c>$2</c>/<c>$3</c> say which column to write.</summary>
+    internal const string EditSettingsSql =
+        "UPDATE config_monitored_servers SET capture_plans = CASE WHEN $2 THEN $3 ELSE capture_plans END, "
+        + "alert_delivery_mode_override = CASE WHEN $4 THEN $5 ELSE alert_delivery_mode_override END WHERE server_id = $1";
 
     internal sealed class PostgresServerEditStore : IServerEditStore
     {
@@ -1463,7 +1732,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                 !reader.IsDBNull(10) && reader.GetBoolean(10), !reader.IsDBNull(11) && reader.GetBoolean(11),
                 reader.IsDBNull(12) ? 0m : reader.GetDecimal(12), reader.GetDateTime(13),
                 reader.IsDBNull(14) ? null : reader.GetString(14), !reader.IsDBNull(15) && reader.GetBoolean(15),
-                reader.IsDBNull(16) ? null : reader.GetString(16));
+                reader.IsDBNull(16) ? null : reader.GetString(16),
+                reader.IsDBNull(17) ? null : reader.GetBoolean(17), reader.IsDBNull(18) ? null : reader.GetString(18));
         }
 
         public async Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken)
@@ -1481,6 +1751,9 @@ FROM config_monitored_servers WHERE server_id = $1";
 
             return keys;
         }
+
+        public async Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            [.. (await LoadDefinitionsForRemovalAsync(_postgres)).Select(d => d.Server).Where(s => s.ServerId != serverId)];
 
         public async Task<ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, HeldCheck? heldCheck, CancellationToken cancellationToken)
@@ -1555,6 +1828,20 @@ FROM config_monitored_servers WHERE server_id = $1";
                     break;
                 default:
                     throw new InvalidOperationException("The edit function answered an outcome this build does not know.");
+            }
+
+            if (sets.Any(set => IsSettingColumn(set.Column)))
+            {
+                var capture = sets.FirstOrDefault(set => set.Column == "capture_plans");
+                var delivery = sets.FirstOrDefault(set => set.Column == "alert_delivery_mode_override");
+                await using var settings = new NpgsqlCommand(EditSettingsSql, connection) { Transaction = transaction };
+                settings.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                settings.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
+                settings.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = capture is not null }); // $2
+                settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = capture?.Value ?? DBNull.Value }); // $3
+                settings.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = delivery is not null }); // $4
+                settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = delivery?.Value ?? DBNull.Value }); // $5
+                await settings.ExecuteNonQueryAsync(cancellationToken);
             }
 
             if (newStorageKey is not null || actualStorageKey is not null)

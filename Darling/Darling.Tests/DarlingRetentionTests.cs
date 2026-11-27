@@ -794,6 +794,19 @@ public sealed class DarlingRetentionTests
                 await insert.ExecuteNonQueryAsync(ct);
             }
 
+            /* #9357: the procedure_stats hour ledger is pruned at the same horizon, with the same three ages. */
+            foreach (var ageDays in new[] { 100.0, 80.0, 1.0 / 24 })
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.procedure_stats_hour_ledger (server_id, server_name, bucket, n)"
+                    + " VALUES ($1, $2, date_trunc('hour', $3::timestamp), $4)", connection);
+                insert.Parameters.AddWithValue(TestServerId);
+                insert.Parameters.AddWithValue("retention-e2e");
+                insert.Parameters.AddWithValue(utcNow.AddDays(-ageDays));
+                insert.Parameters.AddWithValue(9L);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
             /* At least our three expired rows go (40-day wait_stats, 70-day collection_log, 100-day
                config_alert_log); a shared dev store may shed more. The extension-free DELETE path on purpose
                (timescaleAvailable: false) — it must keep working even on a store whose tables ARE hypertables,
@@ -898,6 +911,28 @@ public sealed class DarlingRetentionTests
                 Assert.True(survivors[1].Bucket > utcNow.AddDays(-1),
                     $"the newer surviving ledger bucket should be the last-hour one, got {survivors[1].Bucket:O}; {purgeLog.Joined}");
                 Assert.All(survivors, s => Assert.Equal(7L, s.N));
+            }
+
+            /* #9357: the procedure_stats ledger's survivors are the same two buckets, for the same reason. */
+            using (var read = new NpgsqlCommand(
+                "SELECT bucket, n FROM collect.procedure_stats_hour_ledger WHERE server_id = $1 ORDER BY bucket", connection))
+            {
+                read.Parameters.AddWithValue(TestServerId);
+                using var reader = await read.ExecuteReaderAsync(ct);
+
+                var survivors = new List<(DateTime Bucket, long N)>();
+                while (await reader.ReadAsync(ct))
+                {
+                    survivors.Add((reader.GetDateTime(0), reader.GetInt64(1)));
+                }
+
+                Assert.True(survivors.Count == 2,
+                    $"expected the 80-day and the last-hour procedure ledger bucket to survive, got {survivors.Count} bucket(s); {purgeLog.Joined}");
+                Assert.True(survivors[0].Bucket < utcNow.AddDays(-79) && survivors[0].Bucket > utcNow.AddDays(-81),
+                    $"the older surviving procedure ledger bucket should be the 80-day one, got {survivors[0].Bucket:O}; {purgeLog.Joined}");
+                Assert.True(survivors[1].Bucket > utcNow.AddDays(-1),
+                    $"the newer surviving procedure ledger bucket should be the last-hour one, got {survivors[1].Bucket:O}; {purgeLog.Joined}");
+                Assert.All(survivors, s => Assert.Equal(9L, s.N));
             }
 
             /* The purge writes ONE auditable run-record under the fleet sentinel server_id — SUCCESS here
@@ -1069,6 +1104,7 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
             $"DELETE FROM collect.plan_force_actions WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collect.query_stats_hour_ledger WHERE server_id = {TestServerId}; " +
+            $"DELETE FROM collect.procedure_stats_hour_ledger WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
@@ -1200,11 +1236,11 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void UnorderedRowCappedDelete_HasNoOrderByAndNoMinSubquery()
     {
-        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_text", "last_seen", 300_000);
+        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_plan_map", "last_seen", 300_000);
 
         Assert.Equal(
-            "DELETE FROM collect.query_store_text WHERE ctid IN ("
-            + "SELECT ctid FROM collect.query_store_text WHERE last_seen < $1 "
+            "DELETE FROM collect.query_store_plan_map WHERE ctid IN ("
+            + "SELECT ctid FROM collect.query_store_plan_map WHERE last_seen < $1 "
             + "LIMIT 300000)",
             sql);
 
@@ -1216,7 +1252,8 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Both liveness-touched tables' purge calls use the unordered builder, carry the shared cap as their
+    /// Both liveness-touched tables' purge calls use an unordered row-capped delete (the map through the builder, the text
+    /// through <see cref="QueryStoreTextSeen.PruneSql"/>), carry the shared cap as their
     /// batch size (so the drain loop's "a full-cap batch means there may be more" contract applies), and
     /// leave <c>adaptiveRowCapTimeColumn</c> unset — that parameter exists only for the plan dimension's
     /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
@@ -1242,7 +1279,7 @@ WHERE hypertable_name = 'wait_stats'
         var textAt = source.IndexOf("var queryTextDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
-        Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreTextSeen.PruneSql(", textBody, StringComparison.Ordinal);
         Assert.Contains("livenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
     }
@@ -1275,34 +1312,6 @@ WHERE hypertable_name = 'wait_stats'
 
         Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestMapDay);
         Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestTextDay);
-    }
-
-    /// <summary>
-    /// Among the payload DIMENSION tables only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in
-    /// total and drains in a single slice, so the row cap is scoped to the one dimension whose rows are large
-    /// enough to matter. (The two Query Store interval fact tables are row-capped too since #5569, because they
-    /// are plain heaps where the <c>ctid</c> idiom is safe; <c>QueryStoreIntervalPurgeRowCappedTests</c> pins
-    /// that. The fact tables that stay time-sliced need the compressed-chunk-safe shape, #1564.)
-    /// </summary>
-    [Fact]
-    public void OnlyThePlanDim_TakesTheRowCap()
-    {
-        var source = ReadRetentionSource();
-
-        var at = source.IndexOf("foreach (var dimTable in PayloadDimensions.DimTables)", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the dim purge loop moved (#2386)");
-
-        var body = source[at..Math.Min(source.Length, at + 2200)];
-
-        /* The plan dim is selected by name, and BOTH the statement and the drain batch size follow it. */
-        Assert.Contains("PayloadDimensions.QueryPlanDimTable", body, StringComparison.Ordinal);
-        Assert.Contains("RowCappedDeleteSql(", body, StringComparison.Ordinal);
-        Assert.Contains("TimeSlicedDeleteSql(", body, StringComparison.Ordinal);
-        Assert.Contains("batchSize:", body, StringComparison.Ordinal);
-
-        /* A row-capped statement MUST carry its cap as the batch size, or the drain loop reverts to
-           "stop when a batch clears nothing" and does one batch per sweep instead of draining. */
-        Assert.Contains("PlanDimDeleteRowCap", body, StringComparison.Ordinal);
     }
 
     /// <summary>

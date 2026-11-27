@@ -55,7 +55,7 @@ public sealed class DataWindowFloorTests
     public void TheWindowRead_IsBoundedOnBothSides_ForEverySource()
     {
         var raw = DataWindowFloor.FloorSql([DataWindowFloor.Source.ForCollectorTable("waiting_tasks")], DataWindowFloor.Scope.Fleet);
-        Assert.Contains("AND   f.collection_time >= $2", raw, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collection_time > $2", raw, StringComparison.Ordinal);
         Assert.Contains("AND   f.collection_time <= $1", raw, StringComparison.Ordinal);
 
         Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var hourly));
@@ -142,7 +142,7 @@ public sealed class DataWindowFloorTests
         var collector = DataWindowFloor.FloorSql([DataWindowFloor.Source.ForCollectorTable("waiting_tasks")], DataWindowFloor.Scope.Fleet);
         Assert.Contains("WHERE (w.t IS NOT NULL", collector, StringComparison.Ordinal);
         Assert.Contains(
-            "OR EXISTS (SELECT 1 FROM collect.collection_log AS c WHERE c.server_id = s.server_id AND c.collector_name = 'waiting_tasks' AND c.collection_time >= $2 AND c.collection_time <= $1))",
+            "OR EXISTS (SELECT 1 FROM collect.collection_log AS c WHERE c.server_id = s.server_id AND c.collector_name = 'waiting_tasks' AND c.collection_time > $2 AND c.collection_time <= $1))",
             collector, StringComparison.Ordinal);
 
         Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var hourly));
@@ -200,10 +200,10 @@ public sealed class DataWindowFloorTests
         var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.ServerId);
 
         Assert.Contains($"FROM collect.{table} AS f", sql, StringComparison.Ordinal);
-        Assert.Contains($"AND   f.{timeColumn} >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains($"AND   f.{timeColumn} > $2", sql, StringComparison.Ordinal);
         Assert.Contains($"AND   f.{timeColumn} <= $1", sql, StringComparison.Ordinal);
         Assert.Contains(", w.t) AS t", sql, StringComparison.Ordinal);
-        Assert.Contains($"c.collector_name = '{table}' AND c.collection_time >= $2 AND c.collection_time <= $1", sql, StringComparison.Ordinal);
+        Assert.Contains($"c.collector_name = '{table}' AND c.collection_time > $2 AND c.collection_time <= $1", sql, StringComparison.Ordinal);
 
         /* No walk to the table's oldest chunk: every read of the table carries the window's bounds. */
         Assert.DoesNotContain(" AS h", sql, StringComparison.Ordinal);
@@ -228,7 +228,7 @@ public sealed class DataWindowFloorTests
             sql, StringComparison.Ordinal);
         Assert.DoesNotContain("config_collector_schedules", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.collection_log AS f", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   f.collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collection_time > $2", sql, StringComparison.Ordinal);
         Assert.Contains("AND   f.collection_time <= $1", sql, StringComparison.Ordinal);
         Assert.Contains(", w.t) AS t", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE (w.t IS NOT NULL)", sql, StringComparison.Ordinal);

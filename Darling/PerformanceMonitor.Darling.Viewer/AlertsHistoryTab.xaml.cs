@@ -264,7 +264,8 @@ public partial class AlertsHistoryTab : UserControl
             /* A load the operator has moved past does not report its failure over the newer load's status. */
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load alert history: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Alert History", timer, ex));
         }
         finally
         {

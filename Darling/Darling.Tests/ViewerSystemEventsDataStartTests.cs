@@ -59,7 +59,7 @@ public sealed class ViewerSystemEventsDataStartTests
     {
         var body = MethodBody(ViewerFile("ViewerServerTab.SystemEvents.cs"), @"private async Task " + load + @"\(");
 
-        Assert.Equal(1, Matches(body, @"var dataStartTask = _dataService\.GetSystemHealthEventsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(body, @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetSystemHealthEventsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(body,
             @"await ShowEventDataStartAsync\(SystemEventsTruncationBanner,\s*dataStartTask,\s*""System Events"",\s*startUtc,\s*data\.Select\(r => r\.EventTime\)\);"));
     }
@@ -69,7 +69,7 @@ public sealed class ViewerSystemEventsDataStartTests
     {
         var body = MethodBody(ViewerFile("ViewerServerTab.SystemEvents.cs"), @"private async Task LoadDefaultTraceEventsAsync\(");
 
-        Assert.Equal(1, Matches(body, @"var dataStartTask = _dataService\.GetDefaultTraceDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(body, @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetDefaultTraceDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(body,
             @"await ShowEventDataStartAsync\(SystemEventsTruncationBanner,\s*dataStartTask,\s*""Default Trace"",\s*startUtc,\s*data\.Select\(r => r\.EventTimeUtc\)\);"));
     }
@@ -96,7 +96,7 @@ public sealed class ViewerSystemEventsDataStartTests
         var body = MethodBody(ViewerFile("ViewerServerTab.SystemEvents.cs"), @"private async Task LoadSystemEventsAsync\(");
 
         Assert.Equal(1, Matches(body,
-            @"case SystemEventsContentionSubTabIndex:\s*default:\s*(?:/\*.*?\*/\s*)?SystemEventsTruncationBanner\.Visibility = Visibility\.Collapsed;\s*await LoadSystemHealthChartsAsync\(\);"));
+            @"case SystemEventsContentionSubTabIndex:\s*default:\s*(?:/\*.*?\*/\s*)?SystemEventsTruncationBanner\.Visibility = Visibility\.Collapsed;\s*await LoadSystemHealthChartsAsync\(timer\);"));
     }
 
     [Fact]

@@ -29,6 +29,7 @@ public static class ViewerPersonCommands
     public const string RemoveIdentity = "remove_person_identity";
     public const string AddGrant = "add_person_grant";
     public const string RemoveGrant = "remove_person_grant";
+    public const string DeletePerson = "delete_person";
 
     public static string AddPersonArgs(string displayName) => JsonSerializer.Serialize(new { display_name = displayName });
 
@@ -42,6 +43,8 @@ public static class ViewerPersonCommands
     public static string RemoveIdentityArgs(long identityId) => JsonSerializer.Serialize(new { identity_id = identityId });
 
     public static string RemoveGrantArgs(long grantId) => JsonSerializer.Serialize(new { grant_id = grantId });
+
+    public static string DeletePersonArgs(long personId) => JsonSerializer.Serialize(new { person_id = personId });
 
     /// <summary>The args of an add_person_grant: <c>kinds</c> only for a capability that takes kinds, and at most one of the two scope ids.</summary>
     public static string AddGrantArgs(long personId, string capability, IReadOnlyCollection<string>? kinds, int? scopeServerId, int? scopeTagId)
@@ -114,12 +117,17 @@ public sealed record PersonCommandAnswer(bool Succeeded, string Status, string? 
 /// <summary>One row of the People grid.</summary>
 public sealed class PersonViewRow
 {
-    public PersonViewRow(PersonRow person)
+    public PersonViewRow(PersonRow person, bool hasHistory = false)
     {
         Person = person ?? throw new ArgumentNullException(nameof(person));
+        HasHistory = hasHistory;
     }
 
     public PersonRow Person { get; }
+
+    /// <summary>True when the store says the person has history: a request they asked the agent or a message they sent it. False when the
+    /// screen's login cannot read the history, which leaves the refusal to the service.</summary>
+    public bool HasHistory { get; }
 
     public long PersonId => Person.PersonId;
 
@@ -135,6 +143,9 @@ public sealed class PersonViewRow
     /// <summary>How many grants the person has, the sort key of the Grants column.</summary>
     public int GrantCount => Person.Grants.Count;
 
+    /// <summary>True when the person has no identity, no grant and no history, the three things that stop a delete.</summary>
+    public bool CanDelete => Person.Identities.Count == 0 && Person.Grants.Count == 0 && !HasHistory;
+
     public string IdentitiesDisplay => Person.Identities.Count == 0 ? "none" : Person.Identities.Count.ToString(CultureInfo.InvariantCulture);
 
     public string GrantsDisplay => Person.Grants.Count == 0 ? "none" : Person.Grants.Count.ToString(CultureInfo.InvariantCulture);
@@ -149,8 +160,10 @@ public sealed class PersonViewRow
 
     public IReadOnlyList<PersonGrantViewRow> Grants => Person.Grants.Select(g => new PersonGrantViewRow(g)).ToList();
 
-    public static IReadOnlyList<PersonViewRow> From(IEnumerable<PersonRow> people) =>
-        people.OrderBy(p => p.DisplayName, StringComparer.CurrentCultureIgnoreCase).ThenBy(p => p.PersonId).Select(p => new PersonViewRow(p)).ToList();
+    /// <summary>The grid's rows in name order. <paramref name="withHistory"/> is the ids of the people with history, or null when that is not known.</summary>
+    public static IReadOnlyList<PersonViewRow> From(IEnumerable<PersonRow> people, IReadOnlySet<long>? withHistory = null) =>
+        people.OrderBy(p => p.DisplayName, StringComparer.CurrentCultureIgnoreCase).ThenBy(p => p.PersonId)
+            .Select(p => new PersonViewRow(p, withHistory is not null && withHistory.Contains(p.PersonId))).ToList();
 }
 
 /// <summary>One identity of a person, as the detail grid shows it.</summary>
@@ -221,6 +234,10 @@ public static class PeopleText
 
     /// <summary>The empty-list sentence for the seat: <see cref="NoPeopleReadOnlyNote"/> when the connection is read-only, else <see cref="NoPeopleNote"/>.</summary>
     public static string EmptyNote(bool readOnly) => readOnly ? NoPeopleReadOnlyNote : NoPeopleNote;
+
+    /// <summary>What the Delete confirmation asks: who goes, and that it cannot be put back.</summary>
+    public static string DeleteConfirmation(string displayName) =>
+        "Delete " + displayName + "?" + Environment.NewLine + Environment.NewLine + "This removes them from the list and cannot be undone.";
 
     /// <summary>True when a store at <paramref name="storeVersion"/> has the people tables. A probe that could not answer (null) reads as yes, like every other fail-open rung check, and a failed read then says what went wrong.</summary>
     public static bool StoreHasPeople(int? storeVersion) => storeVersion is not int v || v >= StoreSchemaVersion;

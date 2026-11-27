@@ -105,9 +105,9 @@
             <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
             </StackPanel>
-            <Button Content="Manage Mute Rules…" Click="ManageMuteRules_Click"
+            <Button AutomationProperties.AutomationId="ManageMuteRulesButton" Content="Manage Mute Rules…" Click="ManageMuteRules_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"/>
-            <Button Content="Alert Rules…" Click="AlertRules_Click"
+            <Button AutomationProperties.AutomationId="AlertRulesButton" Content="Alert Rules…" Click="AlertRules_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"
                     ToolTip="Custom alert rules you write over the collected metrics: add, edit, pause and delete."/>
             <Button x:Name="KnownPatternsButton" Content="Known Patterns…" Click="KnownPatterns_Click"

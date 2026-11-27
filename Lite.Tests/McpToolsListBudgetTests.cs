@@ -249,7 +249,7 @@ public sealed class McpToolsListBudgetTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             services.AddSingleton(serviceType, _ => null!);

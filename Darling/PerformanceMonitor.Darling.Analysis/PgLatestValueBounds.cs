@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -46,6 +47,7 @@ internal static class PgLatestValueBounds
         MemoryClerksCollector.Instance,
         PlanCacheStatsCollector.Instance,
         MemoryStatsCollector.Instance,
+        CpuSchedulerStatsCollector.Instance,
     };
 
     /// <summary>This server's schedule overrides: its own rows and the fleet-wide ones, the two levels the
@@ -80,7 +82,7 @@ AND   collection_time <= $2";
         var fleet = new Dictionary<string, int?>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
             using var cmd = new NpgsqlCommand(ScheduleOverridesSql, connection) { CommandTimeout = CommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
@@ -145,7 +147,7 @@ AND   collection_time <= $2";
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
             using var cmd = new NpgsqlCommand(NewestCaptureSql(table), connection) { CommandTimeout = CommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));

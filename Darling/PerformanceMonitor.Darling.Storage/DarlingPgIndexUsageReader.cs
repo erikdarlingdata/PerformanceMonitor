@@ -26,7 +26,7 @@ public static class DarlingPgIndexUsageReader
         string? IndexName,
         DateTime MeasuredAt,
         long TotalScans,
-        long ScansInWindow,
+        long? ScansInWindow,
         long TuplesRead,
         long TuplesFetched,
         long BlocksRead,
@@ -71,7 +71,7 @@ public static class DarlingPgIndexUsageReader
                 index_method, column_count, index_definition, last_scan, stats_reset
             FROM pg_index_usage_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, index_name, collection_time DESC
         ),
@@ -195,7 +195,7 @@ public static class DarlingPgIndexUsageReader
             l.index_scans                                        AS total_scans,
             /* Clamped per the reset argument above; the flag beside it says when the clamp fired for a
                reason rather than because nothing happened. */
-            GREATEST(l.index_scans - e.first_scans, 0)           AS scans_in_window,
+            CASE WHEN e.sample_count >= $4 THEN GREATEST(l.index_scans - e.first_scans, 0) END AS scans_in_window,
             l.tuples_read,
             l.tuples_fetched,
             l.blocks_read,
@@ -227,7 +227,7 @@ public static class DarlingPgIndexUsageReader
            idle. */
         ORDER BY
             l.is_valid ASC,
-            CASE WHEN GREATEST(l.index_scans - e.first_scans, 0) = 0 THEN l.index_bytes ELSE -1 END DESC,
+            CASE WHEN e.sample_count >= $4 AND GREATEST(l.index_scans - e.first_scans, 0) = 0 THEN l.index_bytes ELSE -1 END DESC,
             l.index_bytes DESC
         LIMIT $5
         """;
@@ -258,7 +258,7 @@ public static class DarlingPgIndexUsageReader
                 reader.IsDBNull(3) ? null : reader.GetString(3),
                 reader.GetDateTime(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                reader.IsDBNull(6) ? (long?)null : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
@@ -309,9 +309,9 @@ public static class DarlingPgIndexUsageReader
     public const string PgIndexUsageProbeSql = """
         SELECT
             (SELECT count(*) FROM pg_index_usage_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS rows_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS rows_in_window,
             (SELECT count(DISTINCT collection_time) FROM pg_index_usage_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS snapshots_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS snapshots_in_window,
             (SELECT count(*) FROM pg_index_usage_stats WHERE server_id = $1) AS rows_ever
         """;
 

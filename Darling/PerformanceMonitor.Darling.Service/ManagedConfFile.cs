@@ -263,6 +263,9 @@ internal static class ManagedConfFile
         /* TimescaleDB telemetry off (#7446): same shape, no legacy block and no marker. */
         blocks.Append(DarlingManagedPostgres.BuildTelemetryLevelConfAppend());
 
+        /* Lock-wait logging (#9267): same shape, no legacy block and no marker. */
+        blocks.Append(DarlingManagedPostgres.BuildLogLockWaitsConfAppend());
+
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
@@ -365,6 +368,7 @@ internal static class ManagedConfFile
         {
             [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
             [DarlingManagedPostgres.TelemetryLevelSetting] = DarlingManagedPostgres.TelemetryLevelValue,
+            [DarlingManagedPostgres.LogLockWaitsSetting] = DarlingManagedPostgres.LogLockWaitsValue,
         };
 
     /// <summary>

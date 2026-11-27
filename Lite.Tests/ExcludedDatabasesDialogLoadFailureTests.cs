@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// has the details. A refused login with no database set is a failure, not a one-row list of master. The exception's own text stays out of the dialog, and no message box opens: the load runs on the test's
 /// thread, and a modal box there would stop the test from returning. The reader is replaced so no server is needed to fail.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ExcludedDatabasesDialogLoadFailureTests
 {
     private const string RawText = "A network-related or instance-specific error occurred while establishing a connection to SQL Server.";

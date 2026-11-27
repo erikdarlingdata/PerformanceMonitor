@@ -45,7 +45,8 @@ internal static class McpEngineCapability
         int serverId,
         string serverName,
         string collectorName,
-        AwsRdsKind awsRdsKind)
+        AwsRdsKind awsRdsKind,
+        int sqlMajorVersion = 0)
     {
         var engineEdition = await EngineEditionAsync(dataService, serverId);
 
@@ -57,7 +58,7 @@ internal static class McpEngineCapability
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. awsRdsKind is required for the same reason (#6894). */
-        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind);
+        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind, sqlMajorVersion);
         if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction" or "query_store_health"))
         {
             return engineEnvelope;
@@ -80,14 +81,15 @@ internal static class McpEngineCapability
         string collectorName)
     {
         var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
-        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind);
+        var sqlMajorVersion = SqlMajorVersionOf(serverManager, serverId);
+        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind, sqlMajorVersion: sqlMajorVersion);
     }
 
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
     /// No engine-kind claim, for the reason given in <see cref="NotCollectedStatusAsync"/>.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string collectorName, AwsRdsKind awsRdsKind)
+    private static string? Envelope(string serverName, int engineEdition, string collectorName, AwsRdsKind awsRdsKind, int sqlMajorVersion = 0)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, awsRdsKind);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
     }
 
@@ -106,18 +108,18 @@ internal static class McpEngineCapability
     {
         var engineEdition = await EngineEditionAsync(dataService, serverId);
         var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
-        return SplitCollectionHealthByEngine(serverName, engineEdition, awsRdsKind, rows);
+        return SplitCollectionHealthByEngine(serverName, engineEdition, awsRdsKind, rows, SqlMajorVersionOf(serverManager, serverId));
     }
 
     /// <summary>The pure half of <see cref="SplitCollectionHealthByEngineAsync"/>: the engine facts are given.</summary>
     internal static (List<CollectorHealthRow> Running, List<object> NotCollected) SplitCollectionHealthByEngine(
-        string serverName, int engineEdition, AwsRdsKind awsRdsKind, List<CollectorHealthRow> rows)
+        string serverName, int engineEdition, AwsRdsKind awsRdsKind, List<CollectorHealthRow> rows, int sqlMajorVersion = 0)
     {
         var running = new List<CollectorHealthRow>();
         var notCollected = new List<object>();
         foreach (var row in rows)
         {
-            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
             if (message is null)
             {
                 running.Add(row);
@@ -190,6 +192,31 @@ internal static class McpEngineCapability
         }
 
         return AwsRdsKind.None;
+    }
+
+    /// <summary>
+    /// #9099: the SQL Server major version the connection check read for this server, found the way <see cref="AwsRdsKindOf"/> finds it. It comes
+    /// from the connection probe (<c>SERVERPROPERTY</c> read at connect, which works on any version), never from a stored
+    /// <c>server_properties</c> row: that collector is itself gated off below SQL Server 2016, so on the servers that need this answer the
+    /// store would never hold the version. 0 (no claim) for a server that is not registered, was never checked, whose check failed, or that is an Azure SQL Database or Managed Instance.
+    /// </summary>
+    public static int SqlMajorVersionOf(ServerManager serverManager, int storageServerId)
+    {
+        foreach (var server in serverManager.GetEnabledServers())
+        {
+            if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
+            {
+                var status = serverManager.GetConnectionStatus(server.Id);
+
+                /* An Azure SQL Database or Managed Instance reports major 12, which is not a product year there. The stored edition can be
+                   missing (nothing collected yet), so the connection check's own edition decides. */
+                return status.SqlEngineEdition is CollectorEngineCapability.AzureSqlDatabaseEngineEdition or CollectorEngineCapability.AzureManagedInstanceEngineEdition
+                    ? 0
+                    : status.SqlMajorVersion;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>

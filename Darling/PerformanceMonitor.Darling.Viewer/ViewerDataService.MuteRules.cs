@@ -307,7 +307,7 @@ WHERE id = $1";
         var hasAction = await SupportsMuteActionAsync(cancellationToken);
         await using var command = _dataSource.CreateCommand(hasAction ? MuteRulesSelectWithActionSql : hasRecurrence ? MuteRulesSelectWithRecurrenceSql : MuteRulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rules.Add(new MuteRule

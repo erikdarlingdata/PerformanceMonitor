@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using ModelContextProtocol.Server;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -36,7 +38,13 @@ internal static class DarlingMcpInstructions
     /// fleet-coverage section can sit between them, high enough that an agent reads which store it is talking
     /// to before it reads the tool census.
     /// </summary>
-    public static readonly string Text = Preamble + "\n\n" + BodyHead + "\n\n" + CatalogCensus + "\n\n" + BodyTail;
+    public static string Text => TextOnce.Value;
+
+    /* #9474: lazy, so the text and the census are built on first use, after every static field of this class (LiteToolNames,
+       DirectMuteLimits) and of the policy class they read is initialized. Field initializers run in textual order, and a
+       census computed from the catalog would otherwise run before them. */
+    private static readonly Lazy<string> TextOnce = new(
+        () => Preamble + "\n\n" + BodyHead + "\n\n" + CatalogCensus + "\n\n" + BodyTail);
 
     /// <summary>
     /// Renders the instructions with the whole-catalog census, inserting the declared fleet-coverage section
@@ -49,10 +57,14 @@ internal static class DarlingMcpInstructions
     /// after the write switches, the same collection <c>tools/list</c> lists), and when that is fewer than
     /// <paramref name="catalog"/> (every registered tool) it says which switch is off. The host calls this once,
     /// right after <see cref="DarlingMcpWritePolicy.Apply"/> narrows the collection, so the two cannot disagree.
+    /// The paragraph that says which tools that change state are served follows the same set: the settings paragraph
+    /// (<see cref="DarlingMcpWritePolicy.InstructionsLine"/>), or the arm's own
+    /// (<see cref="DarlingMcpWritePolicy.InvestigationsArmInstructionsLine"/>) when <paramref name="served"/> is the investigations arm.
+    /// <paramref name="agentMuteRules"/> is the served <c>mcp.allowAgentMuteRules</c>.
     /// </summary>
     internal static string Build(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, bool agentMuteRules = true)
-        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool));
+        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool), null, agentMuteRules, InvestigationsArmServed(served));
 
     /// <summary>
     /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
@@ -63,7 +75,7 @@ internal static class DarlingMcpInstructions
     internal static string BuildForNamedToken(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
         DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
-        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
+        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy, agentMuteRules);
 
     /// <summary>What a claim-free mute may do, from the limits the path enforces (<see cref="DarlingMcpAgentMuteDirect"/>), so a change to one moves the text (#8610).</summary>
     internal static readonly string DirectMuteLimits =
@@ -71,32 +83,45 @@ internal static class DarlingMcpInstructions
         $"({DarlingMcpAgentMuteDirect.MaxWritesPerHour} writes an hour, no repeat within {DarlingMcpAgentMuteDirect.RepeatLookbackDays} days)";
 
     private static string Compose(
-        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
+        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null,
+        bool agentMuteRules = true, bool investigationsArm = false)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
         // The fast path returns the fixed text when the served census equals the catalog census, the mute tool is
-        // served, and there are no peers. The census is compared by value: ToolCensus builds a new string on each call.
-        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed)
+        // served, mcp.allowAgentMuteRules is on (the value Text is rendered with), and there are no peers. The census is
+        // compared by value: ToolCensus builds a new string on each call.
+        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed && agentMuteRules)
             return Text;
 
         /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
            is not served, so the step is dropped rather than pointing a client at a tool tools/list lacks. */
         var tail = muteServed ? BodyTail : BodyTail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
-        /* A named token's preamble swaps the settings paragraph for its role's, and says nothing of purge_now unless the role is served it. */
-        var basePreamble = Preamble;
-        if (named is { } role)
-        {
-            basePreamble = basePreamble.Replace(
-                DarlingMcpWritePolicy.InstructionsLine, DarlingMcpWritePolicy.NamedInstructionsLine(role), StringComparison.Ordinal);
-            if (!role.Writes)
-                basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
-        }
+        /* The preamble ends with the paragraph that says which tools that change state are served, for the served
+           mcp.allowAgentMuteRules: the settings paragraph, or the arm's own where the legacy token is served the investigations arm.
+           A named token's preamble carries its role's paragraph instead, and says nothing of purge_now unless the role is served it. */
+        var basePreamble = PreambleHead + (named is { } role
+            ? DarlingMcpWritePolicy.NamedInstructionsLine(role, agentMuteRules)
+            : investigationsArm
+                ? DarlingMcpWritePolicy.InvestigationsArmInstructionsLine(agentMuteRules)
+                : DarlingMcpWritePolicy.InstructionsLine(agentMuteRules));
+        if (named is { Writes: false })
+            basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
 
         var preamble = section.Length == 0 ? basePreamble : basePreamble + "\n\n" + section;
         return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + tail;
     }
 
     private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>True when <paramref name="served"/> holds a write tool outside the server admin and agent action sets: the writes arm.
+    /// The agent action tools are writes an agent may call under the investigations arm (#5915), so they do not make the writes arm "on".</summary>
+    private static bool WritesArmServed(IReadOnlyCollection<string> served) =>
+        served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
+            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.ChangeWindowTools.Contains(n));
+
+    /// <summary>True when <paramref name="served"/> is what the investigations arm serves: an investigation tool, and not the writes arm.</summary>
+    private static bool InvestigationsArmServed(IReadOnlyCollection<string> served) =>
+        served.Any(DarlingMcpWritePolicy.IsInvestigation) && !WritesArmServed(served);
 
     /// <summary>The preamble sentence that names <c>purge_now</c>, a write an agent token is never served (#6542).</summary>
     private const string PurgeSentence = " With writes on, purge_now deletes history older than the retention given.";
@@ -124,12 +149,12 @@ internal static class DarlingMcpInstructions
         var count = served.Count;
         var total = catalog.Count;
         var shared = served.Count(LiteToolNames.Contains);
-        /* #5915: the Level 2 action tools are writes an agent may call under the investigations arm; they do not make the
-           writes arm "on". */
-        var writesServed = served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
-            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
+        var writesServed = WritesArmServed(served);
         var agentActionServed = writesServed ? 0 : served.Count(n => DarlingMcpWritePolicy.IsWrite(n)
             && DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
+        /* #9485: the change window tools are writes an agent token is served too, so they are not among the unserved writes while the arm serves them. */
+        var agentServedWrites = agentActionServed + (writesServed ? 0 : served.Count(DarlingMcpWritePolicy.ChangeWindowTools.Contains));
         var adminServed = served.Any(DarlingMcpWritePolicy.IsServerAdmin);
         var writeCount = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var adminCount = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
@@ -153,19 +178,19 @@ internal static class DarlingMcpInstructions
             {
                 off.Add("this token has the operator role: the investigation tools are served only to an agent token");
                 if (!adminServed)
-                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, or switch agent actions, need " +
+                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, switch agent actions, or make, revoke and list personal tokens, need " +
                         $"both `{DarlingMcpWritePolicy.WritesSetting}` and `{DarlingMcpWritePolicy.ServerAdminSetting}` on");
             }
         }
         else if (!writesServed)
-            off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
-                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+            off.Add($"the write tools are off, so the {writeCount + adminCount - agentServedWrites} that change monitoring configuration or list personal tokens are not served " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentServedWrites}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
                         ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? $", except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DirectMuteLimits} (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
-                    "monitored servers, or switch agent actions, are not served");
+                    "monitored servers, switch agent actions, or make, revoke and list personal tokens, are not served");
         if (named is null && !investigationsServed && investigationCount > 0)
             off.Add(writesServed
                 ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
@@ -187,21 +212,44 @@ internal static class DarlingMcpInstructions
                 : "the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
-               $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, " +
-               "`get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+               $"{postgres} are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_service_starts`, and the store's own reads: `get_store_*` except `get_store_health`, plus `measure_store_table`). " +
+               "`get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
     /// <summary>
-    /// The census of the whole catalog: <see cref="ToolCensus"/> with every tool served, written out as a constant
-    /// so <see cref="Text"/> stays a plain string. <c>DarlingMcpInstructionsBudgetTests</c> fails unless the two
-    /// are identical, so a new tool moves this or fails there.
+    /// The census of the whole catalog: <see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> with every tool
+    /// served, computed once from the tools the service registers (#9474), so adding a tool never edits this file.
+    /// <c>DarlingMcpInstructionsBudgetTests</c> checks the registered names against the host's own catalog.
     /// </summary>
-    private const string CatalogCensus =
-        "This server exposes 286 tools. 112 are the same names Lite exposes. The remaining 174 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
-        "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
-        "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+    private static string CatalogCensus => CatalogCensusOnce.Value;
+
+    private static readonly Lazy<string> CatalogCensusOnce = new(() =>
+    {
+        var catalog = RegisteredToolNames();
+        return ToolCensus(catalog, catalog);
+    });
+
+    /// <summary>
+    /// The protocol name of every tool the service registers: each method in this assembly that carries a tool attribute with a name,
+    /// less <c>call_tool</c>, which is served on <c>/lean</c> only and which <see cref="DarlingMcpWritePolicy.ToolNames"/> leaves out
+    /// of every census too (#9388). Read from the attributes, not listed by hand (#9474).
+    /// </summary>
+    internal static List<string> RegisteredToolNames()
+    {
+        var names = new List<string>();
+        foreach (var type in typeof(DarlingMcpInstructions).Assembly.GetTypes())
+        {
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                var name = method.GetCustomAttribute<McpServerToolAttribute>()?.Name;
+                if (name is not null && !string.Equals(name, DarlingLeanToolProfile.CallToolName, StringComparison.Ordinal))
+                    names.Add(name);
+            }
+        }
+
+        return names;
+    }
 
     /// <summary>
     /// Every tool name Performance Monitor Lite registers, so the census counts the overlap of what THIS server
@@ -210,9 +258,9 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static readonly IReadOnlySet<string> LiteToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
-        "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
+        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled", "create_notification_route", "update_notification_route", "update_alert_settings", "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-        "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "find_database", "get_active_queries",
+        "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "find_database", "find_tools", "get_active_queries",
         "get_alert_history", "get_alert_settings", "get_analysis_facts", "get_analysis_findings",
         "get_blocked_process_reports", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
         "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_scheduler_pressure",
@@ -225,13 +273,13 @@ internal static class DarlingMcpInstructions
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
         "get_investigation_reports", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
         "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend", "get_mute_rules",
-        "get_notification_routes", "get_object_locking", "get_perfmon_stats", "get_perfmon_trend",
+        "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats", "get_perfmon_trend",
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",
         "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
-        "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
-        "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
+        "get_server_properties", "get_server_summary", "get_session_stats", "get_slow_mcp_calls", "get_spinlock_stats",
+        "get_store_health", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
         "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
         "mute_analysis_finding", "set_notification_route_enabled", "submit_investigation_report", "unmute_analysis_finding",
@@ -240,18 +288,22 @@ internal static class DarlingMcpInstructions
         /* #5991: Lite's query-tag tools, the same names as Darling's. */
         "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule",
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
+        /* #9640: Lite's server admin tools, the collector schedule tools and the excluded databases write, the same names as Darling's. */
+        "add_servers", "edit_server", "remove_server", "set_server_excluded_databases", "get_collector_schedules", "reset_collector_schedules",
     };
 
-    /* A property, not a field: Text above is initialized first in textual order, and the settings paragraph it carries
-       is built from DarlingMcpWritePolicy.InvestigationTools at run time. */
-    private static string Preamble => """
+    /* A property, not a field: the settings paragraph it carries is built from DarlingMcpWritePolicy's tool sets at run time. */
+    private static string Preamble => PreambleHead + DarlingMcpWritePolicy.InstructionsLine();
+
+    /// <summary>The preamble up to the settings paragraph, which <see cref="Compose"/> appends for the policy it renders.</summary>
+    private const string PreambleHead = """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
         ## What this server can and cannot do
 
         This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the server action tools act on one. With writes on, purge_now deletes history older than the retention given.
 
-        """ + DarlingMcpWritePolicy.InstructionsLine;
+        """;
 
     private const string BodyHead = """
         ## How Data Is Collected
@@ -280,7 +332,7 @@ internal static class DarlingMcpInstructions
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
         - A stamp with no offset is UTC unless the tool's note puts it on the server's clock.
-        - Latest-snapshot reads take no `as_of`, read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
+        - Latest-snapshot reads take no `as_of`, read `captured_at` / `age_seconds`. `get_pvs_stats` and `get_fleet_overview` never take it; `get_store_metrics` takes it only with `table_activity`.
         - The analysis family takes it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
         Each finding's `confidence` is an evidence score (0.20 for a lone uncorroborated symptom, never 1.0, rising as the root fact's amplifier checks match and the chain deepens) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).

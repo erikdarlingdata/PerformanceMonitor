@@ -163,10 +163,11 @@ r = run(["global.json"])
 check("root build file: all", r["areas"], "all")
 
 # --- all areas -------------------------------------------------------------------------------------------------
-r = run(["tools/odd.txt"])
+# #9441: a path the workflow marked unknown (a file list that cannot be trusted) and a build input stay every area.
+r = run(["unknown/odd.txt"])
 check("unknown path: all", (r["areas"], r["darling_scope"], r["lite_scope"]), ("all", "full", "full"))
-check("unknown path among known ones: all", run(["README.md", "tools/odd.txt"])["areas"], "all")
-check("unknown path says which", "tools/odd.txt" in run(["tools/odd.txt"])["why"], True)
+check("unknown path among known ones: all", run(["README.md", "unknown/odd.txt"])["areas"], "all")
+check("unknown path says which", "unknown/odd.txt" in run(["unknown/odd.txt"])["why"], True)
 check("base main: all", run(["README.md"], base="main")["areas"], "all")
 check("base main: builds", run(["README.md"], base="main")["build"], "true")
 check("base release branch: all", run(["README.md"], base="release/3.10")["areas"], "all")
@@ -200,14 +201,20 @@ r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},
         "darling_weights": {f"F{i}": 60 for i in range(131)}, "lite_weights": {"L1": 0, "L2": 0, "L3": 0}}
-check("full all-areas PR run: 16 legs", run(["tools/odd.txt"], cat=full)["legs"], "16")
-check("same change as a dev push: 10 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "10")
+check("full all-areas PR run: 16 legs", run(["unknown/odd.txt"], cat=full)["legs"], "16")
+check("same change as a dev push: 10 legs", run(["unknown/odd.txt"], event="push", cat=full)["legs"], "10")
 check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], json.dumps(list(range(1, 11)), separators=(",", ":")))
 
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},
             "darling_weights": {"D1": 60, "D2": 180}, "lite_weights": {}}
-check("unweighted class weighs the mean", cp.estimate(mean_cat, "full", "none")[0], (60 + 180 + 120) / 60)
+check("unweighted class weighs the mean of its kind (only kind known)", cp.estimate(mean_cat, "full", "none")[0], (60 + 180 + 120) / 60)
+# #9262: a class missing from the table weighs the mean of its own kind, a live class and any other class apart (the other kind is
+# skewed: median 12, mean 206)
+kind_cat = {"classes": {"darling": classes(["A", "B", "C", "XLiveTests", "YLiveTests", "NewLiveTests", "NewPlain"]), "lite": {}},
+            "darling_weights": {"A": 6, "B": 12, "C": 600, "XLiveTests": 60, "YLiveTests": 180}, "lite_weights": {}}
+check("missing live class weighs the live mean, missing other class the other mean",
+      cp.estimate(kind_cat, "full", "none")[0], (6 + 12 + 600 + 60 + 180 + 120 + (6 + 12 + 600) / 3) / 60)
 no_lite = {"classes": {"darling": {}, "lite": l_cls}, "darling_weights": {}, "lite_weights": {}}
 check("missing Lite weights: full fallback", cp.estimate(no_lite, "none", "full")[1], cp.LITE_FULL_FALLBACK_MINUTES)
 check("missing Lite weights: reads fallback", cp.estimate(no_lite, "none", "reads")[1], cp.LITE_READS_FALLBACK_MINUTES)
@@ -423,8 +430,8 @@ for flag in (True, False):
     check(f"draft={flag}: a dev push is every area", draft_run([SERVICE], draft=flag, event="push").get("darling_scope"), "full")
     check(f"draft={flag}: a base other than dev is every area",
           draft_run([SERVICE], draft=flag, base="main").get("areas"), "all")
-    check(f"draft={flag}: a path no area knows is every area",
-          draft_run([SERVICE, "no-such-area/odd.bin"], draft=flag).get("areas"), "all")
+    check(f"draft={flag}: a path the workflow marked unknown is every area",
+          draft_run([SERVICE, "unknown/odd.bin"], draft=flag).get("areas"), "all")
 check("draft: parse_bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "no")] if hasattr(cp, "parse_bool") else None,
       [True, True, False, False, False])
 
@@ -606,8 +613,8 @@ check("map: a dev push's why line names the push", "a dev push runs the classes 
 r = ready_run([SERVICE], event="push", selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW})
 check("map: a dev push without a readable map runs its areas in full, as rule 5 says", (r.get("areas"), r.get("darling_scope"), r.get("legs"), r.get("full_suite")), ("darling", "full", "6", "false"))
 check("map: a dev push without a readable map: the why line", "A dev push picks its classes from the nightly test map, but no nightly run has a test-map artifact" in r.get("why", ""), True)
-r = ready_run(["tools/odd.txt"], event="push", selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW}, cat=full)
-check("map: a dev push of a path no area knows, without a map, is the full suite", (r.get("areas"), r.get("legs"), r.get("full_suite")), ("all", "10", "true"))
+r = ready_run(["unknown/odd.txt"], event="push", selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW}, cat=full)
+check("map: a dev push of a path the workflow marked unknown, without a map, is the full suite", (r.get("areas"), r.get("legs"), r.get("full_suite")), ("all", "10", "true"))
 r = ready_run([SERVICE, "global.json"], event="push")
 check("map: a dev push of a keep-full file is FULL", (r.get("areas"), r.get("full_suite")), ("all", "true"))
 check("map: a dev push of documentation only builds nothing", (ready_run(["README.md"], event="push").get("areas"), ready_run(["README.md"], event="push").get("build")), ("docs-only", "false"))
@@ -617,14 +624,112 @@ check("map: a dev push without the map input is FULL", (run([SERVICE], event="pu
 r = run([SERVICE], event="workflow_dispatch", cat=full)
 check("map: the hourly dispatch runs every area", (r.get("outcome"), r.get("areas"), r.get("legs"), r.get("full_suite")), ("run", "all", "10", "true"))
 check("map: a dispatch given the map still runs every area", ready_run([SERVICE], event="workflow_dispatch").get("areas"), "all")
-check("map: a pull request that runs every area says full_suite too", run(["tools/odd.txt"]).get("full_suite"), "true")
+check("map: a pull request that runs every area says full_suite too", run(["unknown/odd.txt"]).get("full_suite"), "true")
 check("map: a mapped pull request is not the full suite", ready_run([SERVICE]).get("full_suite"), "false")
 check("map: a base other than dev is FULL", ready_run([SERVICE], base="main").get("areas"), "all")
 check("map: docs-only stays docs-only", ready_run(["README.md"]).get("areas"), "docs-only")
 r = ready_run(["README.md", DT + "D3Tests.cs"])
 check("map: test-only stays test-only, its classes and the Guard class, not the map's (#8355)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4,D1"))
-r = ready_run([SERVICE, "no-such-area/odd.bin"])
-check("map: a path no area knows is every area", r.get("areas"), "all")
+r = ready_run([SERVICE, "unknown/odd.bin"])
+check("map: a path the workflow marked unknown is every area", r.get("areas"), "all")
+
+# --- a file no area knows (#9441) --------------------------------------------------------------------------------
+# A file no area filter names, and that is no build input, selects the classes that read it and nothing of its own. The readers
+# come from readers_of here, a stand-in for the scan of the test sources (D3 reads the file; Gone is a class the tree lacks).
+Q = "docs/darling/store-tables.csv"
+TOOL_SRC = "tools/CompactionRepro/Program.cs"
+READERS = lambda files: {"darling": ["D3", "Gone", "Helper"], "lite": []}
+NO_READERS = lambda files: {"darling": [], "lite": []}
+
+
+def quiet_run(files, readers=READERS, selection=None, draft=False, event="pull_request", cat=cc_cat, **kw):
+    return cp.plan(event, "dev", "feature/x", [], files, rules, cat, draft=draft, selection=selection, readers_of=readers, **kw)
+
+
+r = quiet_run([Q])
+check("quiet: only the file, a class reads it: that class runs alone", (r["areas"], r["darling_classes"], r["lite_scope"], r["build"]), ("classes", "D3", "none", "true"))
+check("quiet: the class that does not exist and the helper never reach the plan", ("Gone" in r["darling_classes"], "Helper" in r["darling_classes"]), (False, False))
+check("quiet: one class is one leg, not the full suite", (r["legs"], r["full_suite"]), ("1", "false"))
+check("quiet: the why line names the file", Q in r["why"], True)
+r = quiet_run([Q], readers=NO_READERS)
+check("quiet: only the file, no class reads it: nothing runs", (r["areas"], r["build"], r["legs"], r["full_suite"]), ("docs-only", "false", "0", "false"))
+check("quiet: no reader: the why line says so", "no test class reads them" in r["why"], True)
+r = quiet_run([Q, "README.md"], readers=NO_READERS)
+check("quiet: with documentation, no reader: nothing runs", (r["areas"], r["build"]), ("docs-only", "false"))
+for label, files in (("a repro tool source", [TOOL_SRC]), ("a repro tool script", ["tools/CompactionRepro/measure-sorted-threads.sh"]),
+                     ("a repro tool project", ["tools/CompactionRepro/CompactionRepro.csproj"]), ("a release workflow", [".github/workflows/darling-msi.yml"]),
+                     ("a generated page", ["docs/codemap.html"]), ("a generated index", ["docs/codemap.json"]), ("a schema script", [".github/sql/ci_validate_installation.sql"]),
+                     ("an upgrade script", ["upgrades/3.0.0-to-3.1.0/01_x.sql"])):
+    r = quiet_run(files, readers=NO_READERS)
+    check(f"quiet: {label} with no reader runs nothing", (r["areas"], r["build"]), ("docs-only", "false"))
+check("quiet: a workflow file still runs actionlint", quiet_run([".github/workflows/darling-msi.yml"], readers=NO_READERS)["actionlint"], "true")
+# The same files with a product file: the rest of the change selects as before, and the readers join.
+r = quiet_run([SERVICE, Q], selection=sel())
+check("quiet: ready, with a product file: the map's classes plus the reader", (r["areas"], r["darling_classes"], r["lite_scope"]), ("classes", "D1,D2,D3", "none"))
+check("quiet: ready, with a product file: not the full suite", r["full_suite"], "false")
+r = quiet_run([SERVICE, TOOL_SRC], selection=sel(), readers=NO_READERS)
+check("quiet: ready, a repro .cs file beside a product file adds nothing and is not FULL", (r["areas"], r["darling_classes"]), ("classes", "D1,D2"))
+r = quiet_run([Q], selection=sel())
+check("quiet: ready, only the file: the reader alone, no Guard class, never the map's tree readers", (r["areas"], r["darling_classes"], r["lite_scope"]), ("classes", "D3", "none"))
+r = quiet_run([Q], selection=sel(), readers=NO_READERS)
+check("quiet: ready, only the file, no reader: nothing runs", (r["areas"], r["build"], r["full_suite"]), ("docs-only", "false", "false"))
+tp_map = make_map()
+tp_map["text_patterns"] = {"D4": [Q], "D2": "tree"}        # the map saw D4 read the file as text, and D2 read the whole tree
+r = quiet_run([Q], selection=sel(map=tp_map), readers=NO_READERS)
+check("quiet: ready: a class the map says reads the file as text runs, a tree reader does not", (r["areas"], r["darling_classes"]), ("classes", "D4"))
+r = quiet_run([Q], selection=sel(map=make_map(built="2026-10-01T06:00:00Z")), readers=NO_READERS)
+check("quiet: ready: a stale map is no reason for FULL", (r["areas"], r["full_suite"]), ("docs-only", "false"))
+r = quiet_run([SERVICE, Q], selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW})
+check("quiet: ready, a missing map: the product file's areas in full, the reader is inside them", (r["areas"], r["darling_scope"]), ("darling", "full"))
+r = quiet_run([Q], selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW})
+check("quiet: ready, a missing map, only the file: the reader alone", (r["areas"], r["darling_classes"]), ("classes", "D3"))
+r = quiet_run([SERVICE, Q], draft=True)
+check("quiet: a draft with a product file: its Guard class plus the reader", (r["areas"], r["darling_classes"]), ("classes", "D1,D3"))
+r = quiet_run([SERVICE, Q], draft=True, named={"darling": ["D4"], "lite": []})
+check("quiet: a draft's named classes join through the draft rule, the quiet file's readers through the scan", r["darling_classes"], "D1,D4,D3")
+r = quiet_run([Q], draft=True)
+check("quiet: a draft with only the file: the reader alone", (r["areas"], r["darling_classes"]), ("classes", "D3"))
+r = quiet_run([SERVICE, Q])
+check("quiet: neither draft nor map: the Darling suite in full holds the Darling reader", (r["areas"], r["darling_scope"]), ("darling", "full"))
+r = quiet_run([Q, DT + "D3Tests.cs"])
+check("quiet: with a test file: the test file's classes, the Guard class and the reader", (r["areas"], r["darling_classes"]), ("classes", "D3,D4,D1"))
+# A reader in a suite the rest of the plan does not run in full is every area.
+r = quiet_run([LITE_SRC, Q])
+check("quiet: a Darling reader beside a Lite file the Darling suite only partly runs: every area", r["areas"], "all")
+check("quiet: ... and the why line says why", "read by Darling test classes" in r["why"], True)
+r = quiet_run([Q], readers=lambda files: {"darling": [], "lite": ["L2"]})
+check("quiet: a Lite reader runs on its own", (r["areas"], r["darling_scope"], r["lite_scope"], r["lite_classes"]), ("classes", "none", "classes", "L2"))
+# A scan that fails is every area, never a red run.
+def broken(files):
+    raise OSError("unreadable")
+r = quiet_run([SERVICE, Q], readers=broken)
+check("quiet: a failed scan is every area", (r["areas"], "scan for test classes that read" in r["why"]), ("all", True))
+# What keeps the whole suite.
+for label, f in (("the workflow's unknown/ path", "unknown/forced"), ("a restore input", "Directory.Packages.props"), ("a lock file", "other/packages.lock.json"),
+                 ("a project file outside tools/", "other/X.csproj"), ("a props file", "other/Y.props"), ("the CI workflow", ".github/workflows/pr.yml"),
+                 ("the test workflow", ".github/workflows/build.yml"), ("the compiler settings", ".editorconfig"), ("the test build project", ".github/ci-test-build.proj"),
+                 ("the quarantine list", ".github/ci-quarantine.txt"), ("global.json beside nothing else", "global.json")):
+    r = quiet_run([Q, f], readers=NO_READERS, selection=sel())
+    check(f"keeps the whole suite: {label}", r["areas"], "all")
+check("keeps the whole suite: a CI script with a quiet file", quiet_run([Q, "tools/x.py", ".github/scripts/ci-plan.py"], readers=NO_READERS)["areas"], "all")
+check("keeps the whole suite: a cut-off list",
+      quiet_run([Q] + [f"docs/f{i}.csv" for i in range(cp.FILES_API_CAP)], readers=NO_READERS)["areas"], "all")
+check("keeps the whole suite: a base other than dev", cp.plan("pull_request", "main", "x", [], [Q], rules, cc_cat, readers_of=NO_READERS)["areas"], "all")
+check("keeps the whole suite: a dev push without the map", quiet_run([Q], event="push", readers=NO_READERS)["areas"], "all")
+check("keeps the whole suite: the hourly dispatch", cp.plan("workflow_dispatch", "dev", "", [], [], rules, cc_cat, readers_of=NO_READERS)["areas"], "all")
+for f in ("tools/CompactionRepro/CompactionRepro.csproj", "tools/SliceRepairRepro/SliceRepairRepro.csproj"):
+    check(f"keeps_full: {f} is a repro of its own, not a build input", cp.keeps_full(f), False)
+check("keeps_full: a csproj elsewhere is a build input", cp.keeps_full("Lite/X.csproj"), True)
+# map_select: a quiet file the map does not know selects nothing; without the quiet set it is FULL as before.
+qmap = make_map()
+args = dict(event="pull_request", base_ref="dev", now=NOW, max_age_days=2.0, **cs.selection_args(rules))
+disc = {"darling": d_cls, "lite": l_cls}
+check("map_select: an unknown non-.cs file is FULL without the quiet set", cs.map_select(qmap, [Q], [], disc, **args)["full"], True)
+got = cs.map_select(qmap, [Q], [], disc, quiet={Q}, **args)
+check("map_select: with the quiet set it is not FULL and the file is named as selecting nothing", (got["full"], Q in got["unknown"]), (False, True))
+check("map_select: a quiet .cs file the map does not know is not FULL", cs.map_select(qmap, [TOOL_SRC], [], disc, quiet={TOOL_SRC}, **args)["full"], False)
+check("map_select: an unknown .cs file outside the quiet set is FULL", cs.map_select(qmap, [TOOL_SRC], [], disc, **args)["full"], True)
+check("map_select: a quiet file does not hide an unknown product file", cs.map_select(qmap, [Q, SERVICE + ".new"], [], disc, quiet={Q}, **args)["full"], True)
 
 # The command line: a pull request with a map error is FULL and the why line says why; a map file that is not at hand says so.
 real_rules2 = cs.Rules
@@ -831,8 +936,8 @@ live = cs.Rules()
 check("real filters: README.md is docs-only", cp.classify(live, "pull_request", "dev", ["README.md"])["areas"], "docs-only")
 check("real filters: Darling file is the Darling suite",
       cp.classify(live, "pull_request", "dev", ["Darling/PerformanceMonitor.Darling.Service/X.cs"])["darling_scope"], "full")
-check("real filters: a stray path runs everything",
-      cp.classify(live, "pull_request", "dev", ["no-such-area/odd.bin"])["areas"], "all")
+check("real filters: a path the workflow marked unknown runs everything",
+      cp.classify(live, "pull_request", "dev", ["unknown/odd.bin"])["areas"], "all")
 check("real filters: a CI script alone is the scripts area, not every area",
       cp.classify(live, "pull_request", "dev", [".github/scripts/ci-plan.py", ".github/scripts/tests/ci-plan-test.py"], sc_cat)["areas"], "classes")
 for wf in (".github/workflows/pr.yml", ".github/workflows/build.yml"):

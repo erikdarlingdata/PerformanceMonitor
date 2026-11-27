@@ -134,7 +134,7 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new DatabaseSizeRow
@@ -196,7 +196,7 @@ LIMIT $3";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new DatabaseSizeSummaryRow

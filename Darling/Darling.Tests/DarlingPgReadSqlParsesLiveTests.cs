@@ -84,6 +84,8 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #8970: a database name, spliced into the Long-Running Query read as a string literal. Not a statement, and the read it is spliced into is in the parse-checked population. */
+        "DarlingPgSessionStatesReader.ManagedMaintenanceDatabase",
         /* #7616: the pg_blocking capture predicate and the FROM ... WHERE clause built on it, spliced into PgBlockingCaptureCountsSql and
            PgBlockingCaptureCountsByServerSql (both in the parse-checked population). Not statements, and verified where they are spliced. */
         "DarlingPgBlockingReader.PgBlockingCaptureFilter",
@@ -116,6 +118,11 @@ public sealed class DarlingPgReadSqlParsesLiveTests
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
         /* #7455: the two words a buffer row without a name shows. Display text, not a statement. */
+        /* #9508: the words and the statement the read names for a snapshot with no relation rows. Not queries. */
+        "DarlingPgBufferUsageReader.RelationsListed",
+        "DarlingPgBufferUsageReader.SkippedOverCap",
+        "DarlingPgBufferUsageReader.Precondition",
+        "DarlingPgBufferUsageReader.PreconditionStatement",
         "DarlingPgBufferUsageReader.NotResolvedLabel",
         "DarlingPgBufferUsageReader.SharedOrDroppedLabel",
         /* #7409: two expression fragments spliced into CurrentConfigSql (in the parse-checked population): the default

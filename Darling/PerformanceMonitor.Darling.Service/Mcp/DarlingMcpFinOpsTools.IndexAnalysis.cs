@@ -28,7 +28,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "index_analysis: index cleanup findings and reclaimable space.";
 
     internal const string IndexAnalysisViewGuide =
-        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over each database's newest collected index snapshot; each databases entry carries captured_at, when that snapshot was collected (a database that left collection scope shows an older one; when it is more than 2 days older than the server's newest snapshot the entry carries left_over=true, and its figures are in neither overall nor recommendations), and overall carries none; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (6 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit (1 to 500, default 10) caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, current databases first and then largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. At limit 500 the answer is about 0.45 MB with typical names, around 1 MB with long names, and up to about 3.5 MB with full_text on wide indexes; use database_name or a smaller limit for less. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
+        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over each database's newest collected index snapshot; each databases entry carries captured_at, when that snapshot was collected (a database that left collection scope shows an older one; when it is more than 2 days older than the server's newest snapshot the entry carries left_over=true, and its figures are in neither overall nor recommendations), and overall carries none; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (6 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit (1 to 500, default 10) caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, current databases first and then largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. At limit 500 the answer is about 0.45 MB with typical names, around 1 MB with long names, and up to about 3.5 MB with full_text on wide indexes; use database_name or a smaller limit for less. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. REVIEW also holds the Heap finding (consolidation_rule Heap, index_name HEAP, index_id 0): a table with no clustered index that has at least 1,000,000 rows or 1 GB reserved and at least 1,000 reads (scans + RID lookups) since the server started; heaps counts them per database and overall, and they are in none of the other roll-up figures. Text numbers use the invariant culture.";
 
     /// <summary>The longest <c>script</c> or <c>original_index_definition</c> text kept when <c>full_text</c> is false.</summary>
     internal const int IndexAnalysisTextCap = 300;
@@ -136,6 +136,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 compression_max_savings_gb = Gb(r.CompressionMaxSavingsGb),
                 total_min_savings_gb = Gb(r.TotalMinSavingsGb),
                 total_max_savings_gb = Gb(r.TotalMaxSavingsGb),
+                heaps = r.Heaps,
             };
         }
 
@@ -159,6 +160,8 @@ public sealed partial class DarlingMcpFinOpsTools
             compression_max_savings_gb = Gb(r.CompressionMaxSavingsGb),
             total_min_savings_gb = Gb(r.TotalMinSavingsGb),
             total_max_savings_gb = Gb(r.TotalMaxSavingsGb),
+            /* #8880: heaps listed as Heap REVIEW findings; in none of the figures above. */
+            heaps = r.Heaps,
             user_seeks = r.UserSeeks,
             user_scans = r.UserScans,
             user_lookups = r.UserLookups,

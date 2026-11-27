@@ -108,7 +108,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     public void TheSkipRoster_IsTheHealthReads_EachWithAReason_AndEachAToolThatExists()
     {
         Assert.Equal(
-            new[] { "get_collection_health", "get_collection_log", "get_read_latency", "get_slow_reads", "get_store_log", "get_store_metrics", "list_servers" },
+            new[] { "get_collection_health", "get_collection_log", "get_collector_readiness", "get_read_latency", "get_slow_reads", "get_store_connections", "get_store_job_runs", "get_store_log", "get_store_metrics", "get_store_pass_steps", "list_servers" },
             ReadAdmission.SkippedRoutes.Keys.OrderBy(k => k, StringComparer.Ordinal));
 
         var toolSource = string.Join("\n", Directory.EnumerateFiles(Path.Combine(ServiceDir, "Mcp"), "*.cs").Select(File.ReadAllText));
@@ -203,11 +203,14 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        ["Mcp/DarlingWebHostService.cs: GET DarlingMcpToolTypes.ToolNamesModulePath"] = "static: the tool names module, written once from the tool registry, no store read",
         ["Hosting/DarlingHealthHostService.cs: GET \"/livez\""] = "health port (#8184): one word from the in-process startup state, no store read",
         ["Hosting/DarlingHealthHostService.cs: GET \"/readyz\""] = "health port (#8184): one word from the in-process startup state, no store read",
+        ["Hosting/DarlingMetricsHostService.cs: GET \"/metrics\""] = "metrics port (#9013): an in-memory snapshot; the refresh admits as get_fleet_overview",
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",
         [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
         [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",
+        [WebFile + "GET \"/api/me\""] = "the calling session's own identity: reads no store",
         [WebFile + "GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",
         [WebFile + "GET \"/api/views\""] = "definition read: the saved views' summaries (config rows, light)",
         [WebFile + "GET \"/api/views/{id:long}\""] = "definition read: one saved view (one config row)",
@@ -241,6 +244,9 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "PUT \"/api/servers/{id:int}/actions/{action}\""] = "write",
         [WebFile + "GET \"/api/people\""] = "definition read: the people with their sign-ins and grants, three small config tables (#7107)",
         [WebFile + "PUT \"/api/people/{command}\""] = "write",
+        [WebFile + "GET \"/api/mcp-tokens\""] = "definition read: the caller's personal MCP tokens, or every person's with ?all=1 (admin seat), one config table read on the owner connection, 1,000 rows at most, live ones first, with a truncated flag (#8737)",
+        [WebFile + "POST \"/api/mcp-tokens\""] = "write",
+        [WebFile + "POST \"/api/mcp-tokens/{id}/revoke\""] = "write",
         [WebFile + "GET \"/api/proposals\""] = "definition read: the action proposals, one small config table capped at 200 rows, plus the request's server names (#7109)",
         [WebFile + "GET \"/api/proposals/{id:guid}\""] = "definition read: one action proposal row (#7109)",
         [WebFile + "POST \"/api/proposals/{id:guid}/first-press\""] = "write",

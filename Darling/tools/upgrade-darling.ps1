@@ -110,6 +110,15 @@ failed, and exits 0 when the upgrade can run and 1 when it cannot. The pre-fligh
 install root, restricts it to SYSTEM and Administrators exactly as the real backup folder is, and removes it. Nothing is
 stopped, copied or left behind, and the service keeps running. It cannot be combined with -PruneOnly or -ListRollbacks.
 
+.PARAMETER MarkVerified
+Mark the newest upgrade run as verified, and exit. Run it once your own checks of the new build pass (the Viewer shows every
+server Online, the collectors report OK, the service log shows the store ready). It does no upgrade: nothing is stopped, copied or
+started. Every upgrade run writes upgrade-run.json in the install root (#9432), and the service records that file in the store's
+collect.upgrade_runs table, so the store can say how the upgrade before a service start went. The file has the run's state:
+in_progress while the script runs, then succeeded or failed, then verified after this switch. It holds no password, connection
+string or token. A run that failed, or has not finished, cannot be verified. It cannot be combined with -PruneOnly,
+-ListRollbacks or -Check.
+
 .PARAMETER SkipHashCheck
 Proceed with a source zip whose SHA256 could not be verified.
 
@@ -150,7 +159,8 @@ param(
     [switch]$SkipHashCheck,
     [switch]$SkipStopGuard,
     [switch]$AcceptWritableExtraction,
-    [switch]$Check
+    [switch]$Check,
+    [switch]$MarkVerified
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,7 +191,9 @@ $script:InstallTreeClearWaitSeconds = 120
 $script:InstallTreeClearPollSeconds = 2
 $manifestName = 'darling-install-manifest.txt'
 
-function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
+# The first message Fail was given is the first error the upgrade run record (#9432) keeps. Fail exits, and the finally at the end of
+# the script writes the record.
+function Fail([string]$message) { if (-not $script:UpgradeRunFirstError) { $script:UpgradeRunFirstError = $message }; Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
 function Note([string]$message) { Write-Host $message }
 
 # Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
@@ -373,7 +385,8 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
 # returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
-# list): darling.json, and every file whose name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
+# list): darling.json, upgrade-run.json (the run record upgrade-darling.ps1 writes and the service removes, #9432), and every file whose
+# name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
 # install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
 # take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
 # write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
@@ -389,7 +402,7 @@ function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
-        Files          = @('darling.json')
+        Files          = @('darling.json', 'upgrade-run.json')
         BackupPrefix   = 'darling.json.bak-'
     }
 }
@@ -1368,7 +1381,7 @@ function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
         $segments = Get-DarlingSegmentsBelowRoot $root "$($finding.Path)"
         if ($null -eq $segments -or $segments.Count -ne 1) { return @() }
         $leaf = $segments[0]
-        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or -not $leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) { return @() }
         if ($names -notcontains $leaf) { $names += $leaf }
     }
     return @($names)
@@ -3993,6 +4006,158 @@ function Remove-DarlingStaleFiles([string]$installRoot, $relativePaths, $shipped
     }
 }
 
+# ============================ the upgrade run record (#9432) ============================
+#
+# Each upgrade run leaves a small JSON file, upgrade-run.json, in the install root. This script never opens a PostgreSQL
+# connection: it has no driver, and the store can be down in the middle of an upgrade. The service reads the file at its start
+# and on its five-minute store-side pass, and records it in collect.upgrade_runs, one row per run id. The file holds no secret:
+# no connection string, no password, no token.
+#
+#   - at the start of a real run (after the -Check exit, before the service is stopped): state in_progress, with the run id,
+#     tool version, target build and start time.
+#   - at the end: the end time, exit code, the stop check's result, the rollback folder, the first error if it failed, and
+#     state succeeded or failed.
+#   - -MarkVerified rewrites it to verified once the operator's checks pass. It does no upgrade.
+#
+# Every write goes to a temp file in the same folder and is moved over the old file, so a reader never sees half a file. The
+# service account gets Modify on the file itself (not on the install root), because the service removes the file once the run is
+# verified or failed and the install root gives it only Read and Execute.
+
+# The product version of an exe, or $null when it has none or cannot be read.
+function Get-DarlingBuildVersion([string]$exePath) {
+    try {
+        if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { return $null }
+        $version = (Get-Item -LiteralPath $exePath -ErrorAction Stop).VersionInfo.ProductVersion
+        if ([string]::IsNullOrWhiteSpace($version)) { return $null }
+        return $version.Trim()
+    }
+    catch { return $null }
+}
+
+# A new run record: state in_progress, a new run id and the start time. An ordered hashtable, so the file reads the same every time.
+function New-DarlingUpgradeRun([string]$toolVersion, [string]$targetBuild, [datetime]$nowUtc) {
+    return [ordered]@{
+        run_id          = [guid]::NewGuid().ToString()
+        state           = 'in_progress'
+        tool_version    = $toolVersion
+        target_build    = $targetBuild
+        started_utc     = $nowUtc.ToUniversalTime().ToString('o')
+        ended_utc       = $null
+        exit_code       = $null
+        stop_check      = $null
+        rollback_folder = $null
+        first_error     = $null
+        verified_utc    = $null
+    }
+}
+
+# The run record at its end, as a copy. A failed run carries its first error, cut at 2000 characters, the most the service reads.
+function Complete-DarlingUpgradeRun($run, [bool]$succeeded, [int]$exitCode, [string]$stopCheck, [string]$rollbackFolder, [string]$firstError, [datetime]$nowUtc) {
+    $done = [ordered]@{}
+    foreach ($key in $run.Keys) { $done[$key] = $run[$key] }
+    $done['state'] = if ($succeeded) { 'succeeded' } else { 'failed' }
+    $done['ended_utc'] = $nowUtc.ToUniversalTime().ToString('o')
+    $done['exit_code'] = $exitCode
+    $done['stop_check'] = if ([string]::IsNullOrWhiteSpace($stopCheck)) { $null } else { $stopCheck }
+    $done['rollback_folder'] = if ([string]::IsNullOrWhiteSpace($rollbackFolder)) { $null } else { $rollbackFolder }
+    if ($succeeded -or [string]::IsNullOrWhiteSpace($firstError)) { $done['first_error'] = $null }
+    else { $done['first_error'] = if ($firstError.Length -gt 2000) { $firstError.Substring(0, 2000) } else { $firstError } }
+    return $done
+}
+
+# Writes the run record: a temp file in the install root, then a move over upgrade-run.json. Returns an object with Ok, Reason
+# (when not Ok) and Warning (the service could not be given Modify on the file, so it may not be able to remove it). It never
+# throws and never leaves the temp file behind: a run record that cannot be written is the caller's warning, not a failed upgrade.
+function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$serviceAccount = '') {
+    $path = Join-Path $installRoot 'upgrade-run.json'
+    $temp = Join-Path $installRoot ('upgrade-run.json.{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    $warning = ''
+    try {
+        $json = $run | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        # LocalSystem already has full control through the root. Any other account gets Modify on this one file, so the service can
+        # delete it. The grant goes on the temp file, because the first write moves it into place and a moved file keeps its own DACL.
+        # Later writes use File.Replace, which keeps the DACL of the file it replaces, so the grant lasts for the whole run. upgrade-run.json
+        # is on Get-DarlingServiceWrittenNames, so the install-tree lock keeps this grant and makes the service the owner, and the pre-lock
+        # walk of a re-run trusts it. This grant is still needed for a run that stops before the lock runs, and for an install whose older
+        # install-darling.ps1 did not list the file, because nothing else gives the service Modify on it.
+        if (-not [string]::IsNullOrWhiteSpace($serviceAccount) -and $serviceAccount -notmatch '^(NT AUTHORITY\\SYSTEM|LocalSystem)$') {
+            $grantOutput = & icacls.exe $temp /grant:r "${serviceAccount}:(M)" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $warning = "the service account '$serviceAccount' could not be given Modify on $path (icacls exit $LASTEXITCODE), so the service may not be able to remove it. It records the file on every pass and keeps one row for the run."
+            }
+        }
+        if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::Replace($temp, $path, [NullString]::Value) }
+        else { [System.IO.File]::Move($temp, $path) }
+        return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning }
+    }
+    catch {
+        return [pscustomobject]@{ Ok = $false; Reason = $_.Exception.Message; Warning = $warning }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# The run record on disk, as an ordered hashtable, or $null when there is no file or it is not a run record.
+function Read-DarlingUpgradeRunFile([string]$installRoot) {
+    $path = Join-Path $installRoot 'upgrade-run.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $parsed = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($null -eq $parsed -or -not ($parsed.PSObject.Properties.Name -contains 'run_id')) { return $null }
+        $record = [ordered]@{}
+        foreach ($property in $parsed.PSObject.Properties) { $record[$property.Name] = $property.Value }
+        return $record
+    }
+    catch { return $null }
+}
+
+# -MarkVerified: the newest run's state becomes verified. Does nothing to the install. Returns Ok, a Message for the operator and a
+# Warning. A run that has not finished, or failed, is not verified: the operator's checks mean nothing for an upgrade that did not complete.
+function Set-DarlingUpgradeRunVerified([string]$installRoot, [datetime]$nowUtc, [string]$serviceAccount = '') {
+    $run = Read-DarlingUpgradeRunFile $installRoot
+    if ($null -eq $run) {
+        $missing = "There is no upgrade run to verify: $(Join-Path $installRoot 'upgrade-run.json') is missing or is not an upgrade run record. The service removes it once a run is verified or failed. Nothing was changed."
+        return [pscustomobject]@{ Ok = $false; Message = $missing; Warning = '' }
+    }
+    $state = "$($run['state'])"
+    if ($state -eq 'verified') {
+        return [pscustomobject]@{ Ok = $true; Message = "Upgrade run $($run['run_id']) is already verified. Nothing was changed."; Warning = '' }
+    }
+    if ($state -eq 'in_progress') {
+        return [pscustomobject]@{ Ok = $false; Message = "Upgrade run $($run['run_id']) has not finished, so it cannot be marked verified. Nothing was changed."; Warning = '' }
+    }
+    if ($state -ne 'succeeded') {
+        return [pscustomobject]@{ Ok = $false; Message = "Upgrade run $($run['run_id']) is in state '$state', not succeeded, so it cannot be marked verified. Run the upgrade again. Nothing was changed."; Warning = '' }
+    }
+    $run['state'] = 'verified'
+    $run['verified_utc'] = $nowUtc.ToUniversalTime().ToString('o')
+    $written = Write-DarlingUpgradeRunFile $installRoot $run $serviceAccount
+    if (-not $written.Ok) {
+        return [pscustomobject]@{ Ok = $false; Message = "Upgrade run $($run['run_id']) could not be marked verified: $($written.Reason)"; Warning = $written.Warning }
+    }
+    return [pscustomobject]@{ Ok = $true; Message = "Upgrade run $($run['run_id']) is marked verified. The service records it in the store at its next pass, within about five minutes."; Warning = $written.Warning }
+}
+
+# The end of a run, called from the script's finally: rewrites the record with the result. $succeeded is true only when the script
+# reached the point where the service is Running. Returns the write's result, or $null when no run was started.
+function Close-DarlingUpgradeRun([string]$installRoot, $run, [bool]$succeeded, [string]$stopCheck, [string]$rollbackFolder, [string]$firstError, [string]$serviceAccount = '') {
+    if ($null -eq $run) { return $null }
+    $exitCode = if ($succeeded) { 0 } else { 1 }
+    $done = Complete-DarlingUpgradeRun $run $succeeded $exitCode $stopCheck $rollbackFolder $firstError ([datetime]::UtcNow)
+    return Write-DarlingUpgradeRunFile $installRoot $done $serviceAccount
+}
+
+# The account the service logs on as, spelled the way icacls takes it (LocalSystem is NT AUTHORITY\SYSTEM, a leading .\ is this computer),
+# or $null when it cannot be read.
+function Get-DarlingUpgradeRunServiceAccount([string]$name) {
+    $account = Get-DarlingServiceLogonName $name
+    if ($account -eq 'LocalSystem') { return 'NT AUTHORITY\SYSTEM' }
+    if ($account) { return ($account -replace '^\.\\', "$env:COMPUTERNAME\") }
+    return $null
+}
+
 # ============================ preamble ============================
 
 $powerShellText = "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition) edition)"
@@ -4001,6 +4166,9 @@ if ($Check) {
     if ($PruneOnly -or $ListRollbacks) {
         Fail "-Check changes nothing, so it cannot be combined with -PruneOnly or -ListRollbacks. Nothing was stopped, copied or pruned."
     }
+}
+if ($MarkVerified -and ($Check -or $PruneOnly -or $ListRollbacks)) {
+    Fail "-MarkVerified only marks the newest upgrade run verified, so it cannot be combined with -Check, -PruneOnly or -ListRollbacks. Nothing was changed."
 }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -4057,6 +4225,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $serviceExeName))) {
 }
 
 Note "Install directory: $InstallRoot"
+
+# ============================ -MarkVerified (#9432) ============================
+#
+# The operator's checks passed: the newest upgrade run becomes verified. No upgrade, no stop, no copy.
+if ($MarkVerified) {
+    $verified = Set-DarlingUpgradeRunVerified $InstallRoot ([datetime]::UtcNow) (Get-DarlingUpgradeRunServiceAccount $serviceName)
+    if ($verified.Warning) { Warn $verified.Warning }
+    if (-not $verified.Ok) { Fail $verified.Message }
+    Good $verified.Message
+    exit 0
+}
 
 # ============================ -ListRollbacks / -PruneOnly ============================
 #
@@ -4508,6 +4687,24 @@ if ($Check) {
     exit 0
 }
 
+# ============================ the upgrade run record (#9432) ============================
+#
+# A real run starts here: the service is still up and nothing has changed. The record says in_progress until the end of the script.
+# A record that cannot be written is a warning, not a refusal: it is bookkeeping for the store and the upgrade does not depend on it.
+$script:UpgradeRunAccount = Get-DarlingUpgradeRunServiceAccount $serviceName
+$upgradeToolVersion = Get-DarlingBuildVersion (Join-Path $PSScriptRoot $serviceExeName)
+if (-not $upgradeToolVersion) { $upgradeToolVersion = 'unknown' }
+$upgradeTargetBuild = if ($sourceIsZip) { [IO.Path]::GetFileName($Source) } else { Get-DarlingBuildVersion (Join-Path $Source $serviceExeName) }
+if (-not $upgradeTargetBuild) { $upgradeTargetBuild = 'unknown' }
+$script:UpgradeRun = New-DarlingUpgradeRun $upgradeToolVersion $upgradeTargetBuild ([datetime]::UtcNow)
+$script:UpgradeRunSucceeded = $false
+$script:UpgradeStopCheck = $null
+$script:UpgradeRollbackFolder = $null
+$upgradeRunWrite = Write-DarlingUpgradeRunFile $InstallRoot $script:UpgradeRun $script:UpgradeRunAccount
+if ($upgradeRunWrite.Ok) { Note "Upgrade run $($script:UpgradeRun['run_id']) started (in_progress), recorded in $(Join-Path $InstallRoot 'upgrade-run.json')." }
+else { Warn "The upgrade run record could not be written ($($upgradeRunWrite.Reason)). The upgrade goes on, and the store will not show this run." }
+if ($upgradeRunWrite.Warning) { Warn $upgradeRunWrite.Warning }
+
 # ============================ stop, back up, prune, copy, start ============================
 #
 # From here on a failure leaves the service DOWN. Every step below is idempotent and the failure messages
@@ -4562,8 +4759,11 @@ $stillHolding = Get-DarlingProcessesUnderPath $InstallRoot
 # Made a list before it is counted: Windows PowerShell 5.1 gives a lone record no Count, and nothing
 # compared with zero would pass the check below with one process still holding the tree.
 $stillHolding = @($stillHolding)
+# #9432: the stop check's result, for the upgrade run record.
+$script:UpgradeStopCheck = if ($SkipStopGuard) { 'skipped (-SkipStopGuard)' } else { 'clear' }
 if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+    $script:UpgradeStopCheck = 'blocked: ' + ($names -join ', ')
     Note "The service is stopped, but processes are STILL running out of the install tree:"
     foreach ($name in $names) { Note "  $name" }
     Fail "Nothing has been copied, so the install is intact - but the service is now STOPPED. Either close these and re-run (safe, and it will reuse the backup it is about to take), or abandon the upgrade with: Start-Service '$serviceName'. Do NOT kill anything under $InstallRoot\pg-runtime - that is the bundled PostgreSQL and killing it takes the store down; give a postmaster that outlived the stop a few seconds and re-run."
@@ -4617,6 +4817,7 @@ $nowUtc = [datetime]::UtcNow
 $backupDecision = Get-DarlingRollbackBackupDecision $backups $BackupWindowMinutes $nowUtc $manifestPath
 
 if ($backupDecision -eq 'reuse') {
+    $script:UpgradeRollbackFolder = $backups[0].FullName
     Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade (no upgrade has finished since it was taken), and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
 }
 else {
@@ -4627,6 +4828,7 @@ else {
     Note "Backing up the install root's files to $backupPath ..."
     try {
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+        $script:UpgradeRollbackFolder = $backupPath
         # The folder is restricted to SYSTEM and Administrators BEFORE anything is copied into it (#5700), so every copy is born
         # with only that DACL instead of the install root's inherited one, and no file in it is ever readable by another account.
         # A folder that could not be restricted is never copied into: the upgrade stops here, with nothing copied or overwritten.
@@ -4781,6 +4983,13 @@ if (-not $sourceIsZip) {
 }
 
 Good "New build in place."
+
+# #9432: the build that is now installed is the true target. A folder source can also carry an upgrade-run.json of its own that the
+# copy just laid over this run's file, so the record is written again here.
+$installedBuild = Get-DarlingBuildVersion (Join-Path $InstallRoot $serviceExeName)
+if ($installedBuild) { $script:UpgradeRun['target_build'] = $installedBuild }
+$upgradeRunWrite = Write-DarlingUpgradeRunFile $InstallRoot $script:UpgradeRun $script:UpgradeRunAccount
+if (-not $upgradeRunWrite.Ok) { Warn "The upgrade run record could not be rewritten after the copy ($($upgradeRunWrite.Reason))." }
 
 if ($configHashBefore) {
     $configHashAfter = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash } else { $null }
@@ -4969,6 +5178,7 @@ try { (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::From
 catch { Fail "'$serviceName' did not reach Running within two minutes. The new build IS in place - read %ProgramData%\PerformanceMonitorDarling\logs before rolling back." }
 
 Good "Service is Running."
+$script:UpgradeRunSucceeded = $true
 Note ""
 Note "The install is NOT verified yet. 'Running' means the process started, not that it collects."
 Note "About 10-15 minutes after the start, check these:"
@@ -4976,9 +5186,18 @@ Note "  1. Open the Viewer. Every monitored server shows Online, and the status 
 Note "  2. On each server card, Collectors shows OK and 'Failing: 0'. The status bar shows 'Collectors: N OK'. The web page has a Collection Health tab for each server."
 Note "  3. The service log (%ProgramData%\PerformanceMonitorDarling\logs) has a line 'Postgres store ready (schema v<N>, ...)' from this start. N is the store version this build expects. If the line is missing, the store did not finish its update: read the log lines near the start."
 Note "  If you connect to the store, you can also run SELECT MAX(version) FROM darling_schema_version. It returns the same N."
+Note "  4. When the checks pass, run this script again with -MarkVerified. That marks this run verified in the store. It does no upgrade."
 
 }
 finally {
+    # #9432: the end of the run record. Runs on success, on Fail (which exits) and on an unhandled error. The first error is the first
+    # message Fail was given, or, for an error nothing caught, the last error PowerShell recorded.
+    if ($script:UpgradeRun) {
+        $upgradeFirstError = $script:UpgradeRunFirstError
+        if (-not $script:UpgradeRunSucceeded -and -not $upgradeFirstError -and $Error.Count -gt 0) { $upgradeFirstError = "$($Error[0].Exception.Message)" }
+        $upgradeRunEnd = Close-DarlingUpgradeRun $InstallRoot $script:UpgradeRun $script:UpgradeRunSucceeded $script:UpgradeStopCheck $script:UpgradeRollbackFolder $upgradeFirstError $script:UpgradeRunAccount
+        if ($upgradeRunEnd -and -not $upgradeRunEnd.Ok) { Warn "The upgrade run record could not be finished ($($upgradeRunEnd.Reason))." }
+    }
     # H1's staging copy (#4043 round-1 review): best-effort, and expected to be a no-op on the folder
     # -Source path, where $zipStagingFolder is never set. Administrators owns it and holds full control (see
     # Protect-DarlingStagingFolder), and this script is already running elevated, so nothing here needs the

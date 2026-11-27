@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// server. servers.json is one shared list; each test gets its own temp folder for it and its own per-user record, and the one
 /// test that saves a password does it under a key prefix made of a fresh GUID, never under Lite's own prefix.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public sealed class ServerHostBindingTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "LiteHostBinding_" + Guid.NewGuid().ToString("N"));
@@ -46,9 +46,9 @@ public sealed class ServerHostBindingTests : IDisposable
     private void WriteSharedServers(params ServerConnection[] servers) =>
         File.WriteAllText(Path.Combine(_sharedDir, "servers.json"), JsonSerializer.Serialize(new { Servers = servers }));
 
-    /* A credential store under a fresh GUID prefix: the first-run step reads saved credentials, and never reads the user's. */
+    /* An in-memory credential store: the first-run step reads saved credentials, and never reads the user's (#8754). */
     private readonly CredentialService _credentials =
-        new(new CredentialStore("PerformanceMonitorLiteHostTest" + Guid.NewGuid().ToString("N") + "_"));
+        new(new InMemoryCredentialStore());
 
     private ServerManager NewManager() => new(_sharedDir, hostBindingsPath: _bindingsPath, credentialService: _credentials);
 
@@ -791,8 +791,8 @@ public sealed class ServerHostBindingTests : IDisposable
     [Fact]
     public void SqlLogin_SavedPassword_IsUsedForItsOwnHost_RefusedForAChangedOne_AndUsedAgainOnceReentered()
     {
-        /* A store under a fresh GUID prefix, so nothing of the user's Lite credentials is read or touched. */
-        var store = new CredentialStore("PerformanceMonitorLiteHostTest" + Guid.NewGuid().ToString("N") + "_");
+        /* An in-memory store, so nothing of the user's Lite credentials is read or touched (#8754). */
+        var store = new InMemoryCredentialStore();
         var credentials = new CredentialService(store);
         var bindings = new ServerHostBindings(_bindingsPath);
         var server = Server(Guid.NewGuid().ToString(), "sql01", AuthenticationTypes.SqlServer);

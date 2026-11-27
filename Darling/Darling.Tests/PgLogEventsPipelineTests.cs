@@ -2374,8 +2374,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("log_lock_waits", description, StringComparison.Ordinal);
         Assert.Contains("truncated", method.GetParameters().Single(p => p.Name == "limit").GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description, StringComparison.Ordinal);
 
-        var host = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        Assert.Contains(".WithGeminiCompatibleTools<DarlingMcpPgLogEventTools>()", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpPgLogEventTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
         Assert.True(dispatch.ContainsKey("get_pg_log_events"));
@@ -2400,8 +2399,9 @@ public sealed class PgLogEventsPipelineTests
         Assert.DoesNotContain("raw_line_hash", logTab, StringComparison.Ordinal);
 
         /* The instructions' census moved with the tool. */
-        var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
-        Assert.Contains("thirty-five are the PostgreSQL reads", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{DarlingMcpInstructions.RegisteredToolNames().Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal))} are the PostgreSQL reads",
+            DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /* ---- the RDS transport --------------------------------------------------------------------------- */
@@ -2587,17 +2587,9 @@ public sealed class PgLogEventsRungTests
     private const int ProbeOrdinal = 104;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("pg-log-events", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* One below the top since V130 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to PgLogEventMetricsRungTests with the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V129 is expected to sit below the ladder's top now that V130 has landed");
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>The rung is the generated schema exactly — one table, one index — for V103's reason; the family index is a later rung.</summary>

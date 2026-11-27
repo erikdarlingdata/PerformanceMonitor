@@ -305,7 +305,8 @@ public partial class JobHistoryTab : UserControl
             /* A load a newer one cancelled (#8549) ends here with no error line, no stamp and no change to the grid. */
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Job History", timer, ex));
 
             LoadingMessage.Visibility = Visibility.Collapsed;
         }
@@ -335,6 +336,7 @@ public partial class JobHistoryTab : UserControl
     {
         if (_dataService == null) return;
 
+        timer ??= new ViewerLoadTimer();
         try
         {
             var statuses = await ViewerServerTab.Timed(timer, "agent status read", _dataService.GetAgentStatusAsync(serverId, cancellationToken));
@@ -372,7 +374,8 @@ public partial class JobHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"failed to load agent status: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Job History", timer, ex));
             AgentStatusIndicator.Text = "";
         }
     }
@@ -429,7 +432,8 @@ public partial class JobHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"failed to load the job history {noun} choices: {ex.Message}");
+            /* #9365: the line below is this read's own log line, so only the status text changes and no second line is written. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.PlainText("Job History", $"{noun} choices"));
             if (_choicesFailures.ShouldLog(source, key))
             {
                 ViewerLogger.Error("JobHistory", $"failed to load the job history {noun} choices; the drop-down keeps what it had and the read is tried again on the next refresh", ex);

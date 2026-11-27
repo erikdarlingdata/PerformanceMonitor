@@ -352,6 +352,26 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task TestRule_WindowUnderTheStampWidth_IsWidenedAndSaysSo_AndStillFindsAKeyWhoseStampIsFiveHoursOld()
+    {
+        var tagId = await _data.CreateQueryTagAsync("Billing", null);
+        /* A key still being seen holds a stamp up to the refresh width plus the backdate old (#9456): 5 hours here, and a dead key 8 hours old. */
+        string Utc(int hoursAgo) => DateTime.UtcNow.AddHours(-hoursAgo).ToString("yyyy-MM-dd HH:mm:ss.ffffff", System.Globalization.CultureInfo.InvariantCulture);
+        await ExecAsync($@"INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name, last_seen) VALUES
+            (1, 'hash', '0xA1', 'billing', TIMESTAMP '{Utc(5)}'), (1, 'hash', '0xA2', 'billing', TIMESTAMP '{Utc(8)}')");
+
+        var narrow = Parse(await McpQueryTagTools.TestRuleCore(_data, [1], null, "application", "billing", tagId, 100, null, 2));
+        var enough = Parse(await McpQueryTagTools.TestRuleCore(_data, [1], null, "application", "billing", tagId, 100, null, 24));
+
+        Assert.Equal(QueryTagSightingBuffer.MinTestWindowHours, narrow.GetProperty("window_hours").GetInt32());
+        Assert.Equal(1, narrow.GetProperty("keys_matched").GetInt32());
+        Assert.Contains("Window widened to 7 hours", narrow.GetProperty("message").GetString());
+        Assert.Equal(24, enough.GetProperty("window_hours").GetInt32());
+        Assert.Equal(2, enough.GetProperty("keys_matched").GetInt32());
+        Assert.DoesNotContain("widened", enough.GetProperty("message").GetString());
+    }
+
+    [Fact]
     public async Task TestRule_CutAtTheCap_SaysTruncated_ExactlyTheCapDoesNot()
     {
         var tagId = await _data.CreateQueryTagAsync("Reports", null);

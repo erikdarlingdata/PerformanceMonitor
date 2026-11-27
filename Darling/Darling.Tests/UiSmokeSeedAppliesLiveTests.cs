@@ -130,6 +130,12 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
         Assert.Equal(2, group.Replicas.Count);
         Assert.Equal(4, group.Databases.Count);
 
+        /* #8841: the long-name server's fleet card shows an Identity capacity tile with data and a runnable-threads reason. */
+        const string longName = "server_id = (SELECT server_id FROM config.config_monitored_servers WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary')";
+        Assert.Equal(1, await CountAsync("collect.cpu_scheduler_stats", longName + " AND total_runnable_tasks_count >= 20"));
+        Assert.Equal(1, await CountAsync("collect.identity_capacity", longName + " AND column_name IS NOT NULL AND percent_used >= 70"));
+        Assert.Equal(1, await CountAsync("collect.identity_capacity", longName + " AND column_name IS NULL AND skip_reason IS NULL"));
+
         Assert.Equal(2 * 360, await CountAsync("collect.pg_database_stats", pg));
         Assert.Equal(3 * 360, await CountAsync("collect.pg_wait_stats", pg));
         Assert.Equal(6 * 36, await CountAsync("collect.pg_statement_stats", pg));

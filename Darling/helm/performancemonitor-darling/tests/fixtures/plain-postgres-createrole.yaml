@@ -1,0 +1,95 @@
+# The external store of the provision-roles kind cases (tests/kind-tests.sh): a plain postgres (17 by default, KIND_PG_IMAGE
+# overrides), no TimescaleDB, whose database `app` is owned by the login `app`, which is NOT a superuser but holds CREATEROLE
+# (the owner the store-roles Job needs). Same shape as plain-postgres.yaml otherwise. The init SQL makes both
+# on the first start of an empty data directory; the data directory is an emptyDir, so a scale from 0 to 1 starts empty again.
+# Test-only: the passwords below exist only in this throwaway fixture.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-postgres
+type: Opaque
+stringData:
+  superuser-password: fixture-superuser-only
+  password: fixture-app-only
+  # The four role passwords for store.provisionRoles.rolePasswordsSecret: 24 characters of A-Za-z0-9.
+  admin: AdminFixturePass0123456x
+  viewer: ViewerFixturePass012345x
+  web: WebFixturePassword01234x
+  mcp: McpFixturePassword0123xy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plain-postgres-init
+data:
+  10-app-owner.sql: |
+    CREATE ROLE app LOGIN PASSWORD 'fixture-app-only' NOSUPERUSER NOCREATEDB CREATEROLE;
+    CREATE DATABASE app OWNER app;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plain-postgres
+  labels:
+    app: plain-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: plain-postgres
+  template:
+    metadata:
+      labels:
+        app: plain-postgres
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: postgres:17
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: plain-postgres
+                  key: superuser-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          # The image's init process listens on the socket only, so a TCP check answers only from the real server.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
+            periodSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: plain-postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plain-postgres
+  labels:
+    app: plain-postgres
+spec:
+  selector:
+    app: plain-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

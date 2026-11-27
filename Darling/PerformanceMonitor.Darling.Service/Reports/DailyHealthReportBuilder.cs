@@ -39,10 +39,18 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
     internal const string DeliveryMetricName = "Daily Health Report";
 
     private readonly NpgsqlDataSource _postgres;
+    private readonly Func<CancellationToken, Task<List<int>>> _readEnabledServerIds;
 
     public DailyHealthReportBuilder(NpgsqlDataSource postgres)
+        : this(postgres, enabledServerIds: null)
+    {
+    }
+
+    /// <summary>A test passes its own enabled-server-ids read to stand for a server enabled after that read; null reads the registry.</summary>
+    internal DailyHealthReportBuilder(NpgsqlDataSource postgres, Func<CancellationToken, Task<List<int>>>? enabledServerIds)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _readEnabledServerIds = enabledServerIds ?? ReadEnabledServerIdsAsync;
     }
 
     public async Task<DailyHealthReportRendered> BuildAsync(DateTime periodEndUtc, CancellationToken ct)
@@ -66,13 +74,33 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
         var lowDiskPercent = settings?.LowDiskThresholdPercent ?? 10;
         var lowDiskGb = settings?.LowDiskThresholdGb ?? 5;
 
-        var fleet = await DarlingFleetReader.GetFleetOverviewAsync(
-            _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct).ConfigureAwait(false);
+        /* #8570: the fleet cards, the alert counts, the failed jobs and the disk snapshot are independent reads, so they run together,
+           each its own command on its own pooled connection, and the build waits on the slowest rather than their sum. The failed-jobs
+           read takes the enabled servers' ids from the registry rather than from the cards, so it need not wait for the fleet read; the
+           cards are built for the same enabled servers, read a moment later, and each card looks up only its own server's jobs. All four
+           are awaited before any is used, so a failed read never leaves another running past the build. */
+        var serverIds = await _readEnabledServerIds(ct).ConfigureAwait(false);
+        var fleetRead = DarlingFleetReader.GetFleetOverviewAsync(
+            _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct);
+        var alertsRead = ReadAlertCountsAsync(start, end, ct);
+        var jobsRead = ReadFailedJobsAsync(start, end, serverIds, ct);
+        var disksRead = ReadVolumesAsync(start, end, ct);
+        await Task.WhenAll(fleetRead, alertsRead, jobsRead, disksRead).ConfigureAwait(false);
+        var fleet = await fleetRead.ConfigureAwait(false);
+        var alertsByServer = await alertsRead.ConfigureAwait(false);
+        var jobsByServer = await jobsRead.ConfigureAwait(false);
+        var disks = await disksRead.ConfigureAwait(false);
 
-        var alertsByServer = await ReadAlertCountsAsync(start, end, ct).ConfigureAwait(false);
-        var jobsByServer = await ReadFailedJobsAsync(start, end, fleet.Cards.Select(c => c.ServerId).ToList(), ct).ConfigureAwait(false);
-
-        var disks = await ReadVolumesAsync(start, end, ct).ConfigureAwait(false);
+        /* A server enabled between the id read and the fleet read has a card that the jobs read did not include. Its jobs are read
+           here, so every card's job section comes from a read that asked for its server. */
+        var unreadServerIds = fleet.Cards.Select(c => c.ServerId).Except(serverIds).ToList();
+        if (unreadServerIds.Count > 0)
+        {
+            foreach (var (serverId, jobs) in await ReadFailedJobsAsync(start, end, unreadServerIds, ct).ConfigureAwait(false))
+            {
+                jobsByServer[serverId] = jobs;
+            }
+        }
 
         var servers = new List<DailyHealthServerReport>(fleet.Cards.Count);
         foreach (var card in fleet.Cards)
@@ -178,6 +206,9 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
     /// <summary>
     /// Each server's volumes at its newest disk snapshot inside the period (the same per-mount-point shape the Low Disk Space alert
     /// reads), so a day with no snapshot reports no disk section rather than a volume from before the period.
+    /// The outer read repeats the period bounds (#8570): a joined row's time equals <c>newest</c>'s, which is already inside the
+    /// period, so no row changes, but the bound lets the planner leave out every chunk wholly outside the period instead of
+    /// hashing them all.
     /// </summary>
     internal const string PeriodVolumesSql = @"
 WITH newest AS (
@@ -195,7 +226,9 @@ SELECT
     MAX(d.collection_time) AS newest_collection_time
 FROM database_size_stats AS d
 JOIN newest AS n ON n.server_id = d.server_id AND n.collection_time = d.collection_time
-WHERE " + VolumeKey.Sql + @" IS NOT NULL
+WHERE d.collection_time >= $1
+AND   d.collection_time <= $2
+AND   " + VolumeKey.Sql + @" IS NOT NULL
 AND   d.volume_total_mb > 0
 GROUP BY d.server_id, " + VolumeKey.Sql + @"";
 
@@ -214,6 +247,27 @@ WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   lower(a.metric_name) <> lower($3)
 GROUP BY a.server_id, a.metric_name";
+
+    /// <summary>The enabled servers' ids: the servers the fleet overview builds its cards for, read on their own so the failed-jobs read
+    /// can start alongside the fleet read. $ none.</summary>
+    internal const string EnabledServerIdsSql = @"
+SELECT s.server_id
+FROM servers AS s
+WHERE s.is_enabled";
+
+    private async Task<List<int>> ReadEnabledServerIdsAsync(CancellationToken ct)
+    {
+        var ids = new List<int>();
+        await using var command = _postgres.CreateCommand(EnabledServerIdsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            ids.Add(reader.GetInt32(0));
+        }
+
+        return ids;
+    }
 
     private async Task<Dictionary<int, IReadOnlyList<DailyHealthAlertCount>>> ReadAlertCountsAsync(DateTime start, DateTime end, CancellationToken ct)
     {

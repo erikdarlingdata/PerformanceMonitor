@@ -6,11 +6,15 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The count guard of a long-window read that takes its middle hours from the hourly interval rollup of
-/// <c>collect.query_stats</c> and its edges from raw (#4605). The read may use the rollup for a span only when the
+/// <c>collect.query_stats</c> and its edges from raw (#4605). It serves <c>collect.procedure_stats</c> the same way (#9357): the
+/// source picks the ledger (<see cref="ProcedureStatsHourLedger"/>), its state table and the rollup
+/// (<c>collect.procedure_stats_interval_hourly</c>), and nothing else in the statement differs. The read may use the rollup for a span only when the
 /// rollup holds every raw row the span has, hour by hour. The guard proves that without scanning raw: it compares, per
 /// (server, hour), the hour ledger (<see cref="QueryStatsHourLedger"/>, a row count the collector adds in the same
 /// transaction as its COPY) with the rollup's <c>sum(sample_count)</c>, and returns the number of pairs that disagree.
@@ -61,17 +65,36 @@ public static class IntervalRollupCountGuard
     /// <summary>The number of (server, hour) pairs in <c>[$1, $2)</c> whose ledger count differs from the hourly rollup's <c>sum(sample_count)</c>, or <see cref="UncoveredResult"/> when the ledger does not cover the window; 0 means the guard passed. The scope binds <c>$3</c> only: use <see cref="SqlFor"/> when the run has unregistered names (<c>$4</c>).</summary>
     public static readonly string QueryStatsSql = SqlFor(withUnregisteredServers: false);
 
-    /// <summary><see cref="QueryStatsSql"/>, with the unregistered-name arm (<c>$4</c>, a <c>text[]</c>) when <paramref name="withUnregisteredServers"/> is true. The FULL JOIN keys on (server_id, server_name, bucket) in both forms, so a pair whose rows sit under an earlier name is compared on its own.</summary>
-    public static string SqlFor(bool withUnregisteredServers)
+    /// <summary>The <c>collect.procedure_stats</c> guard (#9357), in the plain form: the statement of <see cref="QueryStatsSql"/> over the procedure ledger, its state table and <c>collect.procedure_stats_interval_hourly</c>.</summary>
+    public static readonly string ProcedureStatsSql = SqlFor("procedure_stats", withUnregisteredServers: false);
+
+    /// <summary>The store schema version of the rung that creates the source's ledger tables, which the runner checks before it runs the guard. Throws for a source the guard does not serve.</summary>
+    public static int RungVersionFor(string source) => Tables(source).RungVersion;
+
+    private readonly record struct GuardTables(string Ledger, string State, string Rollup, int RungVersion);
+
+    private static GuardTables Tables(string source) => source switch
     {
+        "query_stats" => new GuardTables(QueryStatsHourLedger.LedgerTable, QueryStatsHourLedger.StateTable, "collect.query_stats_interval_hourly", QueryStatsHourLedger.RungVersion),
+        "procedure_stats" => new GuardTables(ProcedureStatsHourLedger.LedgerTable, ProcedureStatsHourLedger.StateTable, "collect.procedure_stats_interval_hourly", ProcedureStatsHourLedger.RungVersion),
+        _ => throw new ArgumentException($"The count guard has no ledger for source '{source}'.", nameof(source)),
+    };
+
+    /// <summary><see cref="QueryStatsSql"/>, with the unregistered-name arm (<c>$4</c>, a <c>text[]</c>) when <paramref name="withUnregisteredServers"/> is true. The FULL JOIN keys on (server_id, server_name, bucket) in both forms, so a pair whose rows sit under an earlier name is compared on its own.</summary>
+    public static string SqlFor(bool withUnregisteredServers) => SqlFor("query_stats", withUnregisteredServers);
+
+    /// <summary><see cref="SqlFor(bool)"/> for the named source (<c>query_stats</c> or <c>procedure_stats</c>): that source's ledger, state table and hourly interval rollup, and the same statement otherwise.</summary>
+    public static string SqlFor(string source, bool withUnregisteredServers)
+    {
+        var tables = Tables(source);
         var scope = "$3::text[] IS NULL OR " + ServerScopeSql.Predicate(string.Empty, "$3", withUnregisteredServers ? "$4" : null);
         return $@"
-WITH l AS (SELECT server_id, server_name, bucket, n FROM collect.query_stats_hour_ledger
+WITH l AS (SELECT server_id, server_name, bucket, n FROM {tables.Ledger}
            WHERE bucket >= $1 AND bucket < $2 AND ({scope})),
-     c AS (SELECT server_id, server_name, bucket, sum(sample_count) AS n FROM collect.query_stats_interval_hourly
+     c AS (SELECT server_id, server_name, bucket, sum(sample_count) AS n FROM {tables.Rollup}
            WHERE bucket >= $1 AND bucket < $2 AND ({scope}) GROUP BY 1, 2, 3),
      m AS (SELECT count(*) AS n FROM l FULL JOIN c USING (server_id, server_name, bucket) WHERE l.n IS DISTINCT FROM c.n)
-SELECT CASE WHEN (SELECT counted_since FROM collect.query_stats_hour_ledger_state WHERE id = 1) <= $1
+SELECT CASE WHEN (SELECT counted_since FROM {tables.State} WHERE id = 1) <= $1
             THEN (SELECT n FROM m) ELSE -1 END;";
     }
 }

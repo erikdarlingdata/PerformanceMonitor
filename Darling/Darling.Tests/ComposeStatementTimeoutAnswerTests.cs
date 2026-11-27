@@ -113,6 +113,21 @@ public sealed class ComposeStatementTimeoutAnswerTests
         Assert.Equal(ComposePanelRunner.StatementTimeoutText, json.RootElement.GetProperty("detail").GetString());
     }
 
+    /// <summary>#9357: the page leaves a stopped cell alone on its own refresh, keyed on this field and never on the sentence. Another 400 does not carry it.</summary>
+    [Fact]
+    public void AStatementTimeout_CarriesTheReason_AndAnotherQueryError_DoesNot()
+    {
+        var body = new JsonObject { ["panel"] = new JsonObject(), ["hours"] = 24 };
+
+        using var stopped = ResultBody(Answer(StatementTimeout(), body), out var stoppedStatus);
+        using var syntax = ResultBody(Answer(ComposeRunOutcome.AuthorQueryError("Query failed: syntax error at or near \"selct\"", "42601"), body), out var syntaxStatus);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, stoppedStatus);
+        Assert.Equal("statement_timeout", stopped.RootElement.GetProperty("reason").GetString());
+        Assert.Equal(StatusCodes.Status400BadRequest, syntaxStatus);
+        Assert.False(syntax.RootElement.TryGetProperty("reason", out _));
+    }
+
     [Fact]
     public void AStatementTimeout_WithOneServer_SaysOneServer()
     {

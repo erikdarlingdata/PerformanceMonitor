@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -346,6 +347,9 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<TimeSpan, CancellationToken, Task> delay,
         CancellationToken passToken)
     {
+        /* #9549: how long the first attempt ran, kept with the retry so the Store Checkpointer Pressure self-alert can
+           tell whether the read ran inside a checkpoint sync. */
+        var firstAttemptClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             return await read(passToken);
@@ -368,7 +372,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
                after the wait would drop every retry that a shutdown interrupts; recorded only on success
                would understate the bands' cost by exactly the episodes where the band was worst, and the
                surface's own note commits to counting both outcomes here. */
-            readFailures?.RecordRetriedRead(serverKey, readName);
+            readFailures?.RecordRetriedRead(serverKey, readName, firstAttemptClock.ElapsedMilliseconds);
 
             /* The pause, on the PASS's token: a service stopping mid-band must not spend two seconds per
                in-flight read waiting to re-ask a store it is shutting down. A trip here throws
@@ -438,7 +442,8 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// <remarks>#9340: leaves out a pair whose two sessions are both the monitor's own (the monitor's collectors queued behind each other), so
+    /// it raises no blocking alert. A pair with a user session on either side, or a NULL app name, stays. Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
     /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
     /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
@@ -457,6 +462,7 @@ FROM blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -480,6 +486,7 @@ FROM dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -508,7 +515,7 @@ LIMIT 200";
         var items = new List<BlockedProcessAlertRow>();
         var dmvItems = new List<BlockedProcessAlertRow>();
 
-        await using (var connection = await _postgres.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken))
         {
             using (var command = new NpgsqlCommand(BlockedProcessReportsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
@@ -626,7 +633,7 @@ GROUP BY collection_time";
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(CurrentBlockingWaitSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
@@ -693,7 +700,7 @@ LIMIT 50";
         var (startTime, endTime) = Window(hoursBack);
 
         var items = new List<DeadlockAlertRow>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(startTime);
@@ -744,6 +751,13 @@ LIMIT 50";
     /// "known quiet" claim. Deltas are never negative (the calculator returns 0 on a reset), so no floor is
     /// applied; a defensive one would only hide a calculator regression.</para>
     ///
+    /// <para><b>newest_collection_time (#9338).</b> It is the newest row that ADDED wait (a positive delta in time or
+    /// tasks), not the newest row of any kind. The engine refuses to re-fire on evidence it already fired on by comparing
+    /// this time, and the collector keeps writing (0, 0) rows after a spike. Taken over every row, each zero row looked like
+    /// new evidence, so one spike re-fired at every cooldown while it stayed in the window. A type with no wait in the
+    /// window returns NULL here, which the reader turns into <see cref="DateTime.MinValue"/>; it is under the bar and
+    /// never fires.</para>
+    ///
     /// <para><b>Cost, under the alert pass's 10-second read deadline while the hourly CAGG refresh runs</b>
     /// (#3597: 4–7 minutes on the largest store). Cheap by SHAPE, not by any index the planner may or may not
     /// pick: the WHERE is predicate-identical to the retired read's — one server_id, the three wait_type
@@ -764,7 +778,7 @@ SELECT
     SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms,
     SUM(delta_waiting_tasks)::bigint AS accumulated_waits,
     COUNT(*)::bigint AS observed_intervals,
-    MAX(collection_time) AS newest_collection_time
+    MAX(collection_time) FILTER (WHERE delta_wait_time_ms > 0 OR delta_waiting_tasks > 0) AS newest_collection_time
 FROM wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
@@ -794,7 +808,7 @@ ORDER BY accumulated_wait_ms DESC";
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<PoisonWaitAccumulation>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(PoisonWaitsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         /* The engine's window, not a local recency constant: the window IS the denominator the bars
@@ -869,7 +883,7 @@ ORDER BY collection_time DESC
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(RunnableQueueSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-lookbackMinutes));
@@ -921,36 +935,42 @@ ORDER BY collection_time DESC
         var serverId = ParseServerKey(serverKey);
         var floor = NaiveUtcNow().AddMinutes(-lookbackMinutes);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("collection_log"), serverId, floor,
             r => r.GetDateTime(0), cancellationToken);
-        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("attention_events"), serverId, floor,
-            r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)), cancellationToken);
-        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("attention_events"), serverId, floor,
-            r => new AttentionSampleGroup(
-                r.GetDateTime(0),
-                r.IsDBNull(1) ? null : r.GetString(1),
-                r.IsDBNull(2) ? null : r.GetString(2),
-                r.GetInt64(3),
-                r.GetInt64(4),
-                r.GetInt64(5)), cancellationToken);
-        /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
-           a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
-        var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
-        /* Final round of #5714 (L2): the lists are bounded like the count is, > floor AND <= newest + RowSkewSeconds (the MCP read's cut). */
-        var topCeiling = AttentionEvaluator.TopListCeiling(runs);
-        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("attention_events", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
-        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
-        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+        /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
+        return await AttentionReadRelation.ReadAsync(connection, async events =>
+        {
+            var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts(events), serverId, floor,
+                r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)), cancellationToken);
+            var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups(events), serverId, floor,
+                r => new AttentionSampleGroup(
+                    r.GetDateTime(0),
+                    r.IsDBNull(1) ? null : r.GetString(1),
+                    r.IsDBNull(2) ? null : r.GetString(2),
+                    r.GetInt64(3),
+                    r.GetInt64(4),
+                    r.GetInt64(5),
+                    r.GetInt64(6),
+                    r.GetInt64(7)), cancellationToken);
+            /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
+               a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
+            var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
+            /* Final round of #5714 (L2): the lists are bounded like the count is, > floor AND <= newest + RowSkewSeconds (the MCP read's cut). */
+            var topCeiling = AttentionEvaluator.TopListCeiling(runs);
+            var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements(events, bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
+            var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "database_name", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+            var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "client_app_name", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+            var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
+            return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
+        }, cancellationToken);
     }
 
     /// <summary>The deadline of the Client Timeouts baseline read (#5736): a 7-day range of one server, run about once a day.</summary>
@@ -977,21 +997,27 @@ ORDER BY collection_time DESC
         var to = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
         var from = to.AddDays(-AttentionBaselineMath.LookbackDays);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection)
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
+        /* #9024: the baseline is a 7-day read, so during the store 277 copy it must see the rows still waiting in the legacy table. */
+        var minutes = await AttentionReadRelation.ReadAsync(connection, async events =>
         {
-            CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
-        };
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
+            await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", events), connection)
+            {
+                CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
+            };
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
 
-        var minutes = new List<AttentionMinute>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            minutes.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
-        }
+            var rows = new List<AttentionMinute>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
+            }
+
+            return rows;
+        }, cancellationToken);
 
         return AttentionBaselineMath.Compute(minutes);
     }
@@ -1133,11 +1159,14 @@ LIMIT $3";
        also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
        where the wait-type match alone misses it and the Long-Running Query alert fires anyway. The query-text
        match (case-insensitive, NULL-safe) catches it regardless of the wait it happens to be in at capture time. */
+    /* A request that is running and not waiting has a NULL wait_type. Each wait-type filter keeps it (wait_type IS NULL OR ...):
+       an opt-out drops the waits it names, and a request with no current wait is in none of them. Without the NULL arm a long
+       query would leave the read on every sample that catches it running, and the alert would clear while it still runs. */
     public const string SpServerDiagnosticsFilter =
-        "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
-    public const string WaitForFilter = "AND r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR')";
-    public const string BackupsFilter = "AND r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO')";
-    public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
+        "AND (r.wait_type IS NULL OR r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%')\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
+    public const string WaitForFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR'))";
+    public const string BackupsFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO'))";
+    public const string MiscWaitsFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('XE_LIVE_TARGET_TVF'))";
     public const string CdcFilter = "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE";
 
     /// <summary>#7573: the collector stores the monitor's own sessions again, so Active Queries can show them behind its switch. This alert read leaves them out itself, as it did when the collector dropped them (#7416). Always on: a monitor query is never the operator's long-running query to act on.</summary>
@@ -1218,7 +1247,7 @@ LIMIT $3";
         int excludedByProgramPrefix = 0;
         int excludedByLogin = 0;
         int excludedByDatabase = 0;
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
@@ -1369,7 +1398,7 @@ ORDER BY c.database_name, c.file_name";
             DateTime.UtcNow.AddMinutes(-Math.Max(1, lookbackMinutes)), DateTimeKind.Unspecified);
 
         var items = new List<DatabaseFileGrowthInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(DatabaseFileGrowthSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(windowStart);
@@ -1485,7 +1514,7 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<VolumeFreeSpaceInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
            so the floor is the newest one seen. A bounded read that finds nothing asks again without a bound. */
         await _volumeFloor.ReadAsync(serverId, async since =>
@@ -1608,7 +1637,7 @@ ORDER BY
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<PvsPressureInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
            so the floor is the newest one seen. A snapshot with no ADR-on database returns no row, which the floor treats as an
            empty read: the unbounded read it falls back to returns no row either, so the result is the same. */
@@ -1665,7 +1694,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -1687,7 +1727,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -1718,7 +1769,7 @@ LIMIT 1";
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         TempDbSpaceInfo? found = null;
         /* #6968: the shared floor loop remembers where the newest row is. A bounded read that finds nothing means the row the
            bound came from is gone, so it asks again without one (the read that shipped before). collection_time is NOT NULL,
@@ -1753,7 +1804,20 @@ LIMIT 1";
                        because that is what it IS and what the property's name says (the #3636 file-growth read's
                        idiom). The engine only ever compares one server's stamps with each other, so the Kind is
                        honesty rather than arithmetic. */
-                    CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                    CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                    /* #8881: the tempdb log, all NULL on a row collected before V269, on an engine that lacks the function, and (the
+                       holder) below 50 percent used. A NULL stays null here: the log alert reads null as "no measurement", never as zero. */
+                    LogTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                    LogUsedMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                    LogUsedPercent = reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                    LogReuseWaitDesc = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    LogTruncationHoldupReason = reader.IsDBNull(13) ? null : reader.GetString(13),
+                    HolderSessionId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                    HolderLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+                    HolderProgramName = reader.IsDBNull(16) ? null : reader.GetString(16),
+                    HolderBeginTimeUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+                    HolderLogBytesUsed = reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                    HolderLogBytesReserved = reader.IsDBNull(19) ? null : reader.GetInt64(19)
                 };
             }
 
@@ -1761,6 +1825,127 @@ LIMIT 1";
         });
 
         return found;
+    }
+
+    /* ---------------- tempdb files for the growth-fit alert (#8882) ---------------- */
+
+    /// <summary>
+    /// The tempdb files (database_id 2) of the newest <c>database_size_stats</c> collection: each file's growth settings, its volume
+    /// and the volume's free space, all from one collection so they describe one instant. $1 server_id.
+    /// </summary>
+    public const string TempDbFilesSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+)
+ORDER BY file_id";
+
+    /// <summary><see cref="TempDbFilesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. Same rows, same order.</summary>
+    public const string TempDbFilesSinceSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time >= $2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+    AND   collection_time >= $2
+)
+ORDER BY file_id";
+
+    private readonly NewestRowFloor _tempDbFilesFloor = new();
+
+    public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetTempDbFilesCoreAsync(serverKey, ct),
+            serverKey,
+            "TempDB growth fit",
+            cancellationToken);
+    }
+
+    private async Task<List<TempDbFileInfo>> GetTempDbFilesCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<TempDbFileInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
+        await _tempDbFilesFloor.ReadAsync(serverId, async since =>
+        {
+            items.Clear();
+            DateTime? newest = null;
+            using var command = new NpgsqlCommand(since is null ? TempDbFilesSql : TempDbFilesSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var item = new TempDbFileInfo
+                {
+                    FileId = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+                    FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    TotalSizeMb = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                    AutoGrowthMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                    IsPercentGrowth = !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    GrowthPct = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                    MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                    VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                    VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                    IsAutogrowAllFiles = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                    CollectionTimeUtc = reader.IsDBNull(12) ? null : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)
+                };
+                items.Add(item);
+                if (item.CollectionTimeUtc is { } sampled && (newest is null || sampled > newest))
+                {
+                    newest = sampled;
+                }
+            }
+
+            return newest;
+        });
+
+        return items;
     }
 
     /* ---------------- anomalous jobs ---------------- */
@@ -1840,7 +2025,7 @@ LIMIT 5";
         var thresholdPercent = (decimal)(multiplier * 100);
 
         var items = new List<AnomalousJobInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         /* #1812: the latest snapshot is only evidence when fresh — a stopped collector, missed cycles,
            or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
@@ -2105,7 +2290,7 @@ AND   (e.expected_state = '(ignore)'
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<DatabaseStateInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         /* #4606: the seed/heal/prune/clear-recovered maintenance run ahead of the deviation read is wrapped
            in its OWN deadlock retry — the narrowest seam that covers the victim statement — rather than
@@ -2380,6 +2565,40 @@ AND   qs.collection_time > $2";
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
+    /// <summary>The restart and memory dump rise the store holds (#8884): the shared <see cref="InstanceEvents.StateSql"/> over this server's
+    /// <c>collector_state</c> rows, judged by the shared <see cref="InstanceEvents"/> functions. Lite's twin is
+    /// <c>LocalDataService.GetInstanceEventsAsync</c>.</summary>
+    public Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetInstanceEventsCoreAsync(serverKey, ct),
+            serverKey,
+            "instance events",
+            cancellationToken);
+    }
+
+    private async Task<InstanceEventInfo> GetInstanceEventsCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
+        using var command = new NpgsqlCommand(InstanceEvents.StateSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var state = new List<BaselineDiscontinuities.StateRow>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            state.Add(new BaselineDiscontinuities.StateRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3)));
+        }
+
+        return InstanceEventInfoMapper.ToInstanceEventInfo(state);
+    }
+
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
@@ -2406,7 +2625,7 @@ AND   qs.collection_time > $2";
         var windowStart = FloorToMicrosecond(NaiveUtcNow() - ForcePlanFailureWindow);
         var fence = _queryStoreWriteFence;
         var before = fence?.Snapshot(serverId);
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         DateTime? newest;
         using (var probe = new NpgsqlCommand(ForcePlanFailuresNewestCollectionSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })

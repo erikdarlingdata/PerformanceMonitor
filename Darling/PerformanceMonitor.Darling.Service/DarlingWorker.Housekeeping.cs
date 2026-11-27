@@ -54,23 +54,7 @@ public sealed partial class DarlingWorker
     {
         var (storeSizeBytes, storeSizeEstimated) = await ReadStoreSizeBytesAsync(cancellationToken);
 
-        long? freeBytes = null;
-        long? totalBytes = null;
-        if (config.Postgres.Managed && OperatingSystem.IsWindows())
-        {
-            try
-            {
-                var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-                (freeBytes, totalBytes) = ReadStoreVolumeSpace(dataDirectory);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* Best-effort: an unreadable drive just means no disk signal this tick. */
-                /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
-                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on a volume read. */
-                _logger.LogDebug("Store disk-pressure check: could not read the store volume free space: {Message}", ex.Message);
-            }
-        }
+        var (freeBytes, totalBytes) = TryReadStoreVolumeSpace(config);
 
         /* EvaluateDiskPressureAsync (not ApplyDiskPressureAsync) so a throwing seam — e.g. a mute rule's
            Matches() in the pre-deliver mute check — is isolated inside the evaluator, exactly like the
@@ -78,6 +62,31 @@ public sealed partial class DarlingWorker
            un-isolated throw here would stop collection for the whole fleet. */
         await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken, storeSizeEstimated);
     }
+
+    /// <summary>The store volume's free and total bytes, or null for both when the service cannot see them (a remote store, or an unreadable
+    /// drive). Best-effort: an unreadable drive just means no disk signal this tick.</summary>
+    private (long? FreeBytes, long? TotalBytes) TryReadStoreVolumeSpace(DarlingConfig config)
+    {
+        if (config.Postgres.Managed && OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+                var (free, total) = ReadStoreVolumeSpace(dataDirectory);
+                return (free, total);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
+                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on a volume read. */
+                _logger.LogDebug("Store volume check: could not read the store volume free space: {Message}", ex.Message);
+            }
+        }
+
+        return (null, null);
+    }
+
+    private long? TryReadStoreFreeBytes(DarlingConfig config) => TryReadStoreVolumeSpace(config).FreeBytes;
 
     /// <summary>
     /// The free and total bytes of the volume that holds the store's data directory, for the disk-pressure
@@ -135,7 +144,7 @@ public sealed partial class DarlingWorker
         var readClock = Stopwatch.StartNew();
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreSettings, cancellationToken);
             readClock.Restart();
             var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
             return stored
@@ -274,7 +283,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreSize, cancellationToken);
             using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeWithTimeSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
@@ -330,10 +339,16 @@ public sealed partial class DarlingWorker
     /// </summary>
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
+        /* #9411: the step's row, written once after the try so a shutdown (which records nothing) and the awaits inside the pass stay as they were. */
+        var stepStarted = DateTime.UtcNow;
+        var stepClock = Stopwatch.StartNew();
+        var stepRan = false;
+        string? stepFailure = null;
+
         var readClock = Stopwatch.StartNew();
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.CompressionHealth, cancellationToken);
             readClock.Restart();
 
             /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
@@ -486,6 +501,7 @@ public sealed partial class DarlingWorker
                this tick's raw rows are the exact ones EvaluateRetentionHoldsAsync and the cadence merge just
                judged. */
             await _selfAlerts!.EvaluateRawPurgeOverHorizonAsync(rawPurgeOverHorizon, cancellationToken);
+            stepRan = true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -493,6 +509,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
+            stepFailure = ex.Message;
             /* WHAT THIS SITE'S ELAPSED CAN AND CANNOT CLAIM, stated because the shared finding sentence
                frames every entry against the alert pass's own command deadline and this one does not fit
                that frame.
@@ -512,6 +529,12 @@ public sealed partial class DarlingWorker
             _logger.LogError(ex, "Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
+        }
+
+        if (stepRan || stepFailure is not null)
+        {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "compression_job_health", stepStarted, stepClock.Elapsed, default, stepFailure);
         }
     }
 
@@ -586,7 +609,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.TimescaleReprobe, budget.Token);
             var available = await TimescaleSupport.TryEnableAsync(connection, null, budget.Token);
             if (!available)
             {
@@ -722,9 +745,14 @@ public sealed partial class DarlingWorker
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(s_retentionReevaluationBudget);
 
+        /* #9411: the step's row, written once after the try so a shutdown (which records nothing) and the awaits inside the pass stay as they were. */
+        var stepStarted = DateTime.UtcNow;
+        var stepRan = false;
+        string? stepFailure = null;
+
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.RetentionReevaluate, budget.Token);
 
             /* #4300: the seam-only repair runs BEFORE the coverage sweep below, on the SAME connection, so a
                seam it closes this tick is already gone by the time EnsureRetentionPoliciesAsync re-judges
@@ -864,6 +892,8 @@ public sealed partial class DarlingWorker
                     _periodicHoleRepair = RunMaterializationHoleRepairAsync(_postgres, cancellationToken);
                 }
             }
+
+            stepRan = true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -871,15 +901,23 @@ public sealed partial class DarlingWorker
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested)
         {
+            stepFailure = "cut short by its time budget";
             _logger.LogWarning(
                 "Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - the policies it had not reached keep the state they were in and are re-judged next hour (and at the next start). A store that cannot answer twenty catalog reads and twenty chunk-pruned min() probes inside that budget is the finding here, not the retention.",
                 (long)s_retentionReevaluationBudget.TotalSeconds, passClock.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
+            stepFailure = ex.Message;
             _logger.LogWarning(
                 "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
+        }
+
+        if (stepRan || stepFailure is not null)
+        {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "retention_reevaluation", stepStarted, passClock.Elapsed, default, stepFailure);
         }
     }
 
@@ -1156,13 +1194,14 @@ AND   j.hypertable_name = '{relation}'", connection))
     private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken, bool timescaleAvailable = true)
     {
         var passClock = Stopwatch.StartNew();
+        var convergenceStarted = DateTime.UtcNow;
         var tally = new StoreObjectConvergenceTally();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(s_storeObjectConvergenceBudget);
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreConverge, budget.Token);
             foreach (var step in s_storeObjectConvergence)
             {
                 /* #3913: the ONE filter the hourly pass has. On a store without TimescaleDB, a step that needs
@@ -1189,6 +1228,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(
+                    Built: tally.Steps, Failed: tally.Failed.Count,
+                    Detail: tally.Changed.Count == 0 ? "nothing changed" : "changed: " + string.Join(", ", tally.Changed)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1196,12 +1240,18 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested)
         {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(Built: tally.Steps, Failed: tally.Failed.Count), "cut short by its time budget");
             _logger.LogWarning(
                 "Store object convergence exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short — {Steps} step(s) ran, {Changed} changed, and the steps it had not reached are exactly as they were and are retried next hour (and at the next start). Every step is idempotent, so the next pass resumes at the one this pass was inside rather than redoing the ones behind it. A CONVERGED store answers this pass in well under a second; a store that spends five minutes in it is either building something real for the first time — a first hypertable conversion or a first aggregate on an adopted store — or is too slow to answer its own catalog, and which one it is shows in the per-object lines above.",
                 (long)s_storeObjectConvergenceBudget.TotalSeconds, passClock.ElapsedMilliseconds, tally.Steps, tally.Changed.Count);
         }
         catch (Exception ex)
         {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(Built: tally.Steps, Failed: tally.Failed.Count), ex.Message);
             _logger.LogWarning(
                 "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
@@ -1214,7 +1264,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <summary>Starts the re-group loop unless one is running. Never throws and does no database work on this thread.</summary>
     private void StartPerfmonRegroupDrain(CancellationToken stoppingToken)
     {
-        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(token), _logger);
+        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(StoreSessionNames.PerfmonRegroup, token), _logger);
         _perfmonRegroupDrain.StartIfIdle(stoppingToken);
     }
 
@@ -1361,8 +1411,8 @@ AND   j.hypertable_name = '{relation}'", connection))
 
     /// <summary>
     /// The #4823 once-a-minute checkpointer sample: one read of the store's cumulative checkpoint sync time, handed to
-    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find the longest single sync in the
-    /// hour. Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
+    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find each sync in the hour, the
+    /// minute it finished in and the longest of them (#9549). Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
     /// failure (a store that is down, a permission the bring-your-own store lacks, the budget expiring) is a Debug line
     /// and a skipped minute: the sampler keeps its previous baseline, and the next successful read differences against
     /// it, which can only lengthen the difference it reports. Never throws except for the service stopping.
@@ -1374,7 +1424,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.CheckpointSample, budget.Token);
             var syncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, budget.Token);
             if (syncMs is long sampled)
             {
@@ -1389,12 +1439,156 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #9437 once-a-minute store connection sample, on the checkpointer sample's minute: the store's client backends by role,
+    /// application, state and wait type, and the slots left against <c>max_connections</c>
+    /// (<see cref="StoreConnectionSamples.CaptureAsync"/>). Awaited on the main loop under its own short budget. A failure (a store that is
+    /// down, a role that cannot read <c>pg_stat_activity</c>, the budget expiring) is a Debug line and a skipped minute. Never throws except
+    /// for the service stopping.
+    ///
+    /// <para>The host load is the managed store's available memory (<see cref="ReadStoreHostLoad"/>) and nothing else. A bring-your-own or
+    /// compose store runs on a host the service does not describe, so it passes null, and CPU percent and disk queue are not read for any store.
+    /// The columns left empty stay NULL and the read says so.</para>
+    /// </summary>
+    private async Task SampleStoreConnectionsAsync(bool managedStore, CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_checkpointSyncSampleBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreConnectionSamples.CaptureAsync(connection, DateTime.UtcNow, ReadStoreHostLoad(managedStore), budget.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store connection sample failed and was skipped");
+        }
+    }
+
+    /// <summary>
+    /// The #9427 once-a-minute capture of the store's settings: compared with the last capture, each change is a row (old and new value, source, reload
+    /// time), and the first capture on a store writes only the baseline. Awaited on the main loop, so it runs under one short budget. A failure (a store
+    /// that is down, a store below the rung, the budget expiring) is a Debug line and a skipped minute, since the next capture compares against the same
+    /// state. A capture with changes logs only how many settings changed, never a name or a value, since a setting can hold a
+    /// credential. Never throws except for the service stopping.
+    /// </summary>
+    private async Task CaptureStoreSettingChangesAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_storeSettingCaptureBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var capture = await StoreSettingChanges.CaptureAsync(connection, budget.Token);
+            if (capture.IsBaseline)
+            {
+                _logger.LogInformation("Store settings baseline captured: {Settings} settings. Changes from here on are recorded.", capture.Stored);
+            }
+            else if (capture.Changes > 0)
+            {
+                _logger.LogInformation("Store settings changed: {Changes} setting(s) recorded. get_store_setting_changes lists them.", capture.Changes);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store setting capture failed and was skipped");
+        }
+    }
+
+    /// <summary>
+    /// What the store's host offers the connection sample (#9437). A managed store runs on the service's own Windows machine, which is the
+    /// machine <see cref="DarlingStoreHostProfile"/> describes, so the memory it can still hand out (the <c>GlobalMemoryStatusEx</c> read the
+    /// profile already makes for total memory) is that host's. Any other store is on a host the service does not describe, and a failed read
+    /// gives nothing: both are null, never a made-up figure. CPU percent and disk queue are left null because the service has no reader for them.
+    /// </summary>
+    internal static StoreHostLoad? ReadStoreHostLoad(bool managedStore)
+    {
+        if (!managedStore || !OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return DarlingManagedPostgres.TryReadWindowsMemoryStatus(out _, out var available, out _, out _)
+            ? new StoreHostLoad(null, available, null)
+            : null;
+    }
+
+    /// <summary>
+    /// The #9439 once-a-minute read of the store's client sessions into <see cref="StoreLockWaits.Shared"/>, so the hourly store
+    /// log sweep can name the roles and applications of a lock wait's blocker even when the blocker ended long before the sweep.
+    /// Its own budget and its own connection, a separate step from the checkpoint sample above. A failed read keeps the old map
+    /// and logs one warning when it starts failing (a Debug line while it goes on), and the next minute tries again. Never throws
+    /// except for the service stopping.
+    /// </summary>
+    private async Task RefreshStoreSessionMapAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(StoreLockWaits.PidMapRefreshTimeoutSeconds));
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreLockWaits.Shared.RefreshAsync(connection, budget.Token);
+            _storeSessionMapFailing = false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            if (!_storeSessionMapFailing)
+            {
+                _storeSessionMapFailing = true;
+                _logger.LogWarning(
+                    "The store session map could not be refreshed, so lock waits keep the last map and may show unresolved roles until it can: {Message}",
+                    ex.Message);
+            }
+            else
+            {
+                _logger.LogDebug(ex, "store session map refresh failed and was skipped");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
+    /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
+    /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege
+    /// text, except the one PostgreSQL raises for a relative log_directory that leads out of the data directory: no grant
+    /// short of pg_read_server_files reads there, and an absolute log_directory needs none. Any other fault keeps the
+    /// privilege text too, as it always did.
+    /// </summary>
+    /// <summary>The words PostgreSQL's file read refuses a relative path outside the data directory with (genfile.c), for a role
+    /// without pg_read_server_files.</summary>
+    internal const string RelativePathOutsideDataDirectoryRefusal = "path must be in or below the data directory";
+
+    internal static string StoreLogCaptureFailureCause(Exception ex)
+    {
+        if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedFile })
+        {
+            return "The store keeps no log files to read (logging_collector is off or the log folder is missing)";
+        }
+
+        if (ex is PostgresException { SqlState: PostgresErrorCodes.InsufficientPrivilege } refused
+            && refused.MessageText.Contains(RelativePathOutsideDataDirectoryRefusal, StringComparison.Ordinal))
+        {
+            return "The store's log_directory is a relative path that leads out of the data directory, which PostgreSQL "
+                + "reads only for a role that holds pg_read_server_files; set log_directory to an absolute path instead";
+        }
+
+        return "Reading the store's own log needs pg_monitor and EXECUTE on pg_read_binary_file; "
+            + "a bring-your-own store may not grant them";
+    }
+
+    /// <summary>
     /// The read-latency flush, with its own catch so a failed flush costs only this window's histogram rows (#4442 scope 2).
     /// Shared by the hourly tick and the stop-time flush (#7153). A cancellation the caller's budget caused is not a flush
-    /// failure and passes through.
+    /// failure and passes through. The stop-time flush passes <paramref name="stopNotice"/> (#9794): a store going down with the
+    /// service gets the unwritten samples added to it instead of the Warning.
     /// </summary>
     private static async Task FlushReadLatencyAsync(
-        ReadLatencyAccumulator readLatency, NpgsqlConnection connection, ILogger logger, CancellationToken budget)
+        ReadLatencyAccumulator readLatency, NpgsqlConnection connection, ILogger logger, CancellationToken budget, StoreStopNotice? stopNotice = null)
     {
         try
         {
@@ -1402,6 +1596,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
         {
+            if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+            {
+                stopNotice.NotWritten(ReadLatencySamplesNotWritten);
+                return;
+            }
+
             logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
         }
     }
@@ -1410,6 +1610,10 @@ AND   j.hypertable_name = '{relation}'", connection))
        loop reaches this the sweeps (up to s_shutdownDrainBudget) and the other drains have already run, so this stays small:
        it opens one connection and writes a handful of rows, and a store that cannot answer in this long is not going to. */
     internal static readonly TimeSpan ShutdownSampleFlushBudget = TimeSpan.FromSeconds(5);
+
+    /* #9794: what the stop's one line calls each accumulator's samples when the store went down before taking them. */
+    private const string CollectorCostSamplesNotWritten = "the collector-cost samples since the last hourly flush";
+    private const string ReadLatencySamplesNotWritten = "the read-latency samples since the last hourly flush";
 
     /// <summary>
     /// #7153: flushes the collector-cost and read-latency samples recorded since the last hourly tick, once, at stop, on a new
@@ -1421,20 +1625,28 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// on its own source.
     /// A second flush inside an hour adds rows rather than replacing them: every flush stamps its own microsecond metric_time, so
     /// the stop flush and the next hourly flush are separate rows in both tables, and the readers sum them.
+    /// <para>#9794: with <paramref name="stopNotice"/>, a store that is going down with the service
+    /// (<see cref="StoreStopNotice.IsStoreUnavailable"/>) is not a failure of this flush. The samples it did not take are added to
+    /// the notice, which the worker reports as one Information line for the whole stop, and no Warning is logged for them. The
+    /// flush is tried once. Any other failure, and a budget that ran out, logs its Warning as above.</para>
     /// </summary>
     internal static async Task FlushSamplesOnStopAsync(
         NpgsqlDataSource postgres, CollectorCostAccumulator collectorCost, ReadLatencyAccumulator readLatency,
-        TimeSpan budgetLimit, ILogger logger)
+        TimeSpan budgetLimit, ILogger logger, StoreStopNotice? stopNotice = null)
     {
         if (!collectorCost.HasSamples && !readLatency.HasSamples)
         {
             return;
         }
 
+        /* False until the collector-cost flush has run: a failure before that left both accumulators unwritten. */
+        var collectorCostTried = false;
+        var hadCollectorCost = collectorCost.HasSamples;
+        var hadReadLatency = readLatency.HasSamples;
         using var budget = new CancellationTokenSource(budgetLimit);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SampleFlush, budget.Token);
 
             try
             {
@@ -1442,20 +1654,41 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
             {
-                logger.LogWarning("Collector-cost flush at stop failed; the samples since the last hourly flush are dropped: {Message}", ex.Message);
+                if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+                {
+                    stopNotice.NotWritten(CollectorCostSamplesNotWritten);
+                }
+                else
+                {
+                    logger.LogWarning("Collector-cost flush at stop failed; the samples since the last hourly flush are dropped: {Message}", ex.Message);
+                }
             }
 
+            collectorCostTried = true;
             if (connection.State != ConnectionState.Open)
             {
                 await connection.CloseAsync();
                 await connection.OpenAsync(budget.Token);
             }
 
-            await FlushReadLatencyAsync(readLatency, connection, logger, budget.Token);
+            await FlushReadLatencyAsync(readLatency, connection, logger, budget.Token, stopNotice);
         }
         catch (Exception ex)
         {
-            if (budget.IsCancellationRequested)
+            if (!budget.IsCancellationRequested && stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+            {
+                /* The connection could not be opened (or opened again after the collector-cost flush lost it), so whatever had not been tried stays unwritten. */
+                if (!collectorCostTried && hadCollectorCost)
+                {
+                    stopNotice.NotWritten(CollectorCostSamplesNotWritten);
+                }
+
+                if (hadReadLatency)
+                {
+                    stopNotice.NotWritten(ReadLatencySamplesNotWritten);
+                }
+            }
+            else if (budget.IsCancellationRequested)
             {
                 logger.LogWarning(
                     "Flushing the collector-cost and read-latency samples at stop did not finish within {Seconds:N0}s, so the samples since the last hourly flush are dropped: {Message}",
@@ -1502,7 +1735,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreMetrics, budget.Token);
 
             /* #3923: its OWN narrow catch, ahead of the store-log capture below and on the same reasoning
                that catch already carries - a PostgresException the store permanently rejects here (catalog
@@ -1516,8 +1749,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                usable, which is what the two passes after it need. */
             try
             {
-                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
-                    checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_metrics_sweep", async () =>
+                {
+                    var rows = await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
+                        checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (PostgresException ex) when (!PgBaselineProvider.IsCommandTimeout(ex)
                                                && connection.State == ConnectionState.Open)
@@ -1528,6 +1765,23 @@ AND   j.hypertable_name = '{relation}'", connection))
                     ex.SqlState, ex.Message);
             }
 
+            /* #9415: the service start history's retention, on the same hourly tick. Its own catch: a failed purge costs the passes below nothing. */
+            try
+            {
+                if (_postgres is { } startHistorySource)
+                {
+                    await ServiceStartHistory.PurgeAsync(startHistorySource, DateTime.UtcNow, budget.Token);
+                }
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                /* A store below V307 has no start history to purge. */
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "The service start history retention could not run this hour");
+            }
+
             /* #3021: the store reading its OWN server log, on the same hourly tick and the same connection.
                It rides this cadence rather than carrying its own for two reasons. The log grows slowly (a
                production day is ~1,400 entries worth classifying), so an hourly bucket is the finest grain
@@ -1536,9 +1790,13 @@ AND   j.hypertable_name = '{relation}'", connection))
                how they get read side by side.
 
                ITS OWN catch, unlike the two passes either side of it, and that asymmetry is the point. This
-               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs
-               pg_read_server_files plus an explicit GRANT on pg_read_binary_file, which the managed store's
-               bootstrap superuser has and a bring-your-own store's owner may not have given. Sharing the
+               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs pg_monitor
+               (pg_ls_logdir and the log_directory setting) plus an explicit GRANT on pg_read_binary_file,
+               which the managed store's bootstrap superuser has and a bring-your-own store's owner may not
+               have given. pg_read_server_files is not needed: PostgreSQL lets a role with EXECUTE read any
+               file under the data directory or under an absolute log_directory. The one place it refuses is a
+               relative log_directory that leads out of the data directory, and the cause says to make it
+               absolute. Sharing the
                outer catch would let that one permanent condition cost the collector-cost flush below it
                every hour forever - a new failure in a pass that was working. Warning rather than Error for
                the same reason: on a store that cannot grant it this repeats hourly and would otherwise
@@ -1547,26 +1805,35 @@ AND   j.hypertable_name = '{relation}'", connection))
                not_collected and names the privilege. */
             try
             {
-                await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_log_capture", async () =>
+                {
+                    var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                    return new StorePassSteps.StepCounts(Built: captures.Count);
+                });
+                _storeLogCaptureNotice.Succeeded();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var unavailable = ex is PostgresException
-                {
-                    SqlState: PostgresErrorCodes.UndefinedFile or PostgresErrorCodes.InsufficientPrivilege,
-                };
-                if (unavailable && _storeLogCaptureUnavailableWarned)
+                if (!_storeLogCaptureNotice.ShouldWarn(ex))
                 {
                     _logger.LogDebug("Store log capture is still unavailable: {Message}", ex.Message);
+                }
+                else if (StoreLogCaptureNotice.IsStoreSideCause(ex))
+                {
+                    _logger.LogWarning(
+                        "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                        + "reports the capture gap). {Cause}: {Message}. Capture needs logging_collector on, a "
+                        + "log_directory that is absolute or inside the data directory, and a store login that holds "
+                        + "pg_monitor and EXECUTE on pg_read_binary_file(text, bigint, bigint). "
+                        + "This is said once per service start: the same cause repeats at Debug until it changes.",
+                        StoreLogCaptureFailureCause(ex), ex.Message);
                 }
                 else
                 {
                     _logger.LogWarning(
                         "Store log capture failed, so this hour's store-log census is missing (get_store_log "
-                        + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
-                        + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
-                        ex.Message);
-                    _storeLogCaptureUnavailableWarned |= unavailable;
+                        + "reports the capture gap). {Cause}: {Message}",
+                        StoreLogCaptureFailureCause(ex), ex.Message);
                 }
             }
 
@@ -1698,7 +1965,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);
             try
             {
-                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_statement_history", async () =>
+                {
+                    var snapshot = await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: snapshot.StatementsKept, Detail: snapshot.Outcome);
+                });
                 _storeStatementHistoryWarned = false;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -1727,7 +1998,11 @@ AND   j.hypertable_name = '{relation}'", connection))
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
-            await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+            await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "collector_cost_flush", async () =>
+            {
+                await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                return default(StorePassSteps.StepCounts);
+            });
 
             /* #4442 scope 2: the read-latency flush runs on the SAME tick, isolated from collector_cost's own
                failure — a bad read-latency flush must not cost the collector_cost series its hourly row, and
@@ -1769,7 +2044,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             hourlyBudget.CancelAfter(CollectionLogHourly.PassSliceBudget);
             try
             {
-                await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "collection_log_hourly", async () =>
+                {
+                    var rows = await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 || (hourlyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
@@ -1793,7 +2072,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             categoryBudget.CancelAfter(JobHistoryCategoryHourly.PassSliceBudget);
             try
             {
-                await JobHistoryCategoryHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, categoryBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "job_history_category_hourly", async () =>
+                {
+                    var rows = await JobHistoryCategoryHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, categoryBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 || (categoryBudget.IsCancellationRequested && !budget.IsCancellationRequested))

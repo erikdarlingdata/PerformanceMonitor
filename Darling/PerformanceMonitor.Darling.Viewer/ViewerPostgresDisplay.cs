@@ -1077,6 +1077,8 @@ internal static class PgDisplay
         public string IndexName { get; init; } = "";
         public string IndexSize { get; init; } = "";
         public string ScansInWindow { get; init; } = "";
+        /// <summary>The cell tooltip (#8915): says why the windowed count is a dash. Empty when the count is known.</summary>
+        public string ScansInWindowNote { get; init; } = "";
 
         /// <summary>The server's own lifetime counter, shown BESIDE the windowed figure rather than
         /// instead of it: they answer different questions, and an operator who checks in psql must not
@@ -1137,7 +1139,9 @@ internal static class PgDisplay
             TableName = row.TableName ?? "",
             IndexName = row.IndexName ?? "",
             IndexSize = Bytes(row.IndexBytes),
-            ScansInWindow = Count(row.ScansInWindow),
+            /* #8915: null is unknown (fewer than two samples), shown as the dash, never as a zero. */
+            ScansInWindowNote = row.ScansInWindow is null ? "Needs two samples: this index has been read once, so there is no windowed count yet. The Lifetime Scans column still has the server's own count." : "",
+            ScansInWindow = row.ScansInWindow is long windowed ? Count(windowed) : NotApplicableText,
             TotalScans = Count(row.TotalScans),
             /* NULL means two different things - PostgreSQL 15 and below do not record it at all, and on
                16+ it is an index never scanned since the reset - so the dash stands for "not recorded"
@@ -1151,7 +1155,7 @@ internal static class PgDisplay
             IsInvalid = !row.IsValid,
             IsUnscanned = unscanned,
             IndexSizeSort = Raw(row.IndexBytes),
-            ScansInWindowSort = Raw(row.ScansInWindow),
+            ScansInWindowSort = row.ScansInWindow is long windowedSort ? Raw(windowedSort) : null,
             TotalScansSort = Raw(row.TotalScans),
             BlockAccessesSort = Raw(row.BlocksHit + row.BlocksRead),
         };
@@ -1684,6 +1688,22 @@ internal static class PgDisplay
         public DateTime? BackendStartUtc { get; init; }
     }
 
+    /// <summary>
+    /// #8920: the sentence under an empty standby grid. Aurora readers read the shared storage volume and never
+    /// appear in <c>pg_stat_replication</c>, so on an Aurora target an empty grid is the permanent answer and must
+    /// not invite a search for a replication fault. Reader lag would need <c>aurora_replica_status()</c>, which no
+    /// collector reads yet.
+    /// </summary>
+    internal static string ReplicationStatsEmptyNote(string? engineKind) => MonitoredEngineKind.IsAurora(engineKind)
+        ? "No standby was streaming from this server in this window. Aurora readers use the shared storage "
+          + "volume instead of streaming replication, so they never appear in pg_stat_replication and this "
+          + "grid is always empty on an Aurora writer. That is not a replication fault. Reader lag would "
+          + "need aurora_replica_status(), which Performance Monitor does not read."
+        : "No standby was streaming from this server in this window. On a REPLICA that is the expected "
+          + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
+          + "server is cascading to a downstream of its own. On a primary it means nothing is "
+          + "replicating from it, which is either correct or the finding.";
+
     internal static List<ReplicationStatRow> ReplicationStatRows(IReadOnlyList<DarlingPgReplicationStatsReader.PgReplicationStatRow> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
@@ -1895,6 +1915,8 @@ internal static class PgDisplay
         public string? Unit { get; init; }
         public string Scope { get; init; } = "";
         public string Kind { get; init; } = "";
+        /// <summary>"resized by the platform" for a serverless target's platform-managed move (#9500), otherwise empty.</summary>
+        public string Note { get; init; } = "";
         public string? Context { get; init; }
         public string? Source { get; init; }
         public string? ShortDescription { get; init; }
@@ -1911,6 +1933,7 @@ internal static class PgDisplay
         Unit = row.Unit,
         Scope = ConfigChangeScope(row),
         Kind = row.ChangeKind,
+        Note = row.PlatformResized ? "resized by the platform" : "",
         Context = row.Context,
         Source = row.Source,
         ShortDescription = row.ShortDescription,
@@ -2083,7 +2106,8 @@ internal static class PgDisplay
     {
         Facet = ViewerServerTab.PlanCaptureFacetLabel(row.Facet, capitalize: true),
         FacetName = row.Facet,
-        Satisfied = row.IsSatisfied ? "yes" : "no",
+        /* #8912: an Aurora engine limit reads "engine limit", not "no": there is no step to take. */
+        Satisfied = row.IsSatisfied ? "yes" : row.IsEngineLimit ? "engine limit" : "no",
         Observed = row.Observed ?? "(not reported)",
         Detail = row.Detail ?? string.Empty,
         CaptureTime = SnapshotTime(row.CaptureTime),

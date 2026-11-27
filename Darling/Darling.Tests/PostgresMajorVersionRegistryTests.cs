@@ -27,20 +27,9 @@ public sealed class PostgresMajorVersionRegistryTests
     /* ---------------- the rung ---------------- */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("pg-major-version", PgMigrations.Scripts.Single(s => s.Version == 100).Name);
-
-        /* The top-of-ladder pins live with whichever rung is newest, so they sit here until one displaces
-           them — same convention as V82's test, which gave them up when V83 landed. */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

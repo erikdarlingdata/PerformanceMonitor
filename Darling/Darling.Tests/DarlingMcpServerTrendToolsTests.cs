@@ -36,7 +36,7 @@ public sealed class DarlingMcpServerTrendToolsTests
         var names = method.GetParameters().Select(p => p.Name).ToArray();
 
         Assert.Equal(["postgres", "metric", "server_name", "hours_back", "as_of", "bucket_minutes", "clerk_types", "names", "cancellationToken"], names);
-        Assert.Contains("DarlingMcpServerTrendTools", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"), StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpServerTrendTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
     }
 
     /// <summary>#7586: every figure was rounded to 2 places, so a file moving 0.0042 MB/s read 0.00 and a steady small rate jumped between 0.01 and
@@ -759,14 +759,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* The hour before the top of the current hour: sixty one-minute collections that one 60-minute bucket holds whole. */
+            /* The hour before the top of the current hour: sixty one-minute collections that one 60-minute bucket holds whole. Each is
+               half a minute past its minute, so none is stamped on the window's start, which belongs to the window before. */
             var now = DateTime.UtcNow;
             var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
             var start = end.AddHours(-1);
             const string Insert = "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)";
             for (var m = 0; m < 60; m++)
             {
-                var t = DarlingMcpTestData.Naive(start.AddMinutes(m));
+                var t = DarlingMcpTestData.Naive(start.AddMinutes(m).AddSeconds(30));
                 await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "SOS_SCHEDULER_YIELD", 100L, 30000L, 60);
                 await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "PAGEIOLATCH_SH", 50L, 6000L, 60);
                 if (m % 5 == 4)

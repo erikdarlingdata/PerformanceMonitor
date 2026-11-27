@@ -613,10 +613,11 @@ public sealed class OversizedPlanSweepRunRecordTests
             .Where(t => t.Contains("v_collection_log", StringComparison.Ordinal))
             .ToList();
 
-        // Three reads: the windowed newest-collection read, the older-than-the-window newest-collection read of the
-        // offline age (W1b; per server, but it carries the same guard so a sentinel id can never be answered), and
-        // the per-collector health aggregate.
-        Assert.Equal(3, reads.Count);
+        // Two reads: the windowed newest-collection read and the older-than-the-window newest-collection read of the
+        // offline age (W1b; per server, but it carries the same guard so a sentinel id can never be answered). The
+        // per-collector health aggregate moved to CollectionHealthRollupSupport (#8570), and
+        // FleetCollectionHealthRawReadLiveTests proves by behavior that its answer holds no sentinel row.
+        Assert.Equal(2, reads.Count);
 
         foreach (var sql in reads)
         {

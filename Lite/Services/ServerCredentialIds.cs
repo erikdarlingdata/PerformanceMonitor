@@ -23,6 +23,69 @@ internal static class ServerCredentialIds
 {
     private static readonly ConcurrentDictionary<string, byte> Logged = new(StringComparer.Ordinal);
 
+    private static readonly ConcurrentDictionary<string, byte> MissingLogged = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #9730: a SQL Server or service principal server whose saved password is not found under this Windows logon connects with no
+    /// user and fails as <c>Login failed for user ''</c>, which names neither the cause nor the fix. Logs one warning per server
+    /// and process that says so. The text carries no password and no user name.
+    /// </summary>
+    internal static void WarnPasswordMissing(string serverId, string? displayName)
+    {
+        if (MissingLogged.TryAdd("server:" + serverId, 0))
+        {
+            AppLogger.Warn("Credentials",
+                $"No saved password was found for server '{displayName}' under this Windows logon. "
+                + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "A scheduled task set to Do not store password can read saved passwords only while that user is signed in. "
+                + "A password saved from a remote PowerShell session can be unreadable to a scheduled task. "
+                + "Add the server again with --add-server as the Windows user that runs Lite, in a session on this machine, "
+                + "or open the server in Edit Server and save the password.");
+        }
+    }
+
+    /// <summary>
+    /// #9730: the saved password exists but Windows refused to read it (an Unreadable read, not a NotFound). Says so, once per server
+    /// and process, apart from the not-found line. <paramref name="failure"/> is "Windows returned error N" or an exception type name.
+    /// </summary>
+    internal static void WarnPasswordUnreadable(string serverId, string? displayName, string? failure)
+    {
+        if (MissingLogged.TryAdd("server-unreadable:" + serverId, 0))
+        {
+            AppLogger.Warn("Credentials",
+                $"A saved password for server '{displayName}' exists but Windows refused to read it under this Windows logon ({failure}). "
+                + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "A password saved from a remote PowerShell session can be unreadable to a scheduled task. "
+                + "Add the server again with --add-server as the Windows user that runs Lite, in a session on this machine, "
+                + "or open the server in Edit Server and save the password.");
+        }
+    }
+
+    /// <summary>#9730: the unreadable-entry warning for a credential profile, once per profile and process.</summary>
+    internal static void WarnProfileSecretUnreadable(string profileId, string? profileName, string? serverDisplayName, string? failure)
+    {
+        if (MissingLogged.TryAdd("profile-unreadable:" + profileId, 0))
+        {
+            AppLogger.Warn("Credentials",
+                $"A saved password for credential profile '{profileName}' (first used by server '{serverDisplayName}') exists but Windows refused to read it under this Windows logon ({failure}). "
+                + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "Open the profile and save its password as the Windows user that runs Lite, in a session on this machine.");
+        }
+    }
+
+    /// <summary>#9730: the same warning for a credential profile with no saved secret, once per profile and process.</summary>
+    internal static void WarnProfileSecretMissing(string profileId, string? profileName, string? serverDisplayName)
+    {
+        if (MissingLogged.TryAdd("profile:" + profileId, 0))
+        {
+            AppLogger.Warn("Credentials",
+                $"No saved password was found for credential profile '{profileName}' (first used by server '{serverDisplayName}') under this Windows logon. "
+                + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "A scheduled task set to Do not store password can read saved passwords only while that user is signed in. "
+                + "Open the profile and save its password as the Windows user that runs Lite, in a session on this machine.");
+        }
+    }
+
     /// <summary>True when <paramref name="serverId"/> is a GUID, the only kind of Id a saved password is used for.</summary>
     internal static bool IsUsable(string? serverId) => Guid.TryParse(serverId, out _);
 

@@ -108,6 +108,15 @@ run.pageUpdated = async () => {
   return { before, afterPage, afterNextFleetPoll, stamp: new Date(clock.t).toISOString() };
 };
 run.sessionFails = async () => { sc.session = new Error("net"); return { items: await poll() }; };
+// #9203: the session's own build line shows last on the bar, and nothing shows when the session names none. Where the fleet read has
+// failed after the build was learned, the build stays beside "Fleet unavailable".
+run.build = async () => { sc.session = { can_edit: true, build: "Version 3.13.0 (commit abcdef123)" }; return { items: await poll() }; };
+run.buildAbsent = async () => { sc.session = { can_edit: true }; return { items: await poll() }; };
+run.buildFleetDown = async () => {
+  sc.session = { can_edit: true, build: "Version 3.13.0 (commit abcdef123)" };
+  await poll();
+  return { items: await poll(null) };
+};
 
 if (!run[scenario]) throw new Error("unknown scenario " + scenario);
 console.log(JSON.stringify(await run[scenario]()));

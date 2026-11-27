@@ -262,8 +262,9 @@ public sealed class FileIoCollectorDefinitionTests
 }
 
 /// <summary>
-/// Pins that the shared DatabaseExclusionFilter and Lite's original builder (still used by
-/// un-migrated collectors) produce identical SQL — the temporary duplication cannot drift.
+/// Pins that Lite's builder (still used by un-migrated collectors) and the shared DatabaseExclusionFilter produce
+/// the same SQL and parameters. Since #9050 Lite's copy calls the shared one, so a name or a pattern (an entry holding *)
+/// means the same in both.
 /// </summary>
 public sealed class DatabaseExclusionFilterTests
 {
@@ -284,6 +285,28 @@ public sealed class DatabaseExclusionFilterTests
         Assert.Equal(2, parameters.Count);
         Assert.Equal("A", parameters[0].Value);
         Assert.All(parameters, p => Assert.Equal(CollectorParameterType.NVarChar128, p.Type));
+    }
+
+    [Fact]
+    public void MatchesLiteBuilder_ForAMixedListWithPatterns()
+    {
+        var names = new[] { "Stack Overflow", "archive_*", "100%*" };
+
+        var (sharedClause, sharedParams) = DatabaseExclusionFilter.Build(names, "d.name");
+        var (liteClause, liteParams) = RemoteCollectorService.BuildDatabaseExclusionFilter(names, "d.name");
+
+        Assert.Equal(sharedClause, liteClause);
+        Assert.Equal(sharedParams.Count, liteParams.Count);
+        for (int i = 0; i < liteParams.Count; i++)
+        {
+            Assert.Equal(sharedParams[i].Name, liteParams[i].ParameterName);
+            Assert.Equal(sharedParams[i].Value, liteParams[i].Value);
+            Assert.Equal(sharedParams[i].Type == CollectorParameterType.NVarChar260 ? 260 : 128, liteParams[i].Size);
+        }
+
+        Assert.Equal(
+            DatabaseExclusionFilter.BuildLiteralClause(names, "d.name", forNestedDynamicSql: true),
+            RemoteCollectorService.BuildDatabaseExclusionLiteralClause(names, "d.name", forNestedDynamicSql: true));
     }
 
     [Fact]

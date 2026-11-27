@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 
@@ -76,10 +78,20 @@ public sealed class ServerEditCoreTests : IDisposable
         public Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken) =>
             Task.FromResult(OtherKeys.ToList());
 
+        public List<RegisteredServer> Others { get; } = [];
+        public bool OthersCannotBeListed { get; set; }
+        public int LastWrittenId { get; private set; }
+
+        public Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            OthersCannotBeListed
+                ? Task.FromException<IReadOnlyList<RegisteredServer>>(new InvalidOperationException("the store did not answer"))
+                : Task.FromResult<IReadOnlyList<RegisteredServer>>(Others.ToList());
+
         public Task<Edit.ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, Edit.HeldCheck? heldCheck, CancellationToken cancellationToken)
         {
             Writes++;
+            LastWrittenId = serverId;
             LastSets = sets.ToList();
             LastNewKey = newStorageKey;
             LastActualKey = actualStorageKey;
@@ -195,6 +207,144 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(0, store.Writes);
     }
 
+    /* #9635: the MCP tool's parse allows the two per-server settings the Viewer's dialog sets. The web route's parse (the default) does not. */
+    private static async Task<(string Answer, FakeStore Store)> RunSettings(string changes, Edit.ServerEditRow? row = null)
+    {
+        var store = new FakeStore { Row = row ?? SqlRow() };
+        var (parsed, error) = Edit.ParseEditChanges(changes, allowSettings: true);
+        if (error is not null)
+        {
+            return (JsonSerializer.Serialize(new { status = "invalid", message = error }), store);
+        }
+
+        var answer = await Edit.EditServerCoreAsync(store, 41, parsed!, ThrowingProbe, TestKeyRings.Healthy, null, CancellationToken.None);
+        return (answer, store);
+    }
+
+    [Theory]
+    [InlineData("{\"capture_plans\":true}", "capture_plans", true)]
+    [InlineData("{\"capture_plans\":false}", "capture_plans", false)]
+    [InlineData("{\"alert_delivery_mode_override\":\"PerEvent\"}", "alert_delivery_mode_override", "PerEvent")]
+    [InlineData("{\"alert_delivery_mode_override\":\"summary\"}", "alert_delivery_mode_override", "Summary")]
+    public async Task ThePerServerSettings_AreWrittenWithTheValuesTheViewerStores_WithNoProbe(string changes, string column, object expected)
+    {
+        var (answer, store) = await RunSettings(changes);
+
+        Assert.Equal("updated", Status(answer));
+        var set = Assert.Single(store.LastSets);
+        Assert.Equal(column, set.Column);
+        Assert.Equal(expected, set.Value);
+        Assert.Contains(column, JsonNode.Parse(answer)!["changed"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.False(JsonNode.Parse(answer)!["reconnects"]!.GetValue<bool>());
+        Assert.False(JsonNode.Parse(answer)!["tested"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task ANullSetting_ClearsTheOverride_AndThePreviousValuesAreReturned()
+    {
+        var (text, store) = await RunSettings(
+            "{\"capture_plans\":null,\"alert_delivery_mode_override\":null}",
+            SqlRow() with { CapturePlans = true, AlertDeliveryModeOverride = "PerEvent" });
+        var answer = JsonNode.Parse(text)!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        Assert.Equal(2, store.LastSets.Count);
+        Assert.All(store.LastSets, set => Assert.Null(set.Value));
+        Assert.True(answer["previous"]!["capture_plans"]!.GetValue<bool>());
+        Assert.Equal("PerEvent", answer["previous"]!["alert_delivery_mode_override"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ASettingEqualToTheStoredValue_IsUnchanged_AndNothingIsWritten()
+    {
+        var (answer, store) = await RunSettings(
+            "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}",
+            SqlRow() with { CapturePlans = false, AlertDeliveryModeOverride = "Summary" });
+
+        Assert.Equal("unchanged", Status(answer));
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Theory]
+    [InlineData("{\"capture_plans\":\"yes\"}", "capture_plans must be true, false, or null")]
+    [InlineData("{\"capture_plans\":1}", "capture_plans must be true, false, or null")]
+    [InlineData("{\"alert_delivery_mode_override\":\"Bogus\"}", "alert_delivery_mode_override must be")]
+    [InlineData("{\"alert_delivery_mode_override\":\"1\"}", "alert_delivery_mode_override must be")]
+    [InlineData("{\"alert_delivery_mode_override\":true}", "alert_delivery_mode_override must be")]
+    public async Task AnInvalidSettingValue_IsRefusedWithAClearMessage_AndNothingIsWritten(string changes, string message)
+    {
+        var (answer, store) = await RunSettings(changes);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains(message, answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    /* #9635: add_servers takes the same two settings, with the values and the refusals edit_server gives. */
+    [Theory]
+    [InlineData("\"capture_plans\":true", true, null)]
+    [InlineData("\"capture_plans\":false", false, null)]
+    [InlineData("\"capture_plans\":null", null, null)]
+    [InlineData("\"alert_delivery_mode_override\":\"PerEvent\"", null, AlertNotificationMode.PerEvent)]
+    [InlineData("\"alert_delivery_mode_override\":\" summary \"", null, AlertNotificationMode.Summary)]
+    [InlineData("\"alert_delivery_mode_override\":null", null, null)]
+    [InlineData("\"unrelated\":1", null, null)]
+    public void AnAddedEntry_CarriesTheTwoSettingsToTheInsert_AndNullWhenItNamesNone(string keys, bool? capture, AlertNotificationMode? delivery)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        var config = Assert.Single(entries).ProbeConfig;
+        Assert.Equal(capture, config.CapturePlans);
+        Assert.Equal(delivery, config.AlertDeliveryModeOverride);
+    }
+
+    [Theory]
+    [InlineData("\"capture_plans\":\"yes\"", "capture_plans must be true, false, or null")]
+    [InlineData("\"capture_plans\":1", "capture_plans must be true, false, or null")]
+    [InlineData("\"alert_delivery_mode_override\":\"Bogus\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":\"1\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":true", "alert_delivery_mode_override must be")]
+    public void AnAddedEntryWithAnInvalidSetting_IsRefusedWithTheMessageEditServerGives(string keys, string message)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(entries);
+        var refused = Assert.Single(invalid);
+        Assert.Equal("invalid", refused.Status);
+        Assert.StartsWith(message, refused.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("excluded_databases")]
+    [InlineData("is_enabled")]
+    [InlineData("plan_force_bot_enabled")]
+    public async Task AKeyStillOnTheRefusedList_StillRefuses_BesideAllowedSettings(string key)
+    {
+        var (answer, store) = await RunSettings("{\"capture_plans\":true,\"" + key + "\":1}");
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains(key, answer, StringComparison.Ordinal);
+        Assert.Contains("cannot be changed here", answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public void TheSettingColumns_AreLeftOutOfTheFunctionsColumnList()
+    {
+        var parameters = Edit.BuildEditFunctionParameters(
+            41, Stamp,
+            [
+                new Edit.EditColumnValue("display_name", "name", NpgsqlDbType.Text, "x"),
+                new Edit.EditColumnValue("capture_plans", "capture_plans", NpgsqlDbType.Boolean, true),
+            ]);
+
+        Assert.Equal(new[] { "name" }, (string[])parameters[2].Value!);
+        Assert.Equal(18, parameters.Count);
+    }
+
     [Fact]
     public void AnUnknownKey_IsRefused_NamingTheEditableKeys_AndNeverEchoingAValue()
     {
@@ -268,12 +418,12 @@ public sealed class ServerEditCoreTests : IDisposable
     {
         var forbidden = new[]
         {
-            "server_id", "engine", "is_enabled", "excluded_databases", "capture_plans", "alert_delivery_mode_override",
+            "server_id", "engine", "is_enabled", "excluded_databases",
             "plan_force_bot_enabled", "remediation_username", "remediation_encrypted_password", "created_at",
         };
 
         Assert.Empty(Edit.EditColumnOfField.Values.Intersect(forbidden));
-        Assert.Equal(15, Edit.EditColumnOfField.Count);
+        Assert.Equal(17, Edit.EditColumnOfField.Count);
     }
 
     [Fact]
@@ -295,7 +445,7 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(DBNull.Value, parameters[4].Value);
         Assert.DoesNotContain("encrypted_password", Edit.EditFunctionSql, StringComparison.Ordinal);
         Assert.Equal(
-            Edit.EditColumnOfField.Values.Order(StringComparer.Ordinal).ToArray(),
+            Edit.EditColumnOfField.Values.Except(["capture_plans", "alert_delivery_mode_override"]).Order(StringComparer.Ordinal).ToArray(),
             Edit.EditFunctionColumns.Select(c => c.Column).Order(StringComparer.Ordinal).ToArray());
     }
 
@@ -529,14 +679,14 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheSentenceEveryReferenceGets()
+    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheEditsSentenceForAReference()
     {
         DarlingOwnedSecrets.Set(new DarlingOwnedSet(Array.Empty<string>(), new[] { "DARLING_CONFIG" }));
 
         var (plan, error) = Plan(SqlRow(), "{\"host\":\"b.example.test\",\"password\":\"env:DARLING_CONFIG\"}");
 
         Assert.Null(plan);
-        Assert.Equal(DarlingSecretSource.RequestReferenceRefusalText, error);
+        Assert.Equal(Edit.EditReferenceRefusedText, error);
     }
 
     [Fact]
@@ -840,8 +990,8 @@ public sealed class ServerEditCoreTests : IDisposable
         var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
 
         Assert.Equal("invalid", answer["status"]!.GetValue<string>());
-        Assert.Equal("Enter the password itself. References (env: or file:) can only be set in the configuration file.", answer["message"]!.GetValue<string>());
         Assert.Equal(Edit.EditReferenceRefusedText, answer["message"]!.GetValue<string>());
+        Assert.NotEqual(ServerConnectionRule.ReferenceRefusedText, answer["message"]!.GetValue<string>());
     }
 
     [Fact]
@@ -905,5 +1055,73 @@ public sealed class ServerEditCoreTests : IDisposable
 
         Assert.Null(error);
         Assert.NotNull(plan);
+    }
+
+    /// <summary>
+    /// #9693: a storage name another registration has as its display name answers for both of them, and an edit refuses a
+    /// name that answers for two. The printed undo names the edited server by its id, so the name it prints picks that one
+    /// server, and running the undo writes to it.
+    /// </summary>
+    [Fact]
+    public async Task TheUndoOfAServerWhoseStorageNameAnotherRegistrationHasAsItsDisplayName_NamesItsId_AndEditsThatServer()
+    {
+        const string edit = """{"monthly_cost_usd": 25}""";
+        var row = SqlRow();
+        var key = JsonNode.Parse(await Run(new FakeStore { Row = row }, edit))!["server"]!.GetValue<string>();
+        var store = new FakeStore { Row = row };
+        store.Others.Add(new RegisteredServer(42, "beta-01.example.test", key));
+
+        var answer = JsonNode.Parse(await Run(store, edit))!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        var undo = answer["undo"]!["arguments"]!;
+        var undoName = undo["server_name"]!.GetValue<string>();
+        Assert.Equal("id:41", undoName);
+
+        // The registry as the edit left it: the storage name answers for both, the printed name for the edited one.
+        List<RegisteredServer> registry = [new RegisteredServer(41, key, row.Name), .. store.Others];
+        Assert.Equal(2, Edit.ResolveForEdit(registry, key).Candidates.Count);
+        var picked = Assert.Single(Edit.ResolveForEdit(registry, undoName).Candidates);
+        Assert.Equal(41, picked.ServerId);
+
+        // The printed undo, run against the row as the edit left it.
+        store.Row = row with { MonthlyCostUsd = 25m, ModifiedAt = Stamp.AddSeconds(1) };
+        var undone = await Edit.EditServerCoreAsync(
+            store, picked.ServerId, undo["changes_json"]!.GetValue<string>(), ThrowingProbe, TestKeyRings.Healthy, null, CancellationToken.None);
+
+        Assert.Equal("updated", Status(undone));
+        Assert.Equal(2, store.Writes);
+        Assert.Equal(41, store.LastWrittenId);
+        var cost = Assert.Single(store.LastSets);
+        Assert.Equal("monthly_cost_usd", cost.Column);
+        Assert.Equal(row.MonthlyCostUsd, cost.Value);
+    }
+
+    /// <summary>#9693: a storage name no other registration answers to is the name the undo prints.</summary>
+    [Fact]
+    public async Task TheUndoOfAServerWhoseStorageNameNoOtherRegistrationAnswersTo_NamesTheStorageName()
+    {
+        var store = new FakeStore { Row = SqlRow() };
+        store.Others.Add(new RegisteredServer(42, "beta-01.example.test", "Beta"));
+
+        var answer = JsonNode.Parse(await Run(store, """{"monthly_cost_usd": 25}"""))!;
+
+        Assert.Equal(answer["server"]!.GetValue<string>(), answer["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #9693: the edit is committed before the other registrations are read for the undo. A read that fails leaves the
+    /// answer an update, and the undo names the server by its id.
+    /// </summary>
+    [Fact]
+    public async Task AnEditWhoseOtherRegistrationsCannotBeListed_StillAnswersUpdated_AndItsUndoNamesTheId()
+    {
+        var store = new FakeStore { Row = SqlRow(), OthersCannotBeListed = true };
+
+        var answer = JsonNode.Parse(await Run(store, """{"monthly_cost_usd": 25}"""))!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Writes);
+        Assert.Equal("id:41", answer["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
     }
 }

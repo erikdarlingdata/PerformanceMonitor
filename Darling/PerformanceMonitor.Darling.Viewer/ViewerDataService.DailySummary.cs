@@ -60,6 +60,20 @@ public sealed partial class ViewerDataService
     /// <c>DarlingHealthReader.UseRangeCacheClockForTests</c>. Production never calls it and keeps the wall clock.</summary>
     internal void UseRangeCacheClockForTests(Func<DateTime> clock) => _dailySummaryRangeCache = new(clock);
 
+    /// <summary>#8549: the most day-aligned sub-ranges a cold Daily Summary range is read as, side by side (see
+    /// <see cref="ReadDailySummaryRangeAsync"/>); the pool's width caps it. Four cuts a month into reads of about a
+    /// week each.</summary>
+    internal const int DailySummaryMissParts = 4;
+
+    /// <summary>Test-only: the number of sub-ranges a cold range is read as, in place of
+    /// <see cref="DailySummaryMissParts"/> capped by the pool, so a live test reads one window as one statement and as
+    /// a known split and compares the rows. Production never sets it.</summary>
+    internal int? DailySummaryMissPartsForTests { get; set; }
+
+    /// <summary>Test-only: called with each [start, end) the Daily Summary statement is run over, so a live test can see
+    /// which reads a range took. Production never sets it.</summary>
+    internal Action<DateTime, DateTime>? DailySummaryRangeReadHookForTests { get; set; }
+
     /// <summary>#4232: one day's worth of <see cref="DailySummarySql"/>'s raw output columns, from BEFORE any
     /// banding or retention judgment — the unit <see cref="_dailySummaryRangeCache"/> actually caches. A record
     /// with init-only properties (immutable), matching every row instance being shared across callers within
@@ -112,7 +126,26 @@ public sealed partial class ViewerDataService
     private async Task<(List<DailySummaryRow> Rows, DateTime RetentionHorizon)> ReadDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken)
     {
-        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        /* #8549: the five lookups the range read needs before it starts (rollup availability, the two banding
+           tiers, the retention horizon, the separately monitored list). None reads another's answer and each runs
+           on its own pooled connection, so they run side by side and the deadline each is handed is priced for five
+           reads in flight. The scope ends before the range read, which is priced on its own. */
+        Task<(RollupAvailability Rollups, RollupCoverage Coverage)> availabilityRead;
+        Task<DeadlockRateThresholds> deadlockRatesRead;
+        Task<BlockingBandThresholds> blockingBandsRead;
+        Task<DateTime> horizonRead;
+        Task<IReadOnlyList<string>> separatelyMonitoredRead;
+        using (ViewerReadFanOut.Of(5))
+        {
+            availabilityRead = GetRollupAvailabilityAsync(cancellationToken).AsTask();
+            deadlockRatesRead = GetDeadlockRateThresholdsAsync(cancellationToken);
+            blockingBandsRead = GetBlockingBandThresholdsAsync(cancellationToken);
+            horizonRead = ReadRetentionHorizonAsync(cancellationToken);
+            separatelyMonitoredRead = GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+            await Task.WhenAll(availabilityRead, deadlockRatesRead, blockingBandsRead, horizonRead, separatelyMonitoredRead);
+        }
+
+        var (rollups, coverage) = await availabilityRead;
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
@@ -123,15 +156,15 @@ public sealed partial class ViewerDataService
            settings-row read. */
         var banding = new DailyHealthThresholds
         {
-            DeadlockRates = await GetDeadlockRateThresholdsAsync(cancellationToken),
-            BlockingBands = await GetBlockingBandThresholdsAsync(cancellationToken),
+            DeadlockRates = await deadlockRatesRead,
+            BlockingBands = await blockingBandsRead,
         };
 
         /* #3653: the horizon, read once per range like the banding tiers above — a schedule save mid-read must
            not judge some days against one horizon and the rest against another. BaselineMath.BaselineWindowDays
            is the floor the purge applies to the baseline-serving raw collectors; it is passed because the
            Analysis assembly that owns it is one Storage does not reference. */
-        var horizon = await ReadRetentionHorizonAsync(cancellationToken);
+        var horizon = await horizonRead;
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window, so the calendar
@@ -145,6 +178,7 @@ public sealed partial class ViewerDataService
         async Task<List<RawDailySummaryDay>> RunRangeAsync(
             string sql, IReadOnlyList<string>? scope, DateTime start, DateTime end, CancellationToken ct)
         {
+            DailySummaryRangeReadHookForTests?.Invoke(start.Date, end.Date);
             var raws = new List<RawDailySummaryDay>();
             await using var command = _dataSource.CreateCommand(sql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -159,7 +193,7 @@ public sealed partial class ViewerDataService
                 command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = scope.ToArray() });
             }
 
-            await using (var reader = await command.ExecuteReaderAsync(ct))
+            await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(ct)))
             {
                 while (await reader.ReadAsync(ct))
                 {
@@ -187,8 +221,13 @@ public sealed partial class ViewerDataService
         /* #4232: the closed-day cache. The viewer's calendar reads are always live ("as of now"), so every
            call is cache-eligible. ToDailySummaryRow re-reads the live banding/horizon on every row, cached or
            fresh, every call — never from whatever a cached block happened to compute them as when it was built
-           (ruling item 7: no column the statement itself returns spans more than one day, but this post-read
-           judgment does move between refreshes). */
+           (ruling item 7: the statement returns no band or rank, but this post-read judgment does move between
+           refreshes).
+           #8549: a cache miss reads every closed day in the window, which on a month nobody has opened is the one
+           long read of the tab. runMissRanges lets the cache cut that read into up to DailySummaryMissParts
+           day-aligned sub-ranges, run here side by side through the same statement text, so the deadline each is
+           handed is priced for that many reads in flight. Each older sub-range is read one day past its end and the
+           cache keeps only its own days (DailySummaryRangeCache's doc says what that day is for). */
         Task<List<RawDailySummaryDay>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => _dailySummaryRangeCache.GetRangeAsync(
             storeKey: string.Empty,
             serverId: serverId,
@@ -200,12 +239,18 @@ public sealed partial class ViewerDataService
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken,
-            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
+            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon), // #6809: the horizon day and older are re-read within the hour, never held for a day
+            missParts: DailySummaryMissPartsForTests ?? Math.Min(DailySummaryMissParts, ViewerReadFanOut.MaxConcurrentReads),
+            runMissRanges: async (ranges, ct) =>
+            {
+                using var readFanOut = ViewerReadFanOut.Of(ranges.Count);
+                return await Task.WhenAll(ranges.Select(range => RunRangeAsync(sql, scope, range.Start, range.End, ct)));
+            });
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks, as get_daily_health does. An empty list (every other target) is today's read, unchanged. A
            scoping fault is logged and the days are read unscoped, so the calendar never loses a day to it. */
-        var separatelyMonitored = await GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+        var separatelyMonitored = await separatelyMonitoredRead;
         List<RawDailySummaryDay> rawResults;
         if (separatelyMonitored.Count > 0)
         {

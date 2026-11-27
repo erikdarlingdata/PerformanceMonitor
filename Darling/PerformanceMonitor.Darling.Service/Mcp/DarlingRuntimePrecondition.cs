@@ -166,6 +166,25 @@ ORDER BY lower(database_name), database_name";
     }
 
     /// <summary>
+    /// #8982: the status of <paramref name="collectorName"/>'s newest <c>collection_log</c> run on this server, or null when it has
+    /// none or the read fails. For a caller that has to tell one named skip from another, which <see cref="StatusAsync"/>'s
+    /// composed answer does not expose.
+    /// </summary>
+    public static async Task<string?> LatestStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var (status, _, _) = await ReadLatestOutcomeAsync(postgres, serverId, collectorName, cancellationToken);
+            return status;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY: its newest
     /// <c>collection_log</c> run is <c>SUCCESS</c> with no note, so the monitored server answered and had nothing for it. Null
     /// when there is no run, the newest run is anything else (a fault, a denial, a missing session, a note that explains the

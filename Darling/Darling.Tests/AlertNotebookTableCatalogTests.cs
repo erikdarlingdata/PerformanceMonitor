@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// The reads are found in the template sources; the catalog is read by running the shipped JavaScript under Node
 /// (reported as skipped when Node is not installed).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertNotebookTableCatalogTests
 {
     private static readonly string[] s_serviceDir = { "Darling", "PerformanceMonitor.Darling.Service" };
@@ -63,7 +64,7 @@ public sealed class AlertNotebookTableCatalogTests
     /// (never a silent pass) when Node is not on the machine. The CI runners are windows-latest images, which carry Node.</summary>
     internal static JsonElement RunNode(string script, params string[] args)
     {
-        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false }.InLocalFolder();
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", script));
         foreach (var arg in args) psi.ArgumentList.Add(arg);
 
@@ -279,7 +280,8 @@ public sealed class AlertNotebookTableCatalogTests
         ["get_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "WaitTrend") },
         ["get_lock_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "LockWaitTrend") },
         ["get_cpu_utilization"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "CpuUtilization") },
-        ["get_tempdb_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbTrend") },
+        /* #8881: the point is built by TempDbPoint, a private helper the envelope builder calls. */
+        ["get_tempdb_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbTrend"), (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbPoint") },
         ["get_memory_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "MemoryTrend") },
         ["get_perfmon_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "PerfmonTrend") },
         ["get_file_io_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "FileIoTrend") },
@@ -331,8 +333,9 @@ public sealed class AlertNotebookTableCatalogTests
             foreach (var (folder, file, method) in builders)
             {
                 var text = File.ReadAllText(PathTo(folder.Append(file).ToArray()));
-                var at = text.IndexOf("public static string " + method + "(", StringComparison.Ordinal);
-                Assert.True(at >= 0, read + ": shared builder " + method + " not found in " + file);
+                var found = Regex.Match(text, @"(?:public|private|internal) static [\w<>?,\[\] ]+ " + Regex.Escape(method) + @"\(");
+                Assert.True(found.Success, read + ": shared builder " + method + " not found in " + file);
+                var at = found.Index;
                 source += SliceTo(text, at, "\n    public static ");
             }
         }

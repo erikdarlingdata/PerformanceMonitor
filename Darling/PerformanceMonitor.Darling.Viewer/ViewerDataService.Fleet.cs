@@ -138,13 +138,13 @@ WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + @"
 SELECT
@@ -179,13 +179,13 @@ SELECT
         FROM collection_log AS l
         WHERE " + DarlingPgBlockingReader.PgBlockingCaptureFilter + @"
         AND   l.rows_collected > 0
-        AND   l.collection_time >= $1
+        AND   l.collection_time > $1
         AND   l.collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
         FROM v_deadlocks
-        WHERE deadlock_time >= $1
+        WHERE deadlock_time > $1
         AND   deadlock_time <= $2
         AND   collection_time >= $3
     )
@@ -246,7 +246,7 @@ SELECT
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         FleetTotals totals;
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             totals = await reader.ReadAsync(cancellationToken)
                 ? new FleetTotals
@@ -915,7 +915,7 @@ public sealed class FleetRollup
         {
             /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
                (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
-            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns, identity.ExhaustedColumns));
         }
 
         if (s.DatabaseStateReason is { Length: > 0 } databaseStateReason)

@@ -36,12 +36,12 @@ namespace Darling.Tests;
 public sealed class QueryStoreTopDailyReadLiveTests
 {
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the daily summary read's live pins (each mints its own scratch database).";
-    private const int ServerId = 1;
-    private const int Top = 30;
-    private const int RetentionDays = 9;
+    internal const int ServerId = 1;
+    internal const int Top = 30;
+    internal const int RetentionDays = 9;
 
-    private static readonly DateTime End = new(2026, 1, 14, 6, 0, 0, DateTimeKind.Unspecified);
-    private static readonly DateTime BuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
+    internal static readonly DateTime End = new(2026, 1, 14, 6, 0, 0, DateTimeKind.Unspecified);
+    internal static readonly DateTime BuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
     /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
@@ -80,13 +80,13 @@ public sealed class QueryStoreTopDailyReadLiveTests
 
     /* ───────────────────────────── live ───────────────────────────── */
 
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static string At(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+    internal static string At(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
 
     /// <summary>The wide table for server 1 from 2026-01-05 to 2026-01-14 12:00, one row per query per hour for most
     /// hours (a row at every midnight among them), with nulls where the facts need them. 40 queries: query 40 has every
@@ -94,7 +94,7 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role. #7814: every row's interval start is its collection time, so the table read
     /// (placed by the interval's start) and the daily summary (built on collection days) place each row in the same window, which the
     /// bit-for-bit comparisons need; an interval that started before its collection moves a row across an outer window edge in one and not the other.</summary>
-    private const string SeedSql = @"
+    internal const string SeedSql = @"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
@@ -120,7 +120,7 @@ FROM
     WHERE (q * 7 + h) % 5 <> 0 OR h % 24 = 0
 ) AS s;";
 
-    private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
+    internal static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await ExecAsync(connection, SeedSql, ct);
         await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (1, 'srv1', TRUE)", ct);
@@ -130,7 +130,7 @@ FROM
     }
 
     /// <summary>One extra wide-table row for query <paramref name="queryId"/> with a duration large enough to rank first.</summary>
-    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null, DateTime? intervalStart = null)
+    internal static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null, DateTime? intervalStart = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
@@ -177,7 +177,7 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         }
     }
 
-    private static DarlingDataReader.QueryStoreRow ToRow(object?[] v)
+    internal static DarlingDataReader.QueryStoreRow ToRow(object?[] v)
     {
         static T? Get<T>(object? value) => value is null or DBNull ? default : (T)value;
         return new DarlingDataReader.QueryStoreRow(
@@ -196,12 +196,12 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
             B(r.AvgRowcount), r.LastExecutionTime is { } t ? At(t) : "<null>", r.QueryText, r.ReplicaRole ?? "<null>");
     }
 
-    private static List<string> Format(IEnumerable<DarlingDataReader.QueryStoreRow> rows) => rows.Select(Format).ToList();
+    internal static List<string> Format(IEnumerable<DarlingDataReader.QueryStoreRow> rows) => rows.Select(Format).ToList();
 
     /// <summary>Runs <paramref name="sql"/> (either statement) and returns its raw rows, NULLs kept.</summary>
-    private static async Task<List<object?[]>> RunSqlAsync(
+    internal static async Task<List<object?[]>> RunSqlAsync(
         NpgsqlConnection connection, string sql, DateTime readStart, DateTime end, string? db, string? outcome, string? module,
-        (DateOnly, DateOnly)? span, CancellationToken ct)
+        (DateOnly, DateOnly)? span, CancellationToken ct, QueryStoreTopHourlyEdges.Plan? extra = null)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
@@ -218,6 +218,15 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         }
 
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(Top) });  /* #5313: the round's candidate limit, bound last */
+        if (extra is not null)
+        {
+            /* #9280: the hourly statement's extra parameters, after the limit. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = QueryStoreTopHourlyEdges.HourValues(extra) });
+            foreach (var bound in QueryStoreTopHourlyEdges.RangeValues(extra))
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = bound });
+            }
+        }
 
         var rows = new List<object?[]>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -236,9 +245,24 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         NpgsqlConnection connection, DateTime readStart, DateTime end, string? db, string? outcome, string? module, CancellationToken ct) =>
         Format((await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, readStart, end, db, outcome, module, null, ct)).Select(ToRow));
 
-    private static async Task<DarlingDataReader.QueryStoreTopRead> RouteAsync(
+    internal static async Task<DarlingDataReader.QueryStoreTopRead> RouteAsync(
         NpgsqlDataSource source, DateTime start, DateTime end, string? db, string? outcome, string? module, CancellationToken ct) =>
         await DarlingDataReader.GetQueryStoreTopWithReachAsync(source, ServerId, start, end, Top, db, outcome, module, ct);
+
+    /// <summary>#9310: a read answered by the daily statement names it in the scope with the days it read from the summary.</summary>
+    [Fact]
+    public async Task TheDailyStatement_IsNamedInTheReadScope_WithItsDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            using var scope = ReadScope.Open(null);
+            var read = await RouteAsync(source, End.AddHours(-72), End, null, null, null, ct);
+
+            Assert.Equal(2, read.DailyDaysUsed);
+            Assert.Equal(ReadScope.SourceIntervalTable, scope.Scope.Source);
+            Assert.Equal("daily table, 2 days", scope.Scope.SourceReason);
+        });
+    }
 
     public static IEnumerable<object?[]> Cells()
     {
@@ -557,7 +581,7 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             await InsertRowAsync(connection, s.AddSeconds(-1), 9101, ct);          // last second of the first edge: read
             await InsertRowAsync(connection, s, 9102, ct);                         // exactly S: inside the summary's first day, missed
             await InsertRowAsync(connection, new DateTime(2026, 1, 14, 0, 0, 0), 9103, ct); // exactly E: the trailing edge, read
-            await InsertRowAsync(connection, End, 9104, ct);                       // exactly $3, inclusive: read
+            await InsertRowAsync(connection, End, 9104, ct);                       // exactly $3, exclusive: in neither
             await InsertRowAsync(connection, End.AddSeconds(1), 9105, ct);         // past $3: in neither
             await InsertRowAsync(connection, End.AddHours(-72).AddSeconds(-1), 9106, ct); // before ReadStart: in neither
 
@@ -575,16 +599,17 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             Assert.Contains(9101L, ids);
             Assert.DoesNotContain(9102L, ids);
             Assert.Contains(9103L, ids);
-            Assert.Contains(9104L, ids);
+            Assert.DoesNotContain(9104L, ids);
             Assert.DoesNotContain(9105L, ids);
             Assert.DoesNotContain(9106L, ids);
             Assert.Contains(9107L, ids);
             Assert.Contains(9108L, ids);
 
-            /* Today's read has everything the window holds except the two outside it. */
+            /* Today's read has everything the window holds except the three outside it. */
             var today = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, route.Table!.Value.ReadStart, End, null, null, null, null, ct))
                 .Select(v => (long)v[1]!).ToHashSet();
             Assert.Contains(9102L, today);
+            Assert.DoesNotContain(9104L, today);
             Assert.DoesNotContain(9105L, today);
             Assert.DoesNotContain(9106L, today);
             Assert.Contains(9107L, today);

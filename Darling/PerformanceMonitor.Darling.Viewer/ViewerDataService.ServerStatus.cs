@@ -80,7 +80,7 @@ WHERE s.server_id <> 0";
         {
             await using var command = _dataSource.CreateCommand(ServerConnectDownSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 result[reader.GetInt32(0)] = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), reader.IsDBNull(2) ? null : reader.GetString(2),
@@ -175,7 +175,7 @@ WHERE s.server_id <> 0";
 
         await using var command = _dataSource.CreateCommand(ServerFreshnessSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             result[reader.GetInt32(0)] = (reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
@@ -196,8 +196,12 @@ WHERE s.server_id <> 0";
     /// <summary>The actual read behind <see cref="GetStoreSizeBytesAsync"/>'s single-flight gate. Runs with
     /// <see cref="CancellationToken.None"/> (via <see cref="SingleFlightTtlCache{T}"/>): shared work, not any
     /// one caller's.</summary>
-    private Task<long?> FetchStoreSizeBytesAsync() =>
-        ResolveStoreSizeAsync(ReadRecordedStoreSizeAsync, ReadLiveStoreSizeAsync, StoreSizeWarn ?? ViewerLogger.Warn);
+    private Task<long?> FetchStoreSizeBytesAsync()
+    {
+        /* #9194: shared work, so it does not take the ambient token of whichever tab load started it. */
+        ViewerReadScope.Clear();
+        return ResolveStoreSizeAsync(ReadRecordedStoreSizeAsync, ReadLiveStoreSizeAsync, StoreSizeWarn ?? ViewerLogger.Warn);
+    }
 
     /// <summary>Test hook: where the fallback WARN goes (the log source and the message), <see cref="ViewerLogger.Warn"/> when null.</summary>
     internal Action<string, string>? StoreSizeWarn { get; set; }

@@ -186,8 +186,9 @@ public sealed partial class ViewerDataService
     {
         /* #5562 R6: a finished range's end goes into the read (the shared reader's UntilUtc), so the SQL bounds the runs before the
            per-server top-N and the row cap count them. A window that ended in the past on a busy fleet keeps every run inside it, not
-           the newest N of everything since the start. The reader's end is inclusive; the picker's end is exclusive (a run at the next
-           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier.
+           the newest N of everything since the start. The picker's range is closed at its start and open at its end (a run at the next
+           day's start is not in "yesterday"); the reader's is open at its start and closed at its end, so each bound is taken one
+           microsecond (the store's precision) earlier (ReaderBound).
            #5703: the tab's Status and Category go into the read the same way. The row cap keeps the newest N runs of the whole fleet,
            and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
            saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
@@ -202,10 +203,10 @@ public sealed partial class ViewerDataService
             : new JobHistoryFilter(
                 RunStatus: runStatus,
                 Category: string.IsNullOrWhiteSpace(category) ? null : category,
-                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+                UntilUtc: untilUtc is { } until ? ReaderBound(until) : null,
                 ShareCapPerServer: share);
         var dtos = await DarlingJobHistoryReader.GetAsync(
-            _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
+            _dataSource, ReaderBound(sinceUtc), serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 
         /* D5: each row converts on its own server's clock, read from the fleet's held clocks (ServerClockCache), the way
            Alert History's rows do, not on whichever server tab happens to be active. */
@@ -221,6 +222,12 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// A bound of the picker's range as the shared job history reader takes it. The picker's range holds its start and not its end;
+    /// the reader's holds its end and not its start. One microsecond, the store's precision, earlier on either bound reads the same runs.
+    /// </summary>
+    internal static DateTime ReaderBound(DateTime pickerBoundUtc) => pickerBoundUtc.AddTicks(-TimeSpan.TicksPerMicrosecond);
 
     /// <summary>Marks every row of a list that holds several servers (#6137), so each reads on the one clock the header names.</summary>
     internal static void StampMixedServers(List<ViewerJobHistoryRow> rows)
@@ -318,7 +325,7 @@ public sealed partial class ViewerDataService
     public Task<List<string>> GetJobHistoryCategoriesAsync(
         DateTime sinceUtc, DateTime? untilUtc = null, int? serverId = null, CancellationToken cancellationToken = default) =>
         DarlingJobHistoryReader.GetCategoriesAsync(
-            _dataSource, sinceUtc, untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+            _dataSource, ReaderBound(sinceUtc), untilUtc is { } until ? ReaderBound(until) : null,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, serverId, cancellationToken);
 
     /// <summary>
@@ -478,7 +485,7 @@ FROM
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
             }
 
-            if (await command.ExecuteScalarAsync(cancellationToken) is DateTime collected)
+            if (await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is DateTime collected)
             {
                 oldest = DateTime.SpecifyKind(collected, DateTimeKind.Utc);
             }
@@ -541,7 +548,7 @@ FROM
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(1))
@@ -563,7 +570,7 @@ FROM
         await using (var probe = _dataSource.CreateCommand(JobHistoryOldestDailyIsAggregateSql))
         {
             probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            if (await probe.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is not true)
             {
                 return null;
             }
@@ -571,7 +578,7 @@ FROM
 
         await using var bounds = _dataSource.CreateCommand(JobHistoryOldestDailyBoundsSql);
         bounds.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await bounds.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await bounds.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
         {
             return null;
@@ -652,7 +659,7 @@ FROM
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await ReadAgentStatusRowsAsync(reader, clocks, cancellationToken);
     }
 

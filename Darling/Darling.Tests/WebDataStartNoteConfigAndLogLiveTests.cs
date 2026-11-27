@@ -159,9 +159,10 @@ public sealed class ConfigAndLogNoteStore : IAsyncLifetime
         await RunsAsync(connection, logCappedId, logCappedName, "wait_stats", End.AddHours(-CappedRunHours), End, "1 hour");
 
         /* The window-start edge: a window of 24 hours ending at End less 24 hours starts at T0 (End less 48 hours). Each
-           server holds 24 hourly runs from its first instant, and a second collector's run at that same first instant,
-           so 25 runs fall in the window and a page of 24 is cut. The first instant is T0 itself for one server, and a
-           second after it for the other. */
+           server holds 24 hourly runs from its first instant, and a second collector's run at that same first instant.
+           The first instant is T0 itself for one server, whose two runs there are outside the window (start, end], so 23
+           runs fall in it and a page of 24 is whole. It is a second after T0 for the other, so 25 runs fall in the window
+           and a page of 24 is cut. */
         var t0 = End.AddHours(-48);
         foreach (var (scenario, shift) in new[] { ("edge-equal", TimeSpan.Zero), ("edge-later", TimeSpan.FromSeconds(1)) })
         {
@@ -478,11 +479,13 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
         AssertNoNote(whole);
     }
 
-    /// <summary>A page that fills its cap shows the note only when its oldest run is later than the window's start, with no
-    /// slack: a page whose oldest run is the window's start shows the whole range and says nothing, and one whose oldest run
-    /// is a second after it was cut there. The window is anchored (as_of) so its start is exact.</summary>
+    /// <summary>A page that fills its cap shows the note when its oldest run is later than the window's start, with no slack.
+    /// The window is (start, end], so the runs stamped on its start are outside it: the server whose first runs sit there
+    /// has 23 runs in the window, its page is not cut and says nothing. The server whose first runs sit a second after the
+    /// start has 25, its page of 24 is cut, and the note names that second. The window is anchored (as_of) so its start is
+    /// exact.</summary>
     [Fact]
-    public async Task ACappedPage_WhoseOldestRunIsTheWindowsStart_GetsNoNote_AndOneASecondLaterGetsIt_AgainstDevPostgres()
+    public async Task RunsOnTheWindowsStart_AreOutsideIt_SoThePageIsNotCutAndGetsNoNote_AndASecondLaterItIsCutAndGetsIt_AgainstDevPostgres()
     {
         RequireStore();
         const int Hours = 24;
@@ -492,8 +495,8 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
 
         var equal = await AskAsync(ConfigAndLogNoteStore.CollectionLogRead, "edge-equal", Hours, Limit, anchor);
         AssertRows(ConfigAndLogNoteStore.CollectionLogRead, equal);
-        Assert.True(equal["truncated"]?.GetValue<bool>(), "the page was cut at its limit");
-        Assert.Equal(windowStart.Ticks, ParseUtc(equal["oldest_returned_collection_time"]).Ticks);
+        Assert.False(equal["truncated"]?.GetValue<bool>(), "the runs on the window's start are outside it, so the page holds every run in the window");
+        Assert.Equal(windowStart.AddHours(1).Ticks, ParseUtc(equal["oldest_returned_collection_time"]).Ticks);
         AssertNoNote(equal);
 
         var later = await AskAsync(ConfigAndLogNoteStore.CollectionLogRead, "edge-later", Hours, Limit, anchor);

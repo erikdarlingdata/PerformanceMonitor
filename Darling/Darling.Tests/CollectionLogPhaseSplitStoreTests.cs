@@ -32,18 +32,9 @@ namespace Darling.Tests;
 public class CollectionLogPhaseSplitStoreTests
 {
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("collection-log-phase-split", PgMigrations.Scripts.Single(s => s.Version == 108).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
@@ -244,7 +235,6 @@ public class CollectionLogPhaseSplitStoreTests
         Assert.Contains(
             "table_name = 'collection_log' AND column_name = 'sql_drain_ms'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 

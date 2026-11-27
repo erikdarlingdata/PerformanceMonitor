@@ -33,7 +33,7 @@ namespace Lite.Tests;
 /// secondary captures Query Store by default and a capturing secondary routes <c>not_mirror</c> (the primary is read), so the
 /// test turns secondary capture off for its run and puts it back afterwards.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public sealed class QueryStoreReplicaAgFixtureLiveTests : IDisposable
 {
     private const string FixtureDatabase = "AgFixtureDb";

@@ -223,6 +223,18 @@ public sealed class RdsCpuIngestor
     private readonly ILogger? _logger;
     private readonly RdsEndpointVerifier _verifier;
 
+    /// <summary>
+    /// #9522: the writer and the <c>DbiResourceId</c> this ingestor shares with the runner's log readers, or null
+    /// for an ingestor that resolves both on every run (one built on its own, as a test builds one).
+    /// </summary>
+    private readonly RdsLookupCache? _lookups;
+
+    /// <summary>
+    /// The tick source for the store time this ingestor reports on <see cref="RdsIngestOutcome.StoreMs"/> (#9523): null
+    /// is the process stopwatch. A test sets it so a duration is a stated number. Nothing in the service sets it.
+    /// </summary>
+    internal Func<long>? StoreClock { get; init; }
+
     public RdsCpuIngestor(
         NpgsqlDataSource postgres,
         Func<string, IAmazonRDS>? rdsClientFactory = null,
@@ -231,8 +243,10 @@ public sealed class RdsCpuIngestor
         RdsEndpointVerifier? verifier = null,
         AwsRoleCredentialCache? roles = null,
         Func<string, AwsRoleKey?, IAmazonRDS>? roleRdsClientFactory = null,
-        Func<string, AwsRoleKey?, IAmazonPI>? rolePiClientFactory = null)
+        Func<string, AwsRoleKey?, IAmazonPI>? rolePiClientFactory = null,
+        RdsLookupCache? lookups = null)
     {
+        _lookups = lookups;
         _verifier = verifier ?? new RdsEndpointVerifier();
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _rdsClientFactory = roleRdsClientFactory ?? AwsRoleClients.Rds(rdsClientFactory, roles);
@@ -284,6 +298,9 @@ public sealed class RdsCpuIngestor
 
         List<PgCpuUtilizationCollector.Row> samples;
 
+        /* #9523: the watermark read and the COPY are this cycle's store time. The AWS calls around them are not. */
+        var store = new RdsStorePhase(StoreClock);
+
         try
         {
             /* #5452: a server with its own role reads under it from here on, host check included; a server with no role
@@ -295,47 +312,37 @@ public sealed class RdsCpuIngestor
             await _verifier.EnsureAsync(
                 rds, parsed, host, serverId, cancellationToken, loginConnectionString, AwsRoleKey.ScopeOf(role));
 
-            var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
-                ? await ResolveWriterAsync(rds, parsed.Identifier, cancellationToken)
-                : parsed.Identifier;
+            var isCluster = parsed.Kind == RdsEndpointKind.ClusterWriter;
 
-            var dbiResourceId = await ResolveDbiResourceIdAsync(rds, instanceId, cancellationToken);
+            /* #9522: the writer is the one the log readers of this cycle resolved, when they share a cache, and the
+               resource id is asked for once an hour rather than once a run: AWS never changes it for an instance. */
+            var instanceId = !isCluster
+                ? parsed.Identifier
+                : _lookups is null
+                    ? await ResolveWriterAsync(rds, parsed.Identifier, cancellationToken)
+                    : await _lookups.WriterAsync(
+                        role, parsed.Region, parsed.Identifier,
+                        () => ResolveWriterAsync(rds, parsed.Identifier, cancellationToken), cancellationToken);
 
-            var watermark = await GetWatermarkAsync(serverId, cancellationToken);
-            var now = DateTime.UtcNow;
-            var startTime = watermark.HasValue && watermark.Value > now - LookbackWindow
-                ? watermark.Value
-                : now - LookbackWindow;
+            try
+            {
+                samples = await ReadInstanceSamplesAsync(rds, role, parsed.Region, instanceId, serverId, store, cancellationToken);
+            }
+            catch (Exception ex) when (_lookups is not null && ex is not (OperationCanceledException or NpgsqlException))
+            {
+                /* #9522: a call addressed to this instance failed, so the writer that named it and its resource id
+                   are dropped, and the next run resolves both again. A failover that removes or renames the old
+                   writer costs one failed run, the same as a run that resolves both itself. A failed watermark
+                   read (an NpgsqlException) says nothing about the instance, so it drops nothing. */
+                _lookups.ForgetInstance(role, parsed.Region, instanceId);
 
-            using var pi = _piClientFactory(parsed.Region, role);
+                if (isCluster)
+                {
+                    _lookups.ForgetWriter(role, parsed.Region, parsed.Identifier);
+                }
 
-            /* All nine names in one call — see RequestedMetrics for why that is the whole cost of #3281's
-               fix, HostMemoryMetrics for V136's five, and for why neither prefix can be paraphrased —
-               degrading first to the pre-V136 four and then to the CPU metric alone if the service rejects
-               the shape, per WithCapacityFallbackAsync. */
-            var response = await WithCapacityFallbackAsync(metrics =>
-                pi.GetResourceMetricsAsync(
-                    new GetResourceMetricsRequest
-                    {
-                        ServiceType = ServiceType.RDS,
-                        Identifier = dbiResourceId,
-                        MetricQueries = metrics
-                            .Select(metric => new Amazon.PI.Model.MetricQuery { Metric = metric })
-                            .ToList(),
-                        StartTime = startTime,
-                        EndTime = now,
-                        PeriodInSeconds = 60,
-                    },
-                    cancellationToken));
-
-            /* Absent and empty mean the same thing coming out of PI — no sample in this window — and the
-               caller already names that outcome ("no new Performance Insights CPU samples this cycle"), so
-               an empty sequence is the honest reading of a null here. It is NOT the honest reading of an
-               absent RDS log-file list, where "no file" means nothing was opened at all; see
-               RdsLogSource.NewestLogFileAsync for why that branch raises instead. Both collections are null
-               rather than empty when the service omits them, and LINQ over either raises
-               ArgumentNullException whose whole message is "Value cannot be null. (Parameter 'source')". */
-            samples = BuildSamples(response.MetricList, watermark);
+                throw;
+            }
         }
         catch (RdsEndpointMismatchException)
         {
@@ -369,11 +376,12 @@ public sealed class RdsCpuIngestor
             /* READ, and it held nothing new. PI answered — the caller's "no new Performance Insights CPU
                samples this cycle" is a true statement here, which is exactly why the not-reached branch
                above must not share it. */
-            return RdsIngestOutcome.Read(0);
+            return RdsIngestOutcome.Read(0) with { StoreMs = store.ElapsedMs };
         }
 
-        return RdsIngestOutcome.Read(
-            await WriteAsync(serverId, storageName, samples, cancellationToken));
+        var written = await store.TimeAsync(() => WriteAsync(serverId, storageName, samples, cancellationToken));
+
+        return RdsIngestOutcome.Read(written) with { StoreMs = store.ElapsedMs };
     }
 
     /// <summary>
@@ -487,6 +495,56 @@ public sealed class RdsCpuIngestor
         return byMetric;
     }
 
+    /// <summary>
+    /// The Performance Insights read of one instance: its resource id, the watermark, then the samples newer than
+    /// it. The caller drops what is held for the instance when this throws (#9522).
+    /// </summary>
+    private async Task<List<PgCpuUtilizationCollector.Row>> ReadInstanceSamplesAsync(
+        IAmazonRDS rds, AwsRoleKey? role, string region, string instanceId, int serverId, RdsStorePhase store,
+        CancellationToken cancellationToken)
+    {
+        var dbiResourceId = _lookups is null
+            ? await ResolveDbiResourceIdAsync(rds, instanceId, cancellationToken)
+            : await _lookups.ResourceIdAsync(
+                role, region, instanceId, () => ResolveDbiResourceIdAsync(rds, instanceId, cancellationToken), cancellationToken);
+
+        var watermark = await store.TimeAsync(() => GetWatermarkAsync(serverId, cancellationToken));
+        var now = DateTime.UtcNow;
+        var startTime = watermark.HasValue && watermark.Value > now - LookbackWindow
+            ? watermark.Value
+            : now - LookbackWindow;
+
+        using var pi = _piClientFactory(region, role);
+
+        /* All nine names in one call — see RequestedMetrics for why that is the whole cost of #3281's
+           fix, HostMemoryMetrics for V136's five, and for why neither prefix can be paraphrased —
+           degrading first to the pre-V136 four and then to the CPU metric alone if the service rejects
+           the shape, per WithCapacityFallbackAsync. */
+        var response = await WithCapacityFallbackAsync(metrics =>
+            pi.GetResourceMetricsAsync(
+                new GetResourceMetricsRequest
+                {
+                    ServiceType = ServiceType.RDS,
+                    Identifier = dbiResourceId,
+                    MetricQueries = metrics
+                        .Select(metric => new Amazon.PI.Model.MetricQuery { Metric = metric })
+                        .ToList(),
+                    StartTime = startTime,
+                    EndTime = now,
+                    PeriodInSeconds = 60,
+                },
+                cancellationToken));
+
+        /* Absent and empty mean the same thing coming out of PI — no sample in this window — and the
+           caller already names that outcome ("no new Performance Insights CPU samples this cycle"), so
+           an empty sequence is the honest reading of a null here. It is NOT the honest reading of an
+           absent RDS log-file list, where "no file" means nothing was opened at all; see
+           RdsLogSource.NewestLogFileAsync for why that branch raises instead. Both collections are null
+           rather than empty when the service omits them, and LINQ over either raises
+           ArgumentNullException whose whole message is "Value cannot be null. (Parameter 'source')". */
+        return BuildSamples(response.MetricList, watermark);
+    }
+
     /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
     /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own
     /// AWS calls end to end (see <see cref="RdsDeadlockIngestor"/>'s doc comment on why it holds its own
@@ -534,8 +592,9 @@ public sealed class RdsCpuIngestor
 
     private async Task<DateTime?> GetWatermarkAsync(int serverId, CancellationToken cancellationToken)
     {
-        await using var command = _postgres.CreateCommand(
-            "SELECT MAX(sample_time) FROM collect.pg_cpu_utilization WHERE server_id = $1");
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.RdsIntake, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT MAX(sample_time) FROM collect.pg_cpu_utilization WHERE server_id = $1", connection);
         command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
         command.Parameters.AddWithValue(serverId);
 

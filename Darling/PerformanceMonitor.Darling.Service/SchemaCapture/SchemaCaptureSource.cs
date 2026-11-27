@@ -50,11 +50,19 @@ internal sealed class SqlSchemaCaptureSource : ISchemaCaptureSource
 
     public SqlSchemaCaptureSource(DarlingCollectorRunner runner) => _runner = runner;
 
-    public async Task<ISchemaCaptureConnection> OpenAsync(ServerRuntime server, string? azureDatabase, CancellationToken cancellationToken)
+    public async Task<ISchemaCaptureConnection> OpenAsync(ServerRuntime server, string? azureDatabase, CancellationToken cancellationToken) =>
+        new Connection(await OpenSqlAsync(_runner, server, azureDatabase, cancellationToken), databaseScoped: azureDatabase is not null, _runner);
+
+    /// <summary>
+    /// The connection both schema-tracking reads use (#7643, #8798): on premises the server, without read-only intent; on Azure SQL
+    /// Database the named database through the runner's per-database path.
+    /// </summary>
+    internal static async Task<SqlConnection> OpenSqlAsync(
+        DarlingCollectorRunner runner, ServerRuntime server, string? azureDatabase, CancellationToken cancellationToken)
     {
         if (azureDatabase is not null)
         {
-            return new Connection(await _runner.OpenAzureDatabaseConnectionAsync(server, azureDatabase, cancellationToken), databaseScoped: true, _runner);
+            return await runner.OpenAzureDatabaseConnectionAsync(server, azureDatabase, cancellationToken);
         }
 
         var connection = new SqlConnection(DarlingXeSessions.WithoutReadOnlyIntent(server.ConnectionString));
@@ -68,8 +76,16 @@ internal sealed class SqlSchemaCaptureSource : ISchemaCaptureSource
             throw;
         }
 
-        return new Connection(connection, databaseScoped: false, _runner);
+        return connection;
     }
+
+    /* On premises the batch runs in the database's own context through its sp_executesql, the way IndexObjectStatsCollector reaches a
+       database: the statement text is one nested string, so its quotes are doubled. Azure SQL Database has no three-part names, and its
+       connection is already in the database. */
+    internal static string Wrap(string database, string batch) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"EXECUTE [{database.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql N'{batch.Replace("'", "''", StringComparison.Ordinal)}';");
 
     private sealed class Connection : ISchemaCaptureConnection
     {
@@ -113,13 +129,5 @@ internal sealed class SqlSchemaCaptureSource : ISchemaCaptureSource
         }
 
         private SqlCommand Command(string text) => new(text, _connection) { CommandTimeout = CommandTimeoutSeconds };
-
-        /* On premises the batch runs in the database's own context through its sp_executesql, the way IndexObjectStatsCollector reaches a
-           database: the statement text is one nested string, so its quotes are doubled. Azure SQL Database has no three-part names, and its
-           connection is already in the database. */
-        internal static string Wrap(string database, string batch) =>
-            string.Create(
-                CultureInfo.InvariantCulture,
-                $"EXECUTE [{database.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql N'{batch.Replace("'", "''", StringComparison.Ordinal)}';");
     }
 }

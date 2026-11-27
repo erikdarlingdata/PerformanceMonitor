@@ -549,38 +549,51 @@ public partial class WebhookAlertService
     /// <summary>
     /// Sends a test notification to Microsoft Teams. Returns null on success, error message on failure.
     /// </summary>
-    public static async Task<string?> SendTestTeamsAsync(string webhookUrl, string? proxyAddress, AlertBranding branding)
+    public static async Task<string?> SendTestTeamsAsync(string webhookUrl, string? proxyAddress, AlertBranding branding) =>
+        (await SendTestTeamsDetailedAsync(webhookUrl, proxyAddress, branding, includeBody: true)).Error;
+
+    /// <summary>
+    /// The Teams test send with its result (#9636): the status and exception type as well as the text. The Viewer's Test button
+    /// takes the text of this, and the service's <c>send_test_notification</c> takes the whole result, without the endpoint's body.
+    /// </summary>
+    public static async Task<TestSendResult> SendTestTeamsDetailedAsync(
+        string webhookUrl, string? proxyAddress, AlertBranding branding, bool includeBody, CancellationToken cancellationToken = default)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(webhookUrl))
-                return "Teams webhook URL is not configured.";
+                return TestSendResult.Refused("Teams webhook URL is not configured.", notConfigured: true);
 
             var payload = BuildTeamsPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true);
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, bodyInResult: true);
+            return await PostTestAsync(webhookUrl, payload, proxyAddress, headers: null, signing: null, includeBody, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
-            return ex.Message;
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 
     /// <summary>
     /// Sends a test notification to Slack. Returns null on success, error message on failure.
     /// </summary>
-    public static async Task<string?> SendTestSlackAsync(string webhookUrl, string? proxyAddress, AlertBranding branding)
+    public static async Task<string?> SendTestSlackAsync(string webhookUrl, string? proxyAddress, AlertBranding branding) =>
+        (await SendTestSlackDetailedAsync(webhookUrl, proxyAddress, branding, includeBody: true)).Error;
+
+    /// <summary>The Slack test send with its result (#9636), as <see cref="SendTestTeamsDetailedAsync"/> is for Teams.</summary>
+    public static async Task<TestSendResult> SendTestSlackDetailedAsync(
+        string webhookUrl, string? proxyAddress, AlertBranding branding, bool includeBody, CancellationToken cancellationToken = default)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(webhookUrl))
-                return "Slack webhook URL is not configured.";
+                return TestSendResult.Refused("Slack webhook URL is not configured.", notConfigured: true);
 
             var payload = BuildSlackPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true);
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, bodyInResult: true);
+            return await PostTestAsync(webhookUrl, payload, proxyAddress, headers: null, signing: null, includeBody, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
-            return ex.Message;
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 
@@ -595,15 +608,27 @@ public partial class WebhookAlertService
         string? bodyTemplate,
         string? proxyAddress,
         AlertBranding branding,
-        WebhookSigningKeys? signing = null)
+        WebhookSigningKeys? signing = null) =>
+        (await SendTestGenericDetailedAsync(webhookUrl, headersJson, bodyTemplate, proxyAddress, branding, signing, includeBody: true)).Error;
+
+    /// <summary>The generic webhook test send with its result (#9636), as <see cref="SendTestTeamsDetailedAsync"/> is for Teams.</summary>
+    public static async Task<TestSendResult> SendTestGenericDetailedAsync(
+        string webhookUrl,
+        string? headersJson,
+        string? bodyTemplate,
+        string? proxyAddress,
+        AlertBranding branding,
+        WebhookSigningKeys? signing,
+        bool includeBody,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(webhookUrl))
-                return "Webhook URL is not configured.";
+                return TestSendResult.Refused("Webhook URL is not configured.", notConfigured: true);
 
             if (!TryParseHeaders(headersJson, out var headers, out var headerError))
-                return headerError;
+                return TestSendResult.Refused(headerError);
 
             /* Same stand-in context as Save-time validation, for the same reason: the Test button must
                exercise the raw tokens with quote-bearing structure or a mis-quoted one test-sends clean. */
@@ -612,22 +637,22 @@ public partial class WebhookAlertService
                 isTest: true, bodyTemplate: bodyTemplate, context: ValidationStandInContext());
 
             if (!IsWellFormedJson(payload, out var bodyError))
-                return bodyError;
+                return TestSendResult.Refused(bodyError);
 
-            /* #6012: the sender signs its own test when it holds a key (Lite, which is the sender); Darling's Viewer passes none and
-               sends the test unsigned, as before. */
+            /* #6012: the sender signs its own test when it holds a key (Lite, and the Darling service, which is the sender). The
+               Darling Viewer passes none and sends the test unsigned, as before. */
+            WebhookSendSigning? signed = null;
             if (signing is { HasKey: true })
             {
                 var sendUtc = DateTime.UtcNow;
-                var signed = new WebhookSendSigning(signing.LiveKeys(sendUtc), WebhookSigning.NewMessageId(), WebhookSigning.UnixSeconds(sendUtc));
-                return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, WebhookPostTimeout, signed, CancellationToken.None, bodyInResult: true);
+                signed = new WebhookSendSigning(signing.LiveKeys(sendUtc), WebhookSigning.NewMessageId(), WebhookSigning.UnixSeconds(sendUtc));
             }
 
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, bodyInResult: true);
+            return await PostTestAsync(webhookUrl, payload, proxyAddress, headers, signed, includeBody, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
-            return ex.Message;
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 

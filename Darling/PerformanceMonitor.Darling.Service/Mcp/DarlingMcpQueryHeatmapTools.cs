@@ -58,7 +58,15 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// enough that no real T-SQL statement is cut by it.</summary>
     public const int FullTextPreviewLength = 32_000;
 
-    [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K." + McpHelpers.UtcStampsDescription)]
+    /// <summary>#8570: what a rollup-served reply says about its precision.</summary>
+    internal const string RollupPrecisionNote =
+        "Whole hours from rollup_from up to rollup_to came from the hourly rollup. The hours before rollup_from and from rollup_to on came from the raw rows. "
+        + "In the rollup hours a cell counts each query's hourly average, not each collection sample, and a query counts once for each database and plan handle that ran it in the hour. "
+        + "An hour counts in the bin that holds its start. At a bin width that is not a multiple of 60 minutes a bin edge can fall inside an hour, so a bin then holds the hours that start in it. "
+        + "The top query text is the newest text stored for that query hash, and is empty when no raw row of it is left.";
+
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. For duration and cpu at 60 minutes or more, whole hours come from the hourly rollup (the reply's source says hourly_rollup, and precision_note says which hours): a cell then counts each query's hourly average rather than each collection sample, and the hours the rollup has not built yet and the partial hours at the window's edges are read raw. Under 60 minutes, and for the other metrics, every collection sample is read raw (source raw). Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -134,15 +142,23 @@ public sealed class DarlingMcpQueryHeatmapTools
                 field whose whole reason for existing is that the cap should not have to be inferred.
             */
             var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
-            var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
-                postgres, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken);
+
+            /* #8570: a bin of 60 minutes or more reads whole hours from the hourly rollup (duration and cpu only), and the hours it has not built yet, and the
+               partial hours at the window's edges, from the raw rows. The store's measured coverage decides; a store with no rollup reads raw as before. */
+            var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+            var read = await DarlingQueryHeatmapReader.GetQueryHeatmapRoutedAsync(
+                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken);
+            var rows = read.Rows;
 
             /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid
                over a window the table does not reach back to is not a report that nothing ran. A window of 90 minutes or
                less that answered cells is covered without a probe. Unfiltered by database_name (the floor is a property of
                the table). */
             var notice = await DarlingMcpWindowNotice.ReadAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, end, cancellationToken),
+                () => read.Rollup is null
+                    ? DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, end, cancellationToken)
+                    /* #8570: the rollup reaches further back than raw, so the floor is the earliest of the sources the read used. */
+                    : DarlingMcpWindowNotice.Probe(postgres, DarlingQueryHeatmapReader.NoticeSources(coverage, read.Rollup, start), resolved.ServerName, start, end, cancellationToken),
                 start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
@@ -208,6 +224,12 @@ public sealed class DarlingMcpQueryHeatmapTools
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
                 coverage_note = QueryStatsCoverage.StoredRowsNote,
+                /* #8570: which store read answered. "hourly_rollup" means whole hours from the hourly rollup (rollup_from to rollup_to, the end
+                   excluded) with the rest of the window raw, and a cell counts each query's hourly average. "raw" is every collection sample. */
+                source = read.Source,
+                rollup_from = read.Rollup is null ? null : DateTime.SpecifyKind(read.Rollup.FromUtc, DateTimeKind.Utc).ToString("o"),
+                rollup_to = read.Rollup is null ? null : DateTime.SpecifyKind(read.Rollup.ToUtc, DateTimeKind.Utc).ToString("o"),
+                precision_note = read.Rollup is null ? null : RollupPrecisionNote,
                 time_bin_count = cells.Select(c => c.TimeBucket).Distinct().Count(),
                 cell_count = cells.Count,
                 /* Which slice of [window_start, window_end] actually came back. When truncated is true the

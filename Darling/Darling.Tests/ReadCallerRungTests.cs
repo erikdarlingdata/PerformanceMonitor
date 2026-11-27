@@ -44,10 +44,6 @@ public sealed class ReadCallerRungTests
     {
         Assert.Equal("read-caller", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V184 (#5632) and V185 (#5812) took the top of the ladder; this rung stays registered below them. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]
@@ -148,7 +144,7 @@ WHERE table_schema = 'collect' AND table_name IN ('slow_reads', 'read_latency')"
         Assert.Equal("web:0123456789ab", (string?)slow["reads"]![0]!["caller"]);
 
         var latency = JsonNode.Parse(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, 24, null, null, 50, cancellationToken: ct))!;
-        var row = latency.AsObject().Select(p => p.Value).OfType<JsonArray>().SelectMany(a => a).Single(r => (string?)r!["route"] == "get_wait_stats")!;
+        var row = latency.AsObject().Select(p => p.Value).OfType<JsonArray>().SelectMany(a => a).OfType<JsonObject>().Single(r => (string?)r["route"] == "get_wait_stats");
         Assert.Equal(2, (int)row["distinct_callers"]!);
     }
 

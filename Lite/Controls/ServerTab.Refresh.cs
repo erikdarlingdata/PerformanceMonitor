@@ -36,6 +36,8 @@ public partial class ServerTab : UserControl
     /// </summary>
     public async void RefreshData()
     {
+        /* #9366: the server tab opening on its tab is a pick. */
+        StampFirstLoadPick();
         await RefreshAllDataAsync();
     }
 
@@ -224,7 +226,7 @@ public partial class ServerTab : UserControl
             /* The window and the selected tab are read now, at the pass's own start, so a replay loads whatever is
                selected when it runs, not what was selected when the request was made. */
             var (tabHoursBack, tabFromDate, tabToDate) = GetCurrentWindowUtc();
-            var failedReads = await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            var failedReads = await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, ct);
             /* #8647: when this read is the first half of a split Full replay, the chrome half that follows words the status line,
                so it needs to know which Overview lanes this read could not read. */
             _tabHalfFailedReads = ct.IsCancellationRequested ? null : failedReads;
@@ -322,7 +324,7 @@ public partial class ServerTab : UserControl
     private async Task<string?> RefreshVisibleTabIfShownAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct)
     {
         if (IsVisible)
-            return await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
+            return await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, ct);
 
         _refreshPendingWhileHidden = true;
         return null;
@@ -405,9 +407,36 @@ public partial class ServerTab : UserControl
         }
     }
 
-    /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
-    private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
+    /// <summary>#9232: one INFO line per tab (per Queries sub-tab) the first time its load completes, so a slow first open can be read from the log.</summary>
+    private TabFirstLoad? _tabFirstLoad;
+
+    /* #9366: the line runs from the pick to the first drawn row. The draw is the Dispatcher pass at Loaded priority, which runs
+       after the layout and render the grid's new rows queued. */
+    private TabFirstLoad FirstLoad => _tabFirstLoad ??= new TabFirstLoad(
+        line => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] {line}"),
+        afterRender: () => Dispatcher.InvokeAsync(static () => { }, System.Windows.Threading.DispatcherPriority.Loaded).Task);
+
+    /// <summary>The key and label the tab now showing is tracked under by <see cref="TabFirstLoad"/>. A null key is not tracked.</summary>
+    private (string? Key, string Label) CurrentFirstLoadKey()
     {
+        var tabIndex = MainTabControl.SelectedIndex;
+        /* No sub-tab picked yet: the load is not a sub-tab's first open, so it is not tracked (#9232). */
+        string? loadKey = tabIndex != QueriesTabIndex ? $"tab {tabIndex}"
+            : QueriesSubTabControl.SelectedIndex < 0 ? null
+            : $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}";
+        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey ?? "Queries";
+        if (tabIndex == QueriesTabIndex && (QueriesSubTabControl.SelectedItem as TabItem)?.Header is string subTabLabel)
+            loadLabel = $"{loadLabel} > {subTabLabel}";
+        return (loadKey, loadLabel);
+    }
+
+    /// <summary>#9366: stamps the moment the tab or sub-tab now showing was picked (or the server tab opened on it).</summary>
+    private void StampFirstLoadPick() => FirstLoad.Pick(CurrentFirstLoadKey().Key);
+
+    /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
+    private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default)
+    {
+        var passStartedAt = FirstLoad.Timestamp();
         await RefreshEngineEditionAsync();
         await RefreshServerDataStartAsync(hoursBack, fromDate);
 
@@ -421,18 +450,24 @@ public partial class ServerTab : UserControl
             if (ct.IsCancellationRequested) return null;
         }
 
+        /* #9232: the tab's reads are timed from here, once per tab (per Queries sub-tab), and logged when the first one completes.
+           #9366: the logged total runs from the pick to the first drawn row, with the steps above and the wait before this pass split out. */
+        var (loadKey, loadLabel) = CurrentFirstLoadKey();
+
         string? failedReads = null;
+        await FirstLoad.RunAsync(loadKey, loadLabel, async () =>
+        {
         switch (MainTabControl.SelectedIndex)
         {
             case 0: failedReads = await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
             case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
-            case QueriesTabIndex: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case QueriesTabIndex: await RefreshQueriesAsync(hoursBack, fromDate, toDate); break;
             case 3: break; // Plan Viewer — no queries
             case 4: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
-            case 5: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 5: await RefreshMemoryAsync(hoursBack, fromDate, toDate); break;
             case 6: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
             case 7: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
-            case BlockingTabIndex: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case BlockingTabIndex: await RefreshBlockingAsync(hoursBack, fromDate, toDate); break;
             case 9: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
             case 10: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
             case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
@@ -444,6 +479,8 @@ public partial class ServerTab : UserControl
             case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
+            return 0;
+        }, () => ct.IsCancellationRequested, passStartedAt);
 
         /* #8647: a read that ended without being superseded has had its say; whatever still says "Loading..." never got an answer. */
         if (!ct.IsCancellationRequested) ResolveFirstPaintLoading();
@@ -497,9 +534,10 @@ public partial class ServerTab : UserControl
             /* #7241: a collector this server's engine does not run is never counted, the rule the grid and Darling's badge follow. */
             var engineEdition = _engineEdition;
             var awsRdsKind = _awsRdsKind;
+            var sqlMajorVersion = _sqlMajorVersion;
             var displayName = _server.DisplayName;
             var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId,
-                name => CollectorEngineCapability.NotCollectedMessage(displayName, engineEdition, engineKind: null, name, awsRdsKind) is not null));
+                name => CollectorEngineCapability.NotCollectedMessage(displayName, engineEdition, engineKind: null, name, awsRdsKind, sqlMajorVersion: sqlMajorVersion) is not null));
             CollectionHealthTab.Header = denied > 0
                 ? $"Collection Health ({denied} no permission)"
                 : "Collection Health";
@@ -529,184 +567,102 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 2 — Queries</summary>
-    private async System.Threading.Tasks.Task RefreshQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
+    private async System.Threading.Tasks.Task RefreshQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         try
         {
-            if (subTabOnly)
+            /* Only the visible sub-tab is read. */
+            switch (QueriesSubTabControl.SelectedIndex)
             {
-                /* Timer tick: only refresh the visible sub-tab (8 queries → 1-4) */
-                switch (QueriesSubTabControl.SelectedIndex)
-                {
-                    case 0: // Performance Trends — 4 trend charts
-                        var qdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var pdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var qsdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var ect = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var disc = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
-                        await System.Threading.Tasks.Task.WhenAll(qdt, pdt, qsdt, ect, disc);
-                        UpdateQueryDurationTrendChart(qdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateProcDurationTrendChart(pdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateQueryStoreDurationTrendChart(qsdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
-                        break;
-                    case ActiveQueriesSubTabIndex: // Active Queries
-                        var includeMonitor = ActiveQueriesIncludeMonitor;
-                        var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitor));
-                        _querySnapshotsFilterMgr!.UpdateData(snapshots);
-                        LiveSnapshotIndicator.Text = "";
-                        _ = LoadActiveQueriesSlicerAsync();
-                        {
-                            /* Where the stored snapshots start, over the SAME UTC window the grid just read
-                               (GetLatestQuerySnapshotsAsync goes through GetTimeRange like the three grids below). */
-                            var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
-                        }
-                        break;
-                    case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
-                        /* One pair of instants for the grid read, the strip load, the comparison and the banner. */
-                        var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
-                        var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
-                        _queryStatsFilterMgr!.UpdateData(queryStats);
-                        UpdateQueryStatsEmptyMessage(queryStats.Count);
-                        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-                        _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
-                        {
-                            /* #4284: the comparison and the banner both read UTC collection_time, so they
-                               share the SAME UTC window GetTopQueriesByCpuAsync just read -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, topQueriesStart, topQueriesEnd);
-                            await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
-                        }
-                        break;
-                    case 3: // Top Procedures by Duration
-                        var (procStats, procLeftOut) = await ReadTopProceduresAsync(hoursBack, fromDate, toDate);
-                        _procStatsFilterMgr!.UpdateData(procStats);
-                        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-                        _ = LoadProcStatsSlicerAsync();
-                        {
-                            /* #4284: UTC comparison and banner window, computed once -- see the twin comment
-                               on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshProcStatsComparisonAsync(windowStart, windowEnd);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart, windowEnd);
-                            await UpdateProcStatsLeftOutBannerAsync(procStats.Count, procLeftOut, windowStart, windowEnd);
-                        }
-                        break;
-                    case 4: // Query Store by Duration
-                        var qsData = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags)));
-                        _queryStoreFilterMgr!.UpdateData(qsData);
-                        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-                        _ = LoadQueryStoreSlicerAsync();
-                        {
-                            /* #4284: UTC comparison and banner window, computed once -- see the twin comment
-                               on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshQueryStoreComparisonAsync(windowStart, windowEnd);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart, windowEnd);
-                        }
-                        break;
-                    case 5: // Plan Corrections
-                        var planCorrections = await Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
-                        _planCorrectionFilterMgr!.UpdateData(planCorrections);
-                        SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
-                        /* #4966: where the stored plan corrections start, over the SAME UTC window the grid read. */
-                        await RefreshPlanCorrectionsBannerAsync(planCorrections, hoursBack, fromDate, toDate);
-                        break;
-                    case 6: // Query Heatmap
-                        var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
-                        var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
-                        AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
-                        UpdateQueryHeatmapChart(hmData);
-                        /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read, worded from the
-                           first column of the chart just drawn. */
-                        await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);
-                        break;
-                }
-                return;
+                case 0: // Performance Trends — 4 trend charts
+                    var qdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var pdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var qsdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var ect = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var disc = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
+                    /* #9232: each chart is drawn when ITS read (and the small discontinuity read) lands, not after the slowest of the five. */
+                    await System.Threading.Tasks.Task.WhenAll(
+                        LandedPanels.DrawAsync(qdt, disc, (trend, markers) => UpdateQueryDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                        LandedPanels.DrawAsync(pdt, disc, (trend, markers) => UpdateProcDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                        LandedPanels.DrawAsync(qsdt, disc, (trend, markers) => UpdateQueryStoreDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                        LandedPanels.DrawAsync(ect, disc, (trend, markers) => UpdateExecutionCountTrendChart(trend, hoursBack, fromDate, toDate, markers)));
+                    break;
+                case ActiveQueriesSubTabIndex: // Active Queries
+                    var includeMonitor = ActiveQueriesIncludeMonitor;
+                    var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitor));
+                    _querySnapshotsFilterMgr!.UpdateData(snapshots);
+                    LiveSnapshotIndicator.Text = "";
+                    _ = LoadActiveQueriesSlicerAsync();
+                    {
+                        /* Where the stored snapshots start, over the SAME UTC window the grid just read
+                           (GetLatestQuerySnapshotsAsync goes through GetTimeRange like the three grids below). */
+                        var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
+                    }
+                    break;
+                case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
+                    /* One pair of instants for the grid read, the strip load, the comparison and the banner. */
+                    var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+                    var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
+                    _queryStatsFilterMgr!.UpdateData(queryStats);
+                    TabFirstLoad.RowsHanded();
+                    UpdateQueryStatsEmptyMessage(queryStats.Count);
+                    SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                    _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
+                    {
+                        /* #4284: the comparison and the banner both read UTC collection_time, so they
+                           share the SAME UTC window GetTopQueriesByCpuAsync just read -- computed once and handed to both. */
+                        var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, topQueriesStart, topQueriesEnd);
+                        await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
+                        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
+                    }
+                    break;
+                case 3: // Top Procedures by Duration
+                    var (procStats, procLeftOut) = await ReadTopProceduresAsync(hoursBack, fromDate, toDate);
+                    _procStatsFilterMgr!.UpdateData(procStats);
+                    TabFirstLoad.RowsHanded();
+                    SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                    _ = LoadProcStatsSlicerAsync();
+                    {
+                        /* #4284: UTC comparison and banner window, computed once -- see the twin comment
+                           on the Top Queries case above. */
+                        var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshProcStatsComparisonAsync(windowStart, windowEnd);
+                        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart, windowEnd);
+                        await UpdateProcStatsLeftOutBannerAsync(procStats.Count, procLeftOut, windowStart, windowEnd);
+                    }
+                    break;
+                case 4: // Query Store by Duration
+                    var qsData = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags)));
+                    _queryStoreFilterMgr!.UpdateData(qsData);
+                    TabFirstLoad.RowsHanded();
+                    SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+                    _ = LoadQueryStoreSlicerAsync();
+                    {
+                        /* #4284: UTC comparison and banner window, computed once -- see the twin comment
+                           on the Top Queries case above. */
+                        var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshQueryStoreComparisonAsync(windowStart, windowEnd);
+                        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart, windowEnd);
+                    }
+                    break;
+                case 5: // Plan Corrections
+                    var planCorrections = await Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+                    _planCorrectionFilterMgr!.UpdateData(planCorrections);
+                    SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+                    /* #4966: where the stored plan corrections start, over the SAME UTC window the grid read. */
+                    await RefreshPlanCorrectionsBannerAsync(planCorrections, hoursBack, fromDate, toDate);
+                    break;
+                case 6: // Query Heatmap
+                    var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
+                    var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                    AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
+                    UpdateQueryHeatmapChart(hmData);
+                    /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read, worded from the
+                       first column of the chart just drawn. */
+                    await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);
+                    break;
             }
-
-            /* Full refresh: load all sub-tabs */
-            var includeMonitorSnapshots = ActiveQueriesIncludeMonitor;
-            var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitorSnapshots)));
-            /* One pair of instants for the Top Queries grid read, its strip load, its comparison and its banner. */
-            var (queryStatsStart, queryStatsEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(0, queryStatsStart, queryStatsEnd));
-            var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
-            var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
-            var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var queryDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var procDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var queryStoreDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var executionCountTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            /* #3653 A5: the window's baseline discontinuities, one read for the four trend charts. */
-            var discontinuitiesTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
-            var heatmapTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Heatmap", () => Task.Run(async () =>
-            {
-                try { return await _dataService.GetQueryHeatmapAsync(_serverId, (HeatmapMetric)Dispatcher.Invoke(() => HeatmapMetricCombo.SelectedIndex), hoursBack, fromDate, toDate, SelectedDatabaseFilter); }
-                catch { return new HeatmapResult(); }
-            }));
-
-            await System.Threading.Tasks.Task.WhenAll(
-                snapshotsTask, queryStatsTask, procStatsTask, queryStoreTask, planCorrectionTask,
-                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
-                discontinuitiesTask, heatmapTask);
-
-            _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
-            LiveSnapshotIndicator.Text = "";
-
-            _ = LoadActiveQueriesSlicerAsync();
-            {
-                /* Where the stored snapshots start, over the SAME UTC window the grid read -- see the Active
-                   Queries case of the sub-tab switch above. */
-                var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
-            }
-
-            _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
-            UpdateQueryStatsEmptyMessage(queryStatsTask.Result.Count);
-            SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-            _ = LoadQueryStatsSlicerAsync(queryStatsStart, queryStatsEnd);
-            {
-                /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
-                   sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, queryStatsStart, queryStatsEnd);
-                await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
-            }
-            _procStatsFilterMgr!.UpdateData(procStatsTask.Result.Rows);
-            SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-            _ = LoadProcStatsSlicerAsync();
-            {
-                /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
-                   sub-tab-switch case above. */
-                var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshProcStatsComparisonAsync(windowStart2, windowEnd2);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart2, windowEnd2);
-                await UpdateProcStatsLeftOutBannerAsync(procStatsTask.Result.Rows.Count, procStatsTask.Result.LeftOut, windowStart2, windowEnd2);
-            }
-            _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
-            SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-            _ = LoadQueryStoreSlicerAsync();
-            {
-                /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
-                   sub-tab-switch case above. */
-                var (windowStart3, windowEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshQueryStoreComparisonAsync(windowStart3, windowEnd3);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart3, windowEnd3);
-            }
-            _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
-            SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
-            /* #4966: see the Plan Corrections case of the sub-tab switch above. */
-            await RefreshPlanCorrectionsBannerAsync(planCorrectionTask.Result, hoursBack, fromDate, toDate);
-
-            UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
-            UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
-            UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
-            UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
-            UpdateQueryHeatmapChart(heatmapTask.Result);
-            /* #4966: see the Query Heatmap case of the sub-tab switch above. */
-            await RefreshQueryHeatmapBannerAsync(heatmapTask.Result, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -725,8 +681,8 @@ public partial class ServerTab : UserControl
     /// <see cref="RefreshCappedGridBannerAsync{T}"/>, when its read is under its cap), and, over the toolbar's window, the
     /// System Events, Default Trace and Config Changes grids (through <c>RefreshStoredWindowBannerAsync</c>) and the two
     /// grids that read a capped page, the Collection Log and Long Queries (through the cap-aware step, like Plan
-    /// Corrections). Called from the sub-tab switch
-    /// and full-refresh paths below, from the slicer handlers in ServerTab.Slicers.cs, from the Active Queries
+    /// Corrections). Called from the sub-tab switches
+    /// below, from the slicer handlers in ServerTab.Slicers.cs, from the Active Queries
     /// drill-downs in ServerTab.DrillDown.cs and from the helpers in ServerTab.QueriesDataStart.cs — a slicer drag
     /// re-reads the same grid over a narrower window, which
     /// can itself start after the raw table's floor, so it needs the same disclosure. A probe that throws costs
@@ -1002,63 +958,39 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 5 — Memory</summary>
-    private async System.Threading.Tasks.Task RefreshMemoryAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
+    private async System.Threading.Tasks.Task RefreshMemoryAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         try
         {
-            if (subTabOnly)
+            /* Only the visible sub-tab is read. */
+            switch (MemorySubTabControl.SelectedIndex)
             {
-                /* Timer tick: only refresh the visible sub-tab (5 queries → 1-2) */
-                switch (MemorySubTabControl.SelectedIndex)
-                {
-                    case 0: // Overview — memory stats + trend
-                        var memStats = await Task.Run(() => _dataService.GetLatestMemoryStatsAsync(_serverId));
-                        var memTrend = await Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
-                        var memGrantTrend = await Task.Run(() => _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate));
-                        UpdateMemorySummary(memStats);
-                        UpdateMemoryChart(memTrend, memGrantTrend, hoursBack, fromDate, toDate);
-                        break;
-                    case 1: // Memory Clerks
-                        var clerkTypes = await Task.Run(() => _dataService.GetDistinctMemoryClerkTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate));
-                        PopulateMemoryClerkPicker(clerkTypes);
-                        await UpdateMemoryClerksChartFromPickerAsync();
-                        break;
-                    case 2: // Memory Grants
-                        var grantChart = await Task.Run(() => _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate));
-                        UpdateMemoryGrantCharts(grantChart, hoursBack, fromDate, toDate);
-                        break;
-                    case 3: // Memory Pressure Events
-                        var pressureEvents = await Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate));
-                        UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
-                        /* #4966: where the stored events start, over the SAME UTC window the chart read. */
-                        await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
-                        break;
-                    case 4: // Plan Cache (#8169: under Memory, as in the Viewer)
-                        await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
-                        break;
-                }
-                return;
+                case 0: // Overview — memory stats + trend
+                    var memStats = await Task.Run(() => _dataService.GetLatestMemoryStatsAsync(_serverId));
+                    var memTrend = await Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
+                    var memGrantTrend = await Task.Run(() => _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate));
+                    UpdateMemorySummary(memStats);
+                    UpdateMemoryChart(memTrend, memGrantTrend, hoursBack, fromDate, toDate);
+                    break;
+                case 1: // Memory Clerks
+                    var clerkTypes = await Task.Run(() => _dataService.GetDistinctMemoryClerkTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate));
+                    PopulateMemoryClerkPicker(clerkTypes);
+                    await UpdateMemoryClerksChartFromPickerAsync();
+                    break;
+                case 2: // Memory Grants
+                    var grantChart = await Task.Run(() => _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate));
+                    UpdateMemoryGrantCharts(grantChart, hoursBack, fromDate, toDate);
+                    break;
+                case 3: // Memory Pressure Events
+                    var pressureEvents = await Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate));
+                    UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
+                    /* #4966: where the stored events start, over the SAME UTC window the chart read. */
+                    await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
+                    break;
+                case 4: // Plan Cache (#8169: under Memory, as in the Viewer)
+                    await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
+                    break;
             }
-
-            /* Full refresh: load all sub-tabs */
-            var memoryTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryStats", () => Task.Run(() => _dataService.GetLatestMemoryStatsAsync(_serverId)));
-            var memoryTrendTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryTrend", () => Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate)));
-            var memoryClerkTypesTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryClerks", () => Task.Run(() => _dataService.GetDistinctMemoryClerkTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate)));
-            var memoryGrantTrendTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryGrantTrend", () => Task.Run(() => _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate)));
-            var memoryGrantChartTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryGrants", () => Task.Run(() => _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate)));
-            var memoryPressureEventsTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryPressureEvents", () => Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate)));
-
-            await System.Threading.Tasks.Task.WhenAll(memoryTask, memoryTrendTask, memoryClerkTypesTask, memoryGrantTrendTask, memoryGrantChartTask, memoryPressureEventsTask);
-
-            UpdateMemorySummary(memoryTask.Result);
-            UpdateMemoryChart(memoryTrendTask.Result, memoryGrantTrendTask.Result, hoursBack, fromDate, toDate);
-            UpdateMemoryGrantCharts(memoryGrantChartTask.Result, hoursBack, fromDate, toDate);
-            UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
-            /* #4966: see the Memory Pressure Events case of the timer's sub-tab refresh above. */
-            await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
-            PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
-            await UpdateMemoryClerksChartFromPickerAsync();
-            await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -1078,6 +1010,9 @@ public partial class ServerTab : UserControl
 
             UpdateFileIoCharts(fileIoTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateFileIoThroughputCharts(fileIoThroughputTask.Result, hoursBack, fromDate, toDate);
+            /* #9099: a SQL Server older than the supported floor does not run file_io_stats, so the empty charts say why. */
+            ShowEngineGap(FileIoNoDataMessage, "file_io_stats", fileIoTrendTask.Result.Count, engineAxisOnly: true);
+            ShowEngineGap(FileIoThroughputNoDataMessage, "file_io_stats", fileIoThroughputTask.Result.Count, engineAxisOnly: true);
         }
         catch (Exception ex)
         {
@@ -1092,10 +1027,13 @@ public partial class ServerTab : UserControl
         {
             var tempDbTask = Helpers.MethodProfiler.TimeAsync("TempDb.Trend", () => Task.Run(() => _dataService.GetTempDbTrendAsync(_serverId, hoursBack, fromDate, toDate)));
             var tempDbFileIoTask = Helpers.MethodProfiler.TimeAsync("TempDb.FileIoTrend", () => Task.Run(() => _dataService.GetTempDbFileIoTrendAsync(_serverId, hoursBack, fromDate, toDate)));
+            /* #8881: who holds the oldest open tempdb log transaction as of the chart's newest collection. */
+            var tempDbHolderTask = Helpers.MethodProfiler.TimeAsync("TempDb.LogHolder", () => Task.Run(() => _dataService.GetNewestTempDbLogHolderAsync(_serverId, hoursBack, fromDate, toDate)));
 
-            await System.Threading.Tasks.Task.WhenAll(tempDbTask, tempDbFileIoTask);
+            await System.Threading.Tasks.Task.WhenAll(tempDbTask, tempDbFileIoTask, tempDbHolderTask);
 
             UpdateTempDbChart(tempDbTask.Result, hoursBack, fromDate, toDate);
+            SetCardNote(TempDbChart, TempDbLogHolderLine.Build(tempDbHolderTask.Result));
             UpdateTempDbSizeChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result, hoursBack, fromDate, toDate);
             await ShowTempDbOutcomeAsync(tempDbTask.Result.Count);
@@ -1109,159 +1047,79 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 8 — Blocking</summary>
-    private async System.Threading.Tasks.Task RefreshBlockingAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
+    private async System.Threading.Tasks.Task RefreshBlockingAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         try
         {
-            if (subTabOnly)
+            /* Only the visible sub-tab is read, then the alert counts. */
+            switch (BlockingSubTabControl.SelectedIndex)
             {
-                /* Timer tick: only refresh the visible sub-tab (7 queries → 1-3) + lightweight alert counts */
-                switch (BlockingSubTabControl.SelectedIndex)
-                {
-                    case 0: // Trends — 3 trend charts
-                        var lwt = Helpers.MethodProfiler.TimeAsync("Locking.LockWaitTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-                        var bt = Helpers.MethodProfiler.TimeAsync("Locking.BlockingTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var dt = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-                        await System.Threading.Tasks.Task.WhenAll(lwt, bt, dt);
-                        UpdateLockWaitTrendChart(lwt.Result, hoursBack, fromDate, toDate);
-                        UpdateBlockingTrendChart(bt.Result, hoursBack, fromDate, toDate);
-                        UpdateDeadlockTrendChart(dt.Result, hoursBack, fromDate, toDate);
-                        await RefreshBlockingTrendsBannersAsync(lwt.Result, bt.Result, dt.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
-                        break;
-                    case 1: // Current Waits — 2 charts
-                        var cwd = Helpers.MethodProfiler.TimeAsync("Locking.WaitingTaskTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-                        var cwb = Helpers.MethodProfiler.TimeAsync("Locking.BlockedSessionTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockedSessionTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        await System.Threading.Tasks.Task.WhenAll(cwd, cwb);
-                        UpdateCurrentWaitsDurationChart(cwd.Result, hoursBack, fromDate, toDate);
-                        UpdateCurrentWaitsBlockedChart(cwb.Result, hoursBack, fromDate, toDate);
-                        {
-                            /* Where the stored waiting-task rows start, over the SAME UTC window both charts read
-                               (GetWaitingTaskTrendAsync and GetBlockedSessionTrendAsync both take it from GetTimeRange). */
-                            var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
-                        }
-                        break;
-                    case BlockedProcessReportsSubTabIndex: // Blocked Process Reports
-                        var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
-                        var bpr = bprRead.Rows;
-                        using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
-                            _blockedProcessFilterMgr!.UpdateData(bpr);
-                        ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
-                        {
-                            /* Where the stored blocked-process coverage starts (#4966), over the SAME UTC window the grid read
-                               resolves from GetTimeRange. */
-                            var (windowStart6, windowEnd6) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6, bpr, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, bprRead.CappedSourceStartUtc);
-                        }
-                        await LoadBlockingSlicerAsync();
-                        break;
-                    case DeadlocksSubTabIndex: // Deadlocks
-                        var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate));
-                        var dlrDetails = await ParseDeadlocksOffUiThreadAsync(dlr);
-                        using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
-                            _deadlockFilterMgr!.UpdateData(dlrDetails);
-                        ApplySeparatelyMonitoredListNote(DeadlockNoteText);
-                        {
-                            /* Where the stored deadlock coverage starts (#4966), over the SAME UTC window the grid read
-                               resolves from GetTimeRange. */
-                            var (windowStart7, windowEnd7) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
-                        }
-                        await LoadDeadlockSlicerAsync();
-                        break;
-                    case 4: // Blocking Stats — blocking + deadlock severity (4 charts + summary strip)
-                        var bdsStats = Helpers.MethodProfiler.TimeAsync("Locking.BlockingDurationStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingDurationStatsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        var bdsCount = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-                        var bdsSeverity = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockSeverityStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockSeverityStatsAsync(_serverId, hoursBack, fromDate, toDate))));
-                        await System.Threading.Tasks.Task.WhenAll(bdsStats, bdsCount, bdsSeverity);
-                        UpdateBlockingDurationChart(bdsStats.Result, hoursBack, fromDate, toDate);
-                        UpdateBlockingTotalDurationChart(bdsStats.Result, hoursBack, fromDate, toDate);
-                        UpdateDeadlockWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
-                        UpdateDeadlockTotalWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
-                        UpdateBlockingStatsSummary(bdsStats.Result, bdsCount.Result, bdsSeverity.Result);
-                        await RefreshBlockingStatsBannersAsync(bdsStats.Result, bdsSeverity.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
-                        break;
-                }
-                /* Always keep alert badge current when Blocking tab is visible */
-                await RefreshAlertCountsAsync();
-                return;
+                case 0: // Trends — 3 trend charts
+                    var lwt = Helpers.MethodProfiler.TimeAsync("Locking.LockWaitTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate))));
+                    var bt = Helpers.MethodProfiler.TimeAsync("Locking.BlockingTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var dt = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate))));
+                    await System.Threading.Tasks.Task.WhenAll(lwt, bt, dt);
+                    UpdateLockWaitTrendChart(lwt.Result, hoursBack, fromDate, toDate);
+                    UpdateBlockingTrendChart(bt.Result, hoursBack, fromDate, toDate);
+                    UpdateDeadlockTrendChart(dt.Result, hoursBack, fromDate, toDate);
+                    await RefreshBlockingTrendsBannersAsync(lwt.Result, bt.Result, dt.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
+                    break;
+                case 1: // Current Waits — 2 charts
+                    var cwd = Helpers.MethodProfiler.TimeAsync("Locking.WaitingTaskTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate))));
+                    var cwb = Helpers.MethodProfiler.TimeAsync("Locking.BlockedSessionTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockedSessionTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    await System.Threading.Tasks.Task.WhenAll(cwd, cwb);
+                    UpdateCurrentWaitsDurationChart(cwd.Result, hoursBack, fromDate, toDate);
+                    UpdateCurrentWaitsBlockedChart(cwb.Result, hoursBack, fromDate, toDate);
+                    {
+                        /* Where the stored waiting-task rows start, over the SAME UTC window both charts read
+                           (GetWaitingTaskTrendAsync and GetBlockedSessionTrendAsync both take it from GetTimeRange). */
+                        var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
+                    }
+                    break;
+                case BlockedProcessReportsSubTabIndex: // Blocked Process Reports
+                    var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                    var bpr = bprRead.Rows;
+                    using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
+                        _blockedProcessFilterMgr!.UpdateData(bpr);
+                    ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
+                    {
+                        /* Where the stored blocked-process coverage starts (#4966), over the SAME UTC window the grid read
+                           resolves from GetTimeRange. */
+                        var (windowStart6, windowEnd6) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6, bpr, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, bprRead.CappedSourceStartUtc);
+                    }
+                    await LoadBlockingSlicerAsync();
+                    break;
+                case DeadlocksSubTabIndex: // Deadlocks
+                    var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate));
+                    var dlrDetails = await ParseDeadlocksOffUiThreadAsync(dlr);
+                    using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
+                        _deadlockFilterMgr!.UpdateData(dlrDetails);
+                    ApplySeparatelyMonitoredListNote(DeadlockNoteText);
+                    {
+                        /* Where the stored deadlock coverage starts (#4966), over the SAME UTC window the grid read
+                           resolves from GetTimeRange. */
+                        var (windowStart7, windowEnd7) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                        await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
+                    }
+                    await LoadDeadlockSlicerAsync();
+                    break;
+                case 4: // Blocking Stats — blocking + deadlock severity (4 charts + summary strip)
+                    var bdsStats = Helpers.MethodProfiler.TimeAsync("Locking.BlockingDurationStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingDurationStatsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+                    var bdsCount = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate))));
+                    var bdsSeverity = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockSeverityStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockSeverityStatsAsync(_serverId, hoursBack, fromDate, toDate))));
+                    await System.Threading.Tasks.Task.WhenAll(bdsStats, bdsCount, bdsSeverity);
+                    UpdateBlockingDurationChart(bdsStats.Result, hoursBack, fromDate, toDate);
+                    UpdateBlockingTotalDurationChart(bdsStats.Result, hoursBack, fromDate, toDate);
+                    UpdateDeadlockWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
+                    UpdateDeadlockTotalWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
+                    UpdateBlockingStatsSummary(bdsStats.Result, bdsCount.Result, bdsSeverity.Result);
+                    await RefreshBlockingStatsBannersAsync(bdsStats.Result, bdsSeverity.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
+                    break;
             }
-
-            /* Full refresh: load all sub-tabs */
-            var blockedProcessTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedProcessReports", () => Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
-            var deadlockTask = Helpers.MethodProfiler.TimeAsync("Locking.Deadlocks", () => Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate)));
-            var lockWaitTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.LockWaitTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-            var blockingTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockingTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var deadlockTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-            var currentWaitsDurationTask = Helpers.MethodProfiler.TimeAsync("Locking.WaitingTaskTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate))));
-            var currentWaitsBlockedTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedSessionTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockedSessionTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var blockingDurationStatsTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockingDurationStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingDurationStatsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-            var deadlockSeverityStatsTask = Helpers.MethodProfiler.TimeAsync("Locking.DeadlockSeverityStats", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetDeadlockSeverityStatsAsync(_serverId, hoursBack, fromDate, toDate))));
-
-            await System.Threading.Tasks.Task.WhenAll(
-                blockedProcessTask, deadlockTask,
-                lockWaitTrendTask, blockingTrendTask, deadlockTrendTask,
-                currentWaitsDurationTask, currentWaitsBlockedTask,
-                blockingDurationStatsTask, deadlockSeverityStatsTask);
-
-            /* Parse deadlock graphs off the UI thread (this was the Blocking-tab hitch). Time the
-               remaining UI-thread render steps so any new hot spot is pinpointed (bind vs charts). */
-            var deadlockDetails = await ParseDeadlocksOffUiThreadAsync(deadlockTask.Result);
-            using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
-                _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result.Rows);
-            using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
-                _deadlockFilterMgr!.UpdateData(deadlockDetails);
-
-            using (Helpers.MethodProfiler.StartTiming("Locking.RenderTrendCharts"))
-            {
-                UpdateLockWaitTrendChart(lockWaitTrendTask.Result, hoursBack, fromDate, toDate);
-                UpdateBlockingTrendChart(blockingTrendTask.Result, hoursBack, fromDate, toDate);
-                UpdateDeadlockTrendChart(deadlockTrendTask.Result, hoursBack, fromDate, toDate);
-                UpdateCurrentWaitsDurationChart(currentWaitsDurationTask.Result, hoursBack, fromDate, toDate);
-                UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
-                /* Blocking Stats severity sub-tab (4 charts + summary strip): the block-duration aggregate
-                   reconciles with the blocking-incident trend (same XE→DMV source), the deadlock severity with
-                   the deadlock count (same deadlock window). */
-                UpdateBlockingDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
-                UpdateBlockingTotalDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
-                UpdateDeadlockWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
-                UpdateDeadlockTotalWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
-                UpdateBlockingStatsSummary(blockingDurationStatsTask.Result, deadlockTrendTask.Result, deadlockSeverityStatsTask.Result);
-            }
-
-            /* #4966: the notes of the Trends and Blocking Stats charts, after the charts are drawn. */
-            await RefreshBlockingTrendsBannersAsync(lockWaitTrendTask.Result, blockingTrendTask.Result, deadlockTrendTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
-            await RefreshBlockingStatsBannersAsync(blockingDurationStatsTask.Result, deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
-
-            {
-                /* Where the stored waiting-task rows start, over the SAME UTC window the Current Waits charts read --
-                   see the Current Waits case of the sub-tab switch above. */
-                var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
-            }
-
-            {
-                /* Where the stored blocked-process and deadlock coverage starts (#4966), over the SAME UTC window the two
-                   grids read (both resolve it from GetTimeRange); after both grids are bound above. */
-                var (windowStart8, windowEnd8) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart8, windowEnd8, blockedProcessTask.Result.Rows, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, blockedProcessTask.Result.CappedSourceStartUtc);
-                await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart8, windowEnd8, deadlockTask.Result, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
-            }
-
-            await LoadBlockingSlicerAsync();
-            await LoadDeadlockSlicerAsync();
-
-            /* Notify parent of alert counts for tab badge */
-            var blockingCount = blockedProcessTask.Result.Rows.Count;
-            var deadlockCount = deadlockTask.Result.Count;
-            DateTime? latestEventTime = null;
-            if (blockingCount > 0 || deadlockCount > 0)
-            {
-                var latestBlocking = blockedProcessTask.Result.Rows.Max(r => (DateTime?)r.EventTime);
-                var latestDeadlock = deadlockTask.Result.Max(r => (DateTime?)r.DeadlockTime);
-                latestEventTime = latestBlocking > latestDeadlock ? latestBlocking : latestDeadlock;
-            }
-            AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
+            /* Always keep alert badge current when Blocking tab is visible */
+            await RefreshAlertCountsAsync();
         }
         catch (Exception ex)
         {
@@ -1465,7 +1323,7 @@ public partial class ServerTab : UserControl
                and the stamped one also holds when the display mode flips or another tab is selected first. */
             var tabClock = _serverClock;
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
-            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind);
+            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind, _sqlMajorVersion);
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";

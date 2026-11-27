@@ -27,9 +27,13 @@ public sealed record ReadPanelParam(string Name, bool Required);
 /// </summary>
 public static partial class CustomViewValidation
 {
-    /// <summary>Every read name a v1 read panel may reference: the keys of the Service's read dispatch.</summary>
-    public static readonly IReadOnlyList<string> KnownReadNames = new[]
+    /// <summary>Every read name a v1 read panel may reference: the keys of the Service's read dispatch. The shared list plus the reads
+    /// each tool registers in its own file under <c>ReadParams/</c> (<see cref="IReadParamsRegistration"/>).</summary>
+    public static IReadOnlyList<string> KnownReadNames => Reads.Names;
+
+    private static readonly string[] SharedReadNames = new[]
     {
+        // New tools do NOT add names here. A new tool adds one file in the Service (handler and catalog entry) and one in Storage (ReadParams/, its parameters), #9477.
         "audit_config",
         "compare_analysis",
         "get_analysis_facts",
@@ -152,9 +156,16 @@ public static partial class CustomViewValidation
         "get_sweep_reports",
         "get_ag_health",
         "get_store_metrics",
+        "get_store_table_health",
+        "measure_store_table",
         "get_store_log",
+        "get_service_starts",
+        "get_store_pass_steps",
+        "get_store_lock_waits",
+        "get_store_checkpoints",
         "get_store_query_history",
         "get_store_query_stats",
+        "get_store_setting_changes",
         "get_store_host",
         "get_collector_cost",
         "get_collector_stall_probes",
@@ -171,6 +182,7 @@ public static partial class CustomViewValidation
         "get_pvs_stats",
         "get_index_usage",
         "get_object_locking",
+        "get_object_usage",
         "get_table_index_sizes",
         "get_cpu_scheduler_pressure",
         "get_plan_cache_bloat",
@@ -198,8 +210,6 @@ public static partial class CustomViewValidation
         "get_finops_recommendations",
         "get_finops"
     };
-
-    private static readonly HashSet<string> KnownReadSet = new HashSet<string>(KnownReadNames, StringComparer.Ordinal);
 
     private static string? TryGetString(JsonObject obj, string key) =>
         obj[key] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;
@@ -677,7 +687,7 @@ public static partial class CustomViewValidation
     /// </summary>
     private static string? ValidateReadPanelSpec(JsonObject spec, string read, Func<string, IReadOnlyList<ReadPanelParam>?> readParams, string label)
     {
-        if (!KnownReadSet.Contains(read))
+        if (!Reads.Set.Contains(read))
         {
             return $"{label} references unknown read '{read}'.";
         }

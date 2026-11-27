@@ -695,18 +695,6 @@ public sealed class DailyCollectorDetachTests
         }
     }
 
-    [Fact]
-    public void TheAtConnectLoop_RunsAnOnLoadCollectorOnlyThroughTheMethodThatTakesTheSlot()
-    {
-        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
-
-        Assert.Equal(1, CountOf(worker, "await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);"));
-
-        /* The one other call that spells the collector `name` and passes no peer mark is the snapshot's, which takes
-           the slot itself; a second one would be the at-connect loop running a collector without it. */
-        Assert.Equal(1, CountOf(worker, "await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);"));
-    }
-
     /* A server removed and added back. The id is the registration's, so the new state has the removed one's id, and a
        run of the removed state that is still going, or still queued for a permit, held the slot the new state's first
        daily run needs: that run skipped, and a skipped daily run waits a day. */
@@ -857,7 +845,7 @@ public sealed class DailyCollectorDetachTests
         Assert.Equal(
             new[]
             {
-                "database_config", "database_scoped_config", "index_object_stats", "pg_column_stats", "pg_extension_availability",
+                "database_config", "database_scoped_config", "index_object_stats", "object_dependencies", "object_inventory", "pg_column_stats", "pg_extension_availability",
                 "pg_index_bloat", "pg_index_usage_stats", "server_config", "server_properties", "trace_flags",
             },
             daily);

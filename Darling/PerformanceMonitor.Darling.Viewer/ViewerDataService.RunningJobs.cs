@@ -156,7 +156,7 @@ public sealed partial class ViewerDataService
         await using var lastGood = _dataSource.CreateCommand(RunningJobsLastGoodCollectionSql);
         lastGood.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         lastGood.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var last = await lastGood.ExecuteScalarAsync(cancellationToken);
+        var last = await lastGood.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
         return new RunningJobsRead(items, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
     }
@@ -169,7 +169,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new RunningJobRow
@@ -200,7 +200,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(RunningJobsCollectorStatusSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result as string;
     }
 
@@ -259,7 +259,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
 
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -282,7 +282,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
 
         if (!await reader.ReadAsync(cancellationToken))
         {

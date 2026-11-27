@@ -69,6 +69,8 @@ Renaming or copying the install folder does not back up the data. The install fo
 
 ### Move the store to another machine
 
+Pick the target before you start. A dump restores into the same PostgreSQL major version or a newer one. The managed Windows store is PostgreSQL 18 and the compose store is PostgreSQL 17, so a managed Windows store cannot move to the compose stack. To move it to Linux, restore into a PostgreSQL 18 server of your own, set up as in [Install Darling on Linux with systemd](darling/linux.md#step-3-set-up-the-store).
+
 Move the data with `pg_dump` and `pg_restore`. These programs ship in the managed bundle, in `pg-runtime\pgsql\bin` in the install folder. You do not need to stop the service for the dump.
 
 The new store must run the same TimescaleDB version as the old store. Install the same Darling build on the new machine. Then upgrade it after the restore. To read the version, run this in `psql` against each store:
@@ -89,7 +91,9 @@ $bin = 'C:\Program Files\PerformanceMonitorDarling\pg-runtime\pgsql\bin'
 Remove-Item Env:PGPASSWORD
 ```
 
-The port 5641 is the default of `postgres.port`. The flags `--no-owner` and `--no-acl` leave out the owners and grants. The service sets the roles and grants again on every start. `pg_dump` can print warnings about circular foreign-key constraints in the TimescaleDB catalog. In our test the dump restored with no errors.
+The port 5641 is the default of `postgres.port`. The flags `--no-owner` and `--no-acl` leave out the owners and grants. The service sets the roles and grants again on every start.
+
+On a TimescaleDB store, `pg_dump` can warn about circular foreign-key constraints on TimescaleDB's own catalog tables, such as `continuous_agg`, and suggest `--disable-triggers`. TimescaleDB's troubleshooting page says this warning can be ignored. Restore with the two TimescaleDB steps on this page, and test a restore before you rely on the dump.
 
 On the new machine:
 
@@ -118,7 +122,23 @@ On the new machine:
    Start-Service 'PerformanceMonitor Darling'
    ```
 
-6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key`, restart the service, and enter each password again in the Viewer.
+6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key` and restart the service. Then run [`--set-login-password`](darling/cli.md#--set-login-password) once for each login. It reads the password from stdin and saves it for every server that uses that login, disabled servers included. Run it with `--dry-run` first to see the list, the store it reaches and the key it seals to.
+
+   ```powershell
+   PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor --dry-run
+   PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor
+   ```
+
+   When the new machine runs Linux, run the verbs in their Linux form (see [Service verbs on Linux](darling/linux.md#service-verbs-on-linux)) and restart with `sudo systemctl restart darling`. The Viewer does not run on Linux, and you do not need it for this step. Pipe the password in, so that it is never in the command line or the shell history. A host whose sudo policy records input (`Defaults log_input`, or `LOG_INPUT` on a command) writes the piped password into its sudo I/O log: run the verb as the `darling` user from a shell that user owns, or use a policy that does not log this command's input.
+
+   ```bash
+   sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --reset-password-key
+   sudo systemctl restart darling
+   <command that prints the password> | sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --set-login-password --username monitor --dry-run
+   <command that prints the password> | sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --set-login-password --username monitor
+   ```
+
+   A server whose password is an `env:` or `file:` reference, or one that darling.json supplies, is listed as `skip` and keeps it. To enter one server's password alone, use the Viewer on Windows, the web dashboard's Admin page or the MCP `edit_server` tool.
 7. Run `PerformanceMonitor.Darling.Service.exe --check-settings`. It prints the store size and the TimescaleDB version.
 
 Restore into the same PostgreSQL major version or a newer one. The managed bundle is PostgreSQL 18. A dump from a compose store (PostgreSQL 17) restores into it. A dump from the managed store does not restore into the compose store.
@@ -130,8 +150,14 @@ If the service connects to a PostgreSQL that you run (`postgres.managed` is `fal
 Dump the `darling` database:
 
 ```
-pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling
+(umask 077; pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling)
 ```
+
+The dump holds every collected row. The `umask 077` makes the file readable only by its owner and root. Without it the file gets your account's default mode, which on most Linux hosts lets every local account read it.
+
+`pg_dump` and the restore commands below ask for the password at a terminal. A backup that runs from a script, a timer or a remote command has no terminal, so give the password in a password file. Put the line `<host>:<port>:darling:<owner>:<password>` in `~/.pgpass` of the user who runs the backup, or in another file that the `PGPASSFILE` variable names. Write a `:` or a `\` in the password as `\:` or `\\`. The file must be mode `0600`: libpq ignores a file that the group or others can read, and the command stops with `no password supplied`. Do not put the password in `PGPASSWORD` on the command line, because the shell history keeps it.
+
+On a TimescaleDB store the same circular foreign-key warning as above is expected, and you can ignore it.
 
 Restore it into an empty database. If the store has the TimescaleDB extension (`\dx` lists `timescaledb`), you need the two TimescaleDB steps. They must be in this order.
 
@@ -144,7 +170,7 @@ psql -h <host> -p <port> -U <owner> -d darling -c "SELECT timescaledb_post_resto
 
 If the store has no TimescaleDB, skip the `psql` lines and run `createdb` and `pg_restore` only. The new TimescaleDB version must match the old one.
 
-Run `Darling/tools/provision-roles.sql` again on the restored database, as the database owner. The dump left out the grants, and this script sets them for the admin, viewer and mcp roles.
+Run `Darling/tools/provision-roles.sql` again on the restored database, as a superuser or a role that has `CREATEROLE`. The store owner that step 3 of [Install Darling on Linux with systemd](darling/linux.md#the-owner-role-and-the-database) creates has neither, so on a systemd store run it as the `postgres` OS user, on a copy of the script, as [Security](darling/security.md#security--least-privilege-roles) says. The dump left out the grants, and this script sets them for the admin, viewer and mcp roles.
 
 Also keep these files. The database dump does not contain them.
 
@@ -183,8 +209,12 @@ docker compose start
 To move to another host, use a dump. The store container has `pg_dump` and `pg_restore`. On the old host:
 
 ```
-docker compose exec -T store pg_dump -U darling --format=custom --no-owner --no-acl darling > darling-store.dump
+(umask 077; docker compose exec -T store pg_dump -U darling --format=custom --no-owner --no-acl darling > darling-store.dump)
 ```
+
+Your shell makes the file, so the `umask 077` keeps it readable only by its owner and root.
+
+The store is a TimescaleDB store, so the same circular foreign-key warning as above is expected, and you can ignore it.
 
 On the new host, copy the compose folder (`darling.json` and `secrets/`), start only the store, and restore into its empty `darling` database:
 
@@ -205,7 +235,7 @@ docker compose up -d
 
 The service runs as user 1654, so the `chown` is needed: a backup taken before the upgrade restores root-owned.
 
-The store container runs PostgreSQL 17 (`timescale/timescaledb:latest-pg17`). Do not restore a dump from a newer major version into it.
+The store container runs PostgreSQL 17 (`timescale/timescaledb:2.32.1-pg17`). Do not restore a dump from a newer major version into it.
 
 ## How much disk will it use
 

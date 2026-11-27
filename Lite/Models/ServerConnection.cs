@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
@@ -89,7 +90,14 @@ public class ServerConnection : INotifyPropertyChanged
     [JsonIgnore]
     public DateTime RegisteredAtUtc => CreatedDate.ToUniversalTime();
 
-    public DateTime LastConnected { get; set; } = DateTime.Now;
+    /// <summary>
+    /// When Lite last connected to this server, or null for "never" (#9761). A hand-edited servers.json can carry
+    /// <c>"LastConnected": null</c>, which reads as null instead of failing the whole file
+    /// (<see cref="LastConnectedJsonConverter"/>). Readers order by it (null sorts last when newest comes first) and the
+    /// Manage Servers grid shows null as blank.
+    /// </summary>
+    [JsonConverter(typeof(LastConnectedJsonConverter))]
+    public DateTime? LastConnected { get; set; } = DateTime.Now;
     public bool IsFavorite { get; set; }
     public bool IsEnabled { get; set; } = true;
 
@@ -282,7 +290,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// reporting failing collectors, and painting it amber would say it was.</para>
     /// </summary>
     [JsonIgnore]
-    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true, IsEnabled);
 
     /// <summary>
     /// Computed dot status for the sidebar indicator. One of: "Connecting", "Online", "Warning", "Offline".
@@ -407,11 +415,31 @@ public class ServerConnection : INotifyPropertyChanged
                 AuthenticationType == AuthenticationTypes.ServicePrincipal)
             {
                 /* A saved password is read only for a server whose Id is a GUID (ServerCredentialIds). */
-                var cred = ServerCredentialIds.Allows(Id, DisplayName) ? credentialService.GetCredential(Id) : null;
-                if (cred.HasValue)
+                (string Username, string Password)? cred = null;
+                var outcome = CredentialReadOutcome.NotFound;
+                string? failure = null;
+                if (ServerCredentialIds.Allows(Id, DisplayName))
+                {
+                    outcome = credentialService.TryReadCredential(Id, out cred, out failure);
+                }
+
+                if (outcome == CredentialReadOutcome.Found && cred.HasValue)
                 {
                     username = cred.Value.Username;
                     password = cred.Value.Password;
+                }
+                else if (ServerCredentialIds.IsUsable(Id))
+                {
+                    /* #9730: no readable saved password under this Windows logon connects with an empty user. Say why, once. An entry
+                       that exists but cannot be read (#6066) gets its own line, apart from one that is not there. */
+                    if (outcome == CredentialReadOutcome.Unreadable)
+                    {
+                        ServerCredentialIds.WarnPasswordUnreadable(Id, DisplayName, failure);
+                    }
+                    else
+                    {
+                        ServerCredentialIds.WarnPasswordMissing(Id, DisplayName);
+                    }
                 }
             }
             // ManagedIdentity fetches no credential (no secret).
@@ -434,11 +462,21 @@ public class ServerConnection : INotifyPropertyChanged
         if (profile.AuthType == AuthenticationTypes.SqlServer ||
             profile.AuthType == AuthenticationTypes.ServicePrincipal)
         {
-            var cred = credentialService.GetCredential(ProfileManager.ProfileCredentialId(profile.Id));
-            if (cred.HasValue)
+            var profileOutcome = credentialService.TryReadCredential(ProfileManager.ProfileCredentialId(profile.Id), out var cred, out var profileFailure);
+            if (profileOutcome == CredentialReadOutcome.Found && cred.HasValue)
             {
                 profileUser = cred.Value.Username;
                 profileSecret = cred.Value.Password;
+            }
+            else if (profileOutcome == CredentialReadOutcome.Unreadable)
+            {
+                /* #9730: the entry exists but Windows refused to read it (#6066). */
+                ServerCredentialIds.WarnProfileSecretUnreadable(profile.Id, profile.Name, DisplayName, profileFailure);
+            }
+            else
+            {
+                /* #9730: the same empty-user connection as a server with no saved password. */
+                ServerCredentialIds.WarnProfileSecretMissing(profile.Id, profile.Name, DisplayName);
             }
         }
         // ManagedIdentity profile carries no secret.
@@ -560,6 +598,18 @@ public class ServerConnection : INotifyPropertyChanged
     internal string BuildConnectionString(string? username, string? password)
         => BuildConnectionString(new ResolvedAuth(AuthenticationType, username, password, AzureClientId, ManagedIdentityClientId));
 
+    /// <summary>
+    /// The encryption option a stored mode builds. The one mapping, used here and by the Add Server window and <c>--add-server</c>
+    /// (through <c>ServerEntryRules</c>). Fail closed: an unknown or blank mode (legacy or hand-edited servers.json) must not
+    /// silently drop to an unencrypted, cert-unvalidated connection, so it is Mandatory, the same default the UI uses.
+    /// </summary>
+    internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => encryptMode switch
+    {
+        "Optional" => SqlConnectionEncryptOption.Optional,
+        "Strict" => SqlConnectionEncryptOption.Strict,
+        _ => SqlConnectionEncryptOption.Mandatory
+    };
+
     private string BuildConnectionString(ResolvedAuth auth)
     {
         var builder = new SqlConnectionStringBuilder
@@ -576,17 +626,7 @@ public class ServerConnection : INotifyPropertyChanged
             MultiSubnetFailover = MultiSubnetFailover
         };
 
-        // Set encryption mode
-        builder.Encrypt = EncryptMode switch
-        {
-            "Mandatory" => SqlConnectionEncryptOption.Mandatory,
-            "Strict" => SqlConnectionEncryptOption.Strict,
-            "Optional" => SqlConnectionEncryptOption.Optional,
-            // Fail closed: an unknown/blank EncryptMode (legacy or hand-edited servers.json) must
-            // not silently drop to an unencrypted, cert-unvalidated connection. The UI default is
-            // Mandatory and the Dashboard builders also default to Mandatory — match that.
-            _ => SqlConnectionEncryptOption.Mandatory
-        };
+        builder.Encrypt = EncryptOptionFor(EncryptMode);
 
         // The tuple is atomic: every auth field comes from the SAME source (profile or server).
         ApplyAuthentication(builder, auth.AuthType, auth.Username, auth.Password,
@@ -761,4 +801,30 @@ public class ServerConnection : INotifyPropertyChanged
         // SqlServer (password) and ServicePrincipal (client secret) require a stored credential.
         return ServerCredentialIds.Allows(server.Id, server.DisplayName) && credentialService.CredentialExists(server.Id);
     }
+}
+
+/// <summary>
+/// #9761: reads <see cref="ServerConnection.LastConnected"/> so that a JSON null (or the earliest date) means "never" and costs
+/// only that field: a null the reader refused would reject the whole servers.json and send Lite to the backup's list.
+/// "Never" is written back as the earliest date, an ordinary value that every build reads, so a file saved here still loads
+/// in an older build and in a reader whose field is not nullable.
+/// </summary>
+internal sealed class LastConnectedJsonConverter : JsonConverter<DateTime?>
+{
+    /* Without this a null value is written as a JSON null and never reaches Write. */
+    public override bool HandleNull => true;
+
+    public override DateTime? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        var value = reader.GetDateTime();
+        return value == DateTime.MinValue ? null : value;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime? value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value ?? DateTime.MinValue);
 }

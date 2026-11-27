@@ -103,7 +103,7 @@ public static class DailySnapshotExporter
         Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
 
         Execute(rawWriter,
-            $"COPY (SELECT * FROM snap ORDER BY server_name, collection_time) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
+            $"COPY (SELECT * FROM snap ORDER BY {TotalOrder.ForTable(rawWriter, "snap", "server_name", "collection_time")}) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
 
         writeStopwatch.Stop();
 

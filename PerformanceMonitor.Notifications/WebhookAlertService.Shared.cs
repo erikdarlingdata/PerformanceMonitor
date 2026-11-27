@@ -315,7 +315,7 @@ public partial class WebhookAlertService
     /// the destination and post once more before anything is counted or logged; any other 429 is a failed post like the
     /// rest, body read and logged, and the ask rides along so the caller can hold the destination.
     /// </summary>
-    private readonly record struct WebhookPostOutcome(string? Error, bool RateLimited, TimeSpan RetryAfter);
+    private readonly record struct WebhookPostOutcome(string? Error, bool RateLimited, TimeSpan RetryAfter, int? StatusCode = null);
 
     /// <summary>
     /// One post, with the client stated: <paramref name="client"/> null picks the pooled client for the proxy and the
@@ -390,13 +390,13 @@ public partial class WebhookAlertService
             using var response = await client.SendAsync(request, timeout.Token);
 
             if (response.IsSuccessStatusCode)
-                return new WebhookPostOutcome(null, false, TimeSpan.Zero);
+                return new WebhookPostOutcome(null, false, TimeSpan.Zero, (int)response.StatusCode);
 
             /* #5366: a redirect is not followed on a send with headers or a signature. The message names no URL and no header. */
             if (noRedirects && (int)response.StatusCode is >= 300 and < 400)
             {
                 return new WebhookPostOutcome(string.Create(CultureInfo.InvariantCulture,
-                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address."), false, TimeSpan.Zero);
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address."), false, TimeSpan.Zero, (int)response.StatusCode);
             }
 
             /* #8244: the endpoint is pacing the sender, not refusing the message. Within the caller's retry bound the body
@@ -407,7 +407,7 @@ public partial class WebhookAlertService
             var retryAfter = rateLimited ? RetryAfterWait(response.Headers.RetryAfter, clock is null ? DateTime.UtcNow : clock()) : TimeSpan.Zero;
             if (rateLimited && retryBound is { } bound && retryAfter <= bound)
             {
-                return new WebhookPostOutcome(HttpStatusText(response.StatusCode), true, retryAfter);
+                return new WebhookPostOutcome(HttpStatusText(response.StatusCode), true, retryAfter, (int)response.StatusCode);
             }
 
             /* #6231: the text this returns is what the alert log's send_error and the channel health getter store and
@@ -422,7 +422,7 @@ public partial class WebhookAlertService
 
             var statusText = HttpStatusText(response.StatusCode);
             if (bodyInResult)
-                return new WebhookPostOutcome($"{statusText}: {body}", rateLimited, retryAfter);
+                return new WebhookPostOutcome($"{statusText}: {body}", rateLimited, retryAfter, (int)response.StatusCode);
 
             if (bodyLog is not null)
             {
@@ -430,12 +430,41 @@ public partial class WebhookAlertService
                 bodyLog.LogError($"Webhook post failed with {statusText}; the endpoint's response: {oneLine}");
             }
 
-            return new WebhookPostOutcome(statusText, rateLimited, retryAfter);
+            return new WebhookPostOutcome(statusText, rateLimited, retryAfter, (int)response.StatusCode);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new WebhookPostOutcome(
                 string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds"), false, TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// One test post (#9636): the same post the Test buttons make, answered as a <see cref="TestSendResult"/> with the HTTP status the
+    /// endpoint returned (also on success) and, when the post threw, the exception's type. <paramref name="includeBody"/> adds the
+    /// endpoint's response body to a failure's text, as the Viewer's Test buttons show it. A cancelled <paramref name="cancellationToken"/>
+    /// propagates as the cancellation it is.
+    /// </summary>
+    internal static async Task<TestSendResult> PostTestAsync(
+        string webhookUrl,
+        string jsonPayload,
+        string? proxyAddress,
+        IReadOnlyDictionary<string, string>? headers,
+        WebhookSendSigning? signing,
+        bool includeBody,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var outcome = await PostOnceAsync(
+                client: null, webhookUrl, jsonPayload, proxyAddress, headers, WebhookPostTimeout, signing, bodyLog: null, includeBody, cancellationToken);
+            return outcome.Error is null
+                ? new TestSendResult(true, outcome.StatusCode, null, null)
+                : new TestSendResult(false, outcome.StatusCode, outcome.Error, null);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 

@@ -701,7 +701,7 @@ public class AnalysisSinglesDigestTests
             fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, branding,
             context: fired.Context, detailText: fired.DetailText, displayName: fired.DisplayName);
         Assert.True(System.Text.Encoding.UTF8.GetByteCount(teams) < 28_000,
-            $"Teams card of {System.Text.Encoding.UTF8.GetByteCount(teams)} bytes, the connector's ceiling is about 28 KB");
+            $"Teams card of {System.Text.Encoding.UTF8.GetByteCount(teams)} bytes, the Teams message ceiling is about 28 KB");
     }
 
     /// <summary>The title changes, the key does not: the generic webhook's metric, the route and mute key and the history

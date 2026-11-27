@@ -41,6 +41,9 @@ public static class ServerIdHelper
         }
     }
 
+    /// <summary>The suffix <see cref="BuildStorageName"/> gives a ReadOnlyIntent registration's storage name.</summary>
+    public const string ReadOnlySuffix = ":RO";
+
     /// <summary>
     /// The canonical storage name a monitored server is identified by (hashed via
     /// <see cref="GetDeterministicHashCode"/> to derive server_id). Appends the database name
@@ -98,7 +101,7 @@ public static class ServerIdHelper
             name += ":" + port.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        return readOnlyIntent ? name + ":RO" : name;
+        return readOnlyIntent ? name + ReadOnlySuffix : name;
     }
 
     /// <summary>

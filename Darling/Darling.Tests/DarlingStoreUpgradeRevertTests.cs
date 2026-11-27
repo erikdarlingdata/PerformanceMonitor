@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// at all. The outcome, and the Failed alert built from it, claimed a clean revert through all three.
 ///
 /// <para>No PostgreSQL is needed. Runtimes and data directories are planted as marker files. A live
-/// postmaster is Windows' ping running under the name postgres.exe, because a PID and an image name are all
+/// postmaster is the stand-in program running under the name postgres.exe, because a PID and an image name are all
 /// the liveness check can see of a real one. And every failure these tests need is a file held open: an open
 /// file anywhere under a directory stops that directory being renamed, and stops the file being moved. A
 /// RUNNING executable does not, which is exactly why the live-server refusal has to come from looking.</para>
@@ -43,8 +43,6 @@ public sealed class DarlingStoreUpgradeRevertTests
     private const string ControlFileContent = "the old cluster's control file";
     private const string PackageHash = "3927392739273927392739273927392739273927392739273927392739273927";
     private const int OldMajor = 17;
-
-    private static readonly string s_ping = Path.Combine(Environment.SystemDirectory, "PING.EXE");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -120,6 +118,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// CRITICAL, naming the exact rename to do by hand. Held open with no sharing, the file cannot be moved:
     /// the deterministic stand-in for a scanner or a shell holding it in the field.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RestoreLinkedControlFile_ARenameItCannotMake_SaysTheStoreCannotStart_AndNamesTheRename()
     {
@@ -211,6 +211,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// still reverted, since it is the right one for when the file is back, but nothing may call the store
     /// back or the data safe, and the outcome carries the shape to the alert.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_LinkMode_ARestoreThatFails_NeverClaimsARunningStore()
     {
@@ -285,6 +287,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// on the data directory, from the rescued runtime. The revert is refused, the outcome says the runtime was
     /// NOT reverted, and nothing claims a store that is back.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_AServerItCouldNotStop_IsNeverReportedAsReverted()
     {
@@ -359,6 +363,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// ...and when it cannot be moved back, nothing is deleted, the store is not called back, and the CRITICAL
     /// line names the move, the rename inside it, and why restarting first would be the expensive mistake.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_ADataDirectoryItCannotMoveBack_SaysTheStoreCannotStart()
     {
@@ -413,6 +419,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// disk space and a test box gets copy mode. A catch clause that no longer reached the recovery leaves the
     /// store where it is.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpgradeDataDirectory_AFailureBeforeTheCommitPoint_RunsTheRecovery()
     {
@@ -441,8 +449,10 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// <summary>
     /// The cancellation catch clause, the same way: a shutdown before the commit point puts the data directory
     /// back BEFORE the runtime revert, and records no block, because a shutdown is not a bad package. The old
-    /// runtime's pg_ctl.exe is ping, so the upgrade reaches the step that observes the already-cancelled token.
+    /// runtime's pg_ctl.exe is the stand-in program, which fails every command, so the upgrade reaches the step that observes the already-cancelled token.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpgradeDataDirectory_AShutdownBeforeTheCommitPoint_PutsTheDataDirectoryBackFirst()
     {
@@ -451,7 +461,7 @@ public sealed class DarlingStoreUpgradeRevertTests
         {
             var host = PlantFailedUpgrade(root.FullName);
             Directory.Move(host.DataDirectory, host.RetainedDirectory);
-            File.Copy(s_ping, Path.Combine(host.PreviousPgsql, "bin", "pg_ctl.exe"));
+            StandinProcess.CopyTo(Path.Combine(host.PreviousPgsql, "bin"), "pg_ctl.exe");
 
             using var shutdown = new CancellationTokenSource();
             shutdown.Cancel();
@@ -478,10 +488,12 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// A runner refuses a token that was cancelled before the call, so a stop that runs in a catch or a
     /// finally must not carry its method's own token: it would throw before pg_ctl started and leave the server
     /// running. The quiesced TimescaleDB update shows it. Its start throws the shutdown's cancellation, and its
-    /// finally still has to launch pg_ctl (ping stands in) to stop the private-port cluster. Ping answers every
-    /// command with a failure, so the log carries both stop attempts, and the marker that lets the next start
+    /// finally still has to launch pg_ctl (the stand-in program) to stop the private-port cluster. The stand-in
+    /// answers every command with a failure, so the log carries both stop attempts, and the marker that lets the next start
     /// find the server is kept.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpdateTimescaleQuiesced_AShutdownBeforeTheStart_StillRunsTheStopInItsFinally()
     {
@@ -490,7 +502,7 @@ public sealed class DarlingStoreUpgradeRevertTests
         {
             var bin = Directory.CreateDirectory(Path.Combine(root.FullName, "pgsql", "bin"));
             var data = Directory.CreateDirectory(Path.Combine(root.FullName, "data"));
-            File.Copy(s_ping, Path.Combine(bin.FullName, "pg_ctl.exe"));
+            StandinProcess.CopyTo(bin.FullName, "pg_ctl.exe");
 
             using var shutdown = new CancellationTokenSource();
             shutdown.Cancel();
@@ -571,6 +583,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// come from looking. The fake runs from the rescued runtime's bin, where the real one runs from, and a
     /// running image does not stop that directory being moved, so without the check this revert really happens.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RevertRuntime_RefusesWhileAPostgresServerHoldsTheDataDirectory()
     {
@@ -642,6 +656,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     }
 
     /// <summary>A standalone (single-user) backend records its PID negated, and holds the directory just the same.</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void FindLivePostmaster_ReadsThePidEitherWayPostgresRecordsIt()
     {
@@ -670,6 +686,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// aside, a second move that failed left NO runtime at all. A file held open under the rescued runtime
     /// makes exactly that happen, since nothing is open under the live one.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RevertRuntime_ASecondMoveThatFails_PutsTheFirstOneBack()
     {
@@ -943,7 +961,7 @@ public sealed class DarlingStoreUpgradeRevertTests
     }
 
     /// <summary>
-    /// A live process named postgres: Windows' ping, copied under that name, pinging loopback for a minute.
+    /// A live process named postgres: the stand-in program, copied under that name, sleeping for a minute.
     /// Harmless, and a PID and an image name are all the liveness check can see of a real postmaster. Killed
     /// on dispose, whatever the test did.
     /// </summary>
@@ -959,11 +977,9 @@ public sealed class DarlingStoreUpgradeRevertTests
 
         public static FakePostmaster StartIn(string directory)
         {
-            Directory.CreateDirectory(directory);
-            var image = Path.Combine(directory, "postgres.exe");
-            File.Copy(s_ping, image, overwrite: true);
+            var image = StandinProcess.CopyTo(directory, "postgres.exe");
 
-            var process = Process.Start(new ProcessStartInfo(image, "-n 60 127.0.0.1")
+            var process = Process.Start(new ProcessStartInfo(image, StandinProcess.SleepArguments(60))
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,

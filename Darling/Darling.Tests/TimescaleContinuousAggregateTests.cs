@@ -1606,6 +1606,16 @@ public sealed class TimescaleContinuousAggregateTests
                         continue;
                     }
 
+                    /* #8824: the hourly wait totals are a leaf too, but their real consumer is the Daily Summary read of the days the daily
+                       rollup has not reached, so their capture requirement is their own four days of refresh window: the retention must outlive it. */
+                    if (string.Equals(relation, TimescaleSupport.WaitStatsHourlyView, StringComparison.Ordinal))
+                    {
+                        Assert.True(
+                            sourceHorizon > TimescaleSupport.DailyRefreshStartSpan,
+                            $"{relation} covers ITSELF; its refresh window is {TimescaleSupport.DailyRefreshStartSpan.TotalDays}d, and it keeps {sourceHorizon.TotalDays}d.");
+                        continue;
+                    }
+
                     Assert.True(
                         sourceHorizon > TimeSpan.FromDays(BaselineMath.BaselineWindowDays),
                         $"{relation} covers ITSELF (the #1757 leaf rule), so its horizon has to exceed the " +

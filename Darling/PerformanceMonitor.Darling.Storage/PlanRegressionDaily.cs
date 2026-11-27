@@ -109,7 +109,13 @@ WITH built AS
         server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash,
         execs, cpu_us_sum, dur_us_sum, last_exec, is_forced_plan, force_failure_count, rowcount_sum
     )
-    SELECT
+" + DayAggregateHead + DayAggregateTail + @"    RETURNING 1
+)
+SELECT count(*)::bigint FROM built;";
+
+    /// <summary>The SELECT of <see cref="BuildDaySql"/> and <see cref="BuildSliceSql"/> up to the watermark bound, shared so the
+    /// slice can never aggregate differently from the whole build (#9458). Parameters as <see cref="BuildDaySql"/>.</summary>
+    private const string DayAggregateHead = @"    SELECT
         $1::integer, $2::date, l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
         SUM(l.execution_count),
         SUM(l.avg_cpu_time_us::numeric * l.execution_count),
@@ -124,13 +130,60 @@ WITH built AS
     AND   l.first_execution_time >= $4::timestamp
     AND   l.first_execution_time < $3::timestamp
     AND   l.first_execution_time < $5::timestamp
-    AND   l.last_execution_time >= $2::date
+";
+
+    /// <summary>The rest of the shared SELECT: the day's own bounds on <c>last_execution_time</c>, the collection bound and the
+    /// grouping.</summary>
+    private const string DayAggregateTail = @"    AND   l.last_execution_time >= $2::date
     AND   l.last_execution_time < $3::timestamp
     AND   l.collection_time >= $4::timestamp
     GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
-    RETURNING 1
+";
+
+    /// <summary>
+    /// Adds the interval rows of an advancing partial day to its stored totals (#9458), where <see cref="BuildDaySql"/> would
+    /// delete the day and aggregate it from midnight again. The same SELECT as <see cref="BuildDaySql"/>
+    /// (<see cref="DayAggregateHead"/> and <see cref="DayAggregateTail"/>) with one more bound, <c>first_execution_time &gt;= $6</c>,
+    /// the <c>built_through</c> the stored totals cover; $1 to $5 as <see cref="BuildDaySql"/> ($5 is the new watermark), $6 the
+    /// stored <c>built_through</c> (timestamp). Returns the rows it wrote and how many of them were new plans (the caller adds those to the day's stored row count).
+    ///
+    /// <para><b>Why the stored totals need no re-reading.</b> While <c>partial_seq = late_seq</c> no interval row below
+    /// <c>built_through</c> has been written since the stored build: V185's trigger fires on every INSERT or UPDATE whose
+    /// <c>first_execution_time</c> is below the store's hour less <see cref="LateTriggerLagHours"/> hours, which is above any stored
+    /// watermark (<see cref="PartialWatermarkLagHours"/> hours), and it moves <c>late_seq</c>. The caller checks that equality in
+    /// the transaction that runs this, so a day invalidated after it was planned is rebuilt whole instead.</para>
+    ///
+    /// <para><b>Each column merges as the SELECT would over the union of the old and new rows.</b> The sums add and stay NULL only
+    /// when both sides are NULL (SUM ignores NULLs). <c>last_exec</c> and <c>force_failure_count</c> take GREATEST, which also
+    /// ignores NULL, as MAX does. <c>is_forced_plan</c> is the boolean or: true if either side is true, NULL if both are NULL,
+    /// otherwise false (as <c>bool_or</c>). <c>rowcount_sum</c> is NULL when either side is NULL (one interval with no
+    /// <c>avg_rowcount</c> makes the day's figure NULL, #5631), otherwise the sum. The key columns never change, so a row
+    /// whose plan has no new interval is not touched at all, and one that is touched changes no indexed column.</para>
+    /// </summary>
+    public const string BuildSliceSql = @"
+WITH merged AS
+(
+    INSERT INTO collect.plan_regression_daily AS t
+    (
+        server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash,
+        execs, cpu_us_sum, dur_us_sum, last_exec, is_forced_plan, force_failure_count, rowcount_sum
+    )
+" + DayAggregateHead + @"
+    AND   l.first_execution_time >= $6::timestamp
+" + DayAggregateTail + @"    ON CONFLICT (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash)
+    DO UPDATE SET
+        execs = CASE WHEN t.execs IS NULL AND EXCLUDED.execs IS NULL THEN NULL ELSE COALESCE(t.execs, 0) + COALESCE(EXCLUDED.execs, 0) END,
+        cpu_us_sum = CASE WHEN t.cpu_us_sum IS NULL AND EXCLUDED.cpu_us_sum IS NULL THEN NULL ELSE COALESCE(t.cpu_us_sum, 0) + COALESCE(EXCLUDED.cpu_us_sum, 0) END,
+        dur_us_sum = CASE WHEN t.dur_us_sum IS NULL AND EXCLUDED.dur_us_sum IS NULL THEN NULL ELSE COALESCE(t.dur_us_sum, 0) + COALESCE(EXCLUDED.dur_us_sum, 0) END,
+        last_exec = GREATEST(t.last_exec, EXCLUDED.last_exec),
+        is_forced_plan = CASE WHEN t.is_forced_plan IS TRUE OR EXCLUDED.is_forced_plan IS TRUE THEN true
+                              WHEN t.is_forced_plan IS NULL AND EXCLUDED.is_forced_plan IS NULL THEN NULL
+                              ELSE false END,
+        force_failure_count = GREATEST(t.force_failure_count, EXCLUDED.force_failure_count),
+        rowcount_sum = t.rowcount_sum + EXCLUDED.rowcount_sum
+    RETURNING (t.xmax = 0) AS inserted
 )
-SELECT count(*)::bigint FROM built;";
+SELECT count(*)::bigint, (count(*) FILTER (WHERE inserted))::bigint FROM merged;";
 
     /// <summary>The most builds of the plan's first queue (days never built, or whose <c>late_seq</c> moved) one tick runs. The
     /// first fill of a store is 15 builds per server (T-14 through today), so a store with many servers takes several ticks;
@@ -163,10 +216,16 @@ ON CONFLICT (server_id, day) DO NOTHING;";
     /// <summary>The day's <c>late_seq</c> as the builder sees it before it aggregates: the value the build is stamped with
     /// (<c>built_seq</c>), so a late apply that lands during the build leaves the day invalid and it is rebuilt, and the build's
     /// watermark (#5812): D + 1 day, or <see cref="PartialWatermarkLagHours"/> before the current hour by the store's own
-    /// clock when that is earlier, so the trigger's bound and this one read one clock. $1 server_id, $2 day.</summary>
+    /// clock when that is earlier, so the trigger's bound and this one read one clock. $1 server_id, $2 day. The third to fifth
+    /// columns are what the build needs to take the slice path (#9458), read in the same statement as <c>late_seq</c>: whether the
+    /// day holds a valid partial build (the rule <see cref="PlanSql"/>'s second queue and <see cref="BuiltDaysSql"/> use), its
+    /// stored <c>built_through</c>, and its <c>source_rows</c>.</summary>
     public static readonly string SeqSql = $@"
 SELECT late_seq,
-       LEAST(($2::date + 1)::timestamp, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PartialWatermarkLagHours} hours')
+       LEAST(($2::date + 1)::timestamp, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PartialWatermarkLagHours} hours'),
+       COALESCE(partial_seq = late_seq AND built_through IS NOT NULL AND built_seq IS DISTINCT FROM late_seq, false),
+       built_through,
+       COALESCE(source_rows, 0)
 FROM collect.plan_regression_daily_built
 WHERE server_id = $1::integer
 AND   day = $2::date;";
@@ -429,8 +488,10 @@ AND   day = $2::date;";
 
     /// <summary>What one tick did. <paramref name="Skipped"/> counts items another builder held the server's lock for.
     /// <paramref name="Advanced"/> counts the partial days whose watermark moved without a build (<see cref="AdvanceIdleSql"/>),
-    /// <paramref name="Stamped"/> the tomorrows stamped with no totals (<see cref="StampTomorrowSql"/>).</summary>
-    public readonly record struct TickResult(int Built, int Failed, int Skipped, long DaysRemoved, int Deferred = 0, int Advanced = 0, int Stamped = 0);
+    /// <paramref name="Stamped"/> the tomorrows stamped with no totals (<see cref="StampTomorrowSql"/>), <paramref name="BlocksBuilt"/> the
+    /// blocks of days summed after the day builds (<see cref="PlanRegressionBlock"/>, #9225), with <paramref name="BlocksSkipped"/>, <paramref name="BlocksFailed"/>
+    /// and <paramref name="BlocksRemoved"/> as the block step counted them. None of them changes the other counts.</summary>
+    public readonly record struct TickResult(int Built, int Failed, int Skipped, long DaysRemoved, int Deferred = 0, int Advanced = 0, int Stamped = 0, int BlocksBuilt = 0, int BlocksSkipped = 0, int BlocksFailed = 0, int BlocksRemoved = 0);
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -505,10 +566,11 @@ AND   day = $2::date;";
 
     /// <summary>
     /// Builds one (server, day): makes sure the built row exists, then in ONE transaction takes the server's advisory lock
-    /// (false: another builder has it, nothing is written and the result is null), reads <c>late_seq</c> as s0, deletes the
-    /// day's totals, inserts them, and stamps <c>built_seq = s0</c>. A late apply that bumps <c>late_seq</c> after s0 was read
+    /// (false: another builder has it, nothing is written and the result is null), reads <c>late_seq</c> as s0, and either adds
+    /// the new hours to the day's totals (<see cref="BuildSliceSql"/>, #9458: only for a valid partial day whose watermark
+    /// advances and is still inside the day) or deletes the day's totals and inserts them again, then stamps <c>built_seq = s0</c>. A late apply that bumps <c>late_seq</c> after s0 was read
     /// leaves the day invalid for a reader (<c>built_seq &lt;&gt; late_seq</c>) and due again, so a race costs one more build,
-    /// never a wrong total. Returns the rows inserted, or null when the lock was not free.
+    /// never a wrong total. Returns the rows in the day's totals (the day's stored count plus the plans a slice inserted, for a slice), or null when the lock was not free.
     /// </summary>
     /// <param name="afterSeqRead">A test seam, called between reading s0 and aggregating, so a pin can land a late apply at
     /// the point the race matters. Null in the service.</param>
@@ -543,6 +605,9 @@ AND   day = $2::date;";
 
         long seq;
         DateTime builtThrough;
+        bool validPartial;
+        DateTime? storedThrough;
+        long storedRows;
         await using (var read = new NpgsqlCommand(SeqSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerDay(read, serverId, day);
@@ -555,6 +620,9 @@ AND   day = $2::date;";
 
             seq = seqReader.GetInt64(0);
             builtThrough = seqReader.GetDateTime(1);
+            validPartial = seqReader.GetBoolean(2);
+            storedThrough = seqReader.IsDBNull(3) ? null : seqReader.GetDateTime(3);
+            storedRows = seqReader.GetInt64(4);
         }
 
         if (afterSeqRead is not null)
@@ -562,21 +630,35 @@ AND   day = $2::date;";
             await afterSeqRead(cancellationToken);
         }
 
-        await using (var delete = new NpgsqlCommand(DeleteDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
-        {
-            AddServerDay(delete, serverId, day);
-            await delete.ExecuteNonQueryAsync(cancellationToken);
-        }
-
         long sourceRows;
         var dayStart = day.ToDateTime(TimeOnly.MinValue);
-        await using (var insert = new NpgsqlCommand(BuildDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+
+        /* #9458: a valid partial day that advances adds the rows from its stored watermark up to the new one. The stored
+           totals cover every row below that watermark and no write to such a row can have landed without moving late_seq
+           (BuildSliceSql), which is the equality SeqSql just read in this transaction, so a day invalidated after it was
+           planned takes the whole build below. Every other day, the first build, a late-marked or closing day, is deleted and
+           built from scratch. The closing tick (the watermark reaches the next midnight) is whole on purpose (#9458): the
+           day's permanent totals are built from the source once, so drift from a write the trigger does not see (a DELETE)
+           cannot outlive the open day. */
+        if (validPartial && storedThrough is { } sliceFrom && sliceFrom < builtThrough && builtThrough < dayStart.AddDays(1))
         {
-            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
-            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(1)) });
-            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(-1)) });
-            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(builtThrough) });
+            await using var slice = new NpgsqlCommand(BuildSliceSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            AddBuildBounds(slice, serverId, day, dayStart, builtThrough);
+            slice.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(sliceFrom) });
+            await using var sliceReader = await slice.ExecuteReaderAsync(cancellationToken);
+            await sliceReader.ReadAsync(cancellationToken);
+            sourceRows = storedRows + sliceReader.GetInt64(1);
+        }
+        else
+        {
+            await using (var delete = new NpgsqlCommand(DeleteDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+            {
+                AddServerDay(delete, serverId, day);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var insert = new NpgsqlCommand(BuildDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            AddBuildBounds(insert, serverId, day, dayStart, builtThrough);
             sourceRows = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
         }
 
@@ -601,6 +683,16 @@ AND   day = $2::date;";
 
         await transaction.CommitAsync(cancellationToken);
         return sourceRows;
+    }
+
+    /// <summary>Binds $1 to $5 of <see cref="BuildDaySql"/> and <see cref="BuildSliceSql"/>.</summary>
+    private static void AddBuildBounds(NpgsqlCommand command, int serverId, DateOnly day, DateTime dayStart, DateTime watermark)
+    {
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(1)) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(-1)) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(watermark) });
     }
 
     private static void AddServerDay(NpgsqlCommand command, int serverId, DateOnly day)
@@ -633,7 +725,7 @@ AND   day = $2::date;";
 
         int built = 0, failed = 0, skipped = 0, started = 0;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.PlanRegression, cancellationToken);
         var removed = await GcAsync(connection, nowUtc, cancellationToken);
         var (advanced, stamped) = await StampWithoutBuildAsync(connection, nowUtc, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, cancellationToken);
@@ -666,9 +758,22 @@ AND   day = $2::date;";
         }
 
         var deferred = plan.Count - started;
-        var result = new TickResult(built, failed, skipped, removed, deferred, advanced, stamped);
-        logger.LogInformation("PLAN_REGRESSION daily totals: built {Built}, failed {Failed}, skipped {Skipped}, deferred {Deferred}, advanced {Advanced} and stamped {Stamped} without a build, removed {Removed} day(s), {ElapsedMs} ms",
-            built, failed, skipped, deferred, advanced, stamped, removed, (long)elapsed().TotalMilliseconds);
+
+        // The block pre-aggregate is a copy of the daily rows the builder just kept (#9225): a failure here costs the read its gain and nothing else,
+        // so it is logged and never fails the tick or changes the day counts.
+        var blockStep = new PlanRegressionBlock.BlockStepResult(0, 0, 0, 0);
+        try
+        {
+            blockStep = await PlanRegressionBlock.RunStepAsync(connection, nowUtc, logger, elapsed, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "PLAN_REGRESSION blocks: the block step failed and is retried next tick (the read uses the daily rows): {Message}", ex.Message);
+        }
+
+        var result = new TickResult(built, failed, skipped, removed, deferred, advanced, stamped, blockStep.Built, blockStep.Skipped, blockStep.Failed, blockStep.Removed);
+        logger.LogInformation("PLAN_REGRESSION daily totals: built {Built}, failed {Failed}, skipped {Skipped}, deferred {Deferred}, advanced {Advanced} and stamped {Stamped} without a build, removed {Removed} day(s); blocks built {BlocksBuilt}, skipped {BlocksSkipped}, failed {BlocksFailed}, removed {BlocksRemoved}, {ElapsedMs} ms",
+            built, failed, skipped, deferred, advanced, stamped, removed, blockStep.Built, blockStep.Skipped, blockStep.Failed, blockStep.Removed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

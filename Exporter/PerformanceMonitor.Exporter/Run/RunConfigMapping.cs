@@ -16,7 +16,9 @@ public static class RunConfigMapping
     /// default host, port and database, and any application_name), the child is the flags-only
     /// `export ...` call, with the application name always, and the login pair only when the login is not the default
     /// darling one. Otherwise the child is `export --config F ...`: the config then carries the login, the host and the
-    /// application name, and the per-call flags are the same.</para>
+    /// application name, and the per-call flags are the same. A destination the `--upload` value cannot express (an S3 endpoint,
+    /// path style, checksum or credentials, or Azure Blob) also makes the child `export --config F`, with `--upload-destination`
+    /// in place of `--upload`, so the child reads the destination from the same file.</para>
     /// </summary>
     public static RunSettings ToRunSettings(ExporterConfig config, string configPath)
     {
@@ -25,9 +27,9 @@ public static class RunConfigMapping
             throw new ConfigException($"schedule.hourly_start_minute: run supports only 20 for now, got {config.Schedule.HourlyStartMinute}");
         }
 
-        var (upload, region) = UploadFor(config);
+        var (upload, region, fromConfig) = UploadFor(config);
         var store = config.Store;
-        var flagsOnly = store.ConnectionStringEnv is null
+        var flagsOnly = !fromConfig && store.ConnectionStringEnv is null
             && store.Password is { Source: CredentialSources.DpapiFile }
             && store.Host == "127.0.0.1" && store.Port == 5641 && store.Database == "darling";
 
@@ -62,6 +64,7 @@ public static class RunConfigMapping
             StateDir = config.Paths.State,
             LogDir = config.Paths.Logs,
             Upload = upload,
+            UploadDestination = fromConfig,
             ChildExe = null,
             ChildBaseArgs = baseArgs,
             PgUser = pgUser,
@@ -123,17 +126,18 @@ public static class RunConfigMapping
     }
 
     /// <summary>
-    /// The child's `--upload` value and `--aws-region` from `destination`. s3 is `s3://bucket[/prefix]` with the
-    /// destination's region, or none when unset (the AWS SDK then resolves it from its own chain); local is the folder
-    /// (joined with its prefix). No destination is the default, the local folder next to paths.out.
-    /// A destination `--upload` cannot express (azure_blob, an S3 endpoint, credentials, checksum or hive layout) is refused.
+    /// How the child uploads to `destination`. An s3 destination with only a bucket, a prefix and a region is the child's
+    /// `--upload s3://bucket[/prefix]` with the destination's region as `--aws-region`, or none when unset (the AWS SDK then
+    /// resolves it from its own chain). local is the folder (joined with its prefix) as `--upload`. No destination is the
+    /// default, the local folder next to paths.out. Every other form (an S3 endpoint, path style, checksum or credentials, and
+    /// azure_blob) is FromConfig: the child reads the destination from the config file. hive_store_folder is refused.
     /// </summary>
-    internal static (string Upload, string? Region) UploadFor(ExporterConfig config)
+    internal static (string? Upload, string? Region, bool FromConfig) UploadFor(ExporterConfig config)
     {
         if (config.Destination is not { } d)
         {
             var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(config.Paths.Out)) ?? config.Paths.Out;
-            return (Path.Combine(parent, "landing"), null);
+            return (Path.Combine(parent, "landing"), null, false);
         }
 
         Upload.UploadSettings parsed;
@@ -143,29 +147,67 @@ public static class RunConfigMapping
         switch (parsed)
         {
             case Upload.UploadSettings.S3 s3:
+                if (s3.HiveStoreFolder) throw new ConfigException(HiveRefused);
                 if (s3.EndpointUrl is not null || s3.ForcePathStyle || s3.Checksum != Upload.S3Checksum.Sha256
-                    || s3.Credentials is not (null or Upload.S3Credentials.Default) || s3.HiveStoreFolder)
+                    || s3.Credentials is not (null or Upload.S3Credentials.Default))
                 {
-                    throw new ConfigException("destination: run supports only bucket, prefix and region for s3 for now");
+                    return (null, null, true);
                 }
                 var prefix = s3.Prefix.Trim('/');
-                return (prefix.Length == 0 ? $"s3://{s3.Bucket}" : $"s3://{s3.Bucket}/{prefix}", string.IsNullOrWhiteSpace(s3.Region) ? null : s3.Region);
+                return (prefix.Length == 0 ? $"s3://{s3.Bucket}" : $"s3://{s3.Bucket}/{prefix}", string.IsNullOrWhiteSpace(s3.Region) ? null : s3.Region, false);
             case Upload.UploadSettings.Local local:
-                if (local.HiveStoreFolder) throw new ConfigException("destination.hive_store_folder: run does not support it for now");
-                var path = local.Prefix.Length == 0 ? local.Path : Path.Combine(local.Path, local.Prefix.Replace('/', Path.DirectorySeparatorChar));
+                if (local.HiveStoreFolder) throw new ConfigException(HiveRefused);
+                var path = LocalRoot(local);
                 if (string.IsNullOrWhiteSpace(path)) throw new ConfigException("destination.path: must not be empty");
-                return (path, null);
+                return (path, null, false);
+            case Upload.UploadSettings.AzureBlob azure:
+                if (azure.HiveStoreFolder) throw new ConfigException(HiveRefused);
+                return (null, null, true);
             default:
-                throw new ConfigException($"destination.type: run supports s3 and local for now, got '{d.GetProperty("type").GetString()}'");
+                throw new ConfigException($"destination.type: run does not support '{d.GetProperty("type").GetString()}'");
+        }
+    }
+
+    private const string HiveRefused = "destination.hive_store_folder: run does not support it for now";
+
+    private static string LocalRoot(Upload.UploadSettings.Local local) =>
+        local.Prefix.Length == 0 ? local.Path : Path.Combine(local.Path, local.Prefix.Replace('/', Path.DirectorySeparatorChar));
+
+    /// <summary>
+    /// The local folder `run` uploads to, with the config key that names it: the destination's path (joined with its
+    /// prefix), or the default `landing` folder next to paths.out when there is no destination. Null for every other
+    /// destination, which has no folder to check.
+    /// </summary>
+    public static (string Root, string Key)? LocalUploadRoot(ExporterConfig config)
+    {
+        if (config.Destination is not { } d)
+        {
+            var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(config.Paths.Out)) ?? config.Paths.Out;
+            return (Path.Combine(parent, "landing"), "paths.out");
+        }
+
+        try
+        {
+            return Upload.UploadSettings.FromJson(d) is Upload.UploadSettings.Local local && LocalRoot(local) is { Length: > 0 } root
+                ? (root, "destination.path")
+                : null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
         }
     }
 
     /// <summary>Loads and maps a config file. Every failure is a <see cref="ConfigException"/>.</summary>
-    public static RunSettings Load(string configPath, bool? isWindows = null)
+    public static RunSettings Load(string configPath, bool? isWindows = null) => LoadWithConfig(configPath, isWindows).Settings;
+
+    /// <summary>Loads a config file and maps it, returning both. Every failure is a <see cref="ConfigException"/>.</summary>
+    public static (RunSettings Settings, ExporterConfig Config) LoadWithConfig(string configPath, bool? isWindows = null)
     {
         try
         {
-            return ToRunSettings(ConfigLoader.Load(configPath, isWindows), configPath);
+            var config = ConfigLoader.Load(configPath, isWindows);
+            return (ToRunSettings(config, configPath), config);
         }
         catch (JsonException ex)
         {

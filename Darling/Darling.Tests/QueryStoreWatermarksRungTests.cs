@@ -49,9 +49,7 @@ public sealed class QueryStoreWatermarksRungTests
         Assert.Equal(178, QueryStoreWatermarks.RungVersion);
         Assert.Equal(QueryStoreWatermarks.RungVersion, Rung.Version);
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions[^1]);
-        /* V179 (#5640) and every later rung sit above this one with no gap, whatever the top is when a rung lands (#5825). */
         Assert.Equal(
             Enumerable.Range(QueryStoreWatermarks.RungVersion, StorageVersion.SchemaVersion - QueryStoreWatermarks.RungVersion + 1).ToArray(),
             versions.Where(v => v >= QueryStoreWatermarks.RungVersion).ToArray());

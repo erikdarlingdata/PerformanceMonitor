@@ -189,8 +189,10 @@ public sealed class AlwaysOnXeReadOnlyIntentDatabase : IAlwaysOnXeDatabase, IDis
 /// (<see cref="LongQueryCompletionsCollector.XeSessionNameFor"/>), and the two capture suffixes are cut from the shared
 /// names, so no second spelling of either exists.</para>
 ///
-/// <para><b>Nothing here drops a session it did not make.</b> The only drop builder takes an own name, and refuses any other.
-/// The shared session is never dropped, because another install may be reading it.</para>
+/// <para><b>Nothing here drops a session it did not make, with one exception.</b> The drop builder takes an own name, and refuses any other.
+/// The shared session is not dropped, because another install may be reading it. The exception is the shared client-timeout
+/// session with an older definition of the same session (#9507): <see cref="BuildAzureSharedAttentionDropSql"/> drops it so it
+/// can be created again with the current one.</para>
 /// </summary>
 public static class AlwaysOnXeSessions
 {
@@ -429,14 +431,60 @@ public static class AlwaysOnXeSessions
             }
         }
 
-        return "ADD EVENT sqlserver.attention\n"
-            + "(\n"
-            + "    ACTION\n"
+        var actionBlock = "    ACTION\n"
             + "    (\n"
             + string.Join(",\n", actions) + "\n"
-            + "    )\n"
+            + "    )\n";
+        var floor = " AND [duration] >= " + CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture);
+        var abortPredicate = "    WHERE (([result] = " + AbortResultMapKey.ToString(CultureInfo.InvariantCulture) + floor + ")"
+            + " OR ([result] = " + ErrorResultMapKey.ToString(CultureInfo.InvariantCulture) + floor + "))\n";
+
+        /* #9507: a real application command timeout raises an attention event that times the cancel (milliseconds), so the
+           attention duration says nothing about how long the command ran. The call that was still running when the client
+           cancelled ends with an rpc_completed or sql_batch_completed carrying its elapsed duration, its object or statement
+           and the same actions. SQL Server 2016 to 2022 end it with result Abort, 2025 with result Error, so the predicate keeps
+           an Abort or an Error that ran at least 0.9 s (a command timeout is whole seconds in every driver). A cancel that
+           arrives after the command finished raises no such event, and one a data layer issues a few milliseconds into a call
+           (a reader closed with rows unread) is left out, so it takes no ring buffer slot from the attention samples (#9538).
+           The two completed events keep their statement and batch_text fields OFF (the SET lines). rpc_completed's statement
+           carries the call's parameter values, which sensitive-statement withholding does not strip, and the engine copies the
+           field on every call of every monitored server before the predicate drops the event. The sql_text action carries the
+           text without values, so the collector reads that. */
+        return "ADD EVENT sqlserver.attention\n"
+            + "(\n"
+            + actionBlock
+            + "),\n"
+            + "ADD EVENT sqlserver.rpc_completed\n"
+            + "(\n"
+            + "    SET collect_statement = (0)\n"
+            + actionBlock
+            + abortPredicate
+            + "),\n"
+            + "ADD EVENT sqlserver.sql_batch_completed\n"
+            + "(\n"
+            + "    SET collect_batch_text = (0)\n"
+            + actionBlock
+            + abortPredicate
             + ")\n";
     }
+
+    /// <summary>
+    /// The key of <c>Abort</c> in the <c>sys.dm_xe_map_values</c> map that the <c>result</c> field of <c>rpc_completed</c> and of
+    /// <c>sql_batch_completed</c> uses (map <c>rpc_return_result</c>: 0 OK, 1 Error, 2 Abort, 3 Skipped). The same on SQL Server
+    /// 2016, 2017, 2019, 2022 and 2025 (#9507).
+    /// </summary>
+    internal const int AbortResultMapKey = 2;
+
+    /// <summary>The key of <c>Error</c> in the same map. SQL Server 2025 ends a client-cancelled call with it (#9507).</summary>
+    internal const int ErrorResultMapKey = 1;
+
+    /// <summary>
+    /// The shortest elapsed time, in microseconds, of a completed call the session keeps (#9507). A command timeout is whole seconds in
+    /// every driver, so a real one runs about 1 s and can be recorded just under it, and the floor keeps ordinary fast failed batches out of
+    /// the ring buffer. The value lives in <see cref="PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs"/> so the read of the captured calls
+    /// keeps the same floor (#9538).
+    /// </summary>
+    internal const long CapturedCallMinDurationUs = PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs;
 
     /* event_counter is the exact count (it never drops an event); the ring buffer is a sample for the detail. 1024 KB is
        Microsoft's tip for a ring buffer and stays under the 4 MB cut-off of the XML a read shreds. */
@@ -484,10 +532,12 @@ public static class AlwaysOnXeSessions
     /// <c>session_state</c> 0 (stopped), 1 (running) or <see cref="AttentionDefinitionMismatch"/> (2: it exists with events, actions or
     /// targets other than the ones <see cref="BuildAttentionServerCreateSql"/> makes, which is an older definition of our own
     /// session, since the name is ours). <c>@session_name</c> is the shared name. <paramref name="appTag"/> is the host's own
-    /// comment tag.
+    /// comment tag. The first read of an ensure is a dirty read, so it sees a session another caller is still creating, which can
+    /// read as another definition (#9675): <paramref name="committedRead"/> asks for the read that waits for that create to commit,
+    /// and the confirming read of <see cref="ConfirmAttentionMismatchAsync"/> uses it.
     /// </summary>
-    public static string BuildAttentionServerProbeSql(string appTag) => @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+    public static string BuildAttentionServerProbeSql(string appTag, bool committedRead = false) => @"
+SET TRANSACTION ISOLATION LEVEL " + (committedRead ? "READ COMMITTED" : "READ UNCOMMITTED") + @";
 
 SELECT /* " + appTag + @" */
     session_state =
@@ -501,9 +551,60 @@ LEFT JOIN sys.dm_xe_sessions AS dxs
   ON dxs.name = ses.name
 WHERE ses.name = @session_name;";
 
+    /// <summary>How long a probe that read another definition waits before it reads again (#9675): the create of the session is a few milliseconds of catalog writes.</summary>
+    public static readonly TimeSpan AttentionMismatchConfirmPause = TimeSpan.FromSeconds(2);
+
     /// <summary>
-    /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the one <c>attention</c> event, every
-    /// action the builder adds to it and none other, and the <c>event_counter</c> and <c>ring_buffer</c> targets and no other.
+    /// #9675: the step that goes between the first probe of the server-scoped client-timeout session and the drop of a session that
+    /// probe called another definition. Several entries on one instance run the ensure at the same moment, and the first probe is a
+    /// dirty read: while one entry's CREATE EVENT SESSION is still writing the session's events, actions and targets, another
+    /// entry's probe can read the half-written definition as another one, and its drop then removes the session the first entry is
+    /// about to start. So an answer of <see cref="AttentionDefinitionMismatch"/> is read again, after <paramref name="pause"/>
+    /// and with <paramref name="probeAgain"/> (the committed read), and that second answer is the one the ensure acts on. Any
+    /// other first answer is returned as it is, with no second read.
+    /// </summary>
+    public static async Task<object?> ConfirmAttentionMismatchAsync(
+        object? probe, Func<CancellationToken, Task<object?>> probeAgain, TimeSpan pause, CancellationToken cancellationToken)
+    {
+        if (!(probe is int mismatch && mismatch == AttentionDefinitionMismatch))
+        {
+            return probe;
+        }
+
+        if (pause > TimeSpan.Zero)
+        {
+            await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await probeAgain(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #9675: runs the drop of a session of another definition. When the drop fails because another entry on the same instance
+    /// dropped it first (both read the same older definition, which is every upgrade with two entries on one instance), the
+    /// session is read again: one that is gone, or that now has this version's definition, is what the drop was for, so the
+    /// failure is not one. A session that is still another definition rethrows the drop's own failure.
+    /// </summary>
+    public static async Task DropAttentionMismatchAsync(
+        Func<CancellationToken, Task> drop, Func<CancellationToken, Task<object?>> probeAgain, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await drop(cancellationToken).ConfigureAwait(false);
+        }
+        catch (System.Data.Common.DbException)
+        {
+            var now = await probeAgain(cancellationToken).ConfigureAwait(false);
+            if (now is int mismatch && mismatch == AttentionDefinitionMismatch)
+            {
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the <c>attention</c> event and the two completed events that carry a predicate (<c>rpc_completed</c>, <c>sql_batch_completed</c>, #9507) and no other event, every
+    /// action the builder adds to them and none other, and the <c>event_counter</c> and <c>ring_buffer</c> targets and no other.
     /// On Azure SQL Database the actions Azure rejects are not required and the unverified ones are optional, because a create the
     /// engine refused is retried without them. Built from the same lists as the DDL, so the two cannot drift.
     /// </summary>
@@ -531,15 +632,27 @@ WHERE ses.name = @session_name;";
         var allowedList = string.Join(", ", allowed);
         var requiredList = string.Join(", ", required);
 
+        /* #9538: the engine stores the predicate text with the floor as written, so a completed event whose predicate holds the floor
+           fewer than twice (once per arm) is a session an older build made, with the floor on the Error arm only. It reads as another
+           definition, so the host drops it and creates it again. */
+        var floorText = CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture);
+
         return @"
             (
-                EXISTS
+                (
+                    SELECT
+                        COUNT_BIG(DISTINCT e.name)
+                    FROM " + prefix + @"_events AS e
+                    WHERE e.event_session_id = " + key + @"
+                    AND   e.name IN (N'attention', N'rpc_completed', N'sql_batch_completed')
+                ) = 3
+                AND NOT EXISTS
                 (
                     SELECT
                         1/0
                     FROM " + prefix + @"_events AS e
                     WHERE e.event_session_id = " + key + @"
-                    AND   e.name = N'attention'
+                    AND   e.name NOT IN (N'attention', N'rpc_completed', N'sql_batch_completed')
                 )
                 AND NOT EXISTS
                 (
@@ -547,7 +660,8 @@ WHERE ses.name = @session_name;";
                         1/0
                     FROM " + prefix + @"_events AS e
                     WHERE e.event_session_id = " + key + @"
-                    AND   e.name <> N'attention'
+                    AND   e.name IN (N'rpc_completed', N'sql_batch_completed')
+                    AND   (e.predicate IS NULL OR (LEN(e.predicate) - LEN(REPLACE(e.predicate, N'" + floorText + @"', N''))) < " + (2 * floorText.Length).ToString(CultureInfo.InvariantCulture) + @")
                 )
                 AND
                 (
@@ -615,8 +729,8 @@ WHERE ses.name = @session_name;";
     }
 
     /// <summary>
-    /// The drop of one session. Takes an own name only: the shared session is never dropped by an install, because another
-    /// install may be reading it. Throws for any other name.
+    /// The drop of one session. Takes an own name only: the shared session is not dropped by this builder, because another
+    /// install may be reading it (the one case that is, is <see cref="BuildAzureSharedAttentionDropSql"/>). Throws for any other name.
     /// </summary>
     public static string BuildAzureDropSql(AlwaysOnXeSessionKind kind, string sessionName)
     {
@@ -627,6 +741,18 @@ WHERE ses.name = @session_name;";
 
         return "DROP EVENT SESSION [" + sessionName + "] ON DATABASE;";
     }
+
+    /// <summary>
+    /// The drop of the shared client-timeout session, for the one case an install may drop a shared session (#9507): its
+    /// definition is an older one of this product's own, so it lacks the events a read needs. See <see cref="BuildAzureDropSql"/>
+    /// for every other name.
+    /// </summary>
+    public static string BuildAzureSharedAttentionDropSql() =>
+        "DROP EVENT SESSION [" + SharedNameFor(AlwaysOnXeSessionKind.Attention) + "] ON DATABASE;";
+
+    /// <summary>The stop that goes before <see cref="BuildAzureSharedAttentionDropSql"/> over a read-only connection (#4961).</summary>
+    public static string BuildAzureSharedAttentionStopSql() =>
+        "ALTER EVENT SESSION [" + SharedNameFor(AlwaysOnXeSessionKind.Attention) + "] ON DATABASE STATE = STOP;";
 
     /// <summary>
     /// The catalog probe: one scalar, the <see cref="AlwaysOnXeCatalog"/> value as an integer, for the session named by
@@ -667,8 +793,8 @@ SELECT /* " + appTag + @" */
             ELSE 0
         END;";
             case AlwaysOnXeSessionKind.Attention:
-                /* #5640: present (2) only with the client-timeout definition; another definition under our name is 1, which the
-                   Azure ensure treats as unusable: the install reads its own session and never drops a shared one. */
+                /* #5640: present (2) only with the client-timeout definition; another definition under our name is 1. The Azure ensure
+                   drops and creates again an own session or the shared one (#9507), and leaves any other kind's shared session alone. */
                 return @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -822,6 +948,14 @@ public sealed class AlwaysOnXeChoices
     public bool MarkReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
         _readOnlyRefusals.TryAdd(KeyOf(serverKey, database, kind), true);
 
+    /* The databases whose shared client-timeout session this run has replaced (#9507). Not forgotten with the registration: the
+       rule is once per run of the app, as the on-premises session's is. */
+    private readonly ConcurrentDictionary<string, bool> _attentionReplaced = new(StringComparer.Ordinal);
+
+    /// <summary>True the first time in this run for one database, so the host replaces an older shared client-timeout session once and no more.</summary>
+    public bool TryClaimAttentionReplace(string serverKey, string database) =>
+        _attentionReplaced.TryAdd(KeyOf(serverKey, database, AlwaysOnXeSessionKind.Attention), true);
+
     /// <summary>Forgets the refusal of one database, after a pass that did not hit it.</summary>
     public void ClearReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
         _readOnlyRefusals.TryRemove(KeyOf(serverKey, database, kind), out _);
@@ -913,6 +1047,9 @@ public static class AlwaysOnXeAzureEnsure
     /// <summary>
     /// One pass of the ensure in one database. <paramref name="ownName"/> is null for a host with no install id, and
     /// <paramref name="idFailure"/> is why, when the host's id store knows (see <see cref="NoOwnSessionMessage"/>).
+    /// <paramref name="claimSharedAttentionReplace"/> is the host's once-per-run claim for one database (true the first time):
+    /// a shared client-timeout session whose definition is older than this version's is dropped and created again only when the
+    /// claim is true (#9507). Without it, such a session is left as it is, as for every other kind.
     /// </summary>
     public static async Task<AlwaysOnXeAzureResult> RunAsync(
         IAlwaysOnXeDatabase database,
@@ -921,7 +1058,8 @@ public static class AlwaysOnXeAzureEnsure
         AlwaysOnXeChoice current,
         CancellationToken cancellationToken,
         string? idFailure = null,
-        int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
+        int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents,
+        Func<bool>? claimSharedAttentionReplace = null)
     {
         ArgumentNullException.ThrowIfNull(database);
 
@@ -930,7 +1068,7 @@ public static class AlwaysOnXeAzureEnsure
             (bool Usable, AlwaysOnXeChange Change) shared;
             try
             {
-                shared = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
+                shared = await TrySharedAsync(database, kind, ringBufferMaxEvents, claimSharedAttentionReplace, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -948,7 +1086,7 @@ public static class AlwaysOnXeAzureEnsure
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Own, ownChange);
         }
 
-        var first = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
+        var first = await TrySharedAsync(database, kind, ringBufferMaxEvents, claimSharedAttentionReplace, cancellationToken);
         if (first.Usable)
         {
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Shared, first.Change);
@@ -964,7 +1102,7 @@ public static class AlwaysOnXeAzureEnsure
     }
 
     private static async Task<(bool Usable, AlwaysOnXeChange Change)> TrySharedAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, int ringBufferMaxEvents, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, int ringBufferMaxEvents, Func<bool>? claimSharedAttentionReplace, CancellationToken cancellationToken)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
         var catalog = await database.ReadCatalogAsync(kind, shared, cancellationToken);
@@ -972,8 +1110,20 @@ public static class AlwaysOnXeAzureEnsure
         switch (catalog)
         {
             case AlwaysOnXeCatalog.WrongEvent:
-                /* Not dropped: another install may be reading it. This install reads its own instead. */
-                return (false, AlwaysOnXeChange.None);
+                /* Not dropped: another install may be reading it. This install reads its own instead. The client-timeout session is
+                   the exception (#9507): its name is this product's own, and the definition under it is an older one of the same
+                   session, without the completed events a read now needs. Left running, it would sit unread with STARTUP_STATE = ON
+                   while every install fell back to a session of its own. It is dropped and created again once per run, as the
+                   on-premises session is, and then read as the shared one. A deadlock session without its event may be another
+                   tool's, so that one stays. */
+                if (kind != AlwaysOnXeSessionKind.Attention || claimSharedAttentionReplace is null || !claimSharedAttentionReplace())
+                {
+                    return (false, AlwaysOnXeChange.None);
+                }
+
+                await DropByStatementsAsync(
+                    database, shared, AlwaysOnXeSessions.BuildAzureSharedAttentionStopSql(), AlwaysOnXeSessions.BuildAzureSharedAttentionDropSql(), cancellationToken);
+                return await CreateSharedAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
 
             case AlwaysOnXeCatalog.Present:
                 if (await database.IsStartedAsync(shared, cancellationToken))
@@ -984,21 +1134,27 @@ public static class AlwaysOnXeAzureEnsure
                 return await StartAndReadBackAsync(database, kind, shared, cancellationToken);
 
             default:
-                try
-                {
-                    var withoutStatementText = await CreateAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
-                    return (true, withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created);
-                }
-                catch (Exception ex) when (database.IsAlreadyPresent(ex))
-                {
-                    /* The catalog missed a session the engine has: another install's, or one this login cannot list. */
-                    if (await database.IsStartedAsync(shared, cancellationToken))
-                    {
-                        return (true, AlwaysOnXeChange.None);
-                    }
+                return await CreateSharedAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
+        }
+    }
 
-                    return await StartAndReadBackAsync(database, kind, shared, cancellationToken);
-                }
+    private static async Task<(bool Usable, AlwaysOnXeChange Change)> CreateSharedAsync(
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string shared, int ringBufferMaxEvents, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var withoutStatementText = await CreateAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
+            return (true, withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created);
+        }
+        catch (Exception ex) when (database.IsAlreadyPresent(ex))
+        {
+            /* The catalog missed a session the engine has: another install's, or one this login cannot list. */
+            if (await database.IsStartedAsync(shared, cancellationToken))
+            {
+                return (true, AlwaysOnXeChange.None);
+            }
+
+            return await StartAndReadBackAsync(database, kind, shared, cancellationToken);
         }
     }
 
@@ -1015,6 +1171,15 @@ public static class AlwaysOnXeAzureEnsure
         IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string ownName, int ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         var catalog = await database.ReadCatalogAsync(kind, ownName, cancellationToken);
+        if (catalog == AlwaysOnXeCatalog.WrongEvent)
+        {
+            /* #9507: the own name is this install's to drop. A session under it with another definition is one an older version of
+               this install made (the attention session before it gained its completed events), and starting it would read it forever
+               without the rows the current definition captures. Dropped and created again with the current definition. */
+            await DropOwnSessionAsync(database, kind, ownName, cancellationToken);
+            return await CreateOwnAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
+        }
+
         if (catalog != AlwaysOnXeCatalog.Missing)
         {
             if (await database.IsStartedAsync(ownName, cancellationToken))
@@ -1026,6 +1191,12 @@ public static class AlwaysOnXeAzureEnsure
             return AlwaysOnXeChange.Started;
         }
 
+        return await CreateOwnAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
+    }
+
+    private static async Task<AlwaysOnXeChange> CreateOwnAsync(
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string ownName, int ringBufferMaxEvents, CancellationToken cancellationToken)
+    {
         try
         {
             var withoutStatementText = await CreateAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
@@ -1062,7 +1233,14 @@ public static class AlwaysOnXeAzureEnsure
     {
         ArgumentNullException.ThrowIfNull(database);
 
-        var drop = AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName);
+        await DropByStatementsAsync(
+            database, ownName, AlwaysOnXeSessions.BuildAzureStopSql(kind, ownName), AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+    }
+
+    /// <summary>The drop's order for one session, with its statements already built (so a name the builders refuse never gets here).</summary>
+    private static async Task DropByStatementsAsync(
+        IAlwaysOnXeDatabase database, string sessionName, string stop, string drop, CancellationToken cancellationToken)
+    {
         if (!database.ReadOnlyIntent)
         {
             await database.ExecuteAsync(drop, cancellationToken);
@@ -1073,9 +1251,9 @@ public static class AlwaysOnXeAzureEnsure
            cannot choose, so this stop reaches only that one, and a copy of the session that runs on another replica is not stopped.
            Microsoft Learn describes no way to address one HA replica; it says the read-intent workload is "distributed arbitrarily
            across all available HA replicas": https://learn.microsoft.com/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica */
-        if (await database.IsStartedAsync(ownName, cancellationToken))
+        if (await database.IsStartedAsync(sessionName, cancellationToken))
         {
-            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureStopSql(kind, ownName), cancellationToken);
+            await database.ExecuteAsync(stop, cancellationToken);
         }
 
         await database.ExecuteWithoutReadOnlyIntentAsync(drop, cancellationToken);

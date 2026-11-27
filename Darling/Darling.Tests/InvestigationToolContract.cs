@@ -90,13 +90,17 @@ internal static class InvestigationToolContract
     };
 
     /// <summary>
-    /// The parameters only Darling's tools take, after the shared ones: Darling's submit takes <c>follow_up_condition</c>
+    /// The parameters only Darling's tools take, after the shared ones: Darling's list takes <c>held</c> (#9485) and Darling's submit takes <c>follow_up_condition</c>
     /// (#6009); Lite's does not (Lite opens a time follow-up only, #6012). <c>links</c>, <c>family_of</c> and <c>queries_run</c>
     /// (#5914, #6004) and the basis on <c>evidence</c> are shared since #6011, and <c>follow_up_at</c> (#6008) since #6012. Darling's test passes this table to
     /// <see cref="Differences"/>; Lite's passes none.
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, ToolParameter[]> DarlingOnlyParameters = new Dictionary<string, ToolParameter[]>(StringComparer.Ordinal)
     {
+        ["list_investigation_requests"] = new[]
+        {
+            P("held", "string?", "null", "only: just the requests a planned change window is holding. exclude: leave them out. Omit for both."),
+        },
         ["submit_investigation_report"] = new[]
         {
             P("follow_up_condition", "string?", "null", "Optional. Open the follow-up when a module is deployed: " + InvestigationReportFields.FollowUpConditionRule + "."),

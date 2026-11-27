@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// runs <see cref="DarlingMcpHostService.PinForwardedHeadersOff"/> on its own builder, and that each host's listener
 /// layout starts from an empty Kestrel configuration. The behavior behind each pin is proven where the pipeline is
 /// built: <see cref="DarlingAllowFromListGateTests"/> for forwarded headers and the live listener test in this class
-/// for configured endpoints.
+/// for configured endpoints. The metrics port's host (#9013) runs the same forwarded-headers pin and is listed beside them.
 ///
 /// <para>Source pins read the code with comments and literals blanked
 /// (<see cref="CSharpSourceWalker.StripCommentsAndStrings"/>), the way
@@ -41,27 +41,29 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class DarlingHostConfigurationPinTests
 {
-    private static string HostCode(string fileName)
+    private static string HostCode(string fileName, string folder = "Mcp")
         => CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName));
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", folder, fileName));
 
     /// <summary>
     /// Each host pins forwarded-header handling off on the statement right after its <c>WebApplication.CreateBuilder</c>
     /// call, so no service is registered between the builder and the pin, and each host builds exactly one builder,
     /// so a second one cannot start without it. The behavior (an <c>X-Forwarded-For</c> naming an allowed address does
     /// not change who the gates judge, even with the framework switch on) is proven in
-    /// <c>DarlingAllowFromListGateTests</c> through the same helper.
+    /// <c>DarlingAllowFromListGateTests</c> through the same helper, and for the metrics port (#9013, a slim builder) in
+    /// <c>DarlingMetricsHostAuthTests</c>.
     /// </summary>
     [Theory]
-    [InlineData("DarlingMcpHostService.cs", "PinForwardedHeadersOff(builder.Services);")]
-    [InlineData("DarlingWebHostService.cs", "DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);")]
-    public void EachHost_PinsForwardedHeadersOff_OnTheStatementAfterItsOwnCreateBuilder(string fileName, string pinCall)
+    [InlineData("Mcp", "DarlingMcpHostService.cs", "PinForwardedHeadersOff(builder.Services);")]
+    [InlineData("Mcp", "DarlingWebHostService.cs", "DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);")]
+    [InlineData("Hosting", "DarlingMetricsHostService.cs", "DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);")]
+    public void EachHost_PinsForwardedHeadersOff_OnTheStatementAfterItsOwnCreateBuilder(string folder, string fileName, string pinCall)
     {
-        var code = HostCode(fileName);
+        var code = HostCode(fileName, folder);
 
-        Assert.Single(Regex.Matches(code, @"WebApplication\.CreateBuilder\("));
+        Assert.Single(Regex.Matches(code, @"WebApplication\.Create(?:Slim)?Builder\("));
 
-        var pinned = new Regex(@"WebApplication\.CreateBuilder\([^;]*?\}\);\s*" + Regex.Escape(pinCall));
+        var pinned = new Regex(@"WebApplication\.Create(?:Slim)?Builder\([^;]*?\}\);\s*" + Regex.Escape(pinCall));
         Assert.True(
             pinned.IsMatch(code),
             $"{fileName}: the statement after WebApplication.CreateBuilder(...) must be {pinCall}");

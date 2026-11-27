@@ -13,7 +13,7 @@ public sealed record ColumnShape(string Name, string DuckDbType);
 /// <summary>
 /// Exports one table for one window: runs the store query, streams rows into an on-disk
 /// DuckDB temp file via the appender, then COPYs that table out to a Parquet file ordered
-/// by (server_name, time column). The on-disk temp file (never in-memory) is deliberate:
+/// by (server_name, time column) and then every other column. The on-disk temp file (never in-memory) is deliberate:
 /// raw tables can be tens of millions of rows for a wide window.
 /// </summary>
 public sealed class TableExporter
@@ -112,10 +112,11 @@ public sealed class TableExporter
     private static void CopyToParquet(DuckDBConnection connection, string table, string timeColumn, string outputPath)
     {
         using var command = connection.CreateCommand();
-        // Ordered by (server_name, time column) so downstream row-group pruning by server
-        // and time is effective; row group size is fixed by the exporter.
+        // Ordered by (server_name, time column) so downstream row-group pruning by server and time is effective, then by
+        // every other column so rows that tie on those two always land in the same order; row group size is fixed by the
+        // exporter.
         command.CommandText =
-            $"COPY (SELECT * FROM {QuoteDuckIdentifier(table)} ORDER BY server_name, {QuoteDuckIdentifier(timeColumn)}) " +
+            $"COPY (SELECT * FROM {QuoteDuckIdentifier(table)} ORDER BY {TotalOrder.ForTable(connection, table, "server_name", timeColumn)}) " +
             $"TO '{outputPath.Replace("'", "''")}' ({DuckDbSession.ParquetCopyOptions})";
         command.ExecuteNonQuery();
     }

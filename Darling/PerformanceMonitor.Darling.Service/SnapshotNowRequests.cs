@@ -151,6 +151,15 @@ public sealed record SnapshotRequestOutcome(bool Accepted, string Code, string T
 
     /// <summary>The store function refused the request itself (DL400): for example a transaction that is not READ COMMITTED.</summary>
     public const string BadRequestCode = "bad_request";
+
+    /// <summary>The store has no <c>config.request_snapshot_now</c> (42883), or the login may not execute it (42501).</summary>
+    public const string StoreRefusedCode = "store_cannot_queue";
+
+    /// <summary>The sentence a <see cref="StoreRefusedCode"/> refusal carries.</summary>
+    public static readonly string StoreRefusedText =
+        "This store login cannot queue a collector run: the store has no config.request_snapshot_now, or the login may not execute it. "
+        + "A managed or compose store adds it when the Darling service starts; on a self-managed store, re-run "
+        + DarlingManagedRoles.ProvisionRolesScriptPath + " as the database owner. Nothing was queued.";
 }
 
 /// <summary>
@@ -245,6 +254,11 @@ public sealed class SnapshotNowRequests
                     $"A collector run was requested for this server less than {(int)MinimumInterval.TotalSeconds} seconds ago."
                     + (nextAllowed is { } at ? $" The next one is allowed at {at.ToString("HH:mm:ss", CultureInfo.InvariantCulture)} UTC." : string.Empty),
                     null, nextAllowed);
+            }
+            catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedFunction or PostgresErrorCodes.InsufficientPrivilege)
+            {
+                return new SnapshotRequestOutcome(
+                    false, SnapshotRequestOutcome.StoreRefusedCode, SnapshotRequestOutcome.StoreRefusedText, null, null);
             }
         }
         finally

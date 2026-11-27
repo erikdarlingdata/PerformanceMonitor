@@ -175,6 +175,24 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                 AssertVerdictFor(role, byo, "max_connections", "not_managed");
                 Assert.False(byo.RootElement.GetProperty("any_stale").GetBoolean(),
                     $"{role}: a bring-your-own gather must never report any_stale.");
+
+                /* #9430: the certificate section answers under each role from the store's own ssl setting: off when it is off, and the
+                   certificate the store presents in the handshake when it is on. */
+                await using (var sslCommand = new NpgsqlCommand("SHOW ssl", owner))
+                {
+                    var ssl = (string?)await sslCommand.ExecuteScalarAsync(ct);
+                    var certificate = byo.RootElement.GetProperty("store_certificate");
+                    Assert.Equal(ssl, certificate.GetProperty("tls").GetString());
+                    if (ssl == "on")
+                    {
+                        Assert.Equal("tls_handshake", certificate.GetProperty("source").GetString());
+                        Assert.Equal(64, certificate.GetProperty("server").GetProperty("sha256").GetString()!.Length);
+                    }
+                    else
+                    {
+                        Assert.Equal(JsonValueKind.Null, certificate.GetProperty("server").ValueKind);
+                    }
+                }
             }
 
             bodySucceeded = true;

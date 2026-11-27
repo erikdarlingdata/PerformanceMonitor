@@ -116,7 +116,7 @@ public sealed partial class ViewerDataService
             victim_query_plan_xml
         FROM deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         ORDER BY deadlock_time DESC
@@ -148,7 +148,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerDeadlockRow

@@ -40,7 +40,8 @@ public sealed record TempDbSample(
     double UnallocatedMb,
     long TotalSessionsUsingTempDb,
     int TopSessionId,
-    double TopSessionTempDbMb);
+    double TopSessionTempDbMb,
+    double? LogUsedMb = null);
 
 /// <summary>
 /// One tempdb file's I/O-latency point — a bucket (or, for a singleton bucket, a raw collection) time,
@@ -81,10 +82,11 @@ public sealed partial class ViewerDataService
                 CAST(unallocated_mb AS double precision) AS unallocated_mb,
                 total_sessions_using_tempdb,
                 top_session_id,
-                CAST(top_session_tempdb_mb AS double precision) AS top_session_tempdb_mb
+                CAST(top_session_tempdb_mb AS double precision) AS top_session_tempdb_mb,
+                CAST(log_used_mb AS double precision) AS log_used_mb
             FROM v_tempdb_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -98,7 +100,8 @@ public sealed partial class ViewerDataService
             (array_agg(top_session_id ORDER BY collection_time DESC))[1] AS top_session_id,
             (array_agg(top_session_tempdb_mb ORDER BY collection_time DESC))[1] AS top_session_tempdb_mb,
             MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
+            COUNT(*) AS collection_count,
+            MAX(log_used_mb) AS peak_log_used_mb
         FROM per_collection
         GROUP BY 1
         ORDER BY 1
@@ -136,7 +139,7 @@ public sealed partial class ViewerDataService
                 CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(delta_stall_write_ms AS double precision) END AS rated_stall_write_ms
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   database_name = 'tempdb'
         )
@@ -177,10 +180,10 @@ public sealed partial class ViewerDataService
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
-        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double UserObjectReservedMb, double InternalObjectReservedMb, double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb, long TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb)>();
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double UserObjectReservedMb, double InternalObjectReservedMb, double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb, long TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb, double? PeakLogUsedMb)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(10) != 1)
@@ -199,7 +202,9 @@ public sealed partial class ViewerDataService
                 /* bigint — GetInt64; GetInt32 would throw against the bigint column. */
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8)));
+                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
+                /* #8881: NULL (a row stored before the log columns, or an engine without the function) stays null, which the chart draws as a gap, never a zero. */
+                reader.IsDBNull(11) ? null : reader.GetDouble(11)));
         }
 
         var samples = new List<TempDbSample>(rows.Count);
@@ -215,10 +220,58 @@ public sealed partial class ViewerDataService
                 /* bigint — read via the buffered row's own long field, matching the reader's GetInt64. */
                 row.TotalSessionsUsingTempDb,
                 row.TopSessionId,
-                row.TopSessionTempDbMb));
+                row.TopSessionTempDbMb,
+                row.PeakLogUsedMb));
         }
 
         return samples;
+    }
+
+    /// <summary>
+    /// The newest tempdb collection in the window, as far as the log holder goes (#8881): the row the chart's last point comes from, read
+    /// beside the chart so the screen can say who holds the oldest open tempdb transaction. Null when the window has no collection. The
+    /// holder columns are NULL below 50 percent of the log used. $1 server_id, $2/$3 the window (naive UTC).
+    /// </summary>
+    public const string TempDbLogHolderSql = """
+        SELECT
+            collection_time,
+            holder_session_id,
+            holder_login_name,
+            holder_program_name,
+            holder_begin_time,
+            holder_log_bytes_used,
+            log_truncation_holdup_reason
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        AND   collection_time > $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbLogHolderSql"/>.</summary>
+    internal async Task<TempDbLogHolder?> GetNewestTempDbLogHolderAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(TempDbLogHolderSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new TempDbLogHolder(
+            DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 
     /// <summary>
@@ -253,7 +306,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double AvgRead, double AvgWrite)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(5) != 1)

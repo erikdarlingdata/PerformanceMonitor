@@ -40,6 +40,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpDefaultTraceTools
 {
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting, use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
     public static Task<string> GetDefaultTraceEvents(
         NpgsqlDataSource postgres,
@@ -101,6 +102,13 @@ public sealed class DarlingMcpDefaultTraceTools
                     databases.Describe());
                 if (notCollected is not null)
                     return notCollected;
+
+                /* #9107: a server whose default trace is turned off needs setup: the capability gap above wins, then this. */
+                var needsSetup = McpHelpers.WithDatabase(
+                    await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "default_trace_events", cancellationToken),
+                    databases.Describe());
+                if (needsSetup is not null)
+                    return needsSetup;
             }
 
             /* Taken from every significant row, before the page limit applies: the read has no SQL cap, so the store really reaches that

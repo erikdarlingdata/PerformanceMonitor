@@ -76,6 +76,14 @@ public sealed partial class DarlingCollectorRunner
        not once per collector, and ForgetRdsVerdicts clears both when the server's definition changes. */
     private readonly RdsEndpointVerifier _rdsVerifier = new();
 
+    /* #9522: one cache of AWS answers for the four RDS readers, built beside the verifier and handed to each. The
+       readers of one cycle ask AWS the same things about the same instance seconds apart: which instance is the
+       writer, which log files it has, what the newest one holds past a marker, and its DbiResourceId. The first to
+       ask calls AWS and the others read its answer. Each log reader still has its own ingestor and its own
+       position, for the reason on _rdsDeadlocks above. A reader gets another's download only when its own position
+       is the one that download was made from. */
+    private readonly RdsLookupCache _rdsLookups = new();
+
     /* #5452: the assumed-role credentials of every server that names its own AWS role, one session per (role, external ID)
        however many servers share it. Built beside the verifier and handed to the four RDS readers; the allow list it checks
        is AwsRoleAllowlist.Current, which the worker sets at start. A server with no role never touches it. */
@@ -107,24 +115,27 @@ public sealed partial class DarlingCollectorRunner
     internal RdsPlanIngestor PublishedRdsPlanIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsPlans,
-            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
+
+    /// <summary>#8982: hands this runner the plan ingestor <see cref="PublishedRdsPlanIngestor"/> returns, so a test can see whether a run reached it.</summary>
+    internal void UseRdsPlanIngestorForTests(RdsPlanIngestor ingestor) => Volatile.Write(ref _rdsPlans, ingestor);
 
     /// <summary>The one deadlock ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsDeadlocks,
-            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
     /// log-hash key <paramref name="logHashKey"/>.</summary>
     internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
         => LazyInitializer.EnsureInitialized(
             ref _rdsLogEvents,
-            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsCpuIngestor PublishedRdsCpuIngestor()
-        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, roles: _awsRoles));
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
@@ -256,6 +267,22 @@ public sealed partial class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
+        /* #8982: a target whose newest readiness row says auto_explain is not loaded has no plan in its log to
+           find. Stand down with the readiness remedy instead of downloading the log for nothing and reporting
+           "no new plans", which reads as healthy and quiet. Checked before the target's log_destination read
+           too, so a stand-down run opens neither the target nor the AWS log API. */
+        var started = Stopwatch.GetTimestamp();
+
+        var notLoaded = await AutoExplainNotLoadedReasonAsync(server.ServerId, cancellationToken);
+
+        /* #9523: the readiness read is a store read, so it is storage time like the ingestor's own store calls. */
+        var readinessMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        if (notLoaded is not null)
+        {
+            throw new PgPlanCapturePreconditionException(notLoaded);
+        }
+
         var rdsPlans = PublishedRdsPlanIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
@@ -265,21 +292,127 @@ public sealed partial class DarlingCollectorRunner
            carries no target connection of its own to probe with. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsPlans.IngestAsync(
             server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases(
+            (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, readinessMs + outcome.StoreMs);
 
         var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
             outcome.ForgedCaptures, filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
-           filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
-           different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
+    }
+
+    /// <summary>
+    /// How one AWS-API collector run is booked (#9523): <paramref name="storeMs"/>, the time its store calls took
+    /// (<see cref="RdsIngestOutcome.StoreMs"/>, plus the readiness read for plan capture), is
+    /// <c>storage_duration_ms</c>, and the rest of <paramref name="runMs"/> is <c>sql_duration_ms</c>. The two add up
+    /// to the run.
+    ///
+    /// <para><b>The rest is the fetch.</b> It is the target's <c>log_timezone</c> and <c>log_destination</c> reads, the
+    /// endpoint check, the AWS calls (the RDS log listing and download, or Performance Insights) and the parse of
+    /// what came back. That is what <c>sql_duration_ms</c> holds for every other collector: the time to get the
+    /// target's data, on whatever transport reaches it. <c>collect.collector_cost</c> has the same two columns, so
+    /// its <c>total_storage_ms</c> for these four collectors is the store's own time. A whole run booked as storage
+    /// time makes a store read as slow when the time is spent waiting on AWS, which on a cycle with nothing to
+    /// store is nearly all of it.</para>
+    ///
+    /// <para>The store time is the measured term and the fetch is the remainder, so nothing is counted twice and no
+    /// part of the run is left out. It is clamped to the run because the two are read from separate clocks.</para>
+    /// </summary>
+    internal static (long SqlMs, long StorageMs) RdsRunPhases(long runMs, long storeMs)
+    {
+        var run = Math.Max(0, runMs);
+        var storage = Math.Clamp(storeMs, 0, run);
+
+        return (run - storage, storage);
+    }
+
+    /// <summary>
+    /// #8982: how far back the newest <c>library_loaded</c> readiness row may be and still decide a plan-capture run.
+    /// Readiness runs hourly, so two days is many rows; a row older than that means readiness has stopped running
+    /// for this target, and a verdict nobody is refreshing must not keep plan capture switched off. The same
+    /// two days <c>PgTargetFactCollector.PlanStateLookbackDays</c> reads this facet over.
+    /// </summary>
+    internal static readonly TimeSpan AutoExplainReadinessLookback = TimeSpan.FromDays(2);
+
+    /* #8982: the newest library_loaded row inside the lookback, whatever its value. The value is judged in C#
+       after the pick, so a newest row with a NULL is_satisfied is "unknown" and is never skipped past to an
+       older FALSE. */
+    private const string AutoExplainReadinessSql = @"
+SELECT is_satisfied, observed, detail, collection_time
+FROM pg_plan_capture_readiness
+WHERE server_id = $1
+AND   facet = 'library_loaded'
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #8982: the stand-down sentence for <c>pg_plan_capture</c> when the target's newest <c>library_loaded</c>
+    /// readiness row (inside <see cref="AutoExplainReadinessLookback"/>) says <c>auto_explain</c> is NOT loaded, or
+    /// null to run as before. Null for no row, a NULL verdict (unknown, not false), a TRUE verdict, and a failed
+    /// store read, which fails toward today's behaviour the way <see cref="GetCollectorStateAsync"/> does. Nothing is
+    /// cached here: each run reads the stored row, so the first run after readiness sees the library loaded
+    /// downloads again.
+    /// </summary>
+    internal async Task<string?> AutoExplainNotLoadedReasonAsync(int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            using var command = new NpgsqlCommand(AutoExplainReadinessSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            /* Unspecified at the bind: collection_time is a naive UTC timestamp, and a Utc kind would be inferred as
+               timestamptz and compared at the store session's TimeZone. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - AutoExplainReadinessLookback, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.GetBoolean(0))
+            {
+                return null;
+            }
+
+            var observed = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var detail = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var checkedAt = reader.GetDateTime(3);
+
+            return AutoExplainNotLoadedSentence(observed, detail, checkedAt);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "Reading plan-capture readiness for server {ServerId} failed; pg_plan_capture runs as before", serverId);
+            return null;
+        }
+    }
+
+    /// <summary>#8982: the stored stand-down sentence: what readiness saw, its remedy, and when capture resumes.</summary>
+    internal static string AutoExplainNotLoadedSentence(string? observed, string? detail, DateTime checkedAtUtc)
+    {
+        var sb = new StringBuilder();
+        sb.Append("auto_explain is not loaded on this target, so its server log holds no plan to capture. ");
+        sb.Append("The plan-capture readiness check (facet library_loaded, ");
+        sb.Append(checkedAtUtc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        sb.Append(" UTC) read shared_preload_libraries as '");
+        sb.Append(string.IsNullOrEmpty(observed) ? "(empty)" : observed);
+        sb.Append("'. ");
+        if (!string.IsNullOrWhiteSpace(detail))
+        {
+            sb.Append(detail.Trim());
+            if (!detail.TrimEnd().EndsWith('.'))
+            {
+                sb.Append('.');
+            }
+
+            sb.Append(' ');
+        }
+
+        sb.Append("The RDS log was not downloaded this run. Plan capture resumes on the first run after the readiness ");
+        sb.Append("check sees auto_explain loaded. This is a setup step, not 'no new plans'.");
+        return sb.ToString();
     }
 
     /// <summary>
@@ -287,7 +420,7 @@ public sealed partial class DarlingCollectorRunner
     /// dispatch this collector was missing (it dispatched unconditionally to the <c>pg_read_file</c> route
     /// even against a managed target, which has no filesystem to read; a 100% failure across the whole
     /// Aurora fleet, since no grant fixes what does not exist there). Mirrors
-    /// <see cref="IngestRdsPlansAsync"/> exactly, including the STORAGE-time accounting rationale.
+    /// <see cref="IngestRdsPlansAsync"/> exactly, including how the run is booked (<see cref="RdsRunPhases"/>).
     /// </summary>
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
@@ -295,6 +428,9 @@ public sealed partial class DarlingCollectorRunner
         var rdsDeadlocks = PublishedRdsDeadlockIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #9523: started before the two target reads below, so their time is in the run and is booked as the fetch. */
+        var started = Stopwatch.GetTimestamp();
 
         /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
            effect with no reconnect and #3604-style connect-time caching would miss that. */
@@ -305,19 +441,17 @@ public sealed partial class DarlingCollectorRunner
            connection of its own to probe with. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsDeadlocks.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
             cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
         var measurements = MeasurementsFor(
             server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped,
             filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
     }
 
@@ -514,6 +648,9 @@ public sealed partial class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #9523: started before the two target reads below, so their time is in the run and is booked as the fetch. */
+        var started = Stopwatch.GetTimestamp();
+
         /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
            the target fresh each cycle rather than caching it at connect. */
         var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
@@ -526,18 +663,16 @@ public sealed partial class DarlingCollectorRunner
            this is a cache hit on every cycle but the first and the one after a switch. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsLogEvents.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
             cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
         var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded,
             filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
     }
 
@@ -617,12 +752,11 @@ public sealed partial class DarlingCollectorRunner
         var outcome = await rdsCpu.IngestAsync(
             server.ServerId, server.StorageName, host, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        /* #9523: booked the way the three log ingests are. The watermark read and the COPY are storage time, and
+           the Describe calls and the Performance Insights call are the fetch. */
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
-        /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
-           ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
-           one target's numbers mean something different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, CollectorContext.NoMeasurements,
             RdsIngestNote(outcome, PiCpuNotReachedNote, PiCpuEmptyNote));
     }
 
@@ -853,7 +987,21 @@ JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
 WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'
 AND p.proname::text OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunction + @"'
 AND p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
-AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + "'";
+AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + @"'
+UNION ALL
+SELECT 'member'::text, p.proname::text, n.nspname::text, NULL::text
+FROM pg_catalog.pg_extension AS x
+JOIN pg_catalog.pg_depend AS d
+  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+ AND d.refobjid OPERATOR(pg_catalog.=) x.oid
+ AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+ AND d.deptype OPERATOR(pg_catalog.=) 'e'
+JOIN pg_catalog.pg_proc AS p
+  ON p.oid OPERATOR(pg_catalog.=) d.objid
+ AND p.pronamespace OPERATOR(pg_catalog.=) x.extnamespace
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE x.extname OPERATOR(pg_catalog.=) 'pg_buffercache'
+AND p.proname::text OPERATOR(pg_catalog.=) '" + PgBufferUsageCollector.SummaryFunction + "'";
 
     /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
     internal const int PgExtensionSchemasTimeoutSeconds = 5;
@@ -878,6 +1026,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     {
         context.PgExtensionSchemas = null;
         context.PgExtensionVersions = null;
+        context.PgExtensionMemberFunctions = null;
         context.PgFunctionSchemas = null;
         var readsFunctions = definition.ReadsAuroraFunctions && context.Target.IsAurora;
         if (definition.TargetEngine != CollectorTargetEngine.PostgreSql
@@ -889,6 +1038,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
         var versions = new Dictionary<string, string>(StringComparer.Ordinal);
         var functions = new List<(string Function, string Schema)>();
+        var members = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             using var command = targetConnection.CreateCommand();
@@ -911,6 +1061,11 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                             versions[reader.GetString(1)] = reader.GetString(3);
                         }
                     }
+                    else if (string.Equals(reader.GetString(0), "member", StringComparison.Ordinal))
+                    {
+                        /* #9508: a function an extension itself owns, found in pg_proc on this connection. */
+                        members.Add(reader.GetString(1));
+                    }
                     else
                     {
                         functions.Add((reader.GetString(1), reader.GetString(2)));
@@ -929,6 +1084,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
 
         context.PgExtensionSchemas = schemas;
         context.PgExtensionVersions = versions;
+        context.PgExtensionMemberFunctions = members;
         if (readsFunctions)
         {
             var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;

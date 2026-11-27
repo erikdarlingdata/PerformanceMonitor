@@ -29,8 +29,14 @@ public sealed partial class QueryStoreSliceRepairService
     /// <summary>
     /// The dedup key at its FULLEST — the read side's partition plus the two columns every stored row carries.
     /// <c>collection_time</c> is what makes it the pre-fix signature rather than merely "the same interval":
-    /// since #1907 the collector emits at most one row per interval per cycle, so no correctly-collected row
-    /// can join such a group, which is why the repair is idempotent and safe to re-run.
+    /// since #1907 the collector emits at most one SLICE per interval per cycle, so no correctly-collected row
+    /// can join such a group as a slice.
+    ///
+    /// <para><b>Copies are not slices (#9352).</b> Current builds can still store an EXACT COPY of a row: the same
+    /// batch written twice, equal in every column but <c>collection_id</c>. A copy joins the group but is not a
+    /// slice of the interval, so it must be dropped, not summed. <see cref="BuildDistinctSliceSource"/> reduces each
+    /// set of copies to one row before any sum, which is also what keeps a re-run safe: summing copies is what
+    /// doubled the counts the first time round.</para>
     /// </summary>
     private static readonly string[] FullKeyColumns =
     [
@@ -128,6 +134,43 @@ public sealed partial class QueryStoreSliceRepairService
     }
 
     private const string AnyValuePrefix = "ANY_VALUE(";
+
+    /// <summary>
+    /// The columns that tell two rows of one key group apart: the key and every measurement. Two rows equal in all of
+    /// them are copies of one row (#9352), because every attribute column is, by the premise of this whole repair,
+    /// identical across the rows of one interval. Attributes are left out on purpose: they include the wide text
+    /// columns (#2771), and comparing those would put the payload back into the aggregate this repair keeps narrow.
+    /// </summary>
+    internal static IReadOnlyList<string> DistinctSliceColumns(IReadOnlyList<string> columns, IReadOnlyList<string> key)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(key);
+
+        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
+        return columns.Where(c => keySet.Contains(c) || IsMeasurement(c)).ToList();
+    }
+
+    /// <summary>
+    /// The FROM source of the collapse: one row per DISTINCT slice of each key group (#9352), carrying the lowest
+    /// row identity of the copies it stands for (<c>pm_row</c>) and how many rows that was (<c>pm_copies</c>).
+    ///
+    /// <para>Rows equal in the key and every measurement are copies of one row, so they reduce to one before the
+    /// outer aggregate sums them. A group of pure copies therefore reduces to a single slice and keeps its
+    /// <c>execution_count</c>, and a mixed group sums only its distinct slices. <c>SUM(pm_copies)</c> over a group is
+    /// still its row count, which is what decides whether the group has anything to remove.</para>
+    ///
+    /// <para><paramref name="rowColumn"/> is the source's row identity (<c>rowid</c> against a table,
+    /// <c>file_row_number</c> against a parquet file). The outer projection names the result <c>pm_row</c>.</para>
+    /// </summary>
+    internal static string BuildDistinctSliceSource(
+        IReadOnlyList<string> columns, IReadOnlyList<string> key, string rowColumn, string fromSource)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowColumn);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fromSource);
+
+        var distinct = string.Join(", ", DistinctSliceColumns(columns, key));
+        return $"(SELECT {distinct}, MIN({rowColumn}) AS pm_row, COUNT(*) AS pm_copies FROM {fromSource} GROUP BY {distinct})";
+    }
 
     /// <summary>
     /// The NARROW staging projection (#2771): the key, a surviving row's identity, and the recombined

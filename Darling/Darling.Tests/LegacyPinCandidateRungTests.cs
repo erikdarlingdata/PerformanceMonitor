@@ -37,15 +37,7 @@ public sealed class LegacyPinCandidateRungTests
     [Fact]
     public void TheRungIsInADenseLadder_BelowTheCurrentTop()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(LegacyPinCandidateTables.RungVersion, Rung.Version);
-        /* No longer the top rung: V168 (the PLAN_REGRESSION per-day totals) and V169 (the per-server AWS role) landed above it. */
-        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Contains(Rung.Version + 1, versions);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
         Assert.Equal(LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql, Rung.Sql);
 
         /* V165 does not change: a store already at 165 never runs it again, so this is a rung of its own. */

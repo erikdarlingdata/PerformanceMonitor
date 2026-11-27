@@ -417,7 +417,6 @@ VALUES ($1, $2, $3, 'memory_stats', $4, 120, 'SUCCESS', NULL, 7, 90, 30)", _next
         var sql = sqlName == nameof(LocalDataService.ResourceSemaphoreWindowSql)
             ? LocalDataService.ResourceSemaphoreWindowSql
             : LocalDataService.MemoryGrantsWindowSql;
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS snapshots_in_window", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(waiter_count) AS peak_waiter_count", sql, StringComparison.Ordinal);

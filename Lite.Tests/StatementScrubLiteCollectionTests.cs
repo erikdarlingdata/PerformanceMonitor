@@ -99,9 +99,11 @@ public sealed class StatementScrubLiteCollectionTests : IClassFixture<SharedDuck
 
         await _collector.RunCollectorDefinitionAsync(QueryStatsCollector.Instance, _server, CancellationToken.None);
 
-        var rows = await QueryAsync("SELECT query_hash || '|' || COALESCE(query_text, '<null>') FROM query_stats WHERE server_id = " + _serverId + " ORDER BY query_hash");
+        var rows = await QueryAsync("SELECT query_hash || '|' || COALESCE(query_text, '<null>') FROM v_query_stats WHERE server_id = " + _serverId + " ORDER BY query_hash");
         Assert.Equal(new[] { "0xC0|" + SensitiveStatements.PlaceholderText, "0xP0|" + StatementScrubCanary.PlainStatement }, rows);
         AssertNoSecret(await WholeTableTextAsync("query_stats"));
+        /* #9241: the text itself is stored once in the dimension, so the leak check reads that table too. */
+        AssertNoSecret(string.Concat(await QueryAsync("SELECT CAST(t AS VARCHAR) FROM query_text_dim t")));
     }
 
     [Fact]

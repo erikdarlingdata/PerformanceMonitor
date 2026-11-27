@@ -16,11 +16,13 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -67,6 +69,18 @@ public sealed partial class DarlingMcpInvestigationTools
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
         new(postgres, ServiceCommandDeadlines.SerialLoopSeconds) { ReadServerIds = DarlingServerResolver.WebAllowedServerIds };
 
+    private static readonly string[] HeldFilters = [InvestigationChangeWindows.HeldOnly, InvestigationChangeWindows.HeldExclude];
+
+    /// <summary>#9485: a row as the list answers it, with held_by always present (null when the request was never held).</summary>
+    private static JsonNode WithHeldBy(InvestigationRequestRow row)
+    {
+        var node = JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row), McpHelpers.JsonOptions)!;
+        if (node is JsonObject obj && !obj.ContainsKey("held_by"))
+            obj["held_by"] = null;
+        return node;
+    }
+
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
@@ -78,17 +92,22 @@ public sealed partial class DarlingMcpInvestigationTools
         "States: open (claimable), claimed (a live lease), reported, closed, expired (past its expiry, or out of its " +
         "three claims). Filters are optional: state, server_name (exact, then partial), family (blocking, query_performance, " +
         "resources, availability, jobs, self_monitor, other), limit (1-100, default 20). requests_returned is how many rows " +
-        "you got; truncated says more requests matched than limit (raise limit or narrow the filters).")]
+        "you got; truncated says more requests matched than limit (raise limit or narrow the filters). " +
+        "held_by on each row is the planned change window that held the request when it opened (window_id, reason, ends_at, released_at), null when it was never held. " +
+        "A request is held when it opened inside a planned change window or its 30 minute tail: it stays listable and claimable but never wakes wait_for_investigation_requests, " +
+        "and the held filter lists only those (only), leaves them out (exclude), or lists both (omit).")]
     public static async Task<string> ListInvestigationRequests(
         NpgsqlDataSource postgres,
         [Description("open, claimed, reported, closed or expired. Omit for all.")] string? state = null,
         [Description("Server name. Omit for all.")] string? server_name = null,
         [Description("Alert family (see the guide). Omit for all.")] string? family = null,
         [Description("1-100. Default 20.")] int limit = 20,
+        [Description("only: just the requests a planned change window is holding. exclude: leave them out. Omit for both.")] string? held = null,
         CancellationToken cancellationToken = default)
     {
         var refusal = McpHelpers.ValidateChoice(state, InvestigationToolCore.States, "state")
-                      ?? McpHelpers.ValidateChoice(family, InvestigationToolCore.Families, "family");
+                      ?? McpHelpers.ValidateChoice(family, InvestigationToolCore.Families, "family")
+                      ?? McpHelpers.ValidateChoice(held, HeldFilters, "held");
         if (refusal is not null)
             return refusal;
         if (limit < 1 || limit > InvestigationToolCore.MaxLimit)
@@ -106,7 +125,7 @@ public sealed partial class DarlingMcpInvestigationTools
             }
 
             /* #5834, the #3699 shape: read one row past the limit, return the page, and say whether more matched. */
-            var fetched = await Store(postgres).ListAsync(state, serverId, family, limit + 1, cancellationToken);
+            var fetched = await Store(postgres).ListAsync(state, serverId, family, limit + 1, held, cancellationToken);
             var truncated = fetched.Count > limit;
             IReadOnlyList<InvestigationRequestRow> rows = truncated ? fetched.Take(limit).ToList() : fetched;
             return JsonSerializer.Serialize(new
@@ -115,7 +134,7 @@ public sealed partial class DarlingMcpInvestigationTools
                 message = rows.Count == 0 ? "No investigation request matches these filters." : null,
                 requests_returned = rows.Count,
                 truncated,
-                requests = rows.Select(InvestigationToolCore.RequestPayload),
+                requests = rows.Select(WithHeldBy),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -124,6 +143,8 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "wait_for_investigation_requests"), Description(
         "Waits up to 25 seconds for an investigation request event on your agent routes (opened, joined, resolved, expired, " +
         "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
@@ -358,6 +379,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Investigation)]
     [McpServerTool(Name = "claim_investigation_request"), Description(
         "Claims an investigation request and returns its brief, claim_id and lease_until. Writes only investigation state. " +
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
@@ -373,7 +395,8 @@ public sealed partial class DarlingMcpInvestigationTools
         "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
         "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
         "The brief is composed at claim time, masked at your data detail level, and stored; if it cannot be composed the claim is " +
-        "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
+        "released (it stays counted) and the answer is status error, as it is when the answer cannot be built after the brief is stored. If the " +
+        "requests people made in the thread cannot be read, the claim still answers, without person_requests and with person_requests_unavailable. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
     public static Task<string> ClaimInvestigationRequest(
         NpgsqlDataSource postgres,
@@ -384,22 +407,28 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
         DarlingAgentActionSeat? seat = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName,
-            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null);
+            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null, logger);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
     /// name, and an <paramref name="agent_id"/> that differs from it is refused. A later call under a claim_id must come from the token
     /// that claimed it. <paramref name="namedAgentNames"/> is the names of the named agent tokens the host serves: the legacy token
-    /// (<paramref name="tokenName"/> null) may not claim under one of them.</summary>
+    /// (<paramref name="tokenName"/> null) may not claim under one of them. <paramref name="logger"/> gets the ERROR line (request id and step) of a
+    /// failure after the claim row is written (#9511). <paramref name="parseBrief"/> reads the stored brief back into the answer: a test passes one that
+    /// throws, to drive the answer build's failure.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null,
-        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null)
+        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null, ILogger? logger = null,
+        Func<string, JsonNode?>? parseBrief = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
+        var step = "claim";
+        Guid? claimWritten = null;
         try
         {
             /* #6542: a named agent token is the agent's identity. An agent_id that names another agent is refused and journaled
@@ -476,7 +505,9 @@ public sealed partial class DarlingMcpInvestigationTools
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
             var claimId = claim.ClaimId!.Value;
+            claimWritten = claimId;
             string? brief;
+            step = "compose_brief";
             try
             {
                 brief = await composer.ComposeAsync(requestId, cancellationToken);
@@ -484,49 +515,96 @@ public sealed partial class DarlingMcpInvestigationTools
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Fix-B ruling: the claim stays counted, so a brief that keeps failing cannot claim forever. */
+                logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim was released", requestId, step);
                 await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
                 await store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None);
                 return McpHelpers.FormatError("claim_investigation_request",
                     new InvalidOperationException("the brief could not be composed, so the claim was released: " + ex.Message, ex));
             }
 
-            if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
+            /* #9511: from here the claim row is written. A failure that leaves the claim live gives the agent an error with no
+               claim_id, and on the legacy token a re-claim answers already_claimed for the whole lease, so it is released and journaled like the
+               brief failures above. */
+            try
             {
+                step = "store_brief";
+                if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
+                {
+                    /* A null brief means no source row for the request, and a false store means the claim no longer holds it. Neither throws,
+                       so the log line and the journal row are written here, the same as the throwing paths. */
+                    if (brief is null)
+                        step = "compose_brief";
+                    logger?.LogError("claim_investigation_request {RequestId}: step {Step} failed, the claim was released", requestId, step);
+                    await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
+                    await store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None);
+                    return McpHelpers.FormatError("claim_investigation_request",
+                        new InvalidOperationException("the brief could not be stored under this claim. The claim was released if it still held the request."));
+                }
+
+                step = "build_answer";
+                var answer = JsonSerializer.SerializeToNode(new
+                {
+                    status = "claimed",
+                    request_id = requestId,
+                    claim_id = claimId,
+                    lease_until = claim.LeaseUntilUtc,
+                    claim_count = claim.ClaimCount,
+                    brief_format = InvestigationFormats.BriefFormat,
+                    report_formats = InvestigationFormats.AcceptedReportFormats,
+                    brief = (parseBrief ?? (text => JsonNode.Parse(text)))(brief),
+                }, McpHelpers.JsonOptions)!.AsObject();
+
+                /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
+                   holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before.
+                   #9511: a side read. When it fails the claim still answers, with the brief and the claim_id, and says the people's requests are missing. */
+                if (ownerStore is not null)
+                {
+                    step = "person_requests";
+                    try
+                    {
+                        if (await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
+                        {
+                            answer["person_requests"] = personRequests;
+                            answer["person_requests_rule"] = PersonRequestsRule;
+                            if (people.Omitted > 0)
+                                answer["person_requests_omitted"] = people.Omitted;
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim answers without person_requests", requestId, step);
+                        answer["person_requests_unavailable"] = "The requests people made in the thread could not be read, so none are listed: " + ex.Message;
+                    }
+                }
+
+                return answer.ToJsonString(McpHelpers.JsonOptions);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim is released", requestId, step);
                 await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
+                await store.RecordRefusalAsync(requestId, agent_id, "claim", "answer_failed", null, CancellationToken.None);
                 return McpHelpers.FormatError("claim_investigation_request",
-                    new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
+                    new InvalidOperationException("the claim answer could not be built, so the claim was released: " + ex.Message, ex));
             }
-
-            var answer = JsonSerializer.SerializeToNode(new
-            {
-                status = "claimed",
-                request_id = requestId,
-                claim_id = claimId,
-                lease_until = claim.LeaseUntilUtc,
-                claim_count = claim.ClaimCount,
-                brief_format = InvestigationFormats.BriefFormat,
-                report_formats = InvestigationFormats.AcceptedReportFormats,
-                brief = JsonNode.Parse(brief),
-            }, McpHelpers.JsonOptions)!.AsObject();
-
-            /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
-               holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before. */
-            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
-            {
-                answer["person_requests"] = personRequests;
-                answer["person_requests_rule"] = PersonRequestsRule;
-                if (people.Omitted > 0)
-                    answer["person_requests_omitted"] = people.Omitted;
-            }
-
-            return answer.ToJsonString(McpHelpers.JsonOptions);
+        }
+        catch (OperationCanceledException) when (claimWritten is not null)
+        {
+            /* #9511: the caller cancelled after the claim row was written. The claim would stay live until the lease lapses, which is the
+               lock-out this method guards against, so it is released with a token that cannot be cancelled before the cancel goes on. A cancel
+               is not a failure, so nothing is logged as an error or journaled. */
+            await store.ReleaseAsync(requestId, claimWritten.Value, CancellationToken.None);
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed", requestId, step);
             return McpHelpers.FormatError("claim_investigation_request", ex);
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_investigation_evidence"), Description(
         "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, invalid (a " +
         "sections name no section carries, the known names listed), not_found or already_claimed. <<GUIDE>> " +
@@ -609,6 +687,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Investigation)]
     [McpServerTool(Name = "submit_investigation_report"), Description(
         "Returns your report on a request you claimed. Writes only investigation state. status reported, invalid, " +
         "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +
@@ -781,6 +860,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_investigation_reports"), Description(
         "Reads investigation requests with their reports and journal, by request_id or over the last hours_back hours. " +
         "status ok or empty. <<GUIDE>> " +
@@ -793,6 +873,8 @@ public sealed partial class DarlingMcpInvestigationTools
         "THE WINDOW IS BOUNDED AT 100 REQUESTS, newest first: requests_returned is how many you got, truncated says the " +
         "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
         "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
+        "THE REPLY IS ALSO BOUNDED BY THE RESPONSE BYTE BUDGET: it keeps the newest requests that fit, each whole with its journal rows, report and feedback, " +
+        "and sets truncated, budget_truncated and a budget_note that says how many requests were left out and the narrower call that gets them. " +
         "Each report also carries the feedback people gave it (verdict right, partly or wrong, corrected_verdict, " +
         "missed_step, comment, author), and a window read returns family_counts: per alert family, reported, " +
         "with_feedback, marked_wrong, agent_false_positives (reports that say false_positive) and false_positives " +
@@ -809,13 +891,15 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
         await ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken, readPolicy.HideLivePracticeAnswers,
-            await composer.KeyAsync(cancellationToken));
+            await composer.KeyAsync(cancellationToken), McpResponseBudget.DefaultBytes);
 
     /// <summary>The report read at <paramref name="mode"/>. The web panel passes <see cref="McpDataDetail.Full"/>: its role
-    /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1).</summary>
+    /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1). The MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> as <paramref name="responseByteBudget"/> and keeps the newest requests that fit it
+    /// (#8983); the web panel passes none.</summary>
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
         string? request_id, int hours_back, CancellationToken cancellationToken, bool hideLivePracticeAnswers = false,
-        PseudonymKey? key = null)
+        PseudonymKey? key = null, int? responseByteBudget = null)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -861,7 +945,7 @@ public sealed partial class DarlingMcpInvestigationTools
                     : InvestigationToolCore.Status("empty", $"No investigation request opened {McpHelpers.InTheLast($"{hours_back} hours")}.");
             }
 
-            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key, responseByteBudget);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

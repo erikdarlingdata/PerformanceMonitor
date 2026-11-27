@@ -37,7 +37,8 @@ CREATE TABLE collect.pg_statement_stats (
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
     delta_rows bigint,
-    sample_interval_seconds integer
+    sample_interval_seconds integer,
+    database_name text
 );
 
 CREATE TABLE collect.pg_database_stats (

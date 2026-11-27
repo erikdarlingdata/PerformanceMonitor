@@ -64,6 +64,7 @@ public static partial class DarlingWebEndpoints
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry, an IReadToolRegistration) and one in Storage (its Custom Views parameters), #9477.
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryNullableInt(c, "baseline_hours_back"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -76,7 +77,7 @@ public static partial class DarlingWebEndpoints
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false), includeMonitor: QueryBool(c, "include_monitor", false))
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false), includeMonitor: QueryBool(c, "include_monitor", false), responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
@@ -94,10 +95,10 @@ public static partial class DarlingWebEndpoints
                     ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
                     : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, Server(c), c.RequestAborted),
-            ["get_daily_health_report"] = (c, pg, an) => DarlingMcpDailyReportTools.GetDailyHealthReport(pg, Str(c, "date"), c.RequestAborted),
+            ["get_daily_health_report"] = (c, pg, an) => DarlingMcpDailyReportTools.GetDailyHealthReportWithin(pg, Str(c, "date"), null, c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
-            ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), c.RequestAborted),
+            ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), Str(c, "held"), c.RequestAborted),
             ["get_investigation_reports"] = (c, pg, an) => DarlingMcpInvestigationTools.ReportsAsync(pg, McpDataDetail.Full, Server(c), Str(c, "request_id"), Hours(c, 24), c.RequestAborted),
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
@@ -124,7 +125,7 @@ public static partial class DarlingWebEndpoints
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
             ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
+                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted, responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             /* #6292: the web-only Block chain read. A key that is present but unreadable is refused, never defaulted; an omitted ecid is 0, as the
                grid carries it. The tree is the Viewer's own, built by the shared reconstruction. */
@@ -144,7 +145,7 @@ public static partial class DarlingWebEndpoints
             /* #5246: the drawn graph is added here for the web only, so the MCP tool's payload, response budget and Lite parity do not change. */
             ["get_deadlock_detail"] = async (c, pg, an) => DarlingWebDeadlockGraph.AddGraphs(await DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), null, AsOf(c), registryState, logger, c.RequestAborted, responseByteBudget: null),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, ChartBudget(c), cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -155,7 +156,7 @@ public static partial class DarlingWebEndpoints
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
             ["get_plan_corrections"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true)
+                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true, responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
@@ -179,7 +180,7 @@ public static partial class DarlingWebEndpoints
                 : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_known_patterns"] = (c, pg, an) => DarlingMcpKnownPatternTools.GetKnownPatterns(pg, Server(c), Str(c, "metric_name"), cancellationToken: c.RequestAborted),
-            ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), Str(c, "watch_id"), c.RequestAborted),
+            ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), Str(c, "watch_id"), responseByteBudget: null, c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── core data reads ── */
@@ -260,10 +261,10 @@ public static partial class DarlingWebEndpoints
             ["get_load_by_caller"] = (c, pg, an) => DarlingMcpWhoDroveItTools.GetLoadByCallerCore(pg, Server(c), Hours(c, 1), Rows(c, "top", 20), Rows(c, "statements", 3), AsOf(c), c.RequestAborted),
             ["get_query_pileups"] = (c, pg, an) => DarlingMcpWhoDroveItTools.GetQueryPileupsCore(pg, Server(c), Hours(c, 24), Rows(c, "min_sessions", 5), Rows(c, "top", 10), AsOf(c), c.RequestAborted),
             ["get_query_store_top"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted, tag: Str(c, "tag"), responseByteBudget: null)
+                ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted, tag: Str(c, "tag"), responseByteBudget: null, roundAverages: false)
                 : DatabaseNamesRefusal(c),
             ["get_long_query_completions"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted, tag: Str(c, "tag"), include_monitor: QueryBool(c, "include_monitor", false))
+                ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted, tag: Str(c, "tag"), include_monitor: QueryBool(c, "include_monitor", false), responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -333,7 +334,7 @@ public static partial class DarlingWebEndpoints
             ["find_database"] = (c, pg, an) => !RequireText(c, "database_name", out var fdDatabase)
                 ? MissingParam("database_name")
                 : DarlingMcpFindDatabaseTools.FindDatabase(pg, fdDatabase, c.RequestAborted),
-            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg, c.RequestAborted),
+            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServersCore(pg, includeDisabled: false, c.RequestAborted),
             ["list_query_tags"] = (c, pg, an) => DarlingMcpQueryTagTools.ListQueryTags(pg, c.RequestAborted),
 
             /* ── trends ── */
@@ -372,12 +373,12 @@ public static partial class DarlingWebEndpoints
                 ? DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_query_fleet_summary"] = (c, pg, an) => RequireText(c, "query_hash", out var qfsHash)
-                ? DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, qfsHash, Hours(c, DarlingMcpQueryFleetSummaryTools.DefaultHoursBack), AsOf(c), Rows(c, "limit", DarlingMcpQueryFleetSummaryTools.DefaultLimit), c.RequestAborted)
+                ? DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, qfsHash, Hours(c, DarlingMcpQueryFleetSummaryTools.DefaultHoursBack), AsOf(c), Rows(c, "limit", DarlingMcpQueryFleetSummaryTools.DefaultLimit), null, c.RequestAborted)
                 : MissingParam("query_hash"),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
                     ? (OptionalInt(c, "bucket_minutes", out var queryTrendBucketMinutes)
-                        ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), bucket_minutes: queryTrendBucketMinutes, cancellationToken: c.RequestAborted)
+                        ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), AsOf(c), queryTrendBucketMinutes, TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints), null, c.RequestAborted)
                         : UnparseableParam("bucket_minutes"))
                     : MissingParam("database_name"))
                 : MissingParam("query_hash"),
@@ -392,21 +393,29 @@ public static partial class DarlingWebEndpoints
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, responseByteBudget: null, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), card_offset: 0, responseByteBudget: null, Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
-            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
-            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, responseByteBudget: null, c.RequestAborted),
-            ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), logger: logger, cancellationToken: c.RequestAborted),
+            /* #9446: as_of anchors the table_activity answer only, and the MCP read refuses it otherwise. The triage page adds as_of to every section of a store alert opened after the firing, and its two store sections (size and jobs) are not table_activity, so as_of is forwarded only with table_activity. The size and job answers ignore it, as they did before #9446. */
+            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), QueryInt(c, "wal_hours_back", null, DarlingStoreWalReader.DefaultHoursBack), QueryBool(c, "table_activity", false), Hours(c, DarlingStoreTableActivityRead.DefaultHours), Str(c, "rank_by"), QueryBool(c, "table_activity", false) ? AsOf(c) : null, c.RequestAborted),
+            ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
+            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => !OptionalInt(c, "rung", out var startsRung) ? UnparseableParam("rung")
+                : !OptionalInt(c, "hours_back", out var startsHours) ? UnparseableParam("hours_back")
+                : DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), startsRung, startsHours, c.RequestAborted),
+            ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
+            ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, c.RequestAborted),
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, QueryDouble(c, "free_floor_percent", DarlingMcpStoreHostTools.DefaultFreeFloorPercent), c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
-            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
+            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
             ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
-            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), readAdmission, c.RequestAborted),
+            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), Str(c, "split_at"), readAdmission, c.RequestAborted),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -443,6 +452,11 @@ public static partial class DarlingWebEndpoints
             ["get_table_index_sizes"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            /* #8784: one database per call (the window read is per database), so database_name is a single name, not the list filter. The
+               ReadOnlyIntent partner is resolved through the same web scope guard as the server, so a token scoped to one server never reads it. */
+            ["get_object_usage"] = (c, pg, an) => DarlingMcpObjectUsageTools.GetObjectUsage(
+                pg, Server(c), QueryInt(c, "days_back", null, DarlingMcpObjectUsageTools.DefaultDaysBack), QueryBool(c, "include_paired_replica", true),
+                Rows(c, "limit", DarlingMcpObjectUsageTools.DefaultLimit), QueryInt(c, "offset", null, 0), Str(c, "database_name"), c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
             ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -557,6 +571,9 @@ public static partial class DarlingWebEndpoints
             ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), Str(c, "database_name"), QueryBool(c, "full_text", false), Str(c, "object_name"), logger, c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
+
+        // Every tool's own registration joins the shared list above (#9477). A name in both throws here, naming the tool.
+        ReadToolRegistrations.AddTo(dispatch, ReadToolRegistrations.All, r => r.Handler);
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
            run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is
@@ -777,7 +794,7 @@ public static partial class DarlingWebEndpoints
     }
 
     /// <summary>The hours-back window from <c>?hours=</c> (or the tool's own <c>?hours_back=</c>), else the tool's default.</summary>
-    private static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
+    internal static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
 
     /// <summary>
     /// The window ANCHOR from <c>?as_of=</c>; null when absent, which is what makes the window end at now.
@@ -785,10 +802,10 @@ public static partial class DarlingWebEndpoints
     /// MCP surfaces cannot disagree about what a bad anchor means, and the refusal envelope reaches the same
     /// <see cref="ToHttpResult"/> 400 mapping every other client-correctable outcome does.
     /// </summary>
-    private static string? AsOf(HttpContext context) => First(context, "as_of");
+    internal static string? AsOf(HttpContext context) => First(context, "as_of");
 
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
-    private static string? Str(HttpContext context, string key) => First(context, key);
+    internal static string? Str(HttpContext context, string key) => First(context, key);
 
     /* ── the database list (#5245): repeated ?database_name= keys, one per chosen database ── */
 
@@ -1086,7 +1103,7 @@ public static partial class DarlingWebEndpoints
     internal static readonly string[] IntegerQueryKeys =
     [
         "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
-        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions"
+        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset", "wal_hours_back"
     ];
 
     /// <summary>
@@ -1170,7 +1187,7 @@ public static partial class DarlingWebEndpoints
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
-    private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
+    internal static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
     /// <summary>A knob whose omitted value is derived from another knob (#5633 item 12: compare_analysis's baseline follows
@@ -1183,7 +1200,7 @@ public static partial class DarlingWebEndpoints
     /// dispatch layer so an authenticated/loopback caller can't request an unbounded result set from a reader
     /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is refused out of range instead, #5644).
     /// </summary>
-    private static int Rows(HttpContext context, string key, int def) =>
+    internal static int Rows(HttpContext context, string key, int def) =>
         ClampRows(QueryInt(context, key, null, def));
 
     /// <summary>The dispatch-layer ceiling on any caller-supplied row count — generous for real use, bounded against abuse.</summary>

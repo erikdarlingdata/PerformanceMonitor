@@ -943,23 +943,11 @@ public sealed class PgCpuCapacityHeadroomTests
     /* ─────────────────────── the rung ─────────────────────── */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(
             "pg-cpu-capacity-headroom",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* V115 was the top rung when #3281 landed; V116 (#3285) now is, so its "== SchemaVersion" claim
-           moved to CustomAlertCoreMigrationTests. This rung is now strictly below the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

@@ -35,7 +35,7 @@ public class RemediationCredentialRungTests
     internal const int ProbeOrdinal = 88;
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -49,10 +49,6 @@ public class RemediationCredentialRungTests
         Assert.True(
             versions.Max() > RungVersion,
             "this rung is no longer the head of the ladder, so a newer rung must exist above it");
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -92,7 +93,7 @@ WHERE collection_time >= $2";
             return;
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         using var command = new NpgsqlCommand(PgTargetCoverageSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);

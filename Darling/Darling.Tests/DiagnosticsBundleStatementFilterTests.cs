@@ -22,16 +22,19 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DiagnosticsBundleStatementFilterTests
 {
-    /// <summary>#7134: every string the bundle writes is judged under a 1.5 second wall-clock budget (the filter's
-    /// <c>ReadBudget</c>), and the first plan judged in a test process pays for cold, unoptimized filter and XML code.
-    /// On a loaded CI runner that used the whole budget, and the budget being spent withholds the whole document, so the
-    /// plain statement in the canary plan went missing. The service runs the filter's start-up warm-up before it serves
-    /// anything, and a test process never does, so this gives the class the same start path (see
-    /// <see cref="StatementFilterWarmUp"/>). No limit or assertion differs.</summary>
+    /// <summary>The service runs the filter's start-up warm-up before it serves anything, and a test process never does,
+    /// so this gives the class the same start path (see <see cref="StatementFilterWarmUp"/>): the judge's own per-match
+    /// timeout is wall-clock, and the first plan judged in a process pays for cold, unoptimized filter and XML code
+    /// (#7134).</summary>
     public DiagnosticsBundleStatementFilterTests() => StatementFilterWarmUp.Ensure();
 
+    /// <summary>Assembles one section with every plan and JSON value judged on <see cref="FrozenClockBudget"/> (#8852).
+    /// The real judge runs, but the 1.5 second wall-clock budget cannot run out on a loaded runner, so a document is
+    /// never withheld whole for time and the plain statement a test asserts is kept stays in the text. The over-budget
+    /// path has its own tests.</summary>
     private static string AssembleOne(string section, JsonNode node)
     {
+        using var frozen = BundleAliaser.UseJudgeBudget(FrozenClockBudget.Create);
         var (text, leaks, _) = DiagnosticsBundle.Assemble(
             new[] { new BundleSection(section, node, false) }, new BundleAliaser(), DiagnosticsBundle.BuildManifest(1, "fleet", 0));
         Assert.Empty(leaks);

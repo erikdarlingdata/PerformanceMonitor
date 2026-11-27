@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -129,7 +130,7 @@ ORDER BY " + WindowTiles.LocalHourSql;
             /* peak_sample_reads has no home in WindowTile (a family-specific extra scalar, design §2's “worst tile”
                rule), so it rides beside the tile list keyed by the SAME row — one entry per tile, in read order. */
             var peakSampleReadsByTile = new List<double>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             using (var cmd = WindowCommand(IoLatencyWindowSql, connection, context))
             {
                 /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the

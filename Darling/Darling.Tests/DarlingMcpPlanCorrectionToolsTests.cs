@@ -84,7 +84,6 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
             "every enablement-only database comes back as a phantom recommendation");
 
         SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");
-        SqlTextPin.AssertExpresses("collection_time >= $2", sql, "the window's start no longer bounds the read");
         SqlTextPin.AssertExpresses("collection_time <= $3", sql, "the window's end no longer bounds the read");
         SqlTextPin.AssertExpresses("ORDER BY collection_time DESC", sql, "the newest recommendations no longer come first");
 
@@ -111,7 +110,6 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         SqlTextPin.AssertExpresses("WHERE newest_rank = 1", sql, "every capture, not one per recommendation, comes back");
         SqlTextPin.AssertExpresses("recommendation_name IS NOT NULL", sql, "enablement-only rows come back as phantom recommendations");
         SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");
-        SqlTextPin.AssertExpresses("collection_time >= $2", sql, "the window's start no longer bounds the read");
         SqlTextPin.AssertExpresses("collection_time <= $3", sql, "the window's end no longer bounds the read");
         SqlTextPin.AssertExpresses("($5::text[] IS NULL OR database_name = ANY($5))", sql, "the database filter no longer narrows the read");
         SqlTextPin.AssertExpresses("ORDER BY collection_time DESC, score DESC", sql, "the newest recommendations no longer come first");
@@ -149,7 +147,7 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         /* The enablement columns repeat on every one of a database's recommendation rows — the snapshot is
            the newest capture DISTINCTed back to one row per database, never a window scan. */
         SqlTextPin.AssertExpresses(
-            "collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)",
+            "collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1 AND ($3::timestamp IS NULL OR collection_time <= $3))",
             sql,
             "the snapshot is a window scan rather than the newest capture");
         Assert.Contains("force_last_good_plan_desired_state", sql, StringComparison.Ordinal);

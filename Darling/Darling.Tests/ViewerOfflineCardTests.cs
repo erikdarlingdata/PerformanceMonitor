@@ -151,7 +151,7 @@ public sealed class ViewerOfflineCardTests
             ViewerTimeHelper.ActiveServerClock = savedClock;
         }
 
-        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC-05:00\)$", text);
+        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC\u2060-05:00\)$", text);
         Assert.True(clipped.Count == 0, "cut off: " + string.Join("; ", clipped));
         Assert.True(slot + 0.5 >= width, $"\"{text}\" renders {width:F0} wide in a {slot:F0} wide cell, so its end is cut");
         Assert.True(rightEdge <= cardWidth - 2 + 0.5, $"the Last Collect value ends at {rightEdge:F0}, past the {cardWidth:F0} wide card's border");

@@ -101,7 +101,7 @@ LIMIT 5";
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         // Step 1: Find when the spike occurred
         using var peakCmd = new NpgsqlCommand(SpikePeakSql, connection);
@@ -195,7 +195,7 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopCpuQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -246,7 +246,7 @@ LIMIT 5";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopSpillingQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -306,61 +306,98 @@ svr AS
 latest AS
 (
     -- #3902: the base table, not v_query_stats. The view resolves statement text for EVERY row it returns
-    -- by joining query_text_dim -- the whole fleet's text dimension -- and the window sort below then
-    -- carries each row's text, so this read paid for the window's worth of text to print five. The row
-    -- keeps the two halves the view would have COALESCEd (the inline legacy text and the digest). This
-    -- read resolves neither against the dimension: the reader keeps the first five plans that pass its
-    -- exact test, and ParameterSensitiveInlineTextSql then reads the inline text of those plans only and
+    -- by joining query_text_dim -- the whole fleet's text dimension -- so this read paid for the window's
+    -- worth of text to print five. The two halves the view would have COALESCEd (the inline legacy text and
+    -- the digest) are read below for the plans that survive the rough filter only. This read resolves
+    -- neither against the dimension: the reader keeps the first five plans that pass its exact test, and
+    -- ParameterSensitiveInlineTextSql then reads the inline text of those plans only and
     -- ParameterSensitiveTextSql resolves the digests of those plans only.
+    --
+    -- #9492: each plan's newest row by an aggregate, not by numbering every row of the window. ROW_NUMBER over
+    -- the window sorted each chunk's rows, held every chunk's sort until the merge ended, and so cost memory in
+    -- step with the window; max over an array whose leading elements are the row's time and id keeps one array
+    -- per plan. Arrays compare element by element, so the largest array is the newest row, and on two rows at
+    -- the newest time the larger collection_id (the pair is unique, so a NULL field after it never decides the
+    -- winner and comes back NULL). Every field here is a bigint or a timestamp, which rides as epoch
+    -- microseconds and is read back exactly: the column is timestamp without time zone, which holds
+    -- microseconds. The boolean and the bytea cannot ride in a bigint[], so offenders looks them up.
     SELECT
         database_name,
         query_hash,
         query_plan_hash,
-        execution_count,
-        creation_time,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        -- #5361: whether the row has inline text, never the text. The window sort below would carry every
-        -- row's whole text (up to 64 KB each) to keep five plans, so the text is read afterwards for those plans.
-        query_text IS NOT NULL AS has_inline_text,
-        query_text_digest,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC
-        ) AS rn
+        max(ARRAY[
+            (extract(epoch FROM collection_time) * 1000000)::bigint,
+            collection_id,
+            execution_count,
+            (extract(epoch FROM creation_time) * 1000000)::bigint,
+            min_worker_time,
+            max_worker_time,
+            min_grant_kb,
+            max_grant_kb,
+            min_spills,
+            max_spills
+        ]) AS w
     FROM query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
+    GROUP BY database_name, query_hash, query_plan_hash
 ),
-offenders AS
+newest_rows AS
 (
     SELECT
         database_name,
         query_hash,
         query_plan_hash,
-        execution_count,
-        min_worker_time,
-        max_worker_time,
-        max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
-        max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-        CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-        creation_time,
-        has_inline_text,
-        query_text_digest,
+        timestamp 'epoch' + w[1] * interval '1 microsecond' AS newest_time,
+        w[2] AS newest_id,
+        w[3] AS execution_count,
+        timestamp 'epoch' + w[4] * interval '1 microsecond' AS creation_time,
+        w[5] AS min_worker_time,
+        w[6] AS max_worker_time,
+        w[7] AS min_grant_kb,
+        w[8] AS max_grant_kb,
+        w[9] AS min_spills,
+        w[10] AS max_spills
+    FROM latest
+),
+offenders AS
+(
+    SELECT
+        n.database_name,
+        n.query_hash,
+        n.query_plan_hash,
+        n.execution_count,
+        n.min_worker_time,
+        n.max_worker_time,
+        n.max_worker_time::DOUBLE PRECISION / NULLIF(n.min_worker_time, 0) AS worker_ratio,
+        n.max_grant_kb::DOUBLE PRECISION / NULLIF(n.min_grant_kb, 0) AS grant_ratio,
+        CASE WHEN n.max_spills > 0 AND n.min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+        n.creation_time,
+        -- #5361: whether the row has inline text, never the text: the text is read afterwards for the plans
+        -- that print. The winning row is looked up by time and id for the plans that pass the rough filter only.
+        t.has_inline_text,
+        t.query_text_digest,
         svr.offset_minutes,
         svr.time_zone_id
-    FROM latest, svr
+    FROM newest_rows AS n
+    CROSS JOIN svr
+    LEFT JOIN LATERAL
+    (
+        SELECT
+            q.query_text IS NOT NULL AS has_inline_text,
+            q.query_text_digest
+        FROM query_stats AS q
+        WHERE q.server_id = $1
+        AND   q.collection_time = n.newest_time
+        AND   q.collection_id = n.newest_id
+        LIMIT 1
+    ) AS t ON TRUE
     -- The creation_time predicate is a rough filter only (#4821): the newest offset, an hour wider than the bound.
     -- The reader makes the exact compiled-before-the-window test on the converted time and keeps the first five,
     -- so this read has no LIMIT.
-    WHERE rn = 1
+    WHERE TRUE
 " + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'", "    ") + @"
 )
 SELECT
@@ -394,8 +431,8 @@ ORDER BY o.worker_ratio DESC";
     /// The inline statement text of the parameter-sensitive plans the reader keeps (#5361), whole: the text
     /// <see cref="ParameterSensitiveSql"/> flags with <c>has_inline_text</c> but does not carry, because it runs
     /// before the reader's cap. Each plan's row is the one that read ranked: the newest row of the window with
-    /// <c>delta_execution_count &gt; 0</c> (its <c>rn = 1</c>), so a kept plan prints the text it printed when the ranking
-    /// read carried it. <c>$1</c> to <c>$3</c> are the server and the window, <c>$4</c> to <c>$6</c> the kept plans'
+    /// <c>delta_execution_count &gt; 0</c>, the newest by (collection_time, collection_id), the same row the ranking keeps,
+    /// so a kept plan prints the text of the row it was ranked on, also when two rows share the newest time. <c>$1</c> to <c>$3</c> are the server and the window, <c>$4</c> to <c>$6</c> the kept plans'
     /// database, query hash and plan hash as three parallel arrays; a NULL part matches a NULL part, as the ranking's
     /// <c>PARTITION BY</c> groups it. The hash comparison also states <c>= ANY</c> so the (server_id, query_hash,
     /// collection_time) index serves the read. The text is the view's own <c>COALESCE</c> (#1767): the row's inline text, else
@@ -419,7 +456,7 @@ AND   q.collection_time >= $2
 AND   q.collection_time <= $3
 AND   q.delta_execution_count > 0
 AND   (q.query_hash = ANY($5::text[]) OR q.query_hash IS NULL)
-ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC";
+ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC, q.collection_id DESC";
 
     /// <summary>
     /// The statement text of the parameter-sensitive plans the reader keeps, by digest (#3902, #4821): one
@@ -488,7 +525,7 @@ WHERE digest = ANY($1)";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         var windowStart = AsNaive(context.TimeRangeStart);
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
@@ -648,6 +685,22 @@ WHERE digest = ANY($1)";
     }
 
     public static string RegressedQueriesSql => RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
+
+    /// <summary>
+    /// A regressed-queries statement for a pass anchored at an instant (<c>AnalysisContext.AsOfUtc</c>): each read of Query
+    /// Store snapshots also ends at <c>$4</c>, the window's end, which every variant already binds, so no snapshot stored
+    /// after that instant is read. Throws when the statement carries none of the snapshot filters this ends.
+    /// </summary>
+    internal static string EndingAtTheWindow(string sql)
+    {
+        var bounded = sql
+            .Replace("AND   collection_time >= $2 - interval '1 day'", "AND   collection_time >= $2 - interval '1 day' AND collection_time <= $4", StringComparison.Ordinal)
+            .Replace("AND   collection_time >= $7", "AND   collection_time >= $7 AND collection_time <= $4", StringComparison.Ordinal)
+            .Replace("AND   q.collection_time >= $7::timestamp", "AND   q.collection_time >= $7::timestamp AND q.collection_time <= $4::timestamp", StringComparison.Ordinal);
+        return bounded.Length == sql.Length
+            ? throw new InvalidOperationException("The regressed-queries statement has no snapshot filter to end at the window.")
+            : bounded;
+    }
 
     /// <summary>
     /// The regressed-queries read over the latest-snapshot interval table (#3953): <see cref="RegressedQueriesSql"/>
@@ -960,7 +1013,8 @@ AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                         AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+-- #9353: then the row's own key, as the fact's statement ends, so rows that tie on both keys come out in one order and the same five stay.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
 LIMIT 5";
 
     /// <summary>
@@ -1139,7 +1193,8 @@ top_five AS
                             AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+    -- #9353: the row's own key last, as above.
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
     LIMIT 5
 )
 SELECT
@@ -1211,7 +1266,8 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = t.database_name
   AND x.query_id = t.query_id
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
+-- #9353: the top five's tail again, so the rows leave in the order the five were cut by.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", t.database_name, t.query_id, t.replica_role NULLS LAST";
 
     /// <summary>
     /// Top regressed queries behind a PLAN_REGRESSION finding.
@@ -1233,7 +1289,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
            decide, the same decision the fact makes, over the same bound. */
@@ -1252,6 +1308,8 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             ? await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken)
             : null;
         var builtDays = new List<PlanRegressionDaily.BuiltDay>();
+        /* A pass anchored at an instant reads nothing stored after its window's end, as the fact it follows does. */
+        var anchored = context.AsOfUtc is not null;
         if (snapshot is not null)
         {
             await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = DrillDownCommandTimeoutSeconds })
@@ -1262,6 +1320,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                 connection, snapshot, context.ServerId, windowStart, DrillDownCommandTimeoutSeconds, _logger,
                 ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+            if (anchored)
+            {
+                /* The fact's own rule: only the days that were whole by the window's end are read from their totals. */
+                var wholeBy = AsNaive(context.TimeRangeEnd).AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
+                builtDays = builtDays.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
+            }
         }
 
         var readsDays = builtDays.Count > 0;
@@ -1279,6 +1343,11 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         var regressedSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
             connection, readsDays ? snapshot : null, DrillDownCommandTimeoutSeconds,
             readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, context.CancellationToken);
+        if (anchored)
+        {
+            regressedSql = EndingAtTheWindow(regressedSql);
+        }
+
         using var cmd = new NpgsqlCommand(
             regressedSql,
             connection,
@@ -1402,7 +1471,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(BadActorDetailSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -1456,7 +1525,7 @@ LIMIT 5";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(PendingGrantsSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;

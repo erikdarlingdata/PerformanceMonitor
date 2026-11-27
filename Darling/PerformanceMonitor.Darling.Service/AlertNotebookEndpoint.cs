@@ -687,7 +687,7 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
-        (new[] { "High CPU" },
+        (new[] { "High CPU", AlertFamily.CapacityAtCeilingMetric },
             new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildLongRunningQueryCells)),

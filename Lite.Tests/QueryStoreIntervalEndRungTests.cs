@@ -170,7 +170,8 @@ public sealed class QueryStoreIntervalEndRungTests : IDisposable
     private static async Task<List<(string Name, string Type, string Nullable)>> ColumnsAsync(DuckDBConnection conn)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'query_store_stats' ORDER BY ordinal_position";
+        /* Without the Lite-only digest column (v85, #9241): it sits after the collector's payload and is not part of it. */
+        cmd.CommandText = $"SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'query_store_stats' AND column_name <> '{LiteTextDimensions.QueryTextDigestColumn}' ORDER BY ordinal_position";
         using var reader = await cmd.ExecuteReaderAsync();
         var rows = new List<(string Name, string Type, string Nullable)>();
         while (await reader.ReadAsync())

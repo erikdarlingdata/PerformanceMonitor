@@ -349,6 +349,17 @@ public sealed class McpDataDetailMaskerTests
         Assert.Equal("host#2", rows[2]!["client_addr"]!.GetValue<string>());
     }
 
+    /// <summary>#9485: who declared a change window is a login like an actor, so a metadataOnly reply carries the keyed pseudonym.</summary>
+    [Fact]
+    public void ADeclaredBy_UnderMetadataOnly_IsAKeyedLoginPseudonym_LikeAnActor()
+    {
+        const string json = "{\"windows\":[{\"declared_by\":\"operator:alice\",\"actor\":\"operator:alice\"},{\"declared_by\":\"agent:agent-a\"}]}";
+        var windows = JsonNode.Parse(McpDataDetailMasker.MaskJson(json, McpDataDetail.MetadataOnly, key: PseudonymTestKey.Key))!["windows"]!.AsArray();
+        Assert.Equal(PseudonymTestKey.Login("operator:alice"), windows[0]!["declared_by"]!.GetValue<string>());
+        Assert.Equal(windows[0]!["actor"]!.GetValue<string>(), windows[0]!["declared_by"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Login("agent:agent-a"), windows[1]!["declared_by"]!.GetValue<string>());
+    }
+
     /// <summary>#6066: with the store's key the same rows carry a keyed pseudonym, the same name the same text in every row.</summary>
     [Fact]
     public void LoginsAndHosts_WithTheKey_AreKeyedPseudonyms()

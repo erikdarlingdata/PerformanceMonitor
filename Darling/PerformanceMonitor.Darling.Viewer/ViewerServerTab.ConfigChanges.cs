@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class ViewerServerTab : UserControl
 {
-    private async Task LoadConfigChangesAsync()
+    private async Task LoadConfigChangesAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
@@ -36,13 +36,14 @@ public partial class ViewerServerTab : UserControl
 
         /* #4966: each grid says where its snapshots start when the range reaches before it. Every history diffs the snapshots one
            collector writes, so each has its own probe (server_config, database_config, trace_flags), started beside its read. */
-        var serverStartTask = _dataService.GetServerConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var databaseStartTask = _dataService.GetDatabaseConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var traceFlagStartTask = _dataService.GetTraceFlagChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: every read is named on the load's clock, and the grid builds are one named client step. */
+        var serverStartTask = Timed(timer, "Server Config Changes data start read", _dataService.GetServerConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var databaseStartTask = Timed(timer, "Database Config Changes data start read", _dataService.GetDatabaseConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var traceFlagStartTask = Timed(timer, "Trace Flag Changes data start read", _dataService.GetTraceFlagChangesDataStartAsync(_server.ServerId, startUtc, endUtc));
 
-        var serverTask = _dataService.GetServerConfigChangesAsync(_server.ServerId, startUtc, endUtc);
-        var databaseTask = _dataService.GetDatabaseConfigChangesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        var traceFlagTask = _dataService.GetTraceFlagChangesAsync(_server.ServerId, startUtc, endUtc);
+        var serverTask = Timed(timer, "Server Config Changes read", _dataService.GetServerConfigChangesAsync(_server.ServerId, startUtc, endUtc));
+        var databaseTask = Timed(timer, "Database Config Changes read", _dataService.GetDatabaseConfigChangesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var traceFlagTask = Timed(timer, "Trace Flag Changes read", _dataService.GetTraceFlagChangesAsync(_server.ServerId, startUtc, endUtc));
 
         /* One probe per grid: each wraps the read so a failing read watches all three. */
         await AwaitReadWatchingProbeAsync(
@@ -59,14 +60,17 @@ public partial class ViewerServerTab : UserControl
         var databaseChanges = databaseTask.Result;
         var traceFlagChanges = traceFlagTask.Result;
 
-        _serverConfigChangesFilterMgr!.UpdateData(serverChanges);
-        _databaseConfigChangesFilterMgr!.UpdateData(databaseChanges);
-        _traceFlagChangesFilterMgr!.UpdateData(traceFlagChanges);
+        ClientStep(timer, "Config Changes grid build", () =>
+        {
+            _serverConfigChangesFilterMgr!.UpdateData(serverChanges);
+            _databaseConfigChangesFilterMgr!.UpdateData(databaseChanges);
+            _traceFlagChangesFilterMgr!.UpdateData(traceFlagChanges);
+        });
 
         /* Where the collector behind a grid cannot run (Azure SQL Database) or has never run for this server, its empty state says
            so in place of the "no changes in this window" text. Database config changes come from a collector that does run there. */
-        await SetChangesNoDataTextAsync(ServerConfigChangesNoDataMessage, "server_config", serverChanges.Count);
-        await SetChangesNoDataTextAsync(TraceFlagChangesNoDataMessage, "trace_flags", traceFlagChanges.Count);
+        await Timed(timer, "Server Config Changes engine gap read", SetChangesNoDataTextAsync(ServerConfigChangesNoDataMessage, "server_config", serverChanges.Count));
+        await Timed(timer, "Trace Flag Changes engine gap read", SetChangesNoDataTextAsync(TraceFlagChangesNoDataMessage, "trace_flags", traceFlagChanges.Count));
 
         /* Empty state keyed on the unfiltered change count (a real "no drift in this window" signal), matching
            the Dashboard's data.Count == 0 check — independent of any active column filter. */

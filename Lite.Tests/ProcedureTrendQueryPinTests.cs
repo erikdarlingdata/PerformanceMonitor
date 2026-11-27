@@ -23,6 +23,8 @@ namespace Lite.Tests;
 /// updated these four hashes with that reason.
 /// #8073 is another: both query-grain statements gain a trailing <c>execution_count</c> column (the bucket's summed rated
 /// executions), so the four hashes moved again on purpose.
+/// The window's start is another: both statements read the collections in (start, end], so the collection stamped exactly on
+/// the start is the baseline of the first one inside and not a point of its own, and the four hashes are of that text.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryPinTests
@@ -36,15 +38,15 @@ public sealed class ProcedureTrendQueryPinTests
     [Fact]
     public void QueryStatsChartSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
     {
-        Assert.Equal("15D7072335BC0123D2A5D646F346ED8D28367604CC4D866029613EF4CB8BE2A9", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
-        Assert.Equal("0B43A65EC59C2DE3003465E13934D337C03B9DBCB3758391C0D8E5C86495F610", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
+        Assert.Equal("FEE4CF0D04A802C144DBAC9272A8C0F9DE8524BE21E3C5E90DAD697E766C6275", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
+        Assert.Equal("BC78243DFAE247499F4FC3EA90E28BF16C3D9C097BA5B9F735729F234D9BEF2B", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
     }
 
     [Fact]
     public void QueryStatsBucketedSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
     {
-        Assert.Equal("8020B8CE5EE7813BDFF96EC980D1112BBBE820E57CCA074AACA37C87C3808705", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
-        Assert.Equal("CA5B63CCD7B613BA0BB95EFD4CD5495670747691E3194987799EADB0AAB075DC", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
+        Assert.Equal("3DEE866B4357869E6F3BF6931544312FD942F9345AF1E1951D0707C260A3A37F", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
+        Assert.Equal("4FE1063E18498B028A1C7863962978B97A80CADD97559AB82E190C475B54C5A5", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
     }
 
     [Theory]
@@ -62,7 +64,6 @@ public sealed class ProcedureTrendQueryPinTests
         {
             /* Both the stored rows and the log's runs come from an hour before $2, and the points before $2 are dropped after the LAG. */
             Assert.Equal(2, CountOf(sql, "collection_time >= $2 - to_seconds(3600)"));
-            Assert.Contains("WHERE collection_time >= $2", sql);
             Assert.Contains("v_collection_log", sql);
             Assert.DoesNotContain("series_first", sql);
             Assert.DoesNotContain("first_interval", sql);

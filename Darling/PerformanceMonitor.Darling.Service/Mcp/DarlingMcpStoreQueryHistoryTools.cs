@@ -21,6 +21,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -80,14 +81,65 @@ SELECT count(*)::bigint,
 FROM collect.store_statement_captures
 WHERE capture_time >= $1";
 
-    /// <summary>The ranked statements. <c>$1</c> window start, <c>$2</c> the role key or null, <c>$3</c> the fetch size.</summary>
-    public static readonly string RankedSql = $@"
+    /// <summary>The ranking order of the ranked mode, by its <c>order_by</c> word (#9410): time spent (the default), blocks dirtied, blocks written, WAL bytes.</summary>
+    public const string OrderByTime = "time";
+
+    /// <summary>The <c>order_by</c> word for blocks dirtied.</summary>
+    public const string OrderByDirtied = "dirtied";
+
+    /// <summary>The <c>order_by</c> word for blocks written.</summary>
+    public const string OrderByWritten = "written";
+
+    /// <summary>The <c>order_by</c> word for WAL bytes.</summary>
+    public const string OrderByWal = "wal";
+
+    /// <summary>What <c>order_by</c> accepts, for the refusal's text.</summary>
+    public const string OrderByAccepted = "time, dirtied, written or wal";
+
+    /// <summary>
+    /// The normalized <c>order_by</c> word, or null when it is not one of the four. Blank or absent reads as <see cref="OrderByTime"/>.
+    /// Case and surrounding spaces do not matter.
+    /// </summary>
+    internal static string? NormalizeOrderBy(string? orderBy)
+    {
+        if (string.IsNullOrWhiteSpace(orderBy))
+        {
+            return OrderByTime;
+        }
+
+        var word = orderBy.Trim().ToLowerInvariant();
+        return word is OrderByTime or OrderByDirtied or OrderByWritten or OrderByWal ? word : null;
+    }
+
+    /// <summary>
+    /// The ranked statements, in the order <paramref name="orderBy"/> names (a word <see cref="NormalizeOrderBy"/> returned). The order
+    /// expression is chosen here from the four fixed words and never carries caller text. A non-time order puts statements with no value
+    /// last (a window of rows from before the rung sums to NULL) and breaks a tie on time, then on query id and role. <c>$1</c> window
+    /// start, <c>$2</c> the role key or null, <c>$3</c> the fetch size.
+    /// </summary>
+    internal static string RankedSqlFor(string orderBy)
+    {
+        var order = orderBy switch
+        {
+            OrderByDirtied => "sum(w.delta_shared_blks_dirtied) DESC NULLS LAST, 4 DESC",
+            OrderByWritten => "sum(w.delta_shared_blks_written) DESC NULLS LAST, 4 DESC",
+            OrderByWal => "sum(w.delta_wal_bytes) DESC NULLS LAST, 4 DESC",
+            _ => "4 DESC",
+        };
+        return BuildRankedSql(order);
+    }
+
+    /// <summary>The ranked statements by time spent. <c>$1</c> window start, <c>$2</c> the role key or null, <c>$3</c> the fetch size.</summary>
+    public static readonly string RankedSql = RankedSqlFor(OrderByTime);
+
+    private static string BuildRankedSql(string order) => $@"
 WITH h AS
 (
     SELECT {DarlingMcpStoreQueryStatsTools.RoleKeySql} AS role_key,
            f.queryid, f.capture_time, f.delta_calls, f.delta_total_exec_ms, f.delta_rows,
            f.delta_shared_blks_hit, f.delta_shared_blks_read, f.delta_temp_blks_written, f.max_exec_ms,
            f.first_seen, f.entry_restarted, f.reset_in_interval,
+           f.delta_shared_blks_dirtied, f.delta_shared_blks_written, f.delta_wal_bytes, f.delta_wal_fpi,
            /* The recent-vs-earlier split ranks only the hours that are NOT first_seen: a first_seen hour can credit a statement's whole earlier life as one hour. */
            row_number() OVER (PARTITION BY f.role_name, f.queryid, f.first_seen ORDER BY f.capture_time DESC) AS newest_rank,
            count(*) OVER (PARTITION BY f.role_name, f.queryid, f.first_seen) AS split_count
@@ -117,10 +169,16 @@ SELECT w.role_key,
        (count(*) FILTER (WHERE w.first_seen))::integer AS first_seen_hours,
        (count(*) FILTER (WHERE w.entry_restarted))::integer AS restarted_hours,
        (count(*) FILTER (WHERE w.reset_in_interval))::integer AS reset_hours,
-       (count(*) FILTER (WHERE NOT w.first_seen))::integer AS split_hours
+       (count(*) FILTER (WHERE NOT w.first_seen))::integer AS split_hours,
+       /* #9410: a row from before the write counters existed holds NULL, which a sum skips, so the hours that DID carry them are counted beside the sums. */
+       sum(w.delta_shared_blks_dirtied)::bigint AS shared_blks_dirtied,
+       sum(w.delta_shared_blks_written)::bigint AS shared_blks_written,
+       sum(w.delta_wal_bytes)::numeric AS wal_bytes,
+       sum(w.delta_wal_fpi)::bigint AS wal_fpi,
+       (count(*) FILTER (WHERE w.delta_shared_blks_dirtied IS NOT NULL))::integer AS write_counter_hours
 FROM w
 GROUP BY w.role_key, w.queryid
-ORDER BY 4 DESC, w.queryid, w.role_key
+ORDER BY {order}, w.queryid, w.role_key
 LIMIT $3";
 
     /// <summary>One statement's series, oldest first. <c>$1</c> window start, <c>$2</c> the role key or null, <c>$3</c> the query id.</summary>
@@ -137,7 +195,11 @@ SELECT f.capture_time,
        f.max_exec_ms,
        f.first_seen,
        f.entry_restarted,
-       f.reset_in_interval
+       f.reset_in_interval,
+       f.delta_shared_blks_dirtied,
+       f.delta_shared_blks_written,
+       f.delta_wal_bytes,
+       f.delta_wal_fpi
 FROM collect.store_statement_history AS f
 WHERE f.queryid = $3
 AND   f.capture_time >= $1
@@ -164,21 +226,24 @@ GROUP BY f.queryid";
     /// <summary>What a statement's text reads when the extension no longer holds it.</summary>
     public const string TextGone = "text no longer in pg_stat_statements";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_query_history"), Description(
         "The STORE's own SQL statements hour by hour (pg_stat_statements deltas the service snapshots), not a " +
         "monitored server's queries. No server_name. Without query_id: top statements over hours_back by time " +
-        "spent, each with calls, mean ms and the newest quarter of its hours vs the rest. With query_id: that " +
+        "spent (or by blocks dirtied, blocks written or WAL bytes with order_by), each with calls, mean ms and the newest quarter of its hours vs the rest. With query_id: that " +
         "statement's hourly series, oldest first. Gated: status precondition before the first snapshot. " +
-        "<<GUIDE>> Reads collect.store_statement_history: once an hour the service records each statement's CHANGE in calls, total time, rows and blocks since the last snapshot (the 100 that spent the most time), so a statement's mean ms per call can be read hour by hour across a store restart, a pg_stat_statements_reset() or the nightly upgrade. get_store_query_stats answers what is expensive since the counters were last reset; this answers what changed and when. Without query_id: statements ranks by total time over hours_back, with calls, mean_ms (total/calls), the mean in the newest quarter of the hours the statement appears in (recent_mean_ms) against the earlier hours (earlier_mean_ms), and hours_present; truncated says more statements exist than top. With query_id (a string, as get_store_query_stats prints it): series, one row per hour, oldest first, with interval_seconds, calls, mean_ms, total_ms, rows, shared block hits and reads, temp blocks written, max_exec_ms and three flags: first_seen (the statement's first hour in the counters; can be an upper bound, so its figures may include earlier life), entry_restarted (the extension evicted and re-admitted the entry, so the hour is a lower bound) and reset_in_interval (the counters were reset inside the hour). max_exec_ms is the extension's cumulative maximum, not the hour's. captures says how many snapshots the window holds, how many were a fresh baseline (rebaselined: no history written for that hour), how many could not read the extension (precondition), the evictions in the window (dealloc_delta_total) and the hours whose cap hid statements (capped_hours): an hour with no row may be an hour not captured. role is owner, admin, viewer or mcp; the text is the live normalized text, or says it is gone. In ranked mode first_seen_hours, restarted_hours and reset_hours count the flagged hours behind each statement's figures (calls and total_ms include them; restarted hours are lower bounds); first_seen hours are left out of recent_mean_ms and earlier_mean_ms, which are null under 4 other hours. effective_start, window_truncated and truncation_note say where the history starts relative to hours_back. History is kept 90 days and taken hourly. Answers status precondition, with the remedy, when the store predates the history, holds no snapshot yet, or when every snapshot so far could not read the extension. When history exists but the reader is not usable now, the history is still answered and only the text is withheld: query reads 'text unavailable' and text_note says why. No server_name: the store is the subject.")]
+        "<<GUIDE>> Reads collect.store_statement_history: once an hour the service records each statement's CHANGE in calls, total time, rows, blocks and write counters since the last snapshot (the 100 that spent the most time plus the 100 that dirtied the most shared blocks, so a quick statement that dirties many pages is kept), so a statement's mean ms per call can be read hour by hour across a store restart, a pg_stat_statements_reset() or the nightly upgrade. get_store_query_stats answers what is expensive since the counters were last reset; this answers what changed and when. Without query_id: statements ranks by total time over hours_back (order_by dirtied, written or wal ranks by shared blocks dirtied, shared blocks written or WAL bytes instead, which names the statements that made the pages a checkpoint writes, a read that only sets hint bits included; order_by echoes the order used), with calls, mean_ms (total/calls), the mean in the newest quarter of the hours the statement appears in (recent_mean_ms) against the earlier hours (earlier_mean_ms), and hours_present; truncated says more statements exist than top. With query_id (a string, as get_store_query_stats prints it): series, one row per hour, oldest first, with interval_seconds, calls, mean_ms, total_ms, rows, shared block hits and reads, temp blocks written, shared_blks_dirtied, shared_blks_written, wal_bytes and wal_fpi (full-page images), max_exec_ms and three flags: first_seen (the statement's first hour in the counters; can be an upper bound, so its figures may include earlier life), entry_restarted (the extension evicted and re-admitted the entry, so the hour is a lower bound) and reset_in_interval (the counters were reset inside the hour). max_exec_ms is the extension's cumulative maximum, not the hour's. captures says how many snapshots the window holds, how many were a fresh baseline (rebaselined: no history written for that hour), how many could not read the extension (precondition), the evictions in the window (dealloc_delta_total) and the hours whose cap hid statements (capped_hours): an hour with no row may be an hour not captured. role is owner, admin, viewer or mcp; the text is the live normalized text, or says it is gone. In ranked mode first_seen_hours, restarted_hours and reset_hours count the flagged hours behind each statement's figures (calls and total_ms include them; restarted hours are lower bounds); first_seen hours are left out of recent_mean_ms and earlier_mean_ms, which are null under 4 other hours. effective_start, window_truncated and truncation_note say where the history starts relative to hours_back. shared_blks_dirtied, shared_blks_written, wal_bytes and wal_fpi sum the window's hours that carry them; a row taken before the service recorded them holds null, so null means not measured, not zero, and in ranked mode write_counter_hours counts the hours that carried them against hours_present (a window that spans the upgrade sums only those). History is kept 90 days and taken hourly. Answers status precondition, with the remedy, when the store predates the history, holds no snapshot yet, or when every snapshot so far could not read the extension. When history exists but the reader is not usable now, the history is still answered and only the text is withheld: query reads 'text unavailable' and text_note says why. build_changes lists the points in the window where the service build changed (service_host, at, from_build, to_build, oldest first; get_service_starts has each start in full), so a statement that moved at an upgrade shows it. It is null, with build_changes_note saying why, when the store has no start history yet. No server_name: the store is the subject.")]
     public static Task<string> GetStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("One statement's id, as get_store_query_stats prints it. Omit to rank the statements.")] string? query_id = null,
         [Description("Only statements run by this role: owner, admin, viewer or mcp. Omit for every role.")] string? role = null,
         [Description("Hours of history. Default 24, max 2160 (90 days).")] int hours_back = DefaultHours,
         [Description("How many statements when ranking. Default 20, max 1000.")] int top = DefaultTop,
+        [Description("Ranking order when ranking: time (total time spent, the default), dirtied (shared blocks dirtied), written (shared blocks written) or wal (WAL bytes). Ignored with query_id.")] string? order_by = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetStoreQueryHistoryCoreAsync(postgres, query_id, role, hours_back, top, uncutText: false, logger, cancellationToken);
+        GetStoreQueryHistoryCoreAsync(postgres, query_id, role, hours_back, top, order_by, uncutText: false, logger, cancellationToken);
 
     /// <summary>
     /// The diagnostics bundle's read (#5097): the ranked answer, every statement's <c>query</c> whole. The bundle aliases the
@@ -186,7 +251,7 @@ GROUP BY f.queryid";
     /// the MCP surface, its parameters and its output are the ones <see cref="GetStoreQueryHistory"/> has.
     /// </summary>
     internal static Task<string> GetStoreQueryHistoryUncut(NpgsqlDataSource postgres, int hours_back, int top, CancellationToken cancellationToken) =>
-        GetStoreQueryHistoryCoreAsync(postgres, query_id: null, role: null, hours_back, top, uncutText: true, logger: null, cancellationToken);
+        GetStoreQueryHistoryCoreAsync(postgres, query_id: null, role: null, hours_back, top, order_by: null, uncutText: true, logger: null, cancellationToken);
 
     private static async Task<string> GetStoreQueryHistoryCoreAsync(
         NpgsqlDataSource postgres,
@@ -194,6 +259,7 @@ GROUP BY f.queryid";
         string? role,
         int hours_back,
         int top,
+        string? order_by,
         bool uncutText,
         ILogger? logger,
         CancellationToken cancellationToken)
@@ -202,6 +268,13 @@ GROUP BY f.queryid";
         if (invalidTop != null)
         {
             return invalidTop;
+        }
+
+        var orderBy = NormalizeOrderBy(order_by);
+        if (orderBy is null)
+        {
+            return McpHelpers.Refusal("order_by",
+                $"Invalid order_by '{order_by}'. Use one of: {OrderByAccepted}, or omit it to rank by time spent.");
         }
 
         /* Checked here, not by McpHelpers.ValidateHoursBack: the shared validator caps at 7 days and this history reaches back 90. */
@@ -249,6 +322,9 @@ GROUP BY f.queryid";
 
             var captures = await ReadCapturesAsync(postgres, windowStart, cancellationToken);
 
+            /* #9415: where the service's build changed inside the window, so a statement's step can be read against an upgrade. */
+            var buildChanges = await DarlingMcpServiceStartTools.ReadBuildChangesAsync(postgres, windowStart, logger, cancellationToken);
+
             if (queryId is long id)
             {
                 var series = await ReadSeriesAsync(postgres, windowStart, roleKey, id, cancellationToken);
@@ -266,6 +342,8 @@ GROUP BY f.queryid";
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
+                    build_changes = buildChanges.List,
+                    build_changes_note = buildChanges.Note,
                     role = roleKey,
                     query_id = id.ToString(CultureInfo.InvariantCulture),
                     query = ShownQuery(text, id, gate.TextUsable, uncutText),
@@ -288,13 +366,17 @@ GROUP BY f.queryid";
                         first_seen = s.FirstSeen,
                         entry_restarted = s.EntryRestarted,
                         reset_in_interval = s.ResetInInterval,
+                        shared_blks_dirtied = s.BlksDirtied,
+                        shared_blks_written = s.BlksWritten,
+                        wal_bytes = s.WalBytes,
+                        wal_fpi = s.WalFpi,
                     }),
                     note = Note,
                 }, McpHelpers.JsonOptions);
                 return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
             }
 
-            var fetched = await ReadRankedAsync(postgres, windowStart, roleKey, top + 1, cancellationToken);
+            var fetched = await ReadRankedAsync(postgres, windowStart, roleKey, top + 1, orderBy, cancellationToken);
             if (fetched.Count == 0)
             {
                 return await EmptyAsync(postgres, "No statement history in the window.", windowStart, captures, logger, cancellationToken);
@@ -310,8 +392,11 @@ GROUP BY f.queryid";
                 effective_start = rankedNotice.EffectiveStart,
                 window_truncated = rankedNotice.WindowTruncated,
                 truncation_note = rankedNotice.TruncationNote,
+                build_changes = buildChanges.List,
+                build_changes_note = buildChanges.Note,
                 role = roleKey,
                 top,
+                order_by = orderBy,
                 text_note = gate.TextNote,
                 statements_returned = page.Count,
                 truncated,
@@ -334,6 +419,11 @@ GROUP BY f.queryid";
                     shared_blks_hit = s.BlksHit,
                     shared_blks_read = s.BlksRead,
                     temp_blks_written = s.TempWritten,
+                    shared_blks_dirtied = s.BlksDirtied,
+                    shared_blks_written = s.BlksWritten,
+                    wal_bytes = s.WalBytes,
+                    wal_fpi = s.WalFpi,
+                    write_counter_hours = s.WriteCounterHours,
                     max_exec_ms = s.MaxMs is double m ? Round(m) : (double?)null,
                     query = ShownQuery(texts, s.QueryId, gate.TextUsable, uncutText),
                 }),
@@ -348,7 +438,7 @@ GROUP BY f.queryid";
     }
 
     private const string Note =
-        "Each row is the CHANGE since the previous hourly snapshot, so it survives a restart or a reset; the extension keeps at most the 100 statements that spent the most time in an hour, so a cheap statement can be missing from an hour it ran in. max_exec_ms is the extension's cumulative maximum, not the hour's. captures.rebaselined counts hours with no history because the counters could not be trusted. History is kept 90 days and taken hourly.";
+        "Each row is the CHANGE since the previous hourly snapshot, so it survives a restart or a reset; an hour keeps the 100 statements that spent the most time and the 100 that dirtied the most shared blocks, so a statement that did neither can be missing from an hour it ran in. shared_blks_dirtied, shared_blks_written, wal_bytes and wal_fpi are null for hours taken before they were recorded. max_exec_ms is the extension's cumulative maximum, not the hour's. captures.rebaselined counts hours with no history because the counters could not be trusted. History is kept 90 days and taken hourly.";
 
     /// <summary>
     /// A statement's text as the answer shows it. <paramref name="uncut"/> keeps it whole (redacted, not compacted) for the
@@ -468,16 +558,20 @@ GROUP BY f.queryid";
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
                 reader.GetBoolean(10),
                 reader.GetBoolean(11),
-                reader.GetBoolean(12)));
+                reader.GetBoolean(12),
+                reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                reader.IsDBNull(15) ? null : reader.GetDecimal(15),
+                reader.IsDBNull(16) ? null : reader.GetInt64(16)));
         }
 
         return rows;
     }
 
-    private static async Task<List<RankedRow>> ReadRankedAsync(NpgsqlDataSource postgres, DateTime windowStart, string? roleKey, int fetch, CancellationToken ct)
+    private static async Task<List<RankedRow>> ReadRankedAsync(NpgsqlDataSource postgres, DateTime windowStart, string? roleKey, int fetch, string orderBy, CancellationToken ct)
     {
         var rows = new List<RankedRow>();
-        await using var command = postgres.CreateCommand(RankedSql);
+        await using var command = postgres.CreateCommand(RankedSqlFor(orderBy));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = windowStart, NpgsqlDbType = NpgsqlDbType.Timestamp });
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)roleKey ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
@@ -503,7 +597,12 @@ GROUP BY f.queryid";
                 reader.GetInt32(14),
                 reader.GetInt32(15),
                 reader.GetInt32(16),
-                reader.GetInt32(17)));
+                reader.GetInt32(17),
+                reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                reader.IsDBNull(19) ? null : reader.GetInt64(19),
+                reader.IsDBNull(20) ? null : reader.GetDecimal(20),
+                reader.IsDBNull(21) ? null : reader.GetInt64(21),
+                reader.GetInt32(22)));
         }
 
         return rows;
@@ -590,10 +689,12 @@ GROUP BY f.queryid";
 
     private sealed record SeriesRow(
         DateTime CaptureTime, string Role, int IntervalSeconds, long Calls, double TotalMs, long Rows,
-        long BlksHit, long BlksRead, long TempWritten, double? MaxMs, bool FirstSeen, bool EntryRestarted, bool ResetInInterval);
+        long BlksHit, long BlksRead, long TempWritten, double? MaxMs, bool FirstSeen, bool EntryRestarted, bool ResetInInterval,
+        long? BlksDirtied, long? BlksWritten, decimal? WalBytes, long? WalFpi);
 
     private sealed record RankedRow(
         string Role, long QueryId, long Calls, double TotalMs, long Rows, long BlksHit, long BlksRead, long TempWritten,
         double? MaxMs, int HoursPresent, long? RecentCalls, double? RecentTotalMs, long? EarlierCalls, double? EarlierTotalMs,
-        int FirstSeenHours, int RestartedHours, int ResetHours, int SplitHours);
+        int FirstSeenHours, int RestartedHours, int ResetHours, int SplitHours,
+        long? BlksDirtied, long? BlksWritten, decimal? WalBytes, long? WalFpi, int WriteCounterHours);
 }

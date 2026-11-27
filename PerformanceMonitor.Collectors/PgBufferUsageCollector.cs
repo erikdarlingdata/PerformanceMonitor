@@ -51,9 +51,21 @@ namespace PerformanceMonitor.Collectors;
 /// relation.</item>
 /// </list>
 ///
-/// <para>Readable by <c>pg_monitor</c>. The full view is a scan of every buffer: measured at 6.1 ms for a
-/// 512 MB pool, which scales linearly, so roughly 780 ms for 64 GB of <c>shared_buffers</c> — affordable
-/// hourly and not affordable per minute, which is the other reason for the cadence.</para>
+/// <para>Readable by <c>pg_monitor</c>. The full view is a scan of every buffer, at about 1 microsecond per
+/// buffer as measured on managed targets (57 ms for 32,768 buffers, 543 ms for 507,904), which scales
+/// linearly: about 9 s for a 64 GB pool, plus a temp-file spill for the function scan's own store of the
+/// pool (#9508). That is affordable hourly on a small pool and not on a large one, so the per-relation
+/// read is skipped above <see cref="PoolCapBuffers"/> and the pool totals come from
+/// <c>pg_buffercache_summary()</c> instead, which has no per-buffer row set.</para>
+///
+/// <para><b>Three shapes of run (#9508), decided on every run from the pool size in <c>pg_settings</c>:</b>
+/// at or under the cap, the per-relation rows as always; over the cap, no <c>pg_buffercache</c> scan and one
+/// totals-only row (<c>buffers</c> NULL, no relation columns) that every reader tells apart from a relation
+/// row by that NULL; and the pool totals from <c>pg_buffercache_summary()</c> whenever <c>pg_proc</c> shows
+/// the function on this connection, from a window over the scan otherwise. A target whose extension was
+/// created before PostgreSQL 16 and never updated has no summary function: under the cap it keeps today's
+/// read, over the cap the totals-only row has the pool size and no used count, and the reader states the
+/// precondition <c>ALTER EXTENSION pg_buffercache UPDATE</c>. The collector never runs that statement.</para>
 /// </summary>
 public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgBufferUsageCollector.Row>
 {
@@ -63,21 +75,49 @@ public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgB
     {
     }
 
+    /// <summary>
+    /// The pool size, in buffers, above which the per-relation scan is skipped (#9508): 16 GB of 8 kB buffers. The scan
+    /// costs about 1 microsecond per buffer on the monitored server, so a pool this size is about 2 s every hour, and
+    /// it grows without bound with <c>shared_buffers</c> (a 64 GB pool is about 9 s, plus a temp spill). The decision
+    /// is made on each run from <c>pg_settings</c>, so a pool that crosses the cap in either direction (a serverless
+    /// target moves <c>shared_buffers</c> with capacity) switches on the next run.
+    /// </summary>
+    public const long PoolCapBuffers = 2_097_152;
+
+    /// <summary>The <c>pg_buffercache</c> function that returns the pool totals without a per-buffer row set (extension 1.4, PostgreSQL 16).</summary>
+    public const string SummaryFunction = "pg_buffercache_summary";
+
+    /// <summary>Measurement labels (counts, never verdicts) a skipped per-relation scan leaves on the run's <c>collection_log</c> note.</summary>
+    public const string ScanSkippedMeasurement = "relation_scan_skipped";
+    public const string PoolBuffersMeasurement = "pool_buffers";
+    public const string CapBuffersMeasurement = "cap_buffers";
+    public const string SummaryMissingMeasurement = "summary_missing";
+
     /// <param name="RelationName">NULL when the buffer belongs to a different database — deliberately, see
     /// the type header. NOT an unnamed relation.</param>
     /// <param name="AvgUsageCount">Mean clock-sweep usage count, 0–5. Buffers sitting at 5 are being reused
     /// constantly; a relation whose buffers are all at 0 or 1 is occupying memory it is not earning.</param>
+    /// <param name="Buffers">NULL only on the totals-only row of a run that skipped the per-relation scan
+    /// (#9508). A relation row always has a count.</param>
+    /// <param name="DirtyBuffers">On a totals-only row, the dirty buffers of the whole pool (NULL when the
+    /// summary function is missing).</param>
     /// <param name="PoolBuffersTotal">Total buffers in the pool, repeated on every row so a caller can
     /// compute a share without a second read.</param>
+    /// <param name="PoolBuffersUsed">NULL only on a totals-only row whose pool used count is unknown because
+    /// the target has no <c>pg_buffercache_summary()</c>.</param>
     public readonly record struct Row(
         string? DatabaseName,
         string? RelationName,
         string? RelationKind,
-        long Buffers,
-        long DirtyBuffers,
+        long? Buffers,
+        long? DirtyBuffers,
         double? AvgUsageCount,
         long PoolBuffersTotal,
-        long PoolBuffersUsed);
+        long? PoolBuffersUsed)
+    {
+        /// <summary>True for the single row of a run that skipped the per-relation scan.</summary>
+        public bool IsTotalsOnly => Buffers is null;
+    }
 
     /* The filenode join is pg_relation_filenode(c.oid), never c.oid or c.relfilenode - see the type header
        for what each of those loses.
@@ -87,30 +127,75 @@ public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgB
        elsewhere are kept with their database named and the relation NULL: dropping them would understate
        how full the pool is, which is the one number this exists to report.
 
-       Pool totals come from a window over the same single scan rather than a second query or
-       pg_buffercache_summary() - two scans of a moving pool would disagree, and the disagreement would land
-       in the percentage a reader computes.
+       Without pg_buffercache_summary(), the pool totals come from a window over the same single scan rather
+       than a second query: two scans of a moving pool would disagree, and the disagreement would land in the
+       percentage a reader computes. With it (#9508, SummaryCtes) the totals are a separate reading of the
+       summary function, one row with no per-buffer row set, and the rows and the totals each describe the
+       pool as of their own moment.
+
+       #9062: the buffers are grouped by (reldatabase, relfilenode) FIRST, and the window runs over those few
+       hundred grouped rows. The window used to run over every buffer row, and a 10 GB pool is 1.3 million of
+       them, which the WindowAgg stored (86 MB of temp file per read, measured on a real target) before the
+       GROUP BY reduced them to about 100. Everything below the grouping is a sum of the sums: buffers and
+       dirty buffers add, and the average usage count is the usage sum over the count of buffers that HAVE a
+       usage count, which is what avg() ignores NULLs to do (NULLIF keeps a group with none NULL, as avg() does,
+       not a division error). The pool totals are sums of the grouped counts, so unused buffers (a NULL
+       relfilenode) are in the total and out of the used count exactly as before. The remaining spill is the
+       function scan's own store of the pool, which still spilled at 64 MB of work_mem; that is what the cap
+       (#9508) is for.
+
+       #9508: the scan sits under a WHERE that reads only the pool size (cfg, from pg_settings, where shared_buffers is
+       already a count of block_size buffers, so the setting IS the buffer count on any build). A qual with no
+       column of the scanned relation is planned as a one-time filter above the scan, so over the cap the
+       pg_buffercache function is never called. The cap is a literal in the text, decided on each run.
 
        A floor of 8 buffers (64 KB) keeps the long tail of one-block catalog relations out; on a large pool
        that tail is thousands of rows that never inform anything. */
     private const string QueryText = @"
-WITH pool AS (
+WITH cfg AS (
+    SELECT s.setting::bigint AS pool_buffers
+    FROM pg_catalog.pg_settings AS s
+    WHERE s.name = 'shared_buffers'
+),
+@@SUMMARY@@per_rel AS (
     SELECT
         b.reldatabase,
         b.relfilenode,
-        b.isdirty,
-        b.usagecount,
-        count(*) OVER ()                                        AS pool_total,
-        count(*) FILTER (WHERE b.relfilenode IS NOT NULL) OVER () AS pool_used
+        count(*)                                                AS buffers,
+        count(*) FILTER (WHERE b.isdirty)                       AS dirty_buffers,
+        sum(b.usagecount)                                       AS usage_sum,
+        count(b.usagecount)                                     AS usage_n
     FROM public.pg_buffercache AS b
+    WHERE (SELECT c.pool_buffers FROM cfg AS c) <= @@CAP@@
+    GROUP BY b.reldatabase, b.relfilenode
+),
+pool AS (
+    SELECT
+        r.reldatabase,
+        r.relfilenode,
+        r.buffers,
+        r.dirty_buffers,
+        r.usage_sum,
+        r.usage_n,
+@@POOLTOTALS@@
+    FROM per_rel AS r@@POOLJOIN@@
 )
+SELECT
+    NULL::text                                                  AS database_name,
+    NULL::text                                                  AS relation_name,
+    NULL::text                                                  AS relation_kind,
+    NULL::bigint                                                AS buffers,
+@@TOTALSROW@@
+FROM cfg AS g@@TOTALSJOIN@@
+WHERE g.pool_buffers > @@CAP@@
+UNION ALL
 SELECT
     d.datname::text                                             AS database_name,
     c.relname::text                                             AS relation_name,
     c.relkind::text                                             AS relation_kind,
-    count(*)::bigint                                            AS buffers,
-    count(*) FILTER (WHERE p.isdirty)::bigint                   AS dirty_buffers,
-    avg(p.usagecount)::double precision                         AS avg_usage_count,
+    sum(p.buffers)::bigint                                      AS buffers,
+    sum(p.dirty_buffers)::bigint                                AS dirty_buffers,
+    (sum(p.usage_sum) / nullif(sum(p.usage_n), 0))::double precision AS avg_usage_count,
     max(p.pool_total)::bigint                                   AS pool_buffers_total,
     max(p.pool_used)::bigint                                    AS pool_buffers_used
 FROM pool AS p
@@ -121,8 +206,36 @@ LEFT JOIN pg_catalog.pg_class AS c
   AND p.reldatabase = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
 WHERE p.relfilenode IS NOT NULL
 GROUP BY d.datname, c.relname, c.relkind
-HAVING count(*) >= 8
-ORDER BY count(*) DESC";
+HAVING sum(p.buffers) >= 8
+ORDER BY buffers DESC NULLS LAST";
+
+    /* #9508: the pieces that differ when pg_buffercache_summary() is there. summ is one row of the pool's own
+       counters; the totals come from it and not from a window over the scan. */
+    private const string SummaryCtes = @"summ AS (
+    SELECT
+        m.buffers_used::bigint                                  AS used,
+        m.buffers_unused::bigint                                AS unused,
+        m.buffers_dirty::bigint                                 AS dirty,
+        m.usagecount_avg::double precision                      AS usage_avg
+    FROM @@SCHEMA@@.pg_buffercache_summary() AS m
+),
+";
+
+    private const string WindowPoolTotals = @"        sum(r.buffers) OVER ()                                  AS pool_total,
+        coalesce(sum(r.buffers) FILTER (WHERE r.relfilenode IS NOT NULL) OVER (), 0) AS pool_used";
+
+    private const string SummaryPoolTotals = @"        m.used + m.unused                                       AS pool_total,
+        m.used                                                  AS pool_used";
+
+    private const string SummaryTotalsRow = @"    m.dirty                                                     AS dirty_buffers,
+    m.usage_avg                                                 AS avg_usage_count,
+    m.used + m.unused                                           AS pool_buffers_total,
+    m.used                                                      AS pool_buffers_used";
+
+    private const string NoSummaryTotalsRow = @"    NULL::bigint                                                AS dirty_buffers,
+    NULL::double precision                                      AS avg_usage_count,
+    g.pool_buffers                                              AS pool_buffers_total,
+    NULL::bigint                                                AS pool_buffers_used";
 
     public override string Name => "pg_buffer_usage";
 
@@ -159,12 +272,29 @@ ORDER BY count(*) DESC";
     /// </summary>
     public override int? CommandTimeoutSecondsOverride => 120;
 
+    /// <summary>The cap this run applies, in buffers: the context's override when a caller set one, else <see cref="PoolCapBuffers"/>.</summary>
+    internal static long CapFor(CollectorContext context) => context.PgBufferUsagePoolCapBuffers ?? PoolCapBuffers;
+
     /* #6143: the view named by the schema pg_buffercache was created in; the monitoring connection's search_path is
-       pg_catalog, and the extension need not be in public. */
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText.Replace(
-        "FROM public.pg_buffercache AS b",
-        "FROM " + context.PgExtensionSchema("pg_buffercache") + ".pg_buffercache AS b",
-        StringComparison.Ordinal));
+       pg_catalog, and the extension need not be in public.
+
+       #9508: the summary function is named only when the host's catalog read found it owned by the extension on this
+       connection. A query that names a missing function fails at parse, so the text is chosen here, not in SQL. */
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        var hasSummary = context.PgExtensionHasFunction(SummaryFunction);
+        var schema = context.PgExtensionSchema("pg_buffercache");
+        var text = QueryText
+            .Replace("@@SUMMARY@@", hasSummary ? SummaryCtes : string.Empty, StringComparison.Ordinal)
+            .Replace("@@POOLTOTALS@@", hasSummary ? SummaryPoolTotals : WindowPoolTotals, StringComparison.Ordinal)
+            .Replace("@@POOLJOIN@@", hasSummary ? "\nCROSS JOIN summ AS m" : string.Empty, StringComparison.Ordinal)
+            .Replace("@@TOTALSROW@@", hasSummary ? SummaryTotalsRow : NoSummaryTotalsRow, StringComparison.Ordinal)
+            .Replace("@@TOTALSJOIN@@", hasSummary ? "\nCROSS JOIN summ AS m" : string.Empty, StringComparison.Ordinal)
+            .Replace("@@CAP@@", CapFor(context).ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            .Replace("FROM public.pg_buffercache AS b", "FROM " + schema + ".pg_buffercache AS b", StringComparison.Ordinal)
+            .Replace("@@SCHEMA@@", schema, StringComparison.Ordinal);
+        return new(text);
+    }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -193,11 +323,29 @@ ORDER BY count(*) DESC";
                 DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
                 RelationName: reader.IsDBNull(1) ? null : reader.GetString(1),
                 RelationKind: reader.IsDBNull(2) ? null : reader.GetString(2),
-                Buffers: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                DirtyBuffers: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                Buffers: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                DirtyBuffers: reader.IsDBNull(4) ? null : reader.GetInt64(4),
                 AvgUsageCount: reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 PoolBuffersTotal: reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                PoolBuffersUsed: reader.IsDBNull(7) ? 0 : reader.GetInt64(7)));
+                PoolBuffersUsed: reader.IsDBNull(7) ? null : reader.GetInt64(7)));
+        }
+
+        /* #9508: a skipped scan is a note on a run that succeeded, as counts the reads word. The pool size and the cap
+           travel with it, so a reader can see how far over the cap the pool was. */
+        foreach (var row in rows)
+        {
+            if (!row.IsTotalsOnly)
+            {
+                continue;
+            }
+
+            context.Measure(ScanSkippedMeasurement, 1);
+            context.Measure(PoolBuffersMeasurement, row.PoolBuffersTotal);
+            context.Measure(CapBuffersMeasurement, CapFor(context));
+            if (row.PoolBuffersUsed is null)
+            {
+                context.Measure(SummaryMissingMeasurement, 1);
+            }
         }
 
         return rows;

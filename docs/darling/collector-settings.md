@@ -67,6 +67,30 @@ PerformanceMonitor.Darling.Service.exe --disable-collector schema_objects --serv
 
 The collector reads the databases of its database scope. With no scope it reads every user database the login can enter; the databases in a server's excluded list are never read. To track one database, set the scope from MCP with `set_collector_databases` (`collector_name: "schema_objects"`, `databases: "SalesDb"`), or in the Viewer's Collector Schedules window, in the Databases column. Closed versions are kept 30 days; `--set-collector-retention` changes that fleet-wide.
 
+## Turn on column selectivity (`column_stats`)
+
+The third collector that ships **off** is `column_stats`, column selectivity for the tables and views that schema tracking follows (#8798). It answers "how selective is this column, or this combination of columns?" from the statistics SQL Server keeps, so nobody has to sign in to the server to count distinct values. Darling only, SQL Server and Azure SQL Database targets.
+
+It is part of schema tracking in code and has its own switch, its own run and its own database scope. It needs two things you turn on on purpose: `schema_objects` on the same server, and a `SELECT` grant in each database it reads. Enabling `column_stats` alone does not start schema tracking: on a server where `schema_objects` is off, a run reads nothing and its note says to enable `schema_objects` first.
+
+```
+PerformanceMonitor.Darling.Service.exe --enable-collector schema_objects --server sql01
+PerformanceMonitor.Darling.Service.exe --enable-collector column_stats --server sql01
+PerformanceMonitor.Darling.Service.exe --disable-collector column_stats --server sql01
+```
+
+**What it copies into the store.** Statistic names and column names, densities, row and sample counts, and last-update times. It never copies a column value. It never reads a histogram, and it does not read a filtered statistic at all, because the filter expression of a filtered statistic can hold literal values. It reads no table data: the numbers come from the density vector of each statistic (`DBCC SHOW_STATISTICS ... WITH DENSITY_VECTOR`), never from `COUNT(DISTINCT ...)`.
+
+**The permission it needs.** `DBCC SHOW_STATISTICS` needs `SELECT`, and that grant lets the monitoring login read every row of the database. So the grant is never part of the base script. [Column selectivity in the permissions guide](../permissions.md#column-selectivity-per-database-select-optional) has the statements, the `--column-stats-databases` option of `--grant-script` and the connection test's check. Under trace flag 9485 `SELECT` is not enough: the login then needs `db_owner`, `db_ddladmin` or ownership of the table, and the collector's note and `get_object_definition` say so.
+
+**Which databases.** A database is read when the database scope of `schema_objects` and the scope of `column_stats` both cover it and the schema pass would write to it: a snapshot, a database that is not online, a standby, a read-only database, one the login cannot access and a secondary replica are skipped, with the reason in the run note. The history of a database in an availability group is kept under the group's key, so either replica's name answers, and the group has one set of rows: after a failover the new primary's first read replaces what the old primary stored. To read one database, set the scope of `column_stats` with `set_collector_databases` (`collector_name: "column_stats"`, `databases: "SalesDb"`) or in the Collector Schedules window. An empty scope means every database that `schema_objects` covers, while the grant normally goes to a few of them: a database without the grant is skipped and counted in the run note, and that is normal. The run raises a `precondition`, with the statements that create the login's user in the database when it has none and grant `SELECT` there (a bare `GRANT SELECT` fails with error 15151 where the login has no user), only when no database in scope has the grant, or when a database named in the `column_stats` scope lacks it.
+
+**How often, and what is read.** A run every 60 minutes by default (`set_collector_frequency` changes it). Each run lists the statistics of each database, compares each `STATS_DATE` with the stored one and reads only the statistics that are new, whose date differs, or that were renamed (a renamed schema, table, statistic or column keeps `STATS_DATE`, so the stored names are compared too). A statistic that no longer exists loses its rows, also in a database with more statistics than the run reads (20,000), where a list of every statistic's ids is read for that. A database the run read before that has left the scope loses its rows on the next run, and so does a dropped one (on Azure SQL Database a dropped one goes after the retention). The first run of a database reads everything; a read that is not finished within its time budget (five minutes per run, 120 seconds per database) continues from where it stopped on the next run, largest tables first. A restored database (a new `recovery_fork_guid`) starts again from nothing. `run_collectors_now` with `column_stats` re-reads every statistic of the databases in scope, on a server where `column_stats` is enabled; where it is off, a named run reads nothing and says so. A lock timeout on one statistic counts as a skip and is retried on the next run, and the rest of that table's statistics in the same batch are counted the same way without a wait of their own, and a statistic that fails (a denied column, a statistic dropped during the read) is counted with one sample message and never fails the database.
+
+**What it leaves out**, counted in the run record: filtered statistics, statistics on memory-optimized tables, XML, spatial and columnstore index statistics, statistics never updated (an index made on an empty table has none until it is first updated or used) and, past 20,000 statistics in one database, the rest.
+
+**Where the numbers show.** `get_object_definition` gives each column a `selectivity` and the table a `column_combinations` list (`distinct_estimate`, `rows_per_value`, `selectivity`, the statistic they came from, when it was updated and how much of the table it sampled), and a `selectivity_status`: `current`, `not_collected` (the collector or `schema_objects` is off, or the database is out of scope), `not_read_yet`, `not_read` (no `SELECT` in a database that the `column_stats` scope does not name), `precondition` (with the grant, or under trace flag 9485 the permission `DBCC SHOW_STATISTICS` then needs), `current_only` (an `as_of` before the stored read shows no numbers, because statistics are not kept as a history) or `unavailable` (the store could not be read). Where `column_stats` is off for the server, the answer adds only `selectivity_status` (`not_collected`): no per-column `selectivity` and no `column_combinations`, so it is the answer it was before the collector existed. `selectivity_checked_at` is the time of the newest run that reached the database. The update time is shown in UTC: exact on SQL Server 2022 and later and on Azure, which report their time zone; on earlier versions it is moved by the server's current UTC offset, so a statistic updated on the other side of a daylight saving change shows an hour off; the sampled percent is the rows the statistic sampled over the table's rows. The answer never fails because selectivity is missing. A nonunique index on a clustered table lists its clustering key columns after its own; those rows have `includes_clustering_key: true`. `unique` appears only where a unique index or constraint covers exactly those columns. The run record is in `collect.column_stats_runs`, one row per database per run (a database refused for no `SELECT` gets one row until the answer changes), and run records are kept for the collector's retention (30 days; `--set-collector-retention` changes it). The [retention notes](operations.md#retention) say how the current rows are kept.
+
 ## Make a new password key (`--reset-password-key`)
 
 The service keeps one key pair for the SQL login passwords saved in the store: it publishes the public half, and every place that saves a password seals it to that key. The verb marks the current key replaced, so the next service start retires the old key file and makes a new key.
@@ -79,6 +103,17 @@ PerformanceMonitor.Darling.Service.exe --reset-password-key --config /etc/darlin
 It changes the store only, as the store owner, and never touches a key file. It prints how many saved passwords were sealed to the old key: restart the service, then enter those passwords again.
 
 With [`passwordKey`](configuration.md#passwordkey-string-optional) set in `darling.json`, the service never makes a key, so the verb ends with `Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service.` and the number of saved passwords to enter again. Until the new key is in that source, a start with the old key gives the state `reset_pending` and publishes no key.
+
+### The same from MCP (#9644)
+
+With `mcp.allowWrites` and `mcp.allowServerAdmin` both on (and a token), two tools do the same. Each calls the code the verb calls, so the numbers and the words are the verb's.
+
+| Tool | The verb it matches | What it does |
+|---|---|---|
+| `reset_password_key` | `--reset-password-key` | Marks the current key replaced. A reset has no undo: every saved password sealed to it must be entered again, and the answer says how many. Restart the service afterwards. Called without `confirm`, it changes nothing and answers with that count and the current key's fingerprint. To reset, call it again with `confirm: true` and `confirm_fingerprint` set to that fingerprint. A missing or wrong fingerprint is refused and nothing changes. |
+| `new_password_key` | `--new-password-key` | Takes no path. Writes a new key to the `pending-password-keys` folder inside the folder that holds the service's active password key file, as `new-password-key-<fingerprint>.key`, and returns that path and the fingerprint, never the key. It creates the folder readable only by the service's account, and refuses a folder that is a link, is owned by another account or that anyone else can read or change. It also refuses when the credentials folder is on a network location, when `passwordKey` is set (the key is then not a file the service keeps), when the service has no key file yet, and when 5 key files are already waiting there. Install the key you want, then delete the files. |
+
+There is no tool for the self-check, which stays a command-line build check (`--self-check-password-key`). There is no tool for the one-time pin step of the old-format passwords. It has no verb. The service runs it at start and again on every sweep while it waits.
 
 ## Set the time of day a daily collector runs (`--set-collector-run-at`)
 
@@ -125,7 +160,7 @@ The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collecto
 
 ## Set the service flags from MCP (#6393)
 
-`update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. It needs `mcp.allowWrites` on (and a token), or an `operator` token in `mcp.tokens`. Send only the ones to change; an omitted argument keeps the stored value.
+`update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection, the two trigram text index options, and the three settings that `darling.json` only seeds: the plan content retention, the compose statement timeout and the plan XML compression. It needs `mcp.allowWrites` on (and a token), or an `operator` token in `mcp.tokens`. Send only the ones to change; an omitted argument keeps the stored value.
 
 | Argument | Meaning | Range |
 |---|---|---|
@@ -134,12 +169,24 @@ The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collecto
 | `query_store_text_budget_mb` | Query Store text budget. | 4 to 256 |
 | `max_concurrent_sweeps` | Server sweeps that run at once. | 1 to 16 |
 | `query_store_fetch_top_n` | Plans per database-hour and metric the Query Store collector fetches. | 0 to 100000 (0 = every new plan) |
+| `query_text_trigram_index_enabled` | The trigram index on the plan-cache text ([`queryTextTrigramIndexEnabled`](configuration.md#querytexttrigramindexenabled)). | true or false |
+| `query_store_text_trigram_index_enabled` | The trigram index on the Query Store text ([`queryStoreTextTrigramIndexEnabled`](configuration.md#querystoretexttrigramindexenabled)). | true or false |
+| `plan_content_retention_days` | Days a stored plan XML outlives its last sighting before the next purge may drop it ([`planContentRetentionDays`](configuration.md)). | 0 (off), or 7 to 365 |
+| `compose_statement_timeout_seconds` | The `statement_timeout` on the `viewer` and `mcp` roles ([`composeStatementTimeoutSeconds`](configuration.md)). | 5 to 600 |
+| `plan_xml_compression` | How new plans are stored ([`planXmlCompression`](configuration.md)). | `gzip` or `none` |
+| `reset_to_file` | Trigram index options to clear, so darling.json governs them again. | `query_text_trigram_index_enabled`, `query_store_text_trigram_index_enabled` |
 
-The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all five values before and after. The running service reloads on its next sweep.
+The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all ten values before and after. The running service reloads on its next sweep. Three of the values act later than that, and the answer says so when you change one:
 
-The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these five columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
+- `plan_content_retention_days` applies at the next purge, the daily one or `purge_now`.
+- `compose_statement_timeout_seconds` is set on the `viewer` and `mcp` roles, not read per query. The service sets it on its next sweep where it provisioned those roles (a managed store, or the compose store). A role uses the new value from its next session, so a query already running keeps the old one. On a store whose roles you provisioned yourself, the service does not touch them, so run `ALTER ROLE ... SET statement_timeout` by hand.
+- `plan_xml_compression` applies to plans written from then on. Plans already stored keep the format they were written in, and every reader takes the text first and the gzip bytes second, row by row, so a change never strands an old plan.
 
-The service grants the `mcp` role `UPDATE` on exactly those five `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
+The two trigram index options are empty (`null`) until set, and an empty option follows darling.json's key. A value set here wins over the file until `reset_to_file` clears it. A call that names an option in `reset_to_file` and also sends a value for it, or names anything else there, answers `invalid` and changes nothing. The index pass reads the option at every pass (every 30 minutes), so the build or the drop starts at the next pass with no restart; `get_store_metrics` shows the state and `option_source` (`store` or `file`).
+
+The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these ten columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
+
+The service grants the `mcp` role `UPDATE` on exactly those ten `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
 
 ## Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 

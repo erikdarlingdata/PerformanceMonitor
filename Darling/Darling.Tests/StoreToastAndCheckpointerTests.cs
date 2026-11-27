@@ -40,8 +40,8 @@ namespace Darling.Tests;
 /// on every other kind) and a <c>checkpointer</c> block, and its description says what utilisation is, what
 /// the reclaim costs, and what the tool does NOT do;</item>
 /// <item>the two INFORMATIONAL self-alerts: Store TOAST Slack (under 50 % on a file over 10 GiB; daily
-/// re-fire; DORMANT wherever live bytes are NULL) and Store Checkpointer Pressure (average sync per checkpoint
-/// over 10 s, the interval's longest single sync over 10 s, or any requested checkpoint; shared cooldown), each
+/// re-fire; DORMANT wherever live bytes are NULL) and Store Checkpointer Pressure (a store read or collector
+/// store write that suffered inside a checkpoint sync, or any requested checkpoint; shared cooldown), each
 /// with a resolution row, each fired with no severity override so the declared INFO arm styles it, each
 /// registered in the family census.</item>
 /// </list>
@@ -378,20 +378,22 @@ public sealed class StoreToastAndCheckpointerTests
             DarlingStoreMetricsReader.CheckpointerReading.From(new(t0, 5_000, 30_000, 7), new(t0, 4_000, 30_000, 7)).Status);
     }
 
-    /* #4037: the bar is judged against the PER-CHECKPOINT average (SyncMs / (timed + requested)), not the summed
-       sync milliseconds — timed and requested vary per case so the average lands where the old sum-based cases
-       intended. */
+    /* #9549: the reading is pressure when a store operation suffered inside a checkpoint sync or when any checkpoint
+       was requested, and on nothing else. How long the syncs took, as the average per checkpoint (#4037) or as the
+       longest single one (#4823), is attribution and fires nothing. */
     [Theory]
-    [InlineData(10_001L, 0L, 1L, true)]   // 1 checkpoint, average 10,001ms: over the bar
-    [InlineData(10_000L, 0L, 1L, false)]  // 1 checkpoint, average exactly 10,000ms: not OVER the bar
-    [InlineData(0L, 1L, 0L, true)]        // any requested checkpoint fires regardless of sync
-    [InlineData(9_999L, 0L, 1L, false)]   // 1 checkpoint, average 9,999ms: under the bar
-    [InlineData(25_200L, 1L, 0L, true)]   // requested fires; the average would too (25,200ms / 1)
-    public void CheckpointerPressure_IsSyncOverTheBarOrAnyRequestedCheckpoint(long syncMs, long requested, long timed, bool expected)
+    [InlineData(10_001L, 0L, 1L, null, false)] // a 10,001ms average sync and no judgment of harm: not pressure
+    [InlineData(25_200L, 0L, 1L, 0, false)]    // a 25.2s average sync and nothing suffered inside one: not pressure
+    [InlineData(10_000L, 0L, 1L, 1, true)]     // one operation suffered inside a sync at the 10s read deadline: pressure
+    [InlineData(25_200L, 0L, 1L, 3, true)]     // three suffered inside a long one
+    [InlineData(0L, 1L, 0L, null, true)]       // any requested checkpoint, with no judgment of harm
+    [InlineData(0L, 1L, 0L, 0, true)]          // any requested checkpoint, with nothing suffering
+    [InlineData(9_999L, 0L, 1L, 0, false)]     // a short sync, nothing suffered, nothing requested
+    public void CheckpointerPressure_IsHarmInsideASyncOrAnyRequestedCheckpoint(long syncMs, long requested, long timed, int? harm, bool expected)
     {
         var t0 = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
         var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t0.AddHours(1), 1_000, 100_000 + syncMs, 3 + requested, Timed: 5 + timed), new(t0, 0, 100_000, 3, Timed: 5));
+            new(t0.AddHours(1), 1_000, 100_000 + syncMs, 3 + requested, Timed: 5 + timed), new(t0, 0, 100_000, 3, Timed: 5)) with { HarmInsideSync = harm };
         Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
         Assert.Equal(expected, reading.IsPressure);
         Assert.Equal(10_000, DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
@@ -572,15 +574,24 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("1 checkpoint, spending", one, StringComparison.Ordinal);
         Assert.Contains("1 checkpoint was REQUESTED rather than timed", one, StringComparison.Ordinal);
         Assert.DoesNotContain("checkpoint(s)", one, StringComparison.Ordinal);
-        Assert.Contains("Both under the lines the self-alert judges (average sync over 10s PER CHECKPOINT, or any requested checkpoint).", quiet, StringComparison.Ordinal);
+        Assert.Contains(
+            "Neither line the self-alert judges is crossed (a store operation suffering inside a checkpoint sync, or any requested checkpoint). How long a sync took does not fire it.",
+            quiet, StringComparison.Ordinal);
         Assert.DoesNotContain("#3802", quiet, StringComparison.Ordinal);
 
-        /* Real pressure: 2 checkpoints, 30s summed -> 15s average, over the bar. */
-        var storm = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 31_000, 5, Timed: 2), new(t0, 1_000, 1_000, 5, Timed: 0)));
+        /* 2 checkpoints, 30s summed -> a 15s average, and no judgment of harm: stated, and not pressure (#9549). */
+        var slow = DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 31_000, 5, Timed: 2), new(t0, 1_000, 1_000, 5, Timed: 0));
+        var slowNote = DarlingMcpStoreMetricsTools.CheckpointerNote(slow);
+        Assert.Contains("an average of 15.0s of sync per checkpoint", slowNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHECKPOINTER PRESSURE", slowNote, StringComparison.Ordinal);
+        Assert.Contains("which does not cover this interval", slowNote, StringComparison.Ordinal);
+
+        /* The same interval with two store operations that suffered inside a sync: pressure. */
+        var storm = DarlingMcpStoreMetricsTools.CheckpointerNote(slow with { HarmInsideSync = 2 });
         Assert.Contains("an average of 15.0s of sync per checkpoint", storm, StringComparison.Ordinal);
-        Assert.Contains("CHECKPOINTER PRESSURE", storm, StringComparison.Ordinal);
-        Assert.Contains("a per-checkpoint sync average past 10s", storm, StringComparison.Ordinal);
-        Assert.Contains("25.2 s and 14.0 s sync phases", storm, StringComparison.Ordinal);
+        Assert.Contains("2 store operations suffered while a checkpoint sync ran", storm, StringComparison.Ordinal);
+        Assert.Contains("That is CHECKPOINTER PRESSURE: a sync is an I/O stall every reader and writer on the store shares, and something suffered inside one", storm, StringComparison.Ordinal);
+        Assert.Contains("The informational Store Checkpointer Pressure self-alert says the same.", storm, StringComparison.Ordinal);
 
         /* Requested arm: low sync average, but one requested checkpoint still fires. The note says what the alert
            says (#4758): a requested checkpoint comes from WAL volume, a base backup or a CHECKPOINT statement, the
@@ -644,7 +655,6 @@ public sealed class StoreToastAndCheckpointerTests
             source, StringComparison.Ordinal);
 
         /* The checkpointer block, and its keys. */
-        Assert.Contains("var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);", source, StringComparison.Ordinal);
         foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
         {
             Assert.Contains(key, source, StringComparison.Ordinal);
@@ -687,7 +697,8 @@ public sealed class StoreToastAndCheckpointerTests
             "CHECKPOINTER:",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
-            "WAL sizing and refresh slicing",
+            "Store Checkpointer Pressure self-alert fires when harm_inside_sync or requested exceeds 0",
+            "How long a sync took is attribution",
             "The checkpointer row is never an object row",
         })
         {
@@ -891,16 +902,16 @@ public sealed class StoreToastAndCheckpointerTests
         h.HoldSelfHealth = true;
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
 
         var held = Assert.Single(h.Deliverer.Outcomes);
         Assert.NotNull(held.Hold);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, held.MetricName);
 
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
 
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Null(h.Deliverer.Outcomes[1].Hold);
@@ -914,13 +925,13 @@ public sealed class StoreToastAndCheckpointerTests
         h.HoldSelfHealth = true;
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
         h.Clock = h.Clock.AddHours(1);
         await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0), Ct);
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
 
         // Two held episodes (a row each) and no page: neither episode reached 3 breaches in a row.
         Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric && o.Hold is not null));
@@ -928,23 +939,23 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     [Fact]
-    public async Task CheckpointerPressure_FiresInfoOnEitherArm_AndNotUnderBothLines()
+    public async Task CheckpointerPressure_FiresInfoOnEitherArm()
     {
         var h = new Harness();
         var e = h.Build();
 
-        /* 1 checkpoint, 25.2 s average sync, no forced checkpoint. */
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        /* The harm arm alone (#9549): one alert-pass read failed inside the hour's 23.5 s sync, nothing requested. */
+        await ApplyHarmedHourAsync(e);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
         Assert.Null(fired.Severity);
         Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
         Assert.Equal("checkpointer", fired.ServerKey);
-        Assert.Equal(25_200, fired.NumericCurrentValue);
-        Assert.Equal(10_000, fired.NumericThresholdValue);
-        Assert.Equal("average sync 25.2s per checkpoint over 1 checkpoint in 60.0 min", fired.CurrentValue);
-        Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", fired.ThresholdValue);
-        Assert.Contains("25.2 s and 14.0 s sync phases", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Equal(1, fired.NumericThresholdValue);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Equal(HarmOrRequestedThreshold, fired.ThresholdValue);
+        Assert.DoesNotContain("Raising max_wal_size", fired.DetailText!, StringComparison.Ordinal);
 
         /* The other arm alone: one requested checkpoint with a short average sync. A requested checkpoint comes
            from WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement, and the counters do not
@@ -953,7 +964,7 @@ public sealed class StoreToastAndCheckpointerTests
         var forced = new Harness();
         await forced.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1, timed: 1), Ct);
         var forcedFire = Assert.Single(forced.Deliverer.Outcomes);
-        Assert.Contains("1 requested checkpoint", forcedFire.CurrentValue, StringComparison.Ordinal);
+        Assert.Equal("1 requested checkpoint over 2 checkpoints in 60.0 min", forcedFire.CurrentValue);
         Assert.DoesNotContain("WAL-forced", forcedFire.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("WAL-forced", forcedFire.ShortMessage!, StringComparison.Ordinal);
         Assert.Contains("WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement", forcedFire.DetailText!, StringComparison.Ordinal);
@@ -964,24 +975,11 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("Raising max_wal_size is the remedy only for the first cause", forcedFire.DetailText!, StringComparison.Ordinal);
         Assert.DoesNotContain("forced by WAL volume", forcedFire.DetailText!, StringComparison.Ordinal);
         Assert.Null(forcedFire.Severity);
-        Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", forcedFire.ThresholdValue);
+        Assert.Equal(HarmOrRequestedThreshold, forcedFire.ThresholdValue);
 
-        /* Exactly the bar, no forced checkpoint: quiet. */
-        var quiet = new Harness();
-        await quiet.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 10_000, requested: 0, timed: 1), Ct);
-        Assert.Empty(quiet.Deliverer.Outcomes);
-        Assert.Empty(quiet.History.Records);
-
-        /* Healthy store: 12 checkpoints, 84s summed sync -> 7s average, no pressure (the #4037 headline case). */
-        var healthy = new Harness();
-        await healthy.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 84_000 - 2_500, requested: 0, timed: 12), Ct);
-        Assert.Empty(healthy.Deliverer.Outcomes);
-        Assert.Empty(healthy.History.Records);
-
-        /* Real pressure: 2 checkpoints, 15s average. */
-        var pressure = new Harness();
-        await pressure.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 30_000 - 2_500, requested: 0, timed: 2), Ct);
-        Assert.Single(pressure.Deliverer.Outcomes);
+        /* A requested fire carries the interval's average sync against the read deadline, as attribution. */
+        Assert.Equal(400, forcedFire.NumericCurrentValue);
+        Assert.Equal(10_000, forcedFire.NumericThresholdValue);
     }
 
     [Fact]
@@ -991,6 +989,7 @@ public sealed class StoreToastAndCheckpointerTests
         var h = new Harness();
         var e = h.Build();
 
+        /* None of these is an interval, so none is judged, whatever the service saw suffer in the same hour. */
         foreach (var reading in new[]
         {
             DarlingStoreMetricsReader.CheckpointerReading.Absent,
@@ -998,14 +997,14 @@ public sealed class StoreToastAndCheckpointerTests
             DarlingStoreMetricsReader.CheckpointerReading.From(new(t0.AddHours(1), 0, 0, 0), new(t0, 1, 99_000, 9)),
         })
         {
-            await e.ApplyCheckpointerPressureAsync(reading, Ct);
+            await e.ApplyCheckpointerPressureAsync(reading, Ct, HarmInsideTheLongSync());
         }
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
         /* Standing, then a reset pair: no recovery row — a reset is not a clean hour. */
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Single(h.Deliverer.Outcomes);
         await e.ApplyCheckpointerPressureAsync(
             DarlingStoreMetricsReader.CheckpointerReading.From(new(t0.AddHours(3), 0, 0, 0), new(t0.AddHours(2), 1, 99_000, 9)), Ct);
@@ -1019,15 +1018,15 @@ public sealed class StoreToastAndCheckpointerTests
         h.Settings.CooldownMinutes = 60;
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 14_000, requested: 0), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Inside the cooldown: held. Past it: the new breaching hour fires. */
         h.Clock = h.Clock.AddMinutes(30);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 14_000, requested: 0), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Single(h.Deliverer.Outcomes);
         h.Clock = h.Clock.AddMinutes(31);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 14_000, requested: 0), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* A clean interval: one Recovered row with the interval's figures. */
@@ -1047,8 +1046,33 @@ public sealed class StoreToastAndCheckpointerTests
     {
         var h = new Harness();
         h.Settings.AlertsEnabled = false;
-        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1), Ct);
+        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1), Ct, HarmInsideTheLongSync());
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #9549, the decision: sync length alone fires nothing. With nothing requested and nothing known to have suffered,
+    /// an interval is quiet whatever its sync figures: a 10.0 s average, the healthy store's 7 s average over 12
+    /// checkpoints (the #4037 headline case), a 15 s average over two, a 25.2 s single checkpoint, and the field
+    /// case's hour whose longest single sync was 23.5 s (#4823).
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_SyncLengthAlone_AtEverySize_StaysQuiet()
+    {
+        foreach (var reading in new[]
+        {
+            Interval(syncMs: 10_000, requested: 0, timed: 1),
+            Interval(syncMs: 84_000 - 2_500, requested: 0, timed: 12),
+            Interval(syncMs: 30_000 - 2_500, requested: 0, timed: 2),
+            Interval(syncMs: 25_200, requested: 0, timed: 1),
+            LongSyncHour(23_542),
+        })
+        {
+            var quiet = new Harness();
+            await quiet.Build().ApplyCheckpointerPressureAsync(reading, Ct);
+            Assert.Empty(quiet.Deliverer.Outcomes);
+            Assert.Empty(quiet.History.Records);
+        }
     }
 
     /// <summary>
@@ -1079,16 +1103,18 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     /// <summary>
-    /// Across a restart the SYNC arm is not judged either: the shutdown checkpoint's own fsync lands in the same
-    /// counter as the live checkpoints' and nothing separates them, and a fast shutdown flushes every dirty buffer
-    /// with every client already gone. So a sync phase far past the bar, the 25.2 s the production read kills sat
-    /// inside, fires nothing on an interval that spans a restart. The control is the next test's.
+    /// Across a restart the harm arm is not judged either (#9549): the shutdown checkpoint's own fsync lands in the
+    /// same counter as the live checkpoints' and nothing separates them, and a fast shutdown flushes every dirty
+    /// buffer with every client already gone, so a read that failed around it failed on a store that was stopping.
+    /// A sync far past the read deadline with a failed read inside it fires nothing on an interval that spans a
+    /// restart. The control is the next test's.
     /// </summary>
     [Fact]
     public async Task CheckpointerPressure_ARestartSpanningInterval_DoesNotFireEvenOnASlowSync()
     {
         var h = new Harness();
-        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: true), Ct);
+        await h.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 25_200, requested: 1, restarted: true, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct, HarmInsideTheLongSync());
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
     }
@@ -1097,10 +1123,10 @@ public sealed class StoreToastAndCheckpointerTests
     public async Task CheckpointerPressure_TheSameSlowSyncWithoutARestart_StillFires()
     {
         var h = new Harness();
-        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false, timed: 1), Ct);
+        await h.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 25_200, requested: 1, restarted: false, timed: 1, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct, HarmInsideTheLongSync());
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Contains("average sync", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("1 requested checkpoint", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync and 1 requested checkpoint over 2 checkpoints in 60.0 min", fired.CurrentValue);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1142,95 +1168,147 @@ public sealed class StoreToastAndCheckpointerTests
         Interval(syncMs: 23_542, requested: 0, timed: 4, longestSyncMs: longestSyncMs,
             longestSyncAt: longestSyncMs is null ? null : at ?? LongSyncMinute);
 
+    /* ---- #9549: the alert fires on harm inside a checkpoint sync ---------------------------------------------- */
+
+    /// <summary>The threshold text every fire carries: the two lines the alert judges.</summary>
+    private const string HarmOrRequestedThreshold =
+        "any store read or collector store write that failed, was retried, was cut off or stalled inside a checkpoint sync, or any requested checkpoint";
+
+    /// <summary>When the harness's interval ends: the newer checkpointer row's stamp.</summary>
+    private static readonly DateTime IntervalEnd = new(2026, 9, 20, 13, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>The field case's long sync as the minute samples saw it: 23,542 ms, in the sample at 12:41 UTC, after the
+    /// sample at 12:40.</summary>
+    private static readonly CheckpointSync LongSync = new(LongSyncMinute.AddMinutes(-1), LongSyncMinute, 23_542);
+
+    /// <summary>One store operation that ended at <paramref name="endedUtc"/> after running for <paramref name="elapsedMs"/>.</summary>
+    private static StoreHarmEvent Harm(StoreHarmKind kind, string name, DateTime endedUtc, long elapsedMs = 10_000) =>
+        new(endedUtc.AddMilliseconds(-elapsedMs), endedUtc, kind, name);
+
+    /// <summary>The verdict the worker hands the evaluator for the harness's interval: the real rule
+    /// (<see cref="StoreHarmLog.Judge"/>), judged five seconds after the row's stamp.</summary>
+    private static CheckpointHarmVerdict Verdict(IReadOnlyList<CheckpointSync> syncs, params StoreHarmEvent[] harm) =>
+        StoreHarmLog.Judge(IntervalEnd.AddSeconds(5), syncs, harm);
+
+    /// <summary>One alert-pass read that failed at 12:40:30 UTC, at its 10 s deadline, while the long sync ran.</summary>
+    private static CheckpointHarmVerdict HarmInsideTheLongSync() =>
+        Verdict(new[] { LongSync }, Harm(StoreHarmKind.AlertReadFailed, "collection signals", LongSyncMinute.AddSeconds(-30)));
+
+    /// <summary>The field case's hour with that read failing inside its long sync: the breaching hour the edge tests use.</summary>
+    private static Task ApplyHarmedHourAsync(DarlingSelfAlertEvaluator e) =>
+        e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, HarmInsideTheLongSync());
+
     /// <summary>
-    /// The field case behind #4823, judged from the stored row (#4834). Four checkpoints in the hour, one of them
-    /// synced for 23,542 ms and the other three next to nothing: the hour's average is 5.9 s, under the 10 s bar, so
-    /// the average arm judged it clean while collection stalled on every server. The once-a-minute sample saw the
-    /// 23,542 ms sync in one minute and the sweep stored it on the hour's checkpointer row; the alert must fire on the
-    /// reading and name how long it took and in which minute (UTC).
+    /// The field case behind #4823, judged on harm (#9549). Four checkpoints in the hour, one of them synced for
+    /// 23,542 ms and the other three next to nothing, and an alert-pass read failed while that sync ran. The alert
+    /// fires on the read, and the text names both: what suffered and when, and the sync it sat inside, how long it
+    /// took and the minute (UTC) it finished in. The hour's sync figures alone are not pressure.
     /// </summary>
     [Fact]
-    public async Task CheckpointerPressure_OneLongSyncAmongFourCheckpoints_FiresAndNamesTheSyncAndItsMinute()
+    public async Task CheckpointerPressure_HarmInsideTheLongSync_FiresAndNamesTheReadAndTheSync()
     {
         var h = new Harness();
         var e = h.Build();
 
-        /* Without the stored longest sync this hour reads clean: today's rule, unchanged. */
-        var withoutLongest = LongSyncHour(null);
-        Assert.Equal(4, withoutLongest.CheckpointCount);
-        Assert.True(withoutLongest.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
-        Assert.False(withoutLongest.IsPressure);
-
         var hour = LongSyncHour(23_542);
-        Assert.True(hour.IsPressure);
+        Assert.Equal(4, hour.CheckpointCount);
+        Assert.True(hour.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+        Assert.False(hour.IsPressure);
 
-        await e.ApplyCheckpointerPressureAsync(hour, Ct);
+        await e.ApplyCheckpointerPressureAsync(hour, Ct, HarmInsideTheLongSync());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
         Assert.Null(fired.Severity);
         Assert.Equal("checkpointer", fired.ServerKey);
-        Assert.Equal(23_542, fired.NumericCurrentValue);
-        Assert.Equal(10_000, fired.NumericThresholdValue);
-
-        foreach (var text in new[] { fired.CurrentValue, fired.ShortMessage!, fired.DetailText! })
-        {
-            Assert.Contains("23.5s", text, StringComparison.Ordinal);
-            Assert.Contains("12:41 UTC", text, StringComparison.Ordinal);
-        }
-
-        Assert.Contains("over 4 checkpoints in 60.0 min", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Equal(1, fired.NumericThresholdValue);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Equal("store checkpointer: 1 store operation suffered inside a checkpoint sync over 4 checkpoints in the last 60.0 min", fired.ShortMessage);
         Assert.DoesNotContain("requested", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("single checkpoint sync > 10s", fired.ThresholdValue, StringComparison.Ordinal);
+
+        /* What suffered, and the sync it sat inside. */
+        Assert.Contains(
+            "the alert pass's collection signals read failed at 12:40 UTC, inside the 23.5s sync that finished in the minute ending 12:41 UTC",
+            fired.DetailText!, StringComparison.Ordinal);
+
+        /* The attribution the stored row carries: the hour's average and its longest single sync with its minute. */
+        Assert.Contains("an average of 5.9s of sync per checkpoint", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains(
+            "The longest single checkpoint sync a once-a-minute sample of the counter saw in that interval was 23.5s, in the minute ending 12:41 UTC.",
+            fired.DetailText!, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task CheckpointerPressure_ALongestSyncOf800Ms_WithTheSameAverage_StaysQuiet()
+    public async Task CheckpointerPressure_ALongSyncWithNoHarm_StaysQuiet()
     {
-        /* The same hour, but the longest single sync the minute samples saw was 800 ms: nothing to say. */
-        var small = new Harness();
-        await small.Build().ApplyCheckpointerPressureAsync(LongSyncHour(800), Ct);
-        Assert.Empty(small.Deliverer.Outcomes);
-        Assert.Empty(small.History.Records);
+        /* The 23.5 s sync, judged, with nothing suffering inside it: sync length is not harm (#9549). */
+        var judged = new Harness();
+        await judged.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }));
+        Assert.Empty(judged.Deliverer.Outcomes);
+        Assert.Empty(judged.History.Records);
 
-        /* No stored longest sync at all (a row from before the rung, or an hour the sampler took no difference in):
-           the average and requested arms decide alone, exactly as before. */
-        var unsampled = new Harness();
-        await unsampled.Build().ApplyCheckpointerPressureAsync(LongSyncHour(null), Ct);
-        Assert.Empty(unsampled.Deliverer.Outcomes);
+        /* The same hour with no judgment at all (the service started inside it): quiet too, since nothing says
+           anything suffered. */
+        var unjudged = new Harness();
+        await unjudged.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
+        Assert.Empty(unjudged.Deliverer.Outcomes);
+
+        /* A 25.2 s average over one checkpoint, judged, nothing suffering: quiet. */
+        var average = new Harness();
+        await average.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 25_200, requested: 0, timed: 1, longestSyncMs: 25_200, longestSyncAt: LongSyncMinute), Ct,
+            Verdict(new[] { new CheckpointSync(LongSyncMinute.AddMinutes(-1), LongSyncMinute, 25_200) }));
+        Assert.Empty(average.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task CheckpointerPressure_TheLongestSyncBar_IsPastTheBar_NotAtIt()
+    public async Task CheckpointerPressure_HarmOutsideAnySync_StaysQuiet()
     {
-        /* Exactly the bar is quiet (over it, like the average arm); a millisecond past it fires. */
-        var atBar = new Harness();
-        await atBar.Build().ApplyCheckpointerPressureAsync(LongSyncHour(10_000), Ct);
-        Assert.Empty(atBar.Deliverer.Outcomes);
+        /* The read failed at 12:20 UTC, nineteen minutes before the long sync began. The store did not answer it, but
+           no checkpoint sync was running, so this alert has nothing to say about it. */
+        var before = new Harness();
+        await before.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct,
+            Verdict(new[] { LongSync }, Harm(StoreHarmKind.AlertReadFailed, "collection signals", LongSyncMinute.AddMinutes(-21))));
+        Assert.Empty(before.Deliverer.Outcomes);
+        Assert.Empty(before.History.Records);
 
-        var pastBar = new Harness();
-        await pastBar.Build().ApplyCheckpointerPressureAsync(LongSyncHour(10_001), Ct);
-        Assert.Single(pastBar.Deliverer.Outcomes);
+        /* A served read cut off five minutes after the sample that saw the sync finish: outside it too. */
+        var after = new Harness();
+        await after.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct,
+            Verdict(new[] { LongSync }, Harm(StoreHarmKind.HostReadDeadline, "get_wait_stats", LongSyncMinute.AddMinutes(5))));
+        Assert.Empty(after.Deliverer.Outcomes);
+
+        /* An hour in which operations suffered and no checkpoint sync finished at all. */
+        var noSync = new Harness();
+        await noSync.Build().ApplyCheckpointerPressureAsync(LongSyncHour(null), Ct,
+            Verdict(Array.Empty<CheckpointSync>(),
+                Harm(StoreHarmKind.AlertReadFailed, "collection signals", LongSyncMinute.AddSeconds(-30)),
+                Harm(StoreHarmKind.CollectorWriteStalled, "wait_stats", LongSyncMinute.AddSeconds(-20))));
+        Assert.Empty(noSync.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task CheckpointerPressure_ALongSyncHour_ResolvesOnTheNextQuietHour()
+    public async Task CheckpointerPressure_AHarmedHour_ResolvesOnTheNextQuietHour()
     {
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
-        /* The next hour: average under the bar, nothing requested, longest sync 800 ms. One Recovered row, which
-           carries the hour's longest sync beside the average. */
+        /* The next hour: nothing requested, nothing suffered, longest sync 800 ms. One Recovered row, which carries
+           the hour's longest sync beside the average and says nothing suffered. */
         h.Clock = h.Clock.AddHours(1);
         await e.ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 1_200, requested: 0, timed: 4, longestSyncMs: 800, longestSyncAt: LongSyncMinute.AddHours(1)), Ct);
+            Interval(syncMs: 1_200, requested: 0, timed: 4, longestSyncMs: 800, longestSyncAt: LongSyncMinute.AddHours(1)), Ct,
+            Verdict(new[] { new CheckpointSync(LongSyncMinute.AddMinutes(-1), LongSyncMinute, 800) }));
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
-        Assert.Contains("0.8s", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("longest single sync 0.8s", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("no store operation suffered inside a checkpoint sync", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.EndsWith(". Clean again", recovered.DetailText!, StringComparison.Ordinal);
 
         /* A second quiet hour resolves nothing twice. */
         await e.ApplyCheckpointerPressureAsync(
@@ -1239,59 +1317,261 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     [Fact]
-    public async Task CheckpointerPressure_ALongSyncHour_KeepsAStandingAlertStanding_WhileTheAverageReadsClean()
+    public async Task CheckpointerPressure_ALongSyncWithNoHarm_RecoversAStandingAlert()
     {
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        await ApplyHarmedHourAsync(e);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* The next hour's average is clean, but a 23.5 s sync is still in it: not a clean hour, so no Recovered row. */
+        /* The next hour holds a 23.5 s sync again, and nothing suffered inside it: a clean hour, so the alert
+           recovers and the row states the sync as the fact it is. */
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
-        Assert.Empty(h.History.Records);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }));
+        Assert.Single(h.Deliverer.Outcomes);
+        var recovered = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
+        Assert.Contains("longest single sync 23.5s", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("no store operation suffered inside a checkpoint sync", recovered.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A checkpoint sync shorter than the store read deadline cannot cut a read off by itself (#9549), so a read that failed
+    /// beside one had another cause and the alert stays quiet. The same read over a sync of exactly the deadline fires, and
+    /// the text says why only a sync that long is counted.
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_HarmOverASyncShorterThanTheReadDeadline_StaysQuiet_AndTheSameHarmOverASyncAtItFires()
+    {
+        var read = Harm(StoreHarmKind.AlertReadFailed, "collection signals", LongSyncMinute.AddSeconds(-30));
+        var belowBar = new CheckpointSync(LongSyncMinute.AddMinutes(-1), LongSyncMinute, DarlingSelfAlertEvaluator.CheckpointSyncBarMs - 1);
+        var atBar = new CheckpointSync(LongSyncMinute.AddMinutes(-1), LongSyncMinute, DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+        Assert.True(belowBar.Overlaps(read.StartedUtc, read.EndedUtc) && atBar.Overlaps(read.StartedUtc, read.EndedUtc));
+
+        var quiet = new Harness();
+        await quiet.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: belowBar.SyncMs, requested: 0, timed: 4, longestSyncMs: belowBar.SyncMs, longestSyncAt: LongSyncMinute), Ct,
+            Verdict(new[] { belowBar }, read));
+        Assert.Empty(quiet.Deliverer.Outcomes);
+        Assert.Empty(quiet.History.Records);
+
+        var loud = new Harness();
+        await loud.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: atBar.SyncMs, requested: 0, timed: 4, longestSyncMs: atBar.SyncMs, longestSyncAt: LongSyncMinute), Ct,
+            Verdict(new[] { atBar }, read));
+        var fired = Assert.Single(loud.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Contains("the alert pass's collection signals read failed at 12:40 UTC, inside the 10.0s sync", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains(
+            "Only a sync of 10s or longer, the read deadline of an alert-pass read and of a read the MCP host serves, is counted: a shorter one cannot cut a read off by itself.",
+            fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An hour whose only harm is collector store writes that a standing collection alert already announced (#9549) is not
+    /// a clean hour. The harm is left out of this alert's count, so it does not fire, and it did suffer, so it does not
+    /// write the Recovered row either: the alert stays standing until an hour reads clean.
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_AnHourOfOnlyLeftOutCollectorWriteStalls_NeitherFiresNorRecoversAStandingAlert()
+    {
+        var stall = Harm(StoreHarmKind.CollectorWriteStalled, "wait_stats", LongSyncMinute.AddSeconds(-30));
+        var h = new Harness();
+        var e = h.Build();
+
+        await ApplyHarmedHourAsync(e);
+        await e.ApplyCollectionStoppedAsync(7, "sql-a", stopped: true, "no recent collection", Ct);
+        var outcomesBefore = h.Deliverer.Outcomes.Count;
+
+        /* Two hours that hold the stall and nothing else: no fire, no Recovered row. */
+        for (var hour = 0; hour < 2; hour++)
+        {
+            h.Clock = h.Clock.AddHours(1);
+            await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, stall));
+        }
+
+        Assert.Equal(outcomesBefore, h.Deliverer.Outcomes.Count);
+        Assert.DoesNotContain(h.History.Records, r => r.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric);
+
+        /* The next hour holds no harm at all: the alert was still standing, so it recovers, once. */
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }));
+        var recovered = Assert.Single(h.History.Records, r => r.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric);
+        Assert.Contains("no store operation suffered inside a checkpoint sync", recovered.DetailText!, StringComparison.Ordinal);
+
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }));
+        Assert.Single(h.History.Records, r => r.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric);
+    }
+
+    /// <summary>
+    /// The hold count survives an hour whose harm was all left out (#9549): the episode is neither ended nor counted. The
+    /// first breach writes the held row, the second holds, and the third breach pages even with such an hour between.
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_AnHourOfOnlyLeftOutCollectorWriteStalls_LeavesTheHoldCountAsItFound()
+    {
+        var stall = Harm(StoreHarmKind.CollectorWriteStalled, "wait_stats", LongSyncMinute.AddSeconds(-30));
+        var h = new Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        await ApplyHarmedHourAsync(e);
+        await e.ApplyCollectionStoppedAsync(7, "sql-a", stopped: true, "no recent collection", Ct);
+
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, stall));
+        h.Clock = h.Clock.AddHours(1);
+        await ApplyHarmedHourAsync(e);
+        h.Clock = h.Clock.AddHours(1);
+        await ApplyHarmedHourAsync(e);
+
+        var pressure = h.Deliverer.Outcomes.Where(o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric).ToList();
+        Assert.Equal(2, pressure.Count);
+        Assert.NotNull(pressure[0].Hold);
+        Assert.Null(pressure[1].Hold);
+        Assert.DoesNotContain(h.History.Records, r => r.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric);
     }
 
     [Fact]
-    public async Task CheckpointerPressure_WhenEveryArmBreaches_TheTextNamesEachOfThem()
+    public async Task CheckpointerPressure_WhenBothArmsBreach_TheTextNamesEachOfThem()
     {
         var h = new Harness();
 
-        /* 3 timed + 1 requested checkpoint, 60 s of sync: a 15.0 s average, one requested, and a 23.5 s longest. */
+        /* 3 timed + 1 requested checkpoint, 60 s of sync (a 15.0 s average), a 23.5 s longest, and a read that
+           failed inside it. */
         await h.Build().ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 60_000, requested: 1, timed: 3, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct);
+            Interval(syncMs: 60_000, requested: 1, timed: 3, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct, HarmInsideTheLongSync());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Contains("average sync 15.0s per checkpoint", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("23.5s", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("12:41 UTC", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("1 requested checkpoint", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Equal(23_542, fired.NumericCurrentValue);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync and 1 requested checkpoint over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Equal(1, fired.NumericThresholdValue);
+        Assert.Contains("an average of 15.0s of sync per checkpoint", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("was 23.5s, in the minute ending 12:41 UTC", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("the alert pass's collection signals read failed at 12:40 UTC", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("Raising max_wal_size is the remedy only for the first cause", fired.DetailText!, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task CheckpointerPressure_ALongSyncInAnIntervalThatIsNotMeasured_NeitherFiresNorResolves()
+    public async Task CheckpointerPressure_HarmInAnIntervalThatIsNotMeasured_NeitherFiresNorResolves()
     {
         /* A restart-spanning interval carries the shutdown checkpoint's sync in the very counters the minute
-           samples difference (#3955), so the long sync is not judged there either. */
+           samples difference (#3955), so what suffered inside a sync is not judged there either. */
         var h = new Harness();
         await h.Build().ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 800, requested: 2, restarted: true, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct);
+            Interval(syncMs: 800, requested: 2, restarted: true, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct, HarmInsideTheLongSync());
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
         var off = new Harness();
         off.Settings.AlertsEnabled = false;
-        await off.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
+        await off.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, HarmInsideTheLongSync());
         Assert.Empty(off.Deliverer.Outcomes);
     }
 
-    /* ---- #4834: the stored row carries the hour's longest sync, and the tool and the alert judge the same value ---- */
+    /// <summary>
+    /// #9549: each kind of harm the service records fires the alert when it sits inside a sync, and the text says what
+    /// it was: an alert-pass read that failed, one that crossed its deadline and was re-asked, a served read cut off
+    /// at its deadline, and a collector store write the store did not answer.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(StoreHarmKind.AlertReadFailed), "collection signals", "the alert pass's collection signals read failed at 12:40 UTC")]
+    [InlineData(nameof(StoreHarmKind.AlertReadRetried), "collection signals", "the alert pass's collection signals read crossed its deadline and was retried at 12:40 UTC")]
+    [InlineData(nameof(StoreHarmKind.HostReadDeadline), "get_wait_stats", "the get_wait_stats read was cut off at its deadline at 12:40 UTC")]
+    [InlineData(nameof(StoreHarmKind.CollectorWriteStalled), "wait_stats", "the wait_stats collector's store write stalled at 12:40 UTC")]
+    public async Task CheckpointerPressure_EachKindOfHarmInsideASync_FiresAndSaysWhatSuffered(string kind, string name, string expected)
+    {
+        var h = new Harness();
+        await h.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct,
+            Verdict(new[] { LongSync }, Harm(Enum.Parse<StoreHarmKind>(kind), name, LongSyncMinute.AddSeconds(-30))));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Contains(
+            expected + ", inside the 23.5s sync that finished in the minute ending 12:41 UTC", fired.DetailText!, StringComparison.Ordinal);
+    }
 
     [Fact]
-    public void TheReading_TakesTheLongestSyncFromTheNewerRow_AndJudgesItPressure()
+    public async Task CheckpointerPressure_ManyOperationsInsideOneSync_NamesThreeAndCountsTheRest()
+    {
+        var harm = Enumerable.Range(0, 5)
+            .Select(i => Harm(StoreHarmKind.HostReadDeadline, "read_" + i, LongSyncMinute.AddSeconds(-50 + i)))
+            .ToArray();
+        var h = new Harness();
+        await h.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, harm));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("5 store operations suffered inside a checkpoint sync over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Equal(5, fired.NumericCurrentValue);
+        Assert.Equal(1, fired.NumericThresholdValue);
+        Assert.Equal(3, DarlingSelfAlertEvaluator.MaxNamedHarm);
+        Assert.Contains("the read_0 read", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("the read_2 read", fired.DetailText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("the read_3 read", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("; and 2 more. ", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #9549, one harm, one alert. A failing collector store write has alerts of its own: Collection Stopped for the
+    /// server whose rows stopped landing, and Collection Falling Behind for the fleet. While one of them stands, a
+    /// collector write that stalled inside a sync is not counted here a second time. A read has no alert of its own,
+    /// so it still counts, and with no collection alert standing the stalled write is this alert's to announce.
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_ACollectorWriteStallACollectionAlertAlreadyAnnounced_IsNotCountedASecondTime()
+    {
+        var stall = Harm(StoreHarmKind.CollectorWriteStalled, "wait_stats", LongSyncMinute.AddSeconds(-30));
+        var read = Harm(StoreHarmKind.AlertReadFailed, "collection signals", LongSyncMinute.AddSeconds(-20));
+
+        var alone = new Harness();
+        await alone.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, stall));
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, Assert.Single(alone.Deliverer.Outcomes).MetricName);
+
+        var h = new Harness();
+        var e = h.Build();
+        await e.ApplyCollectionStoppedAsync(7, "sql-a", stopped: true, "no recent collection", Ct);
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, stall));
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric);
+
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, Verdict(new[] { LongSync }, stall, read));
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric);
+        Assert.Equal("1 store operation suffered inside a checkpoint sync over 4 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Contains("the alert pass's collection signals read failed at 12:40 UTC", fired.DetailText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("collector's store write stalled", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #9549: the verdict is the running service's, judged right after the sweep that wrote the row, so it is applied
+    /// to that row's interval and no other. A verdict judged an hour away says nothing about this interval, which then
+    /// reads as unjudged: only the requested arm can fire it.
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_AVerdictForAnotherHour_IsNotApplied()
+    {
+        var stale = HarmInsideTheLongSync() with { JudgedUtc = IntervalEnd.AddHours(1) };
+
+        var h = new Harness();
+        await h.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct, stale);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var requested = new Harness();
+        await requested.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1, timed: 1), Ct, stale);
+        var fired = Assert.Single(requested.Deliverer.Outcomes);
+        Assert.Equal("1 requested checkpoint over 2 checkpoints in 60.0 min", fired.CurrentValue);
+        Assert.Contains("which does not cover this interval", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    /* ---- #4834: the stored row carries the hour's longest sync, and the tool and the alert state the same value ---- */
+
+    [Fact]
+    public void TheReading_TakesTheLongestSyncFromTheNewerRow_AndDoesNotJudgeItPressure()
     {
         var reading = LongSyncHour(23_542);
 
@@ -1301,29 +1581,63 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal(DateTimeKind.Utc, reading.LongestSyncAtUtc!.Value.Kind);
         Assert.True(reading.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
         Assert.Equal(0L, reading.Requested);
-        Assert.True(reading.IsPressure);
+
+        /* The stored row carries no judgment of harm, and a sync's length is not one (#9549). */
+        Assert.Null(reading.HarmInsideSync);
+        Assert.False(reading.IsPressure);
     }
 
     [Fact]
-    public void TheReading_WithNoStoredLongestSync_KeepsTodaysResult_ExactlyAsBefore()
+    public void TheReading_WithHarm_TakesTheVerdictOfItsOwnInterval_AndNoOther()
+    {
+        var hour = LongSyncHour(23_542);
+
+        var harmed = hour.WithHarm(HarmInsideTheLongSync());
+        Assert.Equal(1, harmed.HarmInsideSync);
+        Assert.True(harmed.IsPressure);
+
+        var clean = hour.WithHarm(Verdict(new[] { LongSync }));
+        Assert.Equal(0, clean.HarmInsideSync);
+        Assert.False(clean.IsPressure);
+
+        Assert.Null(hour.WithHarm(null).HarmInsideSync);
+
+        /* Judged within fifteen minutes of the row's stamp it is this interval's; a tick past that it is not. */
+        var edge = HarmInsideTheLongSync() with { JudgedUtc = IntervalEnd.Add(CheckpointHarmVerdict.RowMatchWindow) };
+        Assert.Equal(1, hour.WithHarm(edge).HarmInsideSync);
+        var past = edge with { JudgedUtc = edge.JudgedUtc.AddTicks(1) };
+        Assert.Null(hour.WithHarm(past).HarmInsideSync);
+        Assert.False(hour.WithHarm(past).IsPressure);
+        Assert.Null(hour.WithHarm(edge with { JudgedUtc = IntervalEnd.AddHours(-1) }).HarmInsideSync);
+
+        /* An interval that is not measured takes no verdict. */
+        var restarted = Interval(syncMs: 800, requested: 2, restarted: true).WithHarm(HarmInsideTheLongSync());
+        Assert.Null(restarted.HarmInsideSync);
+        Assert.False(restarted.IsPressure);
+        Assert.Null(DarlingStoreMetricsReader.CheckpointerReading.Absent.WithHarm(HarmInsideTheLongSync()).HarmInsideSync);
+    }
+
+    [Fact]
+    public void TheReading_WithNoStoredLongestSync_StatesNone_AndOnlyARequestedCheckpointIsPressure()
     {
         /* NULL on the newer row (a row from before the rung, or an hour the sampler took no difference in) is no
-           evidence: never zero, and never a reason to change any of today's three outcomes. */
+           evidence, never zero. With no judgment of harm the requested arm decides alone. */
         var none = LongSyncHour(null);
         Assert.Null(none.LongestSyncMs);
         Assert.Null(none.LongestSyncAtUtc);
         Assert.False(none.IsPressure);
-        Assert.True(Interval(syncMs: 60_000, requested: 0, timed: 2).IsPressure);
+        Assert.False(Interval(syncMs: 60_000, requested: 0, timed: 2).IsPressure);
         Assert.True(Interval(syncMs: 800, requested: 1, timed: 1).IsPressure);
         Assert.False(Interval(syncMs: 800, requested: 0, timed: 1).IsPressure);
     }
 
     [Fact]
-    public void TheReading_ALongestSyncOf800Ms_StaysQuiet_AndTheBarIsPastNotAt()
+    public void TheReading_NoLongestSync_IsPressureOnItsOwn()
     {
         Assert.False(LongSyncHour(800).IsPressure);
         Assert.False(LongSyncHour(10_000).IsPressure);
-        Assert.True(LongSyncHour(10_001).IsPressure);
+        Assert.False(LongSyncHour(10_001).IsPressure);
+        Assert.False(LongSyncHour(23_542).IsPressure);
     }
 
     [Fact]
@@ -1351,22 +1665,34 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     [Fact]
-    public void TheCheckpointerNote_NamesTheLongestSync_WhenItBreached_AsTheAlertDoes()
+    public void TheCheckpointerNote_StatesTheLongestSync_AndCallsItPressureOnlyWhenSomethingSuffered()
     {
-        var breached = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(23_542));
-        Assert.Contains("CHECKPOINTER PRESSURE", breached, StringComparison.Ordinal);
-        Assert.Contains("longest single sync 23.5s in the minute ending 12:41 UTC", breached, StringComparison.Ordinal);
+        /* A 23.5 s sync with nothing suffering inside it: stated, set beside the read deadline, not pressure. */
+        var longOnly = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(23_542).WithHarm(Verdict(new[] { LongSync })));
+        Assert.DoesNotContain("CHECKPOINTER PRESSURE", longOnly, StringComparison.Ordinal);
+        Assert.Contains("was 23.5s, in the minute ending 12:41 UTC.", longOnly, StringComparison.Ordinal);
+        Assert.Contains("That is past the 10s read deadline", longOnly, StringComparison.Ordinal);
+        Assert.Contains("No store read or collector store write suffered while a checkpoint sync of 10s or longer ran.", longOnly, StringComparison.Ordinal);
+        Assert.Contains("How long a sync took does not fire it.", longOnly, StringComparison.Ordinal);
 
-        /* Under the bar: a measured fact the note may state, but not pressure and not the breach sentence. */
+        /* The same hour with a read that failed inside the sync: pressure, as the alert says. */
+        var harmed = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(23_542).WithHarm(HarmInsideTheLongSync()));
+        Assert.Contains("CHECKPOINTER PRESSURE", harmed, StringComparison.Ordinal);
+        Assert.Contains("1 store operation suffered while a checkpoint sync ran", harmed, StringComparison.Ordinal);
+        Assert.Contains("was 23.5s, in the minute ending 12:41 UTC.", harmed, StringComparison.Ordinal);
+        Assert.Contains("The informational Store Checkpointer Pressure self-alert says the same.", harmed, StringComparison.Ordinal);
+
+        /* A short longest sync: a measured fact the note states, with nothing said about the deadline. */
         var quiet = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(800));
         Assert.DoesNotContain("CHECKPOINTER PRESSURE", quiet, StringComparison.Ordinal);
-        Assert.DoesNotContain("longest single sync 0.8s", quiet, StringComparison.Ordinal);
-        Assert.Contains("0.8s", quiet, StringComparison.Ordinal);
+        Assert.Contains("was 0.8s, in the minute ending 12:41 UTC.", quiet, StringComparison.Ordinal);
+        Assert.DoesNotContain("read deadline", quiet, StringComparison.Ordinal);
 
-        /* No stored longest sync: the note is the one it was before the column existed. */
+        /* No stored longest sync and no judgment: the note says the service's record does not cover the interval. */
         var none = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(null));
         Assert.DoesNotContain("longest single", none, StringComparison.Ordinal);
-        Assert.Contains("Both under the lines the self-alert judges", none, StringComparison.Ordinal);
+        Assert.Contains("which does not cover this interval", none, StringComparison.Ordinal);
+        Assert.Contains("Neither line the self-alert judges is crossed", none, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1391,7 +1717,7 @@ public sealed class StoreToastAndCheckpointerTests
         var body = worker.IndexOf("private async Task RunStoreMetricsTickAsync(", run, StringComparison.Ordinal);
         var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);", body, StringComparison.Ordinal);
         var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
-        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);", toast, StringComparison.Ordinal);
+        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(", toast, StringComparison.Ordinal);
         Assert.True(body > 0 && sweep > body && toast > sweep && checkpointer > toast,
             "the two #3783 conditions must be evaluated on the store self-metrics tick, after the sweep that writes their evidence");
 
@@ -1501,6 +1827,7 @@ public sealed class StoreToastAndCheckpointerTests
         public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
+        public bool TempDbGrowthFitEnabled { get; set; } = true;
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
@@ -1755,10 +2082,10 @@ SELECT concat_ws('; ',
 
     /// <summary>The #4834 live proof, against a real server: a sweep given the hour's longest sync stores it and its
     /// minute on the checkpointer row and on no other kind's row, a sweep given none stores NULLs, and the real pair
-    /// read gives both back and judges the long sync as pressure although the interval has no average to judge.
+    /// read gives both back. The stored row carries no judgment of harm, so the long sync alone is not pressure (#9549).
     /// Own store through <c>ScratchPostgres</c>, like the tests around it.</summary>
     [Fact]
-    public async Task TheSweep_StoresTheHoursLongestSync_AndTheRealPairReadJudgesIt_AgainstDevPostgres()
+    public async Task TheSweep_StoresTheHoursLongestSync_AndTheRealPairReadGivesItBack_AgainstDevPostgres()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -1823,7 +2150,88 @@ SELECT concat_ws('; ',
         Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
         Assert.Equal(23_542L, reading.LongestSyncMs);
         Assert.Equal(DateTime.SpecifyKind(minute, DateTimeKind.Utc), reading.LongestSyncAtUtc);
-        Assert.True(reading.IsPressure, "a 23.5 s single sync must be pressure whatever the interval's average");
+        /* Only a checkpoint the real server ran on request between the two sweeps makes this row pressure. */
+        Assert.Null(reading.HarmInsideSync);
+        Assert.Equal(reading.Requested > 0, reading.IsPressure);
+    }
+
+    /// <summary>
+    /// #9549 against a real server: <c>get_store_metrics</c> publishes the verdict the service kept for the interval as
+    /// <c>checkpointer.harm_inside_sync</c>, and <c>pressure</c> follows it. Two planted checkpointer rows make the
+    /// interval (no requested checkpoint, so the verdict alone decides). With no verdict kept the count is null (the
+    /// running service holds no judgment), a verdict judged beside the newer row states how many operations suffered
+    /// inside a sync that can carry them (a shorter sync carries none), and a verdict for another hour is not applied.
+    /// The rows sit months before any other test's, so the process-wide <see cref="StoreHarmLog.Shared"/> verdict this
+    /// sets describes no interval but this scratch store's; it is put back as found. Own store through
+    /// <c>ScratchPostgres</c>, like the tests around it.
+    /// </summary>
+    [Fact]
+    public async Task TheStoreMetricsTool_PublishesTheKeptHarmVerdict_AsHarmInsideSync_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #9549 store metrics harm test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var previousAt = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+        var newerAt = previousAt.AddHours(1);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await PlantCheckpointerRowAsync(connection, previousAt, write: 1_000, sync: 5_000, requested: 3, postmasterStart: null, ct);
+            await PlantCheckpointerRowAsync(connection, newerAt, write: 2_000, sync: 33_000, requested: 3, postmasterStart: null, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        async Task<System.Text.Json.JsonElement> ReadCheckpointerBlockAsync()
+        {
+            var answer = await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, cancellationToken: ct);
+            using var json = System.Text.Json.JsonDocument.Parse(answer);
+            return json.RootElement.GetProperty("checkpointer").Clone();
+        }
+
+        var minute = newerAt.AddMinutes(-20);
+        var read = new StoreHarmEvent(minute.AddSeconds(-40), minute.AddSeconds(-30), StoreHarmKind.AlertReadFailed, "collection signals");
+        var stall = new StoreHarmEvent(minute.AddSeconds(-35), minute.AddSeconds(-25), StoreHarmKind.CollectorWriteStalled, "wait_stats");
+        var longSync = new CheckpointSync(minute.AddMinutes(-1), minute, 28_000);
+        var shortSync = new CheckpointSync(minute.AddMinutes(-1), minute, 400);
+
+        var kept = StoreHarmLog.Shared.LatestVerdict;
+        try
+        {
+            /* Nothing kept: the service holds no judgment for the interval, so the count is null and the interval is not pressure. */
+            StoreHarmLog.Shared.LatestVerdict = null;
+            var none = await ReadCheckpointerBlockAsync();
+            Assert.Equal("Observed", none.GetProperty("status").GetString());
+            Assert.Equal(0, none.GetProperty("requested").GetInt64());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, none.GetProperty("harm_inside_sync").ValueKind);
+            Assert.False(none.GetProperty("pressure").GetBoolean());
+            Assert.Equal(DarlingSelfAlertEvaluator.CheckpointSyncBarMs, none.GetProperty("sync_bar_ms").GetInt64());
+
+            /* A verdict judged beside the newer row: two operations suffered inside the long sync, so the count is two and the interval is pressure. */
+            StoreHarmLog.Shared.LatestVerdict = StoreHarmLog.Judge(newerAt.AddSeconds(5), new[] { longSync }, new[] { read, stall });
+            var harmed = await ReadCheckpointerBlockAsync();
+            Assert.Equal(2, harmed.GetProperty("harm_inside_sync").GetInt32());
+            Assert.True(harmed.GetProperty("pressure").GetBoolean());
+
+            /* The same two operations beside a sync shorter than the read deadline: judged, and nothing suffered inside it. */
+            StoreHarmLog.Shared.LatestVerdict = StoreHarmLog.Judge(newerAt.AddSeconds(5), new[] { shortSync }, new[] { read, stall });
+            var quiet = await ReadCheckpointerBlockAsync();
+            Assert.Equal(0, quiet.GetProperty("harm_inside_sync").GetInt32());
+            Assert.False(quiet.GetProperty("pressure").GetBoolean());
+
+            /* A verdict judged an hour later describes the next interval, not this one. */
+            StoreHarmLog.Shared.LatestVerdict = StoreHarmLog.Judge(newerAt.AddHours(1).AddSeconds(5), new[] { longSync }, new[] { read, stall });
+            var another = await ReadCheckpointerBlockAsync();
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, another.GetProperty("harm_inside_sync").ValueKind);
+        }
+        finally
+        {
+            StoreHarmLog.Shared.LatestVerdict = kept;
+        }
     }
 
     /// <summary>

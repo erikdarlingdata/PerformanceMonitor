@@ -413,15 +413,6 @@ public sealed class DarlingRunTimeSchedulingTests
         Assert.True(server.NextDue[OnLoadCollector] > DateTime.UtcNow.AddHours(10), "served: the next slot is tomorrow's");
     }
 
-    [Fact]
-    public void TheAtConnectLoop_SeedsTheRunTimeSlotFromTheOutcomeOfTheRunAtConnect()
-    {
-        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs").ReplaceLineEndings("\n");
-
-        Assert.Contains("var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);", worker, StringComparison.Ordinal);
-        Assert.Contains("SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);", worker, StringComparison.Ordinal);
-    }
-
     private static async Task<bool> BecomesTrueAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);

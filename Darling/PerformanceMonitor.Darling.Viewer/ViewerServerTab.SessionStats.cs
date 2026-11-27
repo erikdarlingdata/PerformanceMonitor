@@ -54,18 +54,19 @@ public partial class ViewerServerTab
 
     /// <summary>Loads the Session Stats tab: the session-summary snapshots over the toolbar's settable
     /// window, then renders the status-count chart and the top-app / top-host / databases summary.</summary>
-    private async Task LoadSessionStatsAsync()
+    private async Task LoadSessionStatsAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
         /* #6388: Sessions by Application beside the trend, the newest per-application snapshot get_session_stats serves. */
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var dataTask = _dataService.GetSessionStatsAsync(_server.ServerId, startUtc, endUtc);
-        var applicationsTask = _dataService.GetSessionsByApplicationAsync(_server.ServerId);
+        /* #9112: both reads are named on the load's clock, the chart draw is a named client step. */
+        var dataTask = Timed(timer, "Session Stats read", _dataService.GetSessionStatsAsync(_server.ServerId, startUtc, endUtc));
+        var applicationsTask = Timed(timer, "Sessions by Application read", _dataService.GetSessionsByApplicationAsync(_server.ServerId));
         await Task.WhenAll(dataTask, applicationsTask);
         /* Both reads are done; the engine-gap probe below is a store read, so release or it is priced at this width. */
         readFanOut.Release();
-        RenderSessionStatsChart(dataTask.Result);
-        await RenderSessionsByApplicationAsync(applicationsTask.Result);
+        ClientStep(timer, "Session Stats chart draw", () => RenderSessionStatsChart(dataTask.Result));
+        await RenderSessionsByApplicationAsync(applicationsTask.Result, timer);
     }
 
     /// <summary>The session-status trend: hands the settable-window bounds + snapshots to the shared

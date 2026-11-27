@@ -19,7 +19,8 @@ public partial class ServerTab : UserControl
     internal const string PlanCorrectionsQuietWindowText = "No plan corrections in the selected time window.";
 
     /// <summary>
-    /// The server's SQL Server major version, from the newest stored server_properties row (13 is SQL Server 2016). 0 until it is read,
+    /// The server's SQL Server major version (13 is SQL Server 2016), from the connection check the tab was opened with (#9099) or else the newest
+    /// stored server_properties row. 0 until it is read,
     /// which the collector gates take as unknown and assume newest, so the grids keep their ordinary sentences until then.
     /// </summary>
     private int _sqlMajorVersion;

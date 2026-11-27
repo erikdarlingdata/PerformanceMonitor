@@ -290,7 +290,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     /// production store. Plants 30 reports with both text fields near 700-870 characters (a realistic
     /// blocked/blocking statement width, every other field populated) and asserts the default call
     /// previews them under <see cref="McpResponseBudget.DefaultBytes"/>, and that <c>full_text: true</c>
-    /// opts back into the whole text.
+    /// opts back into the whole text on a page held to the same budget, whole reports only.
     /// </summary>
     [Fact]
     public async Task GetBlockedProcessReports_Default_StaysUnderResponseBudget_WithThirtyWideReports()
@@ -340,11 +340,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
             $"get_blocked_process_reports's default call is {defaultBytes:N0} bytes over 30 planted ~700-870-char reports, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
 
+        /* full_text gives each report its whole text, and the page is then held to the response budget: whole
+           reports only, newest first, with the cut named. */
         var fullJson = await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 30, full_text: true);
         var fullRoot = Parse(fullJson);
-        AssertPage(fullRoot, "reports", "reports_returned", returned: 30, truncated: false);
         var fullReports = fullRoot.GetProperty("reports").EnumerateArray().ToList();
-        for (var i = 0; i < 30; i++)
+        Assert.InRange(fullReports.Count, 1, 29);
+        AssertPage(fullRoot, "reports", "reports_returned", returned: fullReports.Count, truncated: true);
+        Assert.True(fullRoot.GetProperty("budget_truncated").GetBoolean());
+        Assert.Contains($"only {fullReports.Count} fit the {McpResponseBudget.DefaultBytes:N0}-byte response budget",
+            fullRoot.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+        var fullBytes = System.Text.Encoding.UTF8.GetByteCount(fullJson);
+        Assert.True(fullBytes <= McpResponseBudget.DefaultBytes,
+            $"get_blocked_process_reports's full_text page is {fullBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+        for (var i = 0; i < fullReports.Count; i++)
         {
             Assert.False(fullReports[i].GetProperty("blocked_sql_text_truncated").GetBoolean());
             Assert.False(fullReports[i].GetProperty("blocking_sql_text_truncated").GetBoolean());

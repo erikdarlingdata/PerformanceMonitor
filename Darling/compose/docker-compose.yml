@@ -33,7 +33,7 @@ name: performancemonitor-darling
 
 services:
   store:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.32.1-pg17
     restart: unless-stopped
     # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
     # the store's queries cost the most). The service collects as the darling login, and the web dashboard and
@@ -93,7 +93,12 @@ services:
     # ALTER SYSTEM, an operator who wants the report deletes the two entries "-c", "timescaledb.telemetry_level=off"
     # from this list. With the level off the extension's policy_telemetry job still runs and records a Failed run
     # each day. This compose stack does not unschedule it (the managed Windows store does); ignore that row.
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB", "-c", "timescaledb.telemetry_level=off"]
+    # #9333: the store keeps its own log files, with the managed store's settings. Without logging_collector the service's
+    # hourly store-log capture finds no log folder (58P01) and get_store_log has nothing to read. The files are a ring of
+    # seven, one per weekday (postgresql-Mon.log ... postgresql-Sun.log), rolled daily and truncated when the weekday comes
+    # round again, so the log stays bounded. They sit in the log folder of the store volume. log_rotation_size=0 on purpose:
+    # a size roll appends and would defeat the truncate.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB", "-c", "timescaledb.telemetry_level=off", "-c", "logging_collector=on", "-c", "log_directory=log", "-c", "log_filename=postgresql-%a.log", "-c", "log_rotation_age=1d", "-c", "log_rotation_size=0", "-c", "log_truncate_on_rotation=on"]
     # Uncomment and set to the host's own budget if this container should be capped — left commented
     # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
     # 8 GB host:
@@ -105,6 +110,12 @@ services:
       POSTGRES_USER: darling
       POSTGRES_DB: darling
       POSTGRES_PASSWORD_FILE: /run/secrets/store_password
+      # The store is created with UTF8 encoding and the C collation, the arguments the managed Windows store gives initdb
+      # (-E UTF8 --locale=C). The Darling Exporter needs the C collation: PostgreSQL text order must equal byte order for its
+      # Query Store keys. A bare --locale=C would pick the SQL_ASCII encoding, so the encoding is named too. initdb runs once, on an
+      # empty volume: a volume made without these arguments keeps the image's default collation (en_US.utf8), and the
+      # service works on it as before, but the Exporter refuses it with a one-line message.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     secrets:
       - store_password
     volumes:

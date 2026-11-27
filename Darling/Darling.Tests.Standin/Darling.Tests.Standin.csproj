@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- #8847: a stand-in process for Darling.Tests. A few tests need a live process under a name and folder they choose
+       (a fake postmaster, a sleeper, a pg_ctl that fails). They used to copy a Windows system tool (ping) under that name, and the Windows
+       Defender rule "Block use of copied or impersonated system tools" refuses to run such a copy. This program is built
+       from source with the tests, so there is nothing to impersonate. No packages, no dependencies. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Darling.Tests.Standin</RootNamespace>
+    <AssemblyName>Darling.Tests.Standin</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <UseAppHost>true</UseAppHost>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+  </PropertyGroup>
+  <!-- #8850: StandinProcess copies Darling.Tests.Standin.exe, so the launcher must be a Windows one. A build on macOS or Linux
+       would write a launcher with no .exe, and the tests then fail when that build is run on Windows. Build the Windows launcher
+       there unless a runtime identifier is given. A Windows build is unchanged. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == '' and !$([MSBuild]::IsOSPlatform('Windows'))">
+    <DefaultAppHostRuntimeIdentifier>win-$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</DefaultAppHostRuntimeIdentifier>
+  </PropertyGroup>
+</Project>

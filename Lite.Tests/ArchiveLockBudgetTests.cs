@@ -285,6 +285,52 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         Assert.True(File.Exists(journal));
     }
 
+    /// <summary>
+    /// A re-cut whose swap waits behind a held read gives up after the budget. Its finished sort is dropped, the file stays as it
+    /// was with no temp beside it, the pass still reports complete (a busy store is not a failed compaction), and nothing is
+    /// remembered against the file: the next pass cuts it.
+    /// </summary>
+    [Fact]
+    public async Task ARecutBehindAHeldRead_DropsItsSort_AndLeavesThePassResultAsItWas()
+    {
+        var initializer = await SeedAsync();
+        var name = $"{DateTime.UtcNow.Date.AddDays(-3):yyyyMMdd}_query_store_stats.parquet";
+        var path = Path.Combine(_archiveDir, name).Replace("\\", "/");
+        using (var connection = new DuckDBConnection("DataSource=:memory:"))
+        {
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "COPY (SELECT i::BIGINT AS collection_id, TIMESTAMP '2026-09-28 00:00:00' + to_seconds(((i * 7919) % 30000)::BIGINT) AS collection_time, " +
+                              "(1 + i % 6)::INTEGER AS server_id FROM range(30000) t(i)) " +
+                              $"TO '{path}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize)})";
+            cmd.ExecuteNonQuery();
+        }
+
+        var bytes = File.ReadAllBytes(path);
+        var service = new ArchiveService(initializer, _archiveDir) { WriteLockBudget = Budget, SortedRowGroupSizeOverride = 4096 };
+
+        bool complete;
+        using (new HeldRead(initializer))
+        {
+            var run = Task.Run(() => service.CompactParquetFiles());
+            var finished = await Task.WhenAny(run, Task.Delay(HangGuard, TestContext.Current.CancellationToken));
+            Assert.True(finished == run, "the re-cut waited for the write lock without a budget");
+            complete = await run;
+        }
+
+        Assert.True(complete);
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(path)), "the file changed");
+        Assert.Equal(new[] { name }, ArchiveFiles());
+
+        /* The lock is free now: the same file is cut. */
+        Assert.True(service.CompactParquetFiles());
+        using var check = new DuckDBConnection("DataSource=:memory:");
+        check.Open();
+        using var checkCmd = check.CreateCommand();
+        checkCmd.CommandText = $"SELECT max(row_group_num_rows) FROM parquet_metadata('{path}')";
+        Assert.Equal(4096L, Convert.ToInt64(checkCmd.ExecuteScalar()));
+    }
+
     private void MakeParquet(string fileName, long from, long to)
     {
         using var connection = new DuckDBConnection("DataSource=:memory:");

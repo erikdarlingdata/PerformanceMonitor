@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -262,6 +263,9 @@ public partial class DuckDbInitializer : IDisposable
     {
         /* Counted as this initializer's waiting reader from the ask to the hold (#8490). */
         Interlocked.Increment(ref _waitingReaders);
+        /* #9195: the wait is added to the MCP call's tally when one is open. Outside a call this is one null check. */
+        var tally = ReadLockWaitTally.Current;
+        var waitStarted = tally is null ? 0 : Stopwatch.GetTimestamp();
         try
         {
             return AcquireReadLockCore(holderMember, holderFile, cancellationToken);
@@ -269,6 +273,7 @@ public partial class DuckDbInitializer : IDisposable
         finally
         {
             Interlocked.Decrement(ref _waitingReaders);
+            tally?.RecordAcquire(Stopwatch.GetTimestamp() - waitStarted);
         }
     }
 
@@ -297,7 +302,7 @@ public partial class DuckDbInitializer : IDisposable
                proceeds normally. */
             return NoOpDisposable.Instance;
         }
-        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false), readOwner: this);
     }
 
     /// <summary>
@@ -340,7 +345,7 @@ public partial class DuckDbInitializer : IDisposable
             return NoOpDisposable.Instance;
         }
 
-        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false), readOwner: this);
     }
 
     /// <summary>
@@ -393,7 +398,7 @@ public partial class DuckDbInitializer : IDisposable
     /// switch of over a second at the median against a few milliseconds alone. A polling writer is not waiting as far
     /// as the lock knows, so readers keep flowing around it.</para>
     ///
-    /// <para>The tail is the bound on starvation. A writer polling against readers that never leave a gap never finds
+    /// <para>The tail is the bound on starvation (its length is <see cref="EffectiveWriteLockParkTail"/>). A writer polling against readers that never leave a gap never finds
     /// the lock free; once parked, no new reader gets in ahead of it, and it has the lock as soon as the readers in
     /// flight finish. So a reader is held behind a budgeted writer for at most the tail, plus the writer's own hold,
     /// and the writer keeps the whole budget it was given: the deadline is the same, and a budget no longer than the
@@ -407,7 +412,6 @@ public partial class DuckDbInitializer : IDisposable
     private LockReleaser? TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted, string? holderMember, string? holderFile)
     {
         var deadline = waitStarted + ToTimestampTicks(timeout);
-        var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
         Interlocked.Increment(ref s_pollingWriters);
         Interlocked.Increment(ref _pollingWriters);
         try
@@ -419,6 +423,8 @@ public partial class DuckDbInitializer : IDisposable
                     return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
                 }
 
+                /* Asked again each pass: a read that finishes while the writer polls can lengthen the tail (#9196). */
+                var parkAt = deadline - ToTimestampTicks(EffectiveWriteLockParkTail(timeout));
                 var now = Stopwatch.GetTimestamp();
                 if (now >= parkAt)
                 {
@@ -468,14 +474,105 @@ public partial class DuckDbInitializer : IDisposable
 
     /// <summary>
     /// The last part of a budgeted writer's wait, spent parked as a waiting writer that holds new readers back
-    /// (#7256). One second: the longest any reader waits behind a budgeted writer, and long enough for the ordinary
-    /// store reads in flight at the park, which take milliseconds, to finish inside it so the writer gets its turn.
+    /// (#7256). One second: long enough for the ordinary store reads in flight at the park, which take milliseconds,
+    /// to finish inside it so the writer gets its turn. It is the floor: <see cref="EffectiveWriteLockParkTail"/> lengthens
+    /// it when reads have been holding the lock longer than that (#9196).
     /// An instance value rather than a static so a test can set it on its own initializer; a tail no shorter than the
     /// writer's budget makes it park at once.
     /// </summary>
     internal TimeSpan WriteLockParkTail { get; set; } = InitialWriteLockParkTail;
 
     internal static readonly TimeSpan DefaultWriteLockParkTail = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// #9196: the tail a budgeted writer really parks for. A parked writer gets the lock when the reads already in flight
+    /// finish, so a tail shorter than a read that is in flight at the park times the writer out: one MCP client reading tool
+    /// after tool, each read holding the lock for 1.3 to 2.6 s, left a writer with a 5 s budget and a 1 s tail parked behind
+    /// a read that outlasted its budget. The tail is therefore the longer of <see cref="WriteLockParkTail"/> and
+    /// <see cref="ReadHoldTailFactor"/> times the longest counted read hold seen within <see cref="ReadHoldMemory"/>, but
+    /// never more than <see cref="MaxAdaptiveTailShare"/> of the budget, so a writer always polls for the first part of
+    /// its budget and a tab read still flows around it then (#7256).
+    /// <para>A hold counts only when it is no longer than that cap (<see cref="MaxAdaptiveTailShare"/> times the writer's budget).
+    /// A longer read, such as an archive read of minutes, cannot be outwaited by any park inside the budget, so letting it
+    /// move the tail would only make each writer park at the cap, hold new tab reads there for the rest of its budget and
+    /// still time out. The budget is the writer's, so the holds are kept and each call filters them against its own budget.
+    /// With no counted hold the tail is the configured one, so the ordinary store reads, which take milliseconds, still see
+    /// a writer park for one second at most.</para>
+    /// </summary>
+    internal TimeSpan EffectiveWriteLockParkTail(TimeSpan timeout)
+    {
+        var configured = WriteLockParkTail < timeout ? WriteLockParkTail : timeout;
+        var cap = timeout * MaxAdaptiveTailShare;
+        var longest = LongestRecentReadHoldWithin(cap);
+        if (longest <= TimeSpan.Zero)
+        {
+            return configured;
+        }
+
+        var wanted = longest * ReadHoldTailFactor;
+        var adaptive = wanted < cap ? wanted : cap;
+        return adaptive > configured ? adaptive : configured;
+    }
+
+    /// <summary>The margin on the longest read: a read in flight at the park may be a little longer than the longest one seen.</summary>
+    private const double ReadHoldTailFactor = 1.25;
+
+    /// <summary>The most of a writer's budget the longest-read tail may take, so the writer always polls for the first part of it.</summary>
+    private const double MaxAdaptiveTailShare = 0.8;
+
+    /// <summary>How long a read hold is remembered. A test sets it on its own initializer.</summary>
+    internal TimeSpan ReadHoldMemory { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How many recent read holds are kept. Reads past this many displace the oldest, and they are the current load.</summary>
+    private const int ReadHoldRingSize = 64;
+
+    private readonly object _readHoldLock = new();
+    private readonly long[] _readHoldTicks = new long[ReadHoldRingSize];
+    private readonly long[] _readHoldSeenAt = new long[ReadHoldRingSize];
+    private int _readHoldNext;
+
+    /// <summary>
+    /// Notes how long a read lock was held, in a ring of the last <see cref="ReadHoldRingSize"/> holds. Called when a read
+    /// lock is released: one lock and one slot write, no allocation.
+    /// </summary>
+    internal void RecordReadHold(TimeSpan held)
+    {
+        var ticks = ToTimestampTicks(held);
+        if (ticks <= 0)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        lock (_readHoldLock)
+        {
+            _readHoldTicks[_readHoldNext] = ticks;
+            _readHoldSeenAt[_readHoldNext] = now;
+            _readHoldNext = (_readHoldNext + 1) % ReadHoldRingSize;
+        }
+    }
+
+    /// <summary>The longest hold within <see cref="ReadHoldMemory"/> that is no longer than <paramref name="cap"/>, or zero.</summary>
+    private TimeSpan LongestRecentReadHoldWithin(TimeSpan cap)
+    {
+        var capTicks = ToTimestampTicks(cap);
+        var memoryTicks = ToTimestampTicks(ReadHoldMemory);
+        var now = Stopwatch.GetTimestamp();
+        long longest = 0;
+        lock (_readHoldLock)
+        {
+            for (var i = 0; i < ReadHoldRingSize; i++)
+            {
+                var ticks = _readHoldTicks[i];
+                if (ticks > longest && ticks <= capTicks && now - _readHoldSeenAt[i] < memoryTicks)
+                {
+                    longest = ticks;
+                }
+            }
+        }
+
+        return longest == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(0, longest);
+    }
 
     /// <summary>
     /// The tail every new initializer starts with: <see cref="DefaultWriteLockParkTail"/> in the product, where nothing sets it.
@@ -536,14 +633,16 @@ public partial class DuckDbInitializer : IDisposable
         private readonly long _holdId;
         private readonly long _acquiredAt = Stopwatch.GetTimestamp();
         private readonly TimeSpan _warnAfter;
+        private readonly DuckDbInitializer? _readOwner;
         private bool _disposed;
 
-        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default)
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default, DuckDbInitializer? readOwner = null)
         {
             _lock = rwLock;
             _write = write;
             _holdId = holdId;
             _warnAfter = warnAfter;
+            _readOwner = readOwner;
         }
 
         public void Dispose()
@@ -568,6 +667,8 @@ public partial class DuckDbInitializer : IDisposable
                     /* The warning is measurement only. */
                 }
             }
+            /* #9196: how long reads hold the lock sets how long a budgeted writer must park to get past one in flight. */
+            _readOwner?.RecordReadHold(Stopwatch.GetElapsedTime(_acquiredAt));
             StoreLockHolders.Unregister(_holdId);
             if (_write) _lock.ExitWriteLock();
             else _lock.ExitReadLock();
@@ -577,7 +678,23 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 81;
+    internal const int CurrentSchemaVersion = 87;
+
+    /* #9425: what this instance's start did to the schema, for the build history row. The version stamp the file carried before
+       the first open (0 for a fresh file), the stamp after the last one, and the milliseconds the migration steps took. A start
+       that opens the store more than once (the headless retry, a rebuild) keeps the first "before" and sums the migration time. */
+    private int? _startupSchemaBefore;
+    private int _startupSchemaAfter;
+    private long _startupMigrationMs;
+
+    /// <summary>The schema version stamped in the store file before this start's first open. Null until a start has run.</summary>
+    internal int? StartupSchemaBefore => _startupSchemaBefore;
+
+    /// <summary>The schema version stamped in the store file after this start's last open.</summary>
+    internal int StartupSchemaAfter => _startupSchemaAfter;
+
+    /// <summary>Milliseconds the schema migration steps took across this start. Zero when none ran.</summary>
+    internal long StartupMigrationMs => _startupMigrationMs;
 
     private readonly string _archivePath;
 
@@ -966,7 +1083,7 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     private void ReopenSentinel()
     {
-        var connection = new DuckDBConnection(ConnectionString);
+        var connection = NewMainConnection();
         connection.Open();
         _sentinel = connection;
     }
@@ -1161,6 +1278,14 @@ public partial class DuckDbInitializer : IDisposable
     ///   with every 8192-row group of every file. Once it is over the trim cycle's 64 MB target, the trim's
     ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
     ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
+    /// - prefetch_all_parquet_files=true (#9362): DuckDB's default reads a local Parquet file one column chunk at a time. With the
+    ///   archive's 2,048-row row groups (#5381, kept) a wide scan of many files becomes tens of thousands of small serial reads, and
+    ///   that is where the 168 hour Query Store regressions and top queries reads spent nearly all their time. With the setting on,
+    ///   each column chunk the scan needs is fetched whole. It is NOT in this string: the win-arm64 DuckDB library rejects the
+    ///   option at open ("options were not recognized") and Lite would not start (#9553). <see cref="NewMainConnection"/> sets it
+    ///   with <c>SET</c> right after every open instead. Only this main connection takes it: the archive service and compaction
+    ///   open their own in-memory connections, and the memory limit still bounds what a read may hold (the #5381 memory tests run
+    ///   through this connection string).
     /// </summary>
     public string ConnectionString =>
         $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
@@ -1259,7 +1384,7 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal void AdoptInitializedFileForTests()
     {
-        var connection = new DuckDBConnection(ConnectionString);
+        var connection = NewMainConnection();
         try
         {
             connection.Open();
@@ -1292,7 +1417,7 @@ public partial class DuckDbInitializer : IDisposable
         string? currentIdentity;
         try
         {
-            using var connection = new DuckDBConnection(ConnectionString);
+            using var connection = NewMainConnection();
             await connection.OpenAsync();
             using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
@@ -1424,7 +1549,7 @@ public partial class DuckDbInitializer : IDisposable
                        already present win. */
                     var restored = 0;
                     var failed = false;
-                    var connection = new DuckDBConnection(ConnectionString);
+                    var connection = NewMainConnection();
                     try
                     {
                         await connection.OpenAsync();
@@ -1577,10 +1702,13 @@ public partial class DuckDbInitializer : IDisposable
                expecting CREATE TABLE to follow, which is destructive on a blank DB.
                Just create tables with the current schema and stamp the version. */
             _versionHeldBackAt = null;
+            _startupSchemaBefore ??= existingVersion;
             if (existingVersion > 0 && existingVersion < CurrentSchemaVersion)
             {
                 _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
+                var migrationClock = System.Diagnostics.Stopwatch.StartNew();
                 await RunMigrationsAsync(connection, existingVersion);
+                _startupMigrationMs += migrationClock.ElapsedMilliseconds;
             }
 
             foreach (var tableStatement in Schema.GetAllTableStatements())
@@ -1607,10 +1735,17 @@ public partial class DuckDbInitializer : IDisposable
                 await AddMissingColumnsAsync(connection, AddedColumns);
             }
 
+            /* #9241: the Lite-only digest columns, on EVERY start and a fresh file too: the generated table statements do not carry
+               them, and they sit outside AddedColumns (the payload order shared with Darling). A fresh file and an upgraded one end
+               with the same columns in the same order, the digest last. */
+            await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
+
             if (existingVersion < CurrentSchemaVersion)
             {
                 await SetSchemaVersionAsync(connection, _versionHeldBackAt ?? CurrentSchemaVersion);
             }
+
+            _startupSchemaAfter = existingVersion < CurrentSchemaVersion ? _versionHeldBackAt ?? CurrentSchemaVersion : existingVersion;
 
             /* Exact duplicate deadlock rows an older build stored twice (a master-registered Azure database's own
                session and the server's telemetry): removed on every start, keeping the earliest of each. A no-op
@@ -1652,7 +1787,7 @@ public partial class DuckDbInitializer : IDisposable
 
         for (int attempt = 1; ; attempt++)
         {
-            var connection = new DuckDBConnection(ConnectionString);
+            var connection = NewMainConnection();
             try
             {
                 await connection.OpenAsync();
@@ -1664,7 +1799,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("DuckDB storage version mismatch detected. Migrating data via Parquet export/import.");
                 await MigrateViaParquetAsync(archivePath);
 
-                var migrated = new DuckDBConnection(ConnectionString);
+                var migrated = NewMainConnection();
                 await migrated.OpenAsync();
                 return migrated;
             }
@@ -1848,7 +1983,7 @@ public partial class DuckDbInitializer : IDisposable
         {
             try
             {
-                using var newConn = new DuckDBConnection(ConnectionString);
+                using var newConn = NewMainConnection();
                 await newConn.OpenAsync();
 
                 using var cmd = newConn.CreateCommand();
@@ -3391,6 +3526,86 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v81: adding memory_pressure_events.memory_node_id");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(81));
         }
+
+        if (fromVersion < 82)
+        {
+            /* v82 (#8784, twinning Darling's V268 column): index_object_stats.answering_server_name, the @@SERVERNAME of the instance that answered,
+               so the object usage window read can tell a change of node behind a listener from a counter that merely moved. VARCHAR, nullable, the
+               LAST column (the shared added-columns list). NULL on a row stored before v82; the archive views union parquet by name, so a parquet
+               file written before v82 reads NULL for it. Darling's module execution summary in the same rung has no twin: Lite keeps every
+               collector for its one retention horizon, so its object usage read sums the stored Query Store rows directly. */
+            _logger?.LogInformation("Running migration to v82: adding index_object_stats.answering_server_name and is_memory_optimized");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(82));
+        }
+
+        if (fromVersion < 83)
+        {
+            /* v83 (#8881, twinning Darling's V269): the tempdb log's space and what holds it, on tempdb_stats. Eleven nullable columns, the LAST
+               ones (the shared added-columns list), in the collector's payload order. NULL on a row stored before v83, on an engine that lacks the
+               function, and on a holder below 50 percent used; the archive views union parquet by name, so a parquet file written before v83
+               reads NULL for them. */
+            _logger?.LogInformation("Running migration to v83: adding the tempdb log columns to tempdb_stats");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(83));
+        }
+
+        if (fromVersion < 84)
+        {
+            /* v84 (#8882, twinning Darling's V270): database_size_stats.is_autogrow_all_files, whether tempdb's data-file filegroup grows all its files
+               together. BOOLEAN, nullable, the LAST column (the shared added-columns list). NULL on a row stored before v84, on tempdb's log file and on
+               every other database; the archive views union parquet by name, so a parquet file written before v84 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v84: adding database_size_stats.is_autogrow_all_files");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(84));
+        }
+
+        if (fromVersion < 85)
+        {
+            /* v85 (#9241): query text kept once in query_text_dim, keyed by a content digest (LiteTextDimensions). The step adds the
+               nullable query_text_digest BLOB to query_store_stats, query_stats and plan_correction and rewrites nothing: a row stored before it keeps its
+               inline text, and the vh_ views read the inline text first. Lite only, so the columns come from LiteTextDimensions and not
+               from the added-columns list that follows the payload order shared with Darling. The dimension table itself is created by
+               the table statements that run after the migrations. An older build refuses a file stamped v85 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats, query_stats and plan_correction");
+            await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
+        }
+
+        if (fromVersion < 86)
+        {
+            /* v86 (#9423): mcp_slow_calls, the MCP calls that took two seconds or more. A new table with no row to backfill: a database older
+               than v86 has no slow calls recorded, which is the state before the feature. Non-fatal, matching v69: without the table a row
+               write fails and is logged at Debug, the read tool answers an error, and every other tool is untouched. The table statements
+               that follow retry the CREATE on the next start. An older build refuses a file stamped v86 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v86: adding mcp_slow_calls (the slow MCP call rows)");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateMcpSlowCallsTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v86 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 87)
+        {
+            /* v87 (#9596, twinning Darling's V299): the persisted object usage chain, three new tables (object_usage_snapshots,
+               object_usage_deltas, object_usage_runs) created empty. A database older than v87 has snapshots in index_object_stats and no
+               chain: ObjectUsageChainBuilder backfills each database from its oldest stored snapshot in the background, and get_object_usage
+               reads the full fold of every snapshot until a database's chain covers its window. Non-fatal, matching v86: the table
+               statements that follow retry each CREATE on the next start, and without the tables the builder logs and get_object_usage
+               folds. An older build refuses a file stamped v87 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v87: adding the object usage chain tables");
+            try
+            {
+                foreach (var statement in Schema.ObjectUsageChainTableStatements())
+                {
+                    await ExecuteNonQueryAsync(connection, statement);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v87 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3477,6 +3692,24 @@ public partial class DuckDbInitializer : IDisposable
         (80, "waiting_tasks", "program_name", "VARCHAR"),
         /* #7691: the memory node a resource monitor ring buffer record came from (Darling's V250 column). NULL on a row stored before v81 and on a record that has none. */
         (81, "memory_pressure_events", "memory_node_id", "INTEGER"),
+        /* #8784: the @@SERVERNAME of the instance that answered the index and object stats collection (Darling's V268 column). NULL on a row stored before v82. */
+        (82, "index_object_stats", "answering_server_name", "VARCHAR"),
+        /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
+        (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
+        /* #8881: the tempdb log's space and what holds it (Darling's V269 columns), in the collector's payload order. NULL on a row stored before v83. */
+        (83, "tempdb_stats", "log_total_mb", "DECIMAL(18,2)"),
+        (83, "tempdb_stats", "log_used_mb", "DECIMAL(18,2)"),
+        (83, "tempdb_stats", "log_used_percent", "DECIMAL(5,2)"),
+        (83, "tempdb_stats", "log_reuse_wait_desc", "VARCHAR"),
+        (83, "tempdb_stats", "log_truncation_holdup_reason", "VARCHAR"),
+        (83, "tempdb_stats", "holder_session_id", "INTEGER"),
+        (83, "tempdb_stats", "holder_login_name", "VARCHAR"),
+        (83, "tempdb_stats", "holder_program_name", "VARCHAR"),
+        (83, "tempdb_stats", "holder_begin_time", "TIMESTAMP"),
+        (83, "tempdb_stats", "holder_log_bytes_used", "BIGINT"),
+        (83, "tempdb_stats", "holder_log_bytes_reserved", "BIGINT"),
+        /* #8882: tempdb's autogrow-all-files flag on a data-file row (Darling's V270 column). NULL on a row stored before v84. */
+        (84, "database_size_stats", "is_autogrow_all_files", "BOOLEAN"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
@@ -3602,7 +3835,53 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     public DuckDBConnection CreateConnection()
     {
-        return new DuckDBConnection(ConnectionString);
+        return NewMainConnection();
+    }
+
+    /// <summary>The statement every main connection runs right after it opens (#9362, #9553).</summary>
+    internal const string PrefetchParquetFilesSql = "SET prefetch_all_parquet_files = true";
+
+    private int _prefetchWarned;
+
+    /// <summary>
+    /// The one place a connection to the main database is built (#9553): <see cref="CreateConnection"/> and every open this class
+    /// does itself. The caller still opens it, with <c>Open</c> or <c>OpenAsync</c>, and the <c>StateChange</c> handler runs
+    /// <see cref="PrefetchParquetFilesSql"/> as the open completes. The setting cannot ride in <see cref="ConnectionString"/>
+    /// because the win-arm64 DuckDB library rejects it there and the open fails.
+    /// </summary>
+    private DuckDBConnection NewMainConnection()
+    {
+        var connection = new DuckDBConnection(ConnectionString);
+        connection.StateChange += (sender, e) =>
+        {
+            if (e.CurrentState == ConnectionState.Open && sender is DuckDBConnection opened)
+            {
+                ApplyPrefetchSetting(opened);
+            }
+        };
+        return connection;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="sql"/> (the prefetch SET) on a connection that has just opened. It only makes Parquet reads faster, so
+    /// a DuckDB error is logged once as a Warning and the open carries on, and a performance setting can never stop Lite from
+    /// starting (#9553). Other exceptions, cancellation included, still propagate.
+    /// </summary>
+    internal void ApplyPrefetchSetting(DuckDBConnection connection, string sql = PrefetchParquetFilesSql)
+    {
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+        catch (DuckDBException ex)
+        {
+            if (Interlocked.Exchange(ref _prefetchWarned, 1) == 0)
+            {
+                AppLogger.Warn("DuckDbInitializer", $"Could not set prefetch_all_parquet_files on the main connection, Parquet reads stay at DuckDB's default: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -3696,9 +3975,28 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogInformation("Archive-view refresh sees {Count} tables", tableCount);
         }
 
+        /* #9241: the vh_ views first, because a v_ view over a diverted table reads the hot rows through its vh_ view. A vh_ view that
+           cannot be built (the digest column is missing after a failed add, which the next start retries) leaves that table's v_ view to
+           the table-only fallback below, which reads the inline text. */
+        foreach (var dimTable in LiteTextDimensions.All.Select(d => d.Table).Distinct())
+        {
+            try
+            {
+                using var vhCmd = connection.CreateCommand();
+                vhCmd.CommandText = LiteTextDimensions.CreateViewSql(dimTable);
+                await vhCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to create the text view {View}; v_{Table} reads the table's inline text only", LiteTextDimensions.ViewName(dimTable), dimTable);
+            }
+        }
+
         foreach (var table in ArchivableTables)
         {
             var hasParquetFiles = false;
+            /* The hot rows of the table: its vh_ view when a text column is diverted (#9241), else the table itself. */
+            var hot = LiteTextDimensions.HotSource(table);
             try
             {
                 var parquetGlobs = ArchiveParquetGlobs(table);
@@ -3711,7 +4009,7 @@ public partial class DuckDbInitializer : IDisposable
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
-SELECT *, 'live' AS source FROM {table}
+SELECT *, 'live' AS source FROM {hot}
 UNION ALL BY NAME
 SELECT *, 'archive' AS source FROM read_parquet({parquetSource}, union_by_name=true) p
 WHERE NOT EXISTS (
@@ -3731,7 +4029,7 @@ WHERE NOT EXISTS (
 SELECT *
 FROM
 (
-    SELECT * FROM {table}
+    SELECT * FROM {hot}
     UNION ALL BY NAME
     SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
@@ -3739,15 +4037,15 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
                     }
                     else
                     {
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {hot} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
                     }
                 }
                 else
                 {
                     if (table == "config_alert_log")
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {hot}";
                     else
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {hot}";
                 }
 
                 using var cmd = connection.CreateCommand();
@@ -3881,7 +4179,13 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     /// Gets the actual used data size inside the database by querying pragma_database_size().
     /// Returns null if the query fails (e.g., database busy).
     /// </summary>
-    public double? GetUsedDataSizeMb()
+    public double? GetUsedDataSizeMb() => ReadUsedDataSize().Mb;
+
+    /// <summary>
+    /// <see cref="GetUsedDataSizeMb"/> with the reason when it gave nothing (#9250): the read lock was busy, or the query failed.
+    /// The per-tick size check logs a run of failures with it. The status bar and the other callers use the plain method.
+    /// </summary>
+    internal UsedDataRead ReadUsedDataSize()
     {
         /* Under the read lock (#2594). This was the one periodic connection site that opened without it,
            on the UI's 30-second timer, which put a live handle on the database file at moments the
@@ -3891,7 +4195,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
 
         if (readLock is null)
         {
-            return null;
+            return new UsedDataRead(null, UsedDataReadFailure.LockBusy);
         }
 
         try
@@ -3903,14 +4207,14 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
             var result = cmd.ExecuteScalar();
             if (result != null && result != DBNull.Value)
             {
-                return Convert.ToInt64(result) / (1024.0 * 1024.0);
+                return new UsedDataRead(Convert.ToInt64(result) / (1024.0 * 1024.0), UsedDataReadFailure.None);
             }
         }
         catch
         {
-            /* Database may be busy — fall back to null */
+            /* Database may be busy: fall back to null, with the reason for the caller that logs it */
         }
-        return null;
+        return new UsedDataRead(null, UsedDataReadFailure.QueryFailed);
     }
 
     /// <summary>

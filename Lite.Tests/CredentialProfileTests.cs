@@ -27,7 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// and a temp config dir; each test cleans up. Pure resolution tests use an in-memory IProfileLookup
 /// stub so they don't depend on Credential Manager for the profile non-secret fields.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public class CredentialProfileTests
 {
     private static SqlConnectionStringBuilder Parse(string connStr) => new(connStr);

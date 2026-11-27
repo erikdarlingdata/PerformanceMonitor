@@ -22,23 +22,23 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #3953: a literal end before <c>applied_through</c> reads raw (<see cref="QueryStoreIntervalWide.UseTable"/>
-/// clause 4), so a later re-fetch of the SAME interval past that end cannot clip the answer a bounded read
-/// gives back. This pins one traced identity straddling a literal end on both callers this table serves — the
-/// viewer grid (<see cref="ViewerDataService.GetQueryStoreTopQueriesAsync"/>) and the MCP/web top read
-/// (<see cref="DarlingDataReader.GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>)
-/// — seeded through the real write path so <c>applied_through</c> is the product's own apply-time stamp, not a
-/// forced value.
+/// #3953 and #8570: one traced identity straddling a literal end before <c>applied_through</c>, on both callers
+/// the interval table serves: the viewer grid (<see cref="ViewerDataService.GetQueryStoreTopQueriesAsync"/>) and
+/// the MCP/web top read
+/// (<see cref="DarlingDataReader.GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>).
+/// The interval is collected once inside the window (192) and re-fetched after the literal end (385). Both callers
+/// place the window by the interval's start, so both show its newest snapshot, 385. The grid passes the literal end
+/// to the gate, and <see cref="QueryStoreIntervalWide.UseTable"/> clause 4 sends it to raw with no scan of the
+/// table. The MCP read asks the gate with no literal end and reads the table. The seed goes through the real write
+/// path, so <c>applied_through</c> is the product's own apply-time stamp, not a forced value.
 ///
 /// <para><b>Isolating clause 4.</b> <see cref="SeedStraddleAsync"/>'s own coverage bookkeeping
-/// (<c>QueryStoreIntervalWide.EnsureCoverageSql</c>) raises <c>filled_since</c> to the wall clock the FIRST apply
-/// ran at — not to <see cref="WindowStart"/>'s own, much earlier, historical span — so left alone,
-/// <c>filled_since &gt; WindowStart</c> and clause 2 alone sends both reads to raw: the pin's own 192/192 would
-/// pass whether or not clause 4 does anything. This test forces <c>filled_since</c> back below
-/// <see cref="WindowStart"/> after seeding (the same move <c>QueryStoreIntervalWideGridLiveTests</c> makes for
-/// the identical reason), so every clause EXCEPT 4 passes, and adds a positive control — the same seeded store,
-/// read with an open end — that proves the table path is live for this identity before trusting that the
-/// literal-end reads' 192/zero-scans means clause 4 specifically.</para>
+/// (<c>QueryStoreIntervalWide.EnsureCoverageSql</c>) raises <c>filled_since</c> to the wall clock the first apply
+/// ran at, not to <see cref="WindowStart"/>'s much earlier span, so left alone clause 2 would send both reads to
+/// raw. This test forces <c>filled_since</c> back below <see cref="WindowStart"/> after seeding (the same move
+/// <c>QueryStoreIntervalWideGridLiveTests</c> makes for the same reason), so every clause except 4 passes, and
+/// adds a positive control (the same seeded store, read with an open end) that proves the table path is live for
+/// this identity before the grid's zero scans are read as clause 4's doing.</para>
 /// </summary>
 /* #1776 own-store: reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and
    then works entirely inside it, the same shape as QueryStoreIntervalWideGridLiveTests and
@@ -50,16 +50,14 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
     private static readonly DateTime WindowStart = new(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime WindowEnd = WindowStart.AddDays(3);
-    /* Between the two collections below: raw's own $3 keeps the 192 snapshot and drops the 385 one, and
-       clause 4 (a literal end this far in the past is always before applied_through, the real wall clock the
-       apply below stamps it at) sends both callers to raw before either ever opens
-       collect.query_store_interval_wide. */
+    /* Between the two collections below. A literal end this far in the past is always before applied_through (the
+       real wall clock the apply below stamps), so clause 4 refuses the table to a gate asked with it. */
     private static readonly DateTime LiteralEnd = WindowStart.AddDays(2);
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task LiteralEndBeforeAppliedThrough_ReadsRaw_OnBothCallers_WithZeroWideTableScans()
+    public async Task LiteralEndBeforeAppliedThrough_TheGridReadsRaw_TheMcpReadReadsTheTable_AndBothShowTheNewestSnapshot()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 literal-end straddle live test.");
@@ -166,19 +164,19 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         var gridRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, LiteralEnd, TestTop, null, literalEndUtc: LiteralEnd);
         var gridRow = gridRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
         /* #7776: the grid places its window by the interval's start (day0, inside the window), so the re-fetch collected after
-           LiteralEnd is the interval's newest state and the grid shows it: 385, the answer the table path gives. Before, the grid
-           windowed on collection_time and showed the 192 snapshot. */
+           LiteralEnd is the interval's newest state and the grid shows it: 385, the answer the table path gives. */
         Assert.Equal(385, gridRow.TotalExecutions);
+        var afterGrid = await WideTableScanCountsAsync();
+        Assert.Equal(before, afterGrid);
 
-        /* The MCP/web top read: endUtc doubles as both the window end and the gate's literal end (#3953's own
-           doc comment on DarlingDataReader.GetQueryStoreTopAsync), so an explicit as_of/end IS this parameter. */
+        /* The MCP/web top read at the same bounded end (an explicit as_of): it asks the gate with no literal end (#8570), so it
+           reads the table, and (#7814) its raw read would place the window by the interval's start too: the same 385. */
         var mcpRows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, ServerId, WindowStart, LiteralEnd, TestTop, null, ct);
         var mcpRow = mcpRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
-        /* #7814: the MCP read places the window by the interval's start too, so it shows the same newest state (385) as the grid above. */
         Assert.Equal(385, mcpRow.TotalExecutions);
-
-        var after = await WideTableScanCountsAsync();
-        Assert.Equal(before, after);
+        var afterMcp = await WideTableScanCountsAsync();
+        Assert.True(afterMcp.SeqScan + afterMcp.IdxScan > afterGrid.SeqScan + afterGrid.IdxScan,
+            "the MCP read at a literal end before applied_through must read the wide table");
     }
 
     /// <summary>

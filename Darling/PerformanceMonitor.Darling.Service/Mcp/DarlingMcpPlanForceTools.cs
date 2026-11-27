@@ -54,6 +54,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal const string BadLoginTime = "bad_login_time";
     internal const string ServerClockUnknown = "server_clock_unknown";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "force_query_store_plan"), Description(
         "Agent arm, SQL Server only: forces one Query Store plan for a query on the monitored server (replaces another plan of the query that is forced now). Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
@@ -74,6 +75,7 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunAsync(postgres, ownerSource?.Read(), logger, force: true, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
@@ -93,6 +95,7 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunAsync(postgres, ownerSource?.Read(), logger, force: false, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "evict_cached_plan"), Description(
         "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
         "<<GUIDE>>" +
@@ -112,16 +115,18 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "kill_session"), Description(
         "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: returns what the server says about the session and kills nothing; a write needs dry_run=false. Needs agent_action at Level 3, that server's kill_session switch (ships off) and a remediation login with kill rights (grants in the guide). Refuses Darling's own sessions, session_gone and session_reused. " +
         "<<GUIDE>>" +
-        "Grants the remediation login needs. SQL Server: ALTER ANY CONNECTION, which can kill any session on that server. Azure SQL Database: a user in each database it may kill in, with VIEW DATABASE STATE and KILL DATABASE CONNECTION. PostgreSQL: pg_signal_backend and pg_read_all_stats. " +
+        "Grants the remediation login needs. SQL Server: ALTER ANY CONNECTION, which can kill any session on that server, and VIEW SERVER PERFORMANCE STATE (SQL Server 2022 and later) or VIEW SERVER STATE (earlier versions), which the session and transaction views need. Azure SQL Database: a user in each database it may kill in, with VIEW DATABASE STATE and KILL DATABASE CONNECTION. PostgreSQL: pg_signal_backend and pg_read_all_stats. " +
         "SQL Server: take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back unchanged). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
         "Azure SQL Database: also pass database_name, the database_name of the get_blocking row you read. A session is reached only from inside its own database, so the kill connects there (never master), read-write, and checks that the session's database is that one. The database must be the server's registered database or one Darling collected a blocking row from in the last day, and not excluded. Hyperscale: the kill reaches only the primary; a session on a named replica or a read-only secondary answers session_gone. " +
         "PostgreSQL: pass backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits, and session_id as the pid the same read returned (root_pid or pid); leave login_time out. backend_id is the session's start time in epoch seconds followed by its pid in seven digits, and session_id must agree with it. The pid and the start second are checked in the SAME statement that calls pg_terminate_backend, so a pid given to a session that started in another second is never ended. On Windows a pid can come back within about a second, so there a new session can share the pid and the start second. A login that cannot signal the session (no pg_signal_backend, a superuser's session, or no pg_read_all_stats to see its start time) is refused before any kill is tried. Only client sessions are ended. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
+        "On SQL Server and Azure SQL Database a dry run also returns the exact KILL statement a write would run, in statement. " +
         "On SQL Server the answer lists the session's login_name, host_name, program_name, database_name (the database it is in now), status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
-        "Refusals: Azure SQL Database only: database_required, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. SQL Server and Azure SQL Database: database_excluded (the database is excluded in the server's entry: on SQL Server the database the session is in now, read in the same batch as its login_time; on Azure SQL Database the database_name passed), database_changed (the session's running request moved it to another database since the dry run; nothing was killed, dry run it again). SQL Server only: session_database_unknown (the server's entry excludes databases and the remediation login cannot name the session's database, as when VIEW ANY DATABASE is denied; a person grants it, or gives the login a user in that database). Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), session_changed (the session ran something new since the dry run: its last request ended at another time on SQL Server, or its transaction or state changed on PostgreSQL; nothing was killed, dry run it again), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
+        "Refusals: Azure SQL Database only: database_required, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. SQL Server and Azure SQL Database: database_excluded (the database is excluded in the server's entry: on SQL Server the database the session is in now, read in the same batch as its login_time; on Azure SQL Database the database_name passed), database_changed (the session's running request moved it to another database since the dry run; nothing was killed, dry run it again). SQL Server only: session_database_unknown (the server's entry excludes databases and the remediation login cannot name the session's database, as when VIEW ANY DATABASE is denied; a person grants it, or gives the login a user in that database). Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), session_changed (the session ran something new since the dry run: its last request ended at another time on SQL Server, or its transaction or state changed on PostgreSQL; nothing was killed, dry run it again), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), kill_view_permission_denied (SQL Server: the login lacks the VIEW grant above, checked before any session is read; the message names the grant for that server's version), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or outcome_unknown (the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
@@ -244,7 +249,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, plan_id.ToString(CultureInfo.InvariantCulture), database_name.Trim());
 
             /* 1: SQL Server only. A PostgreSQL target is refused with its own reason, before the gate is asked, and the refusal is journaled. */
-            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 var problem = InvestigationToolCore.ParseAgentAction(agent_action, out var parsed);
@@ -442,7 +447,7 @@ public sealed partial class DarlingMcpPlanForceTools
             }
 
             /* 2: SQL Server only. */
-            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
@@ -534,7 +539,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
-            var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (engineEdition, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
                 return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct, agentTokenName, namedAgentNames);
 
@@ -598,7 +603,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var before = prepared.Before;
             var warnings = prepared.Warnings;
             if (dry_run)
-                return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+                return KillDryRunAnswer(dry, before, warnings);
 
             /* #7109: the action needs a person's approval. The prepare step ran the dry batch; store a proposal with its facts and kill nothing. */
             if (decision.NeedsApproval)
@@ -866,6 +871,10 @@ public sealed partial class DarlingMcpPlanForceTools
         utc = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
         return true;
     }
+
+    /// <summary>The SQL Server and Azure SQL Database kill's dry run answer (#9786): the session's facts and, under <c>statement</c> as every other action's dry run carries it, the exact <c>KILL</c> a write would run.</summary>
+    internal static string KillDryRunAnswer(RemediationResult dry, object? before, object? warnings) =>
+        Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, statement = dry.Statement, session = before, warnings });
 
     /// <summary>A refusal or a failure of the kill batch. A reused id answers nothing about the session that has it now: not its login time, not its facts.</summary>
     private static string KillNotDone(RemediationResult result, ServerClock clock, bool dryRun)
@@ -1211,9 +1220,9 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."
             + (string.IsNullOrEmpty(guidance) ? "" : " " + guidance));
 
-    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
+    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632). An entry holding <c>*</c> is a pattern (#9050).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
-        excluded is not null && excluded.Any(e => string.Equals(e?.Trim(), database, StringComparison.OrdinalIgnoreCase));
+        PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(excluded, database);
 
     internal const string AzureDatabaseRequiredMessage =
         "This server is an Azure SQL Database, where a session is reached only from inside its own database: pass database_name, the database_name of the get_blocking row you read (never master). Nothing was run.";

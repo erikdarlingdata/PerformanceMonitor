@@ -454,26 +454,37 @@ public sealed class EmailSendCore
     /// message on failure. Static — the test-send path supplies its own <see cref="IAlertSettings"/>
     /// (Lite: <c>new AppAlertSettings()</c>; Dashboard: the transient form-values adapter, MOD-1).
     /// </summary>
-    public static async Task<string?> SendTestEmailAsync(IAlertSettings settings, AlertBranding branding)
+    public static async Task<string?> SendTestEmailAsync(IAlertSettings settings, AlertBranding branding) =>
+        (await SendTestEmailDetailedAsync(settings, branding)).Error;
+
+    /// <summary>
+    /// The test email with its result (#9636): the SMTP status the mail server reported and the exception's type on a failure, as
+    /// well as the text. The send has the same 30 second bound as an alert's email.
+    /// </summary>
+    public static async Task<TestSendResult> SendTestEmailDetailedAsync(IAlertSettings settings, AlertBranding branding)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(settings.SmtpServer))
-                return "SMTP server is not configured.";
+                return TestSendResult.Refused("SMTP server is not configured.", notConfigured: true);
 
             if (string.IsNullOrWhiteSpace(settings.SmtpFromAddress))
-                return "From address is not configured.";
+                return TestSendResult.Refused("From address is not configured.", notConfigured: true);
 
             if (string.IsNullOrWhiteSpace(settings.SmtpRecipients))
-                return "No recipients configured.";
+                return TestSendResult.Refused("No recipients configured.", notConfigured: true);
 
             var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildTestEmail(branding);
             await SendEmailAsync(settings, "[SQL Monitor] Test Email", htmlBody, plainTextBody);
-            return null;
+            return new TestSendResult(true, null, null, null, SmtpStatus: "Ok");
+        }
+        catch (SmtpException ex)
+        {
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name, SmtpStatus: ex.StatusCode.ToString());
         }
         catch (Exception ex)
         {
-            return ex.Message;
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 

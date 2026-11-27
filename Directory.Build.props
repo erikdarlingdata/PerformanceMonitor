@@ -15,7 +15,7 @@
     agree with the XML read, so the ordering is enforced rather than remembered.
   -->
   <PropertyGroup>
-    <Version>3.13.0</Version>
+    <Version>3.14.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -52,6 +52,27 @@
     ENTRY assembly, and DarlingCliCommands.ProductVersion reads the service assembly, which is a shipped
     app and carries the product version either way.
   -->
+
+  <!--
+    #9591: the commit a build was made from rides as an AssemblyMetadata attribute named SourceCommit, apart from the
+    informational version, so that version stays the clean semver the suppression above keeps (#3222).
+    ProductBuildText.CommitForAssembly reads it for the front door's /version and for the commit column of the service-start
+    history.
+
+    A target rather than an item group at evaluation time: SourceRevisionId is empty while the project is evaluated. The SDK's
+    source-control target sets it while the build runs, from the git checkout, so an item group conditioned on it at evaluation
+    would see it empty in every checkout and stamp nothing. The SDK reads the AssemblyMetadata items when it generates the assembly
+    attributes, after InitializeSourceControlInformation, and AfterTargets on that target runs this one in between.
+
+    A build that has no source revision (a checkout-less docker build context, a source archive) adds no item, so an empty value is
+    never stamped. Such a build passes the commit on the command line (-p:SourceRevisionId=...), which the SDK keeps: Darling/Dockerfile
+    takes it as a build argument. A project type that does not define InitializeSourceControlInformation never runs this target.
+  -->
+  <Target Name="AddSourceCommitAssemblyMetadata" AfterTargets="InitializeSourceControlInformation">
+    <ItemGroup Condition="'$(SourceRevisionId)' != ''">
+      <AssemblyMetadata Include="SourceCommit" Value="$(SourceRevisionId)" />
+    </ItemGroup>
+  </Target>
 
   <!--
     #6978: the warning suppressions shared by every project outside deprecated/, declared once. Each code

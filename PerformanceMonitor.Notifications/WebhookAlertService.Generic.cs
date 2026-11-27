@@ -20,6 +20,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -694,7 +695,7 @@ public partial class WebhookAlertService
         }
         catch (JsonException ex)
         {
-            error = $"Webhook headers are not valid JSON: {ex.Message}";
+            error = JsonParseError.Describe("Webhook headers", ex);
             return false;
         }
     }
@@ -727,7 +728,7 @@ public partial class WebhookAlertService
         }
         catch (JsonException ex)
         {
-            error = $"Webhook body template did not produce valid JSON: {ex.Message}";
+            error = JsonParseError.Describe("Webhook body template output", ex);
             return false;
         }
     }

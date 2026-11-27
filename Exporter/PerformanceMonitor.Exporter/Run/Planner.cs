@@ -238,9 +238,17 @@ public static class Planner
             "--statement-timeout-seconds", s.StatementTimeoutSeconds.ToString(CultureInfo.InvariantCulture),
             "--duckdb-memory-limit", s.DuckdbMemoryLimit]);
         if (s.DuckdbThreads is { } threads) a.AddRange(["--duckdb-threads", threads.ToString(CultureInfo.InvariantCulture)]);
-        if (!string.IsNullOrEmpty(s.Upload)) a.AddRange(["--upload", s.Upload]);
-        // The order is fixed: --aws-region, --state-dir, then --application-name, right after --upload.
-        if (!string.IsNullOrEmpty(s.AwsRegion)) a.AddRange(["--aws-region", s.AwsRegion]);
+        // The order is fixed: --aws-region, --state-dir, then --application-name, right after --upload. A destination the
+        // --upload value cannot express takes --upload-destination in the same place, and the child reads it from its config.
+        if (s.UploadDestination)
+        {
+            a.Add("--upload-destination");
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(s.Upload)) a.AddRange(["--upload", s.Upload]);
+            if (!string.IsNullOrEmpty(s.AwsRegion)) a.AddRange(["--aws-region", s.AwsRegion]);
+        }
         if (!string.IsNullOrEmpty(s.ExportStateDir)) a.AddRange(["--state-dir", s.ExportStateDir]);
         if (!string.IsNullOrEmpty(s.ApplicationName)) a.AddRange(["--application-name", s.ApplicationName]);
         if (!string.IsNullOrEmpty(c.Tables)) a.AddRange(["--tables", c.Tables]);
@@ -251,6 +259,7 @@ public static class Planner
         if (!string.IsNullOrEmpty(s.PgUser)) a.AddRange(["--pg-user", s.PgUser, "--pg-credential-file", s.PgCredentialFile!]);
         if (!string.IsNullOrEmpty(s.ProcedurePlanReuse)) a.AddRange(["--procedure-plan-reuse", s.ProcedurePlanReuse]);
         if (!string.IsNullOrEmpty(s.QueryStoreSource)) a.AddRange(["--query-store-source", s.QueryStoreSource]);
+        if (s.Verbose) a.Add("--verbose");
         a.RemoveAll(string.IsNullOrEmpty);
         return a;
     }

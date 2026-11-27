@@ -67,12 +67,26 @@ public static class ComposeLimits
 
     /// <summary>
     /// The most raw <c>collect.procedure_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811).
-    /// MEASURED in the field like <see cref="MaxRawQueryStatsRows"/>: a 24 h fleet procedure_stats panel reads 17.3 M to 20.5 M rows a
-    /// day (19.7 M on the last full day) and finishes today in at most 20.8 s, about 1.1 us per row (20.8 s over 19.7 M); the 45 s
-    /// budget over that is about 40 million. Same rule: a false refusal is user-visible breakage, and the refusal is only for windows
-    /// that would have run to the statement timeout.
+    /// The cap is a calibration against loaded cost. The earlier field measurement (#5811) is a 24 h fleet procedure_stats panel that read
+    /// 17.3 M to 20.5 M rows (19.7 M on the last full day) and finished in at most 20.8 s, about 1.1 us per row; at that cost the
+    /// 45 s budget would allow about 40 million rows. 15 million is the same budget at 3 us per row instead. The cap uses that
+    /// figure because per-row costs measured on large stores under collection load reach it (query_stats, <see cref="MaxRawQueryStatsRows"/>,
+    /// measured about 2.9 us per row), and that earlier figure does not. The estimate counts collected rows, so it runs above the rows
+    /// the store keeps. A panel past the cap refuses at once with the narrower-window text instead of running past the budget, and
+    /// that covers a window the route cannot serve, because its count guard tripped or the source is not yet on the route (#9357).
+    /// A false refusal is user-visible breakage, so the cap only refuses windows that would have run past the budget at the loaded cost.
+    /// The cap is for an UNFILTERED statement: one with an <c>eq</c> filter keeps <see cref="MaxRawFilteredProcedureStatsRows"/>.
     /// </summary>
-    public const long MaxRawProcedureStatsRows = 40_000_000;
+    public const long MaxRawProcedureStatsRows = 15_000_000;
+
+    /// <summary>
+    /// The limit for a raw <c>procedure_stats</c> statement that carries at least one <c>eq</c> filter (one value or a list), on any
+    /// dimension (#9357). The raw estimate counts the whole collector's rows and cannot see filters, so a filtered statement keeps
+    /// the limit it had before #9357 and is never refused where it ran before: a one-procedure line over a day was measured far
+    /// under the 45 s budget although the estimate for the same window is above <see cref="MaxRawProcedureStatsRows"/>.
+    /// <c>query_stats</c> has no such exception.
+    /// </summary>
+    public const long MaxRawFilteredProcedureStatsRows = 40_000_000;
 
     /// <summary>
     /// The weight of an hour served from the rollup of the wide table (<c>collect.query_store_compose_stamp</c>), against 1.0

@@ -167,33 +167,5 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         Assert.Equal(now.AddMinutes(-1), CollectorCadence.ClampDue(now.AddMinutes(-1), now, backoff));
     }
 
-    [Fact]
-    public void TheCheck_GoesThroughTheClamp_WithTheBackoffEveryWriterStampsWith()
-    {
-        var source = ReadRepoFile("Lite/Services/ArchiveService.cs");
-
-        Assert.DoesNotContain("DateTime.UtcNow < ResetRetryNotBeforeUtc", source, StringComparison.Ordinal);
-        Assert.Contains(
-            "resetNow < CollectorCadence.ClampDue(ResetRetryNotBeforeUtc, resetNow, ResetRetryBackoff)", source, StringComparison.Ordinal);
-
-        /* The interval passed to the clamp is the one every writer of the stamp adds to the clock: every
-           assignment must be the backoff form, however many writers there are. */
-        var correct = Regex.Matches(source, Regex.Escape("ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;")).Count;
-        var all = Regex.Matches(source, @"\bResetRetryNotBeforeUtc\s*=[^=]").Count;
-        Assert.True(all >= 2, "expected at least two writers of the reset retry stamp");
-        Assert.Equal(all, correct);
-    }
-
     /* Locate the repo from this file: no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
 }

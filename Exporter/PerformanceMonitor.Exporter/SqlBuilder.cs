@@ -54,6 +54,20 @@ public static class SqlBuilder
     /// the counter, a counter reset, or a collection gap), and the delta columns are 0 in
     /// that case, so summing them in would silently understate the hour.
     ///
+    /// Beyond the grain's sums and per-sample min/max, every row also carries the plan's DMV attributes as of the LAST
+    /// counted sample of the hour ("counted" means a sample the sums cover, so not an interval-0 one). ALL of them come from
+    /// ONE source row: several rows share a collection_time inside one group (the collector keys a row by sql_handle, statement
+    /// offsets and plan_handle, none of which is in the grain), so the row is picked by a total order, `collection_time`, then
+    /// `plan_handle`, `sql_handle`, `statement_start_offset`, `statement_end_offset`, a NULL sorting before any value. Here that
+    /// is `array_agg(c ORDER BY ...)[1]` per column; in DuckDB one `arg_max` over a struct of every attribute, because a
+    /// per-column `arg_max` would break the tie column by column (and skips a NULL attribute, which a NULL in the last
+    /// sample must not do). The attributes are `creation_time`, `plan_generation_num`, `sql_handle`, `plan_handle`, the statement offsets, the lifetime
+    /// totals and the per-execution `min_*`/`max_*` pairs, under the store's own column names. Those `min_*`/`max_*` are NOT
+    /// `worker_time_min`/`worker_time_max` above, which are the smallest and largest per-sample DELTA: they are DMV lifetime
+    /// values, since the plan was cached (`creation_time` says when that lifetime began), as of the hour's last sample.
+    /// They are attributes, not part of the grain, so the row count per hour is the same with or without them. The
+    /// handles are the hex text the store holds, exported as is so they compare equal to the same column elsewhere.
+    ///
     /// kept only as a test oracle. No code path passes this to an NpgsqlCommand any more --
     /// <see cref="QueryStatsHourlyDuckDbSql"/> computes the identical rollup in DuckDB, over
     /// the single query_stats read shared with plan_shape/query_text (<see
@@ -61,16 +75,55 @@ public static class SqlBuilder
     /// </summary>
     public const string QueryStatsHourlySql = """
         /* darling-export:query_stats_hourly */
-        SELECT server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time) AS hour,
+        SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time) AS hour,
                sum(delta_execution_count)::bigint AS execution_count_sum,
                sum(delta_worker_time)::bigint AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
                sum(delta_elapsed_time)::bigint AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
                sum(delta_logical_reads)::bigint AS logical_reads_sum, sum(delta_logical_writes)::bigint AS logical_writes_sum,
                sum(delta_physical_reads)::bigint AS physical_reads_sum, sum(delta_rows)::bigint AS rows_sum, sum(delta_spills)::bigint AS spills_sum,
-               sum(sample_interval_seconds)::bigint AS sample_interval_seconds_sum, count(*) AS sample_count
+               sum(sample_interval_seconds)::bigint AS sample_interval_seconds_sum, count(*) AS sample_count,
+               (array_agg(creation_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS creation_time,
+               (array_agg(last_execution_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS last_execution_time,
+               (array_agg(plan_generation_num ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS plan_generation_num,
+               (array_agg(sql_handle ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS sql_handle,
+               (array_agg(plan_handle ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS plan_handle,
+               (array_agg(statement_start_offset ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS statement_start_offset,
+               (array_agg(statement_end_offset ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS statement_end_offset,
+               (array_agg(execution_count ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS execution_count,
+               (array_agg(total_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_worker_time,
+               (array_agg(total_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_elapsed_time,
+               (array_agg(total_logical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_logical_reads,
+               (array_agg(total_logical_writes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_logical_writes,
+               (array_agg(total_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_physical_reads,
+               (array_agg(total_clr_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_clr_time,
+               (array_agg(total_rows ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_rows,
+               (array_agg(total_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS total_spills,
+               (array_agg(min_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_worker_time,
+               (array_agg(max_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_worker_time,
+               (array_agg(min_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_elapsed_time,
+               (array_agg(max_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_elapsed_time,
+               (array_agg(min_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_physical_reads,
+               (array_agg(max_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_physical_reads,
+               (array_agg(min_rows ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_rows,
+               (array_agg(max_rows ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_rows,
+               (array_agg(min_dop ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_dop,
+               (array_agg(max_dop ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_dop,
+               (array_agg(min_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_grant_kb,
+               (array_agg(max_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_grant_kb,
+               (array_agg(min_used_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_used_grant_kb,
+               (array_agg(max_used_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_used_grant_kb,
+               (array_agg(min_ideal_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_ideal_grant_kb,
+               (array_agg(max_ideal_grant_kb ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_ideal_grant_kb,
+               (array_agg(min_reserved_threads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_reserved_threads,
+               (array_agg(max_reserved_threads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_reserved_threads,
+               (array_agg(min_used_threads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_used_threads,
+               (array_agg(max_used_threads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_used_threads,
+               (array_agg(min_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS min_spills,
+               (array_agg(max_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS max_spills,
+               (array_agg(query_plan_xml_bytes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC, coalesce(statement_start_offset, -2147483648) DESC, coalesce(statement_end_offset, -2147483648) DESC))[1] AS query_plan_xml_bytes
         FROM collect.query_stats
         WHERE collection_time >= @from AND collection_time < @to AND sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time)
+        GROUP BY server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time)
         """;
 
     /// <summary>
@@ -84,12 +137,20 @@ public static class SqlBuilder
     /// </summary>
     public const string QueryStatsWindowSql = """
         /* darling-export:query_stats.window */
-        SELECT server_name, database_name, query_hash, query_plan_hash, collection_time,
+        SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, collection_time,
                sample_interval_seconds,
                delta_execution_count, delta_worker_time, delta_elapsed_time,
                delta_logical_reads, delta_logical_writes, delta_physical_reads,
                delta_rows, delta_spills,
-               query_plan_digest, query_text_digest
+               query_plan_digest, query_text_digest,
+               creation_time, last_execution_time, plan_generation_num, sql_handle, plan_handle,
+               statement_start_offset, statement_end_offset,
+               execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_logical_writes,
+               total_physical_reads, total_clr_time, total_rows, total_spills,
+               min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time, min_physical_reads, max_physical_reads,
+               min_rows, max_rows, min_dop, max_dop, min_grant_kb, max_grant_kb, min_used_grant_kb, max_used_grant_kb,
+               min_ideal_grant_kb, max_ideal_grant_kb, min_reserved_threads, max_reserved_threads,
+               min_used_threads, max_used_threads, min_spills, max_spills, query_plan_xml_bytes
         FROM collect.query_stats
         WHERE collection_time >= @from AND collection_time < @to
         """;
@@ -103,16 +164,21 @@ public static class SqlBuilder
     /// casts raise on overflow rather than silently wrapping.
     /// </summary>
     public const string QueryStatsHourlyDuckDbSql = """
-        SELECT server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time) AS hour,
-               CAST(sum(delta_execution_count) AS BIGINT) AS execution_count_sum,
-               CAST(sum(delta_worker_time) AS BIGINT) AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
-               CAST(sum(delta_elapsed_time) AS BIGINT) AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
-               CAST(sum(delta_logical_reads) AS BIGINT) AS logical_reads_sum, CAST(sum(delta_logical_writes) AS BIGINT) AS logical_writes_sum,
-               CAST(sum(delta_physical_reads) AS BIGINT) AS physical_reads_sum, CAST(sum(delta_rows) AS BIGINT) AS rows_sum, CAST(sum(delta_spills) AS BIGINT) AS spills_sum,
-               CAST(sum(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds_sum, count(*) AS sample_count
-        FROM query_stats_raw
-        WHERE sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time)
+        SELECT * EXCLUDE (last_row), last_row.*
+        FROM (
+            SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time) AS hour,
+                   CAST(sum(delta_execution_count) AS BIGINT) AS execution_count_sum,
+                   CAST(sum(delta_worker_time) AS BIGINT) AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
+                   CAST(sum(delta_elapsed_time) AS BIGINT) AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
+                   CAST(sum(delta_logical_reads) AS BIGINT) AS logical_reads_sum, CAST(sum(delta_logical_writes) AS BIGINT) AS logical_writes_sum,
+                   CAST(sum(delta_physical_reads) AS BIGINT) AS physical_reads_sum, CAST(sum(delta_rows) AS BIGINT) AS rows_sum, CAST(sum(delta_spills) AS BIGINT) AS spills_sum,
+                   CAST(sum(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds_sum, count(*) AS sample_count,
+                   arg_max(struct_pack(creation_time := creation_time, last_execution_time := last_execution_time, plan_generation_num := plan_generation_num, sql_handle := sql_handle, plan_handle := plan_handle, statement_start_offset := statement_start_offset, statement_end_offset := statement_end_offset, execution_count := execution_count, total_worker_time := total_worker_time, total_elapsed_time := total_elapsed_time, total_logical_reads := total_logical_reads, total_logical_writes := total_logical_writes, total_physical_reads := total_physical_reads, total_clr_time := total_clr_time, total_rows := total_rows, total_spills := total_spills, min_worker_time := min_worker_time, max_worker_time := max_worker_time, min_elapsed_time := min_elapsed_time, max_elapsed_time := max_elapsed_time, min_physical_reads := min_physical_reads, max_physical_reads := max_physical_reads, min_rows := min_rows, max_rows := max_rows, min_dop := min_dop, max_dop := max_dop, min_grant_kb := min_grant_kb, max_grant_kb := max_grant_kb, min_used_grant_kb := min_used_grant_kb, max_used_grant_kb := max_used_grant_kb, min_ideal_grant_kb := min_ideal_grant_kb, max_ideal_grant_kb := max_ideal_grant_kb, min_reserved_threads := min_reserved_threads, max_reserved_threads := max_reserved_threads, min_used_threads := min_used_threads, max_used_threads := max_used_threads, min_spills := min_spills, max_spills := max_spills, query_plan_xml_bytes := query_plan_xml_bytes),
+                           (collection_time, coalesce(plan_handle, ''), coalesce(sql_handle, ''), coalesce(statement_start_offset, -2147483648), coalesce(statement_end_offset, -2147483648))) AS last_row
+            FROM query_stats_raw
+            WHERE sample_interval_seconds IS DISTINCT FROM 0
+            GROUP BY server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time)
+        )
         ORDER BY server_name, hour
         """;
 
@@ -129,7 +195,33 @@ public static class SqlBuilder
                sum(delta_elapsed_time)::bigint AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
                sum(delta_logical_reads)::bigint AS logical_reads_sum, sum(delta_logical_writes)::bigint AS logical_writes_sum,
                sum(delta_physical_reads)::bigint AS physical_reads_sum, sum(delta_spills)::bigint AS spills_sum,
-               sum(sample_interval_seconds)::bigint AS sample_interval_seconds_sum, count(*) AS sample_count
+               sum(sample_interval_seconds)::bigint AS sample_interval_seconds_sum, count(*) AS sample_count,
+               (array_agg(object_type ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS object_type,
+               (array_agg(cached_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS cached_time,
+               (array_agg(module_modify_date ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS module_modify_date,
+               (array_agg(sql_handle ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS sql_handle,
+               (array_agg(plan_handle ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS plan_handle,
+               (array_agg(last_execution_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS last_execution_time,
+               (array_agg(execution_count ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS execution_count,
+               (array_agg(total_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_worker_time,
+               (array_agg(total_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_elapsed_time,
+               (array_agg(total_logical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_logical_reads,
+               (array_agg(total_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_physical_reads,
+               (array_agg(total_logical_writes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_logical_writes,
+               (array_agg(total_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS total_spills,
+               (array_agg(min_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_worker_time,
+               (array_agg(max_worker_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_worker_time,
+               (array_agg(min_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_elapsed_time,
+               (array_agg(max_elapsed_time ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_elapsed_time,
+               (array_agg(min_logical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_logical_reads,
+               (array_agg(max_logical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_logical_reads,
+               (array_agg(min_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_physical_reads,
+               (array_agg(max_physical_reads ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_physical_reads,
+               (array_agg(min_logical_writes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_logical_writes,
+               (array_agg(max_logical_writes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_logical_writes,
+               (array_agg(min_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS min_spills,
+               (array_agg(max_spills ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS max_spills,
+               (array_agg(query_plan_xml_bytes ORDER BY collection_time DESC, coalesce(plan_handle, ''::text) DESC, coalesce(sql_handle, ''::text) DESC))[1] AS query_plan_xml_bytes
         FROM collect.procedure_stats
         WHERE collection_time >= @from AND collection_time < @to AND sample_interval_seconds IS DISTINCT FROM 0
         GROUP BY server_name, database_name, schema_name, object_name, date_trunc('hour', collection_time)
@@ -153,6 +245,11 @@ public static class SqlBuilder
                delta_execution_count, delta_worker_time, delta_elapsed_time,
                delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_spills,
                query_plan_digest, plan_handle, cached_time,
+               module_modify_date, sql_handle, last_execution_time, execution_count,
+               total_worker_time, total_elapsed_time, total_logical_reads, total_physical_reads, total_logical_writes, total_spills,
+               min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+               min_logical_reads, max_logical_reads, min_physical_reads, max_physical_reads,
+               min_logical_writes, max_logical_writes, min_spills, max_spills, query_plan_xml_bytes,
                (query_plan_xml IS NULL)            AS plan_xml_is_null,
                (query_plan_xml_bytes IS NOT NULL)  AS has_plan_xml_bytes
         FROM collect.procedure_stats
@@ -168,16 +265,22 @@ public static class SqlBuilder
     /// rather than silently wrapping.
     /// </summary>
     public const string ProcedureStatsHourlyDuckDbSql = """
-        SELECT server_name, database_name, schema_name, object_name, date_trunc('hour', collection_time) AS hour,
-               CAST(sum(delta_execution_count) AS BIGINT) AS execution_count_sum,
-               CAST(sum(delta_worker_time) AS BIGINT) AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
-               CAST(sum(delta_elapsed_time) AS BIGINT) AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
-               CAST(sum(delta_logical_reads) AS BIGINT) AS logical_reads_sum, CAST(sum(delta_logical_writes) AS BIGINT) AS logical_writes_sum,
-               CAST(sum(delta_physical_reads) AS BIGINT) AS physical_reads_sum, CAST(sum(delta_spills) AS BIGINT) AS spills_sum,
-               CAST(sum(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds_sum, count(*) AS sample_count
-        FROM procedure_stats_raw
-        WHERE sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY server_name, database_name, schema_name, object_name, date_trunc('hour', collection_time)
+        SELECT * EXCLUDE (last_row), last_row.*
+        FROM (
+            SELECT server_name, database_name, schema_name, object_name, date_trunc('hour', collection_time) AS hour,
+                   CAST(sum(delta_execution_count) AS BIGINT) AS execution_count_sum,
+                   CAST(sum(delta_worker_time) AS BIGINT) AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
+                   CAST(sum(delta_elapsed_time) AS BIGINT) AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
+                   CAST(sum(delta_logical_reads) AS BIGINT) AS logical_reads_sum, CAST(sum(delta_logical_writes) AS BIGINT) AS logical_writes_sum,
+                   CAST(sum(delta_physical_reads) AS BIGINT) AS physical_reads_sum, CAST(sum(delta_spills) AS BIGINT) AS spills_sum,
+                   CAST(sum(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds_sum, count(*) AS sample_count,
+                   arg_max(struct_pack(object_type := object_type, cached_time := cached_time, module_modify_date := module_modify_date, sql_handle := sql_handle, plan_handle := plan_handle, last_execution_time := last_execution_time, execution_count := execution_count, total_worker_time := total_worker_time, total_elapsed_time := total_elapsed_time, total_logical_reads := total_logical_reads, total_physical_reads := total_physical_reads, total_logical_writes := total_logical_writes, total_spills := total_spills, min_worker_time := min_worker_time, max_worker_time := max_worker_time, min_elapsed_time := min_elapsed_time, max_elapsed_time := max_elapsed_time, min_logical_reads := min_logical_reads, max_logical_reads := max_logical_reads, min_physical_reads := min_physical_reads, max_physical_reads := max_physical_reads, min_logical_writes := min_logical_writes, max_logical_writes := max_logical_writes, min_spills := min_spills, max_spills := max_spills, query_plan_xml_bytes := query_plan_xml_bytes),
+                           (collection_time, coalesce(plan_handle, ''), coalesce(sql_handle, ''))) AS last_row
+            FROM procedure_stats_raw
+            WHERE sample_interval_seconds IS DISTINCT FROM 0
+            GROUP BY server_name, database_name, schema_name, object_name, date_trunc('hour', collection_time)
+        )
+        ORDER BY server_name, hour
         """;
 
     /// <summary>
@@ -438,7 +541,7 @@ public static class SqlBuilder
                avg_tempdb_space_used, min_tempdb_space_used, max_tempdb_space_used,
                plan_type, plan_forcing_type, is_forced_plan, force_failure_count, last_force_failure_reason,
                compatibility_level, query_plan_hash, replica_role, runtime_stats_interval_id,
-               interval_start_time_utc, collection_time
+               interval_start_time_utc, interval_end_time_utc, collection_time
         FROM collect.query_store_stats
         WHERE collection_time >= @from AND collection_time < @to_plus_2h
               AND interval_start_time_utc >= @from AND interval_start_time_utc < @to
@@ -470,7 +573,7 @@ public static class SqlBuilder
                avg_tempdb_space_used, min_tempdb_space_used, max_tempdb_space_used,
                plan_type, plan_forcing_type, is_forced_plan, force_failure_count, last_force_failure_reason,
                compatibility_level, query_plan_hash, replica_role, runtime_stats_interval_id,
-               interval_start_time_utc, collection_time
+               interval_start_time_utc, interval_end_time_utc, collection_time
         FROM collect.query_store_interval_wide
         WHERE first_execution_time >= @from AND first_execution_time < @to
         """;
@@ -600,7 +703,7 @@ public static class SqlBuilder
     /// </summary>
     public const string PgStatementTextBatchSql = """
         /* darling-export:opt.pg_statement_text */
-        SELECT t.server_id, t.queryid, t.query_text, t.first_seen, t.last_seen
+        SELECT t.server_id, t.queryid, t.query_text, t.first_seen, t.last_seen, t.own_entries::text AS own_entries
         FROM collect.pg_statement_text t
         JOIN unnest(@sids::int4[], @qids::int8[]) AS k(sid, qid)
           ON t.server_id = k.sid AND t.queryid = k.qid
@@ -642,6 +745,21 @@ public static class SqlBuilder
         "AND is_identity <> 'YES' " +
         "AND (column_default IS NULL OR column_default NOT LIKE 'nextval(%') " +
         "ORDER BY ordinal_position";
+
+    /// <summary>
+    /// The discovery read for a table whose identity or serial columns are real keys (<see
+    /// cref="OptionalTable.KeepIdentityColumns"/>): the same read as <see cref="OptionalColumnDiscoverySql"/> without the
+    /// identity and serial filters. <c>server_id</c> and <c>collection_id</c> are still left out.
+    /// </summary>
+    public const string OptionalColumnDiscoveryKeepingIdentitySql =
+        "/* darling-export:opt.column_discovery */ SELECT column_name, data_type, udt_name FROM information_schema.columns " +
+        "WHERE table_schema = @schema AND table_name = @table " +
+        "AND column_name NOT IN ('server_id', 'collection_id') " +
+        "ORDER BY ordinal_position";
+
+    /// <summary>The column discovery read for <paramref name="table"/>: it keeps identity columns only when the entry asks for them.</summary>
+    public static string OptionalColumnDiscoverySqlFor(OptionalTable table) =>
+        table.KeepIdentityColumns ? OptionalColumnDiscoveryKeepingIdentitySql : OptionalColumnDiscoverySql;
 
     /// <summary>
     /// Builds the SELECT for an optional table: an explicit, ordinal-ordered column list (as discovered by <see
@@ -687,6 +805,16 @@ public static class SqlBuilder
             ?? new Dictionary<string, ColumnRule>(StringComparer.Ordinal);
 
         var projections = new List<string>();
+
+        // A table with server_id but no server_name: discovery leaves server_id out, so the read looks the name up by
+        // primary key in collect.servers. The outer column is fully qualified so it cannot bind to the subquery's own
+        // server_id. NULL when the table's server_id is NULL or the server is gone.
+        if (table.ResolveServerName && !projected.Any(c => string.Equals(c.Name, "server_name", StringComparison.Ordinal)))
+        {
+            projections.Add(
+                $"(SELECT s.server_name FROM collect.servers AS s WHERE s.server_id = {table.Schema}.{QuoteIdentifier(table.Name)}.server_id) AS server_name");
+        }
+
         foreach (var column in projected)
         {
             if (!rulesByColumn.TryGetValue(column.Name, out var rule))
@@ -727,7 +855,11 @@ public static class SqlBuilder
                 throw new ArgumentException($"Optional table '{table.Name}' is a window table but has no TimeColumn.");
             }
 
-            sql += $" WHERE {table.TimeColumn} >= @from AND {table.TimeColumn} < @to";
+            // A timestamptz column is compared with the bounds read as UTC, whatever the session TimeZone is. The CAST is
+            // a no-op for the timestamp parameter and keeps the bound a timestamp when a literal stands in for it.
+            var from = table.TimeColumnHasTimeZone ? "CAST(@from AS timestamp) AT TIME ZONE 'UTC'" : "@from";
+            var to = table.TimeColumnHasTimeZone ? "CAST(@to AS timestamp) AT TIME ZONE 'UTC'" : "@to";
+            sql += $" WHERE {table.TimeColumn} >= {from} AND {table.TimeColumn} < {to}";
         }
 
         return sql;

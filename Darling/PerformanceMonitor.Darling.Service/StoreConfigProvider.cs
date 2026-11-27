@@ -9,7 +9,9 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -88,7 +90,7 @@ public sealed class StoreConfigProvider
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             using var command = new NpgsqlCommand("SELECT config_version FROM config_service WHERE id = 1", connection);
             command.CommandTimeout = ServiceCommandDeadlines.ConfigReloadBeaconSeconds;
             var result = await command.ExecuteScalarAsync(cancellationToken);
@@ -122,7 +124,7 @@ public sealed class StoreConfigProvider
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var now = Naive(DateTime.UtcNow);
 
             if (await CountAsync(connection, "config_alert_settings", cancellationToken) == 0)
@@ -630,7 +632,7 @@ public sealed class StoreConfigProvider
                 + "or the MCP add_servers tool. Note --test-connection reads darling.json, so it will keep "
                 + "reporting them as PASS while they collect nothing.",
                 neverRegistered.Count,
-                string.Join(", ", neverRegistered));
+                string.Join(", ", neverRegistered.Select(ServerFieldText.Escape)));
         }
 
         /* Cause 2 — monitored once, then removed, and the file was left alone. A CORRECT state, so this is
@@ -645,7 +647,7 @@ public sealed class StoreConfigProvider
                 + "the file. Delete them from darling.json to silence this line; their collected history is "
                 + "kept either way.",
                 deliberatelyRemoved.Count,
-                string.Join(", ", deliberatelyRemoved));
+                string.Join(", ", deliberatelyRemoved.Select(ServerFieldText.Escape)));
         }
     }
 
@@ -688,24 +690,11 @@ public sealed class StoreConfigProvider
         var live = drifted.Where(d => d.IsEnabled).ToList();
         var paused = drifted.Where(d => !d.IsEnabled).ToList();
 
-        if (live.Count > 0)
+        /* #9693: one line per server, each with the --edit-server command that applies the file's values, so a host with no
+           Viewer, web dashboard or MCP still has a way to make the registry agree. */
+        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.PasteableEntryPointHere(), configPath: ConfigPathInUse()))
         {
-            var connectionCaveat = live.Any(d => d.Fields.Any(f => f.AffectsConnection))
-                ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
-                  + "PASS for a connection the service will never make."
-                : "";
-            var passwordNote = DescribePasswordNotUsed(live, MaxDriftedServersLogged);
-
-            _logger?.LogWarning(
-                "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
-                + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
-                + "registered server's settings in the file changes nothing and a restart cannot change that — "
-                + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
-                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}{PasswordNote}",
-                live.Count,
-                FormatSettingDrift(live, MaxDriftedServersLogged),
-                connectionCaveat,
-                passwordNote);
+            _logger?.LogWarning("{DriftLine}", line);
         }
 
         if (paused.Count > 0)
@@ -719,6 +708,245 @@ public sealed class StoreConfigProvider
                 FormatSettingDrift(paused, MaxDriftedServersLogged));
         }
     }
+
+    /// <summary>
+    /// The start-up warnings for enabled servers whose darling.json entry disagrees with the registry (#2552, #9693): one line
+    /// per server, naming every field that differs with both values and the <c>--edit-server</c> command that applies the
+    /// file's values. A field the verb does not set is named with where it is changed instead. At most
+    /// <paramref name="maxServers"/> servers get a line of their own, and one more line names the rest. No password is in a
+    /// line: the comparison never reads one, so a field list cannot carry it. Every value is in double quotes with the
+    /// characters that do not print escaped (<see cref="DriftValue"/>), so a name or host cannot start a second log line, reorder
+    /// how the line displays or add words that read as the line's own.
+    /// The command runs as printed in the shell the line names: bash everywhere but Windows, PowerShell (Windows PowerShell 5.1
+    /// and PowerShell 7) when <paramref name="windows"/> is true, where <paramref name="entryPoint"/> is the call operator and
+    /// the full path of the service executable (<see cref="OperatorVerbForm.PasteableEntryPoint"/>). Every word is quoted for
+    /// that shell and a backslash is never escaped. The server is named by its name or as <c>id:&lt;server id&gt;</c>
+    /// (<see cref="ServerWord"/>). A server with a value
+    /// <see cref="CommandWord"/> does not print gets no command, and so does every server when <paramref name="entryPoint"/> is
+    /// null: the line says to run <c>--edit-server</c> by hand. The command ends with <c>--config</c> and
+    /// <paramref name="configPath"/>, the configuration file the service is using, as one more quoted word, so the paste edits
+    /// through that file wherever it is. A path <see cref="CommandWord"/> does not print leaves the server without a command.
+    /// The command is the end of the line, so copying from its first
+    /// word to the end of the line copies the command and nothing else. Pure, so a test reads the lines.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildSettingDriftWarnings(
+        IReadOnlyList<ServerSettingDrift> live, int maxServers, string? entryPoint, bool? windows = null, string? configPath = null)
+    {
+        var lines = new List<string>();
+        if (live is null || live.Count == 0)
+        {
+            return lines;
+        }
+
+        var powershell = windows ?? OperatingSystem.IsWindows();
+        var shown = maxServers > 0 && live.Count > maxServers ? maxServers : live.Count;
+        foreach (var server in live.Take(shown))
+        {
+            var fields = string.Join(", ", server.Fields.Select(f => $"{f.Field} (file={DriftFieldValue(f.FileValue)}, store={DriftFieldValue(f.StoreValue)})"));
+            var other = server.Fields.Where(f => !DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field).ToList();
+            var args = EditServerArgsFor(server);
+            /* args is the name, then "--set" and a field=value pair for each field: the flag is printed as it is, the rest is quoted. */
+            var words = args.Select((a, i) => i > 0 && i % 2 == 1 ? a : CommandWord(a, powershell)).ToList();
+            if (words.Count > 0)
+            {
+                words[0] = ServerWord(server, powershell);
+            }
+
+            /* The command names the configuration the service is using, so a paste on a host whose configuration is not at the
+               default path edits through that one. The path is one more quoted word, and a path the quoter does not print
+               leaves the server without a command. */
+            var configWord = configPath is null ? null : CommandWord(configPath, powershell);
+            var configPrintable = configPath is null || configWord is not null;
+            /* A Windows folder that cannot be printed leaves only the executable's name, which PowerShell runs from the current
+               folder only as .\name, so the sentence says where to run it. */
+            var byHandFromFolder = powershell && entryPoint is null;
+            var remedy = "";
+            if (args.Count > 0 && entryPoint is not null && !words.Contains(null) && configPrintable)
+            {
+                remedy = $" To apply the file's values, {(powershell ? "in PowerShell, run" : "run")}: {entryPoint} --edit-server {string.Join(" ", words)}"
+                    + (configWord is null ? "" : " --config " + configWord);
+            }
+            else if (args.Count > 0)
+            {
+                remedy = " No command is printed for this server because "
+                    + (words.Contains(null) ? "a value holds characters"
+                        : entryPoint is null ? "the folder the service is installed in holds characters"
+                        : "the path of the service's configuration file holds characters")
+                    + $" that cannot be pasted safely. Run --edit-server by hand{(powershell ? " in PowerShell" : "")}{(byHandFromFolder ? ", from the folder the service is installed in" : "")}:"
+                    + $" {entryPoint ?? OperatorVerbForm.ByHandEntryPoint(powershell)} --edit-server <server name>"
+                    + $" followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}"
+                    + (configPath is null ? "." : $", then --config and the path of the configuration file the service is using ({DriftValue(configPath)}).");
+            }
+
+            var otherNote = other.Count == 0
+                ? ""
+                : (other.Contains("engine", StringComparer.Ordinal)
+                    ? " The engine of a registered server cannot be changed: remove the server and add it again."
+                    : "")
+                  + (other.Any(f => f != "engine")
+                    ? $" --edit-server does not set {string.Join(", ", other.Where(f => f != "engine"))}: change that in the Viewer's Manage Servers window, on the web dashboard's Admin page or over MCP."
+                    : "");
+            var connectionCaveat = server.Fields.Any(f => f.AffectsConnection)
+                ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report PASS for a connection the service will never make."
+                : "";
+            lines.Add(
+                $"darling.json disagrees with the registry about monitored server {DriftValue(server.Server)}, and the registry is what the service uses: {fields}. "
+                + "The store is authoritative after the first seed, so editing a registered server's settings in the file changes nothing and a restart cannot change that."
+                + otherNote + connectionCaveat + DescribePasswordNotUsed([server], 1) + remedy);
+        }
+
+        if (shown < live.Count)
+        {
+            lines.Add(
+                $"darling.json also disagrees with the registry about {live.Count - shown} more monitored server(s): "
+                + string.Join(", ", live.Skip(shown).Select(d => DriftValue(d.Server)))
+                + ". Fix the ones listed above and restart to see these, or compare them in the Viewer's Manage Servers window or on the web dashboard's Admin page.");
+        }
+
+        return lines;
+    }
+
+    /// <summary>The full path of the configuration file this service is using (<c>DARLING_CONFIG</c>, else the file beside the
+    /// service), for the printed <c>--edit-server</c> command (#9693). Null when the path cannot be made absolute, and the command
+    /// then names no configuration.</summary>
+    internal static string? ConfigPathInUse(Func<string, string?>? environment = null)
+    {
+        try
+        {
+            return System.IO.Path.GetFullPath(DarlingConfig.ResolveConfigPath(null, environment ?? Environment.GetEnvironmentVariable));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or System.IO.PathTooLongException or System.Security.SecurityException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The word that names <paramref name="server"/> in the printed command (#9693): its name, when that name answers
+    /// for this server and no other under the rule the verb resolves a name by and the shell's quoting can carry it, else
+    /// <c>id:&lt;server id&gt;</c>, which names exactly one server and is one plain word in every shell. A name several servers
+    /// answer to would be refused by the verb, a name that starts with <c>--</c> is read by the verb as an option
+    /// (<see cref="DarlingCliCommands.ReadsAsAnOption"/>), and a name with a double quote cannot be handed to an executable by
+    /// Windows PowerShell 5.1, so the paste names the server by its id in all three cases. Null when neither can be printed.</summary>
+    internal static string? ServerWord(ServerSettingDrift server, bool powershell)
+    {
+        var byName = server.NamePicksOne && !DarlingCliCommands.ReadsAsAnOption(server.Server) ? CommandWord(server.Server, powershell) : null;
+        return byName
+            ?? (server.ServerId is { } id
+                ? CommandWord(Mcp.DarlingMcpServerAdminTools.ServerIdNamePrefix + id.ToString(CultureInfo.InvariantCulture), powershell)
+                : null);
+    }
+
+    /// <summary>The arguments after <c>--edit-server</c> that apply a drifted server's darling.json values (#9693): the registered name,
+    /// then one <c>--set</c> per field the verb sets. Empty when it sets none of the fields that differ.</summary>
+    internal static IReadOnlyList<string> EditServerArgsFor(ServerSettingDrift server)
+    {
+        var args = new List<string>();
+        foreach (var field in server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)))
+        {
+            args.Add("--set");
+            args.Add(field.Field + "=" + (field.FileValue == NoneText ? "" : field.FileValue));
+        }
+
+        if (args.Count > 0)
+        {
+            args.Insert(0, server.Server);
+        }
+
+        return args;
+    }
+
+    /// <summary>
+    /// A value as it appears in a log line or in a line the <c>--edit-server</c> verb prints (#9693): every character that does not
+    /// print is written as <c>\uXXXX</c>, so a value a person can set (a server name, a host, a login) never ends a line and
+    /// starts a forged one, and never reorders how the line displays. Those are the control characters (below U+0020, DEL and
+    /// U+0080 to U+009F), U+2028 and U+2029, the format characters (a right-to-left override, an isolate, a zero-width space),
+    /// private-use and unassigned code points, a lone surrogate and U+FFFD. A character outside the first plane is written as its
+    /// two code units.
+    /// </summary>
+    internal static string DriftText(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return value ?? "";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        for (var i = 0; i < value.Length; i++)
+        {
+            var units = UnitsAt(value, i, out var escaped);
+            for (var u = i; u < i + units; u++)
+            {
+                if (escaped)
+                {
+                    builder.Append("\\u").Append(((int)value[u]).ToString("X4", CultureInfo.InvariantCulture));
+                }
+                else
+                {
+                    builder.Append(value[u]);
+                }
+            }
+
+            i += units - 1;
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>A value between double quotes in a line a person reads: <see cref="DriftText"/>, with a double quote in the value
+    /// written as <c>\u0022</c>, so the value ends at the closing quote and nothing in it reads as the line's own words (#9693).
+    /// A backslash is written as it is and never doubled: a named instance (<c>SQL01\INST</c>) and a Windows path are read off
+    /// this line and typed into a command, and neither PowerShell nor cmd.exe takes a backslash as an escape, so a doubled one
+    /// would name another server. The cost is that a value holding the six characters of an escape as text prints like the
+    /// character the escape stands for. These quotes are for reading. A word of a printed command is quoted for its shell by
+    /// <see cref="CommandWord"/>.</summary>
+    internal static string DriftValue(string? value) =>
+        "\"" + DriftText(value).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
+
+    /// <summary>One side of a drifted field: <see cref="DriftValue"/>, or the bare <c>(none)</c> for a value that is not set, so
+    /// a value that is set is always the one in quotes.</summary>
+    private static string DriftFieldValue(string value) => value == NoneText ? NoneText : DriftValue(value);
+
+    /// <summary>How many code units the character at <paramref name="index"/> takes (two for a surrogate pair) and whether
+    /// <see cref="DriftText"/> escapes it.</summary>
+    private static int UnitsAt(string value, int index, out bool escaped)
+    {
+        var c = value[index];
+        if (char.IsHighSurrogate(c) && index + 1 < value.Length && char.IsLowSurrogate(value[index + 1]))
+        {
+            escaped = IsLogControl(char.GetUnicodeCategory(value, index));
+            return 2;
+        }
+
+        escaped = char.IsSurrogate(c) || IsLogControl(c);
+        return 1;
+    }
+
+    private static bool IsLogControl(UnicodeCategory category) =>
+        category is UnicodeCategory.Control or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.Format or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate;
+
+    /// <summary>True for a single code unit <see cref="DriftText"/> escapes. Half of a surrogate pair is not one: the pair is
+    /// judged together.</summary>
+    internal static bool IsLogControl(char c) => !char.IsSurrogate(c) && (c == '\uFFFD' || IsLogControl(char.GetUnicodeCategory(c)));
+
+    /// <summary>True when <paramref name="value"/> holds a character <see cref="DriftText"/> escapes.</summary>
+    internal static bool HasControlCharacter(string? value)
+    {
+        for (var i = 0; value is not null && i < value.Length; i++)
+        {
+            i += UnitsAt(value, i, out var escaped) - 1;
+            if (escaped)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>One word of the printed <c>--edit-server</c> command, or null when it cannot be printed safely:
+    /// <see cref="OperatorVerbForm.ShellWord"/>, the quoter the entry point is printed with too.</summary>
+    internal static string? CommandWord(string text, bool powershell) => OperatorVerbForm.ShellWord(text, powershell);
 
     /// <summary>
     /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
@@ -738,7 +966,7 @@ public sealed class StoreConfigProvider
         }
 
         var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
-        var listed = string.Join(", ", names.Take(shown)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        var listed = string.Join(", ", names.Take(shown).Select(DriftValue)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
         return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
             + "its password from darling.json is not used until the two agree.";
     }
@@ -887,9 +1115,14 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
 
     /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).
     /// <paramref name="FileEntryCarriesPassword"/> is whether the entry holds a password or a reference, which decides
-    /// whether the warning says that password is not used while a connection setting differs.</summary>
+    /// whether the warning says that password is not used while a connection setting differs.
+    /// <paramref name="ServerId"/> is the registry row's id, and <paramref name="NamePicksOne"/> is whether
+    /// <paramref name="Server"/> answers for that row and no other under the rule <c>--edit-server</c> resolves a name by
+    /// (<see cref="Mcp.DarlingMcpServerAdminTools.ResolveForEdit"/>): together they decide whether the printed command names the
+    /// server by its name or as <c>id:&lt;server id&gt;</c> (#9693).</summary>
     internal sealed record ServerSettingDrift(
-        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false);
+        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false,
+        int? ServerId = null, bool NamePicksOne = true);
 
     /// <summary>
     /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
@@ -922,6 +1155,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             byId[stored.Config.ServerId] = stored;
         }
 
+        /* The registry as --edit-server resolves a name against it: each row's id, storage name and display name. */
+        var registered = storeServers
+            .Select(s => new PerformanceMonitor.Darling.Storage.RegisteredServer(s.Config.ServerId, s.Config.StorageName, s.Config.DisplayName))
+            .ToList();
         var storeNameCounts = CountNames(storeServers.Select(s => s.Config.DisplayName));
         var fileNameCounts = CountNames(file.Select(s => s.DisplayName));
         var fileIdCounts = new Dictionary<int, int>();
@@ -953,9 +1190,12 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             var fields = CompareServerSettings(entry, match.Config);
             if (fields.Count > 0)
             {
+                var answers = Mcp.DarlingMcpServerAdminTools.ResolveForEdit(registered, match.Config.DisplayName);
                 drifted.Add(new ServerSettingDrift(
                     match.Config.DisplayName, match.IsEnabled, fields,
-                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password)));
+                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password),
+                    match.Config.ServerId,
+                    answers.MatchedBy == "exact" && answers.Candidates.Count == 1 && answers.Candidates[0].ServerId == match.Config.ServerId));
             }
         }
 
@@ -1211,7 +1451,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
 
     private static string Trimmed(string? value) => value?.Trim() ?? "";
 
-    private static string NoneIfBlank(string value) => string.IsNullOrEmpty(value) ? "(none)" : value;
+    /// <summary>What a blank value prints as in a drift line.</summary>
+    private const string NoneText = "(none)";
+
+    private static string NoneIfBlank(string value) => string.IsNullOrEmpty(value) ? NoneText : value;
 
     private static string Json(bool value) => value ? "true" : "false";
 
@@ -1295,8 +1538,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
         for (int i = 0; i < shown; i++)
         {
             var server = drifted[i];
-            var fields = server.Fields.Select(f => $"{f.Field} (file={f.FileValue}, store={f.StoreValue})");
-            parts.Add($"{server.Server}: {string.Join(", ", fields)}");
+            /* #9787: a row saved before the control-character rule can hold one in any of these values; it prints as \uXXXX text
+               (DriftValue and DriftFieldValue escape every character that does not print, #9693). */
+            var fields = server.Fields.Select(f => $"{f.Field} (file={DriftFieldValue(f.FileValue)}, store={DriftFieldValue(f.StoreValue)})");
+            parts.Add($"{DriftValue(server.Server)}: {string.Join(", ", fields)}");
         }
 
         if (shown < drifted.Count)
@@ -1446,11 +1691,15 @@ INSERT INTO config_alert_settings (
     blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
     blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
     daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours)
+    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+    tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+    tempdb_growth_fit_enabled,
+    instance_restarted_enabled, memory_dumps_enabled,
+    self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1596,6 +1845,17 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.BackupOverdueThresholdHours);
         command.Parameters.AddWithValue(a.LogBackupOverdueThresholdMinutes);
         command.Parameters.AddWithValue(a.CheckDbOverdueThresholdHours);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceEnabled);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceThresholdPercent);
+        /* #8882 (V270), bound last in the order the column was appended. The switch seeds TRUE (darling.json's default): the alert ships on. */
+        command.Parameters.AddWithValue(a.TempDbGrowthFitEnabled);
+        /* #8884, bound last in the order the V271 columns were appended. Both switches seed from darling.json, which defaults them on. */
+        command.Parameters.AddWithValue(a.InstanceRestartedEnabled);
+        command.Parameters.AddWithValue(a.MemoryDumpsEnabled);
+        /* #9000 (V276), bound last in the order the columns were appended. */
+        command.Parameters.AddWithValue(a.SelfStoreGrowthEnabled);
+        command.Parameters.AddWithValue(a.SelfStoreGrowthFloorGb);
+        command.Parameters.AddWithValue(a.SelfStoreGrowthObjectFloorGb);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1673,7 +1933,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         ArgumentNullException.ThrowIfNull(ring);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var v = new string?[11];
             bool signingSaved;
             await using (var select = new NpgsqlCommand(
@@ -1998,9 +2258,9 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, queryTextTrigramIndexStoreValue, queryStoreTextTrigramIndexStoreValue, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
@@ -2047,7 +2307,10 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
             /* #5366: the pins taken at upgrade for the old-format passwords, read once for the SMTP slot and every server. */
             var pins = await ReadLegacyPinsAsync(connection, cancellationToken);
+            /* #5456, #9749: read once, so the resolver's refusal and the re-enter line below say the same thing about the pin step. */
+            var waiting = LegacyPinsWaiting?.Invoke() == true;
             smtp.SecretPin = pins.GetValueOrDefault((0, "smtp"));
+            smtp.SecretPinWaiting = waiting;
             MarkSmtpTheFileDeclares(smtp, bootstrap);
 
             /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
@@ -2055,7 +2318,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                ordinary state and resolves to the parent row exactly. */
             var routes = await ReadNotificationRoutesAsync(connection, _logger, cancellationToken);
 
-            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
+            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins, pinsWaiting: waiting);
 
             /* #6583: a SQL Server registry row that holds a port, which is ignored. Once per change in the warnings, not once per reload. */
             var portWarnings = SqlServerPortAdvice.Warnings(servers);
@@ -2074,7 +2337,6 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                #5456: while the one-time pin step is waiting to run, the same count is a different message (do not enter
                them again yet), so the line is repeated once when that changes. */
             var enterAgain = CountPasswordsToEnterAgain(servers, smtp, LegacyDpapi.Current);
-            var waiting = LegacyPinsWaiting?.Invoke() == true;
             if ((enterAgain, waiting) != _lastReenterLogged)
             {
                 var line = ReenterLine(enterAgain, waiting);
@@ -2113,6 +2375,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                 PlanContentRetentionDays = planContentRetentionDays,
                 ComposeStatementTimeoutSeconds = composeStatementTimeoutSeconds,
                 QueryStoreFetchTopN = queryStoreFetchTopN,
+                QueryTextTrigramIndexStoreValue = queryTextTrigramIndexStoreValue,
+                QueryStoreTextTrigramIndexStoreValue = queryStoreTextTrigramIndexStoreValue,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -2192,11 +2456,11 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
-    internal const int MinPlanContentRetentionDays = 7;
-    internal const int MaxPlanContentRetentionDays = 365;
+    internal const int MinPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMin;
+    internal const int MaxPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMax;
 
     internal static int ClampPlanContentRetentionDays(int value) =>
-        value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampPlanContentRetentionDays(value);
 
     /* #2357: the compose statement_timeout bounds WORK -- a LIMIT bounds output, a group-by scans and sorts
        before it -- so it is clamped rather than trusted. A floor of 5s keeps the backstop meaningful; a
@@ -2208,11 +2472,11 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static int ClampQueryStoreFetchTopN(int value) =>
         value <= 0 ? 0 : Math.Min(value, QueryStoreFetchSelection.MaxTopN);
 
-    internal const int MinComposeStatementTimeoutSeconds = 5;
-    internal const int MaxComposeStatementTimeoutSeconds = 600;
+    internal const int MinComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMin;
+    internal const int MaxComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMax;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
-        Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(value);
 
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
@@ -2221,18 +2485,18 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, bool? QueryTextTrigramIndexStoreValue, bool? QueryStoreTextTrigramIndexStoreValue, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
-               plan content keeps the V75 default 21-day horizon. */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, 0);
+               plan content keeps the V75 default 21-day horizon. The trigram index options (V274) read NULL: darling.json governs. */
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, null, null, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
@@ -2241,7 +2505,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             reader.GetBoolean(6), reader.GetInt32(7),
             reader.GetBoolean(8), reader.GetInt32(9),
             ClampPlanContentRetentionDays(reader.GetInt32(10)),
-            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)), reader.GetInt64(13));
+            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)),
+            reader.IsDBNull(13) ? null : reader.GetBoolean(13), reader.IsDBNull(14) ? null : reader.GetBoolean(14), reader.GetInt64(15));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -2281,7 +2546,11 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+       tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+       tempdb_growth_fit_enabled,
+       instance_restarted_enabled, memory_dumps_enabled,
+       self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2468,6 +2737,18 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             BackupOverdueThresholdHours = reader.GetInt32(96),
             LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
             CheckDbOverdueThresholdHours = reader.GetInt32(98),
+            /* #8881 (V269): the TempDB Log Space switch and bar at 99-100. */
+            TempDbLogSpaceEnabled = reader.GetBoolean(99),
+            TempDbLogSpaceThresholdPercent = reader.GetInt32(100),
+            /* #8882 (V270): the TempDB Growth Fit switch at 101 (same reachability rule as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected but not read here would reset the switch to on at every worker start). */
+            TempDbGrowthFitEnabled = reader.GetBoolean(101),
+            /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
+            InstanceRestartedEnabled = reader.GetBoolean(102),
+            MemoryDumpsEnabled = reader.GetBoolean(103),
+            /* #9000 (V276): the Store Growth switch and its two floors at 104-106. */
+            SelfStoreGrowthEnabled = reader.GetBoolean(104),
+            SelfStoreGrowthFloorGb = reader.GetInt32(105),
+            SelfStoreGrowthObjectFloorGb = reader.GetInt32(106),
         };
         var analysis = new AnalysisConfig
         {
@@ -2567,10 +2848,11 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
 
     /// <summary>Internal, not private (#4214): <c>--validate-config</c>'s registry-based pre-flight calls this
     /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
-    /// store will actually collect from.</summary>
+    /// store will actually collect from. <paramref name="pinsWaiting"/> is whether the one-time pin step is waiting to run (#9749); a caller
+    /// that has no worker behind it leaves it false, so an old-format password with no pin is a refusal that needs an operator.</summary>
     internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct,
-        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null)
+        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null, ISet<int>? disabledServerIds = null, bool pinsWaiting = false)
     {
         pins ??= await ReadLegacyPinsAsync(connection, ct);
         var servers = new List<MonitoredServer>();
@@ -2583,13 +2865,21 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
        aws_role_arn, aws_external_id, hypothetical_index_username, hypothetical_index_encrypted_password,
-       query_store_replica, capture_plans, xe_session_databases
-FROM config_monitored_servers WHERE is_enabled = TRUE
+       query_store_replica, capture_plans, xe_session_databases, is_enabled
+FROM config_monitored_servers WHERE is_enabled = TRUE OR $1
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        /* Only a caller that hands in a set (--set-login-password, #9689) gets the disabled rows, and its set names them. The
+           service and every other caller read the enabled servers alone. */
+        command.Parameters.AddWithValue(disabledServerIds is not null);
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            servers.Add(BuildServerFromRow(reader, bootstrap));
+            var server = BuildServerFromRow(reader, bootstrap);
+            servers.Add(server);
+            if (!reader.GetBoolean(26))
+            {
+                disabledServerIds?.Add(server.ServerId);
+            }
         }
 
         /* #5366: the pins taken when this service was upgraded, matched to each server by id and slot. */
@@ -2597,6 +2887,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         {
             server.SecretPin = pins.GetValueOrDefault((server.ServerId, "server"));
             server.RemediationPin = pins.GetValueOrDefault((server.ServerId, "remediation"));
+            server.SecretPinWaiting = pinsWaiting;
         }
 
         return servers;
@@ -2833,9 +3124,28 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         foreach (var declared in bootstrap.Servers)
         {
             /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
-            if (declared is null
-                || declared.ServerId != server.ServerId
-                || ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
+            if (declared is null)
+            {
+                continue;
+            }
+
+            if (ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
+            {
+                /* #9693: the file declares this same reference for this server (by id, or by name when a changed host or database
+                   gave the entry another id) with other connection settings. The reference stays unused, and the mark below
+                   only lets the refusal say that the settings differ instead of that the reference is the service's own. */
+                if ((declared.ServerId == server.ServerId || string.Equals(declared.DisplayName, server.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    && declared.EncryptedPasswordDeclaredByFile
+                    && DarlingSecrets.DeclaresSecretText(server.EncryptedPassword)
+                    && string.Equals(declared.EncryptedPassword, server.EncryptedPassword, StringComparison.Ordinal))
+                {
+                    server.EncryptedPasswordDeclaredForOtherSettings = true;
+                }
+
+                continue;
+            }
+
+            if (declared.ServerId != server.ServerId)
             {
                 continue;
             }
@@ -3014,14 +3324,98 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             }
         }
 
-        /* #5750: a scoped route that is never expanded matches nothing, so every route this loader returns goes through the
-           expander. A store with no scoped route skips the three extra reads: the fleet-wide routes come back as they are. */
+        return await ExpandIfScopedAsync(connection, routes, logger, ct);
+    }
+
+    /// <summary>
+    /// #5750: a scoped route that is never expanded matches nothing, so every route a loader returns goes through the expander.
+    /// A store with no scoped route skips the three extra reads: the fleet-wide routes come back as they are.
+    /// </summary>
+    private static async Task<IReadOnlyList<NotificationRoute>> ExpandIfScopedAsync(
+        NpgsqlConnection connection, List<NotificationRoute> routes, ILogger? logger, CancellationToken ct)
+    {
         if (!routes.Exists(r => r.IsScoped))
         {
             return routes;
         }
 
         return ExpandRoutes(routes, await ReadRouteScopeInputsAsync(connection, logger, ct));
+    }
+
+    /// <summary>
+    /// The columns of <c>config_notification_routes</c> the agent action gate reads (#9728): match, scope, enabled, the agent channel's level, limits,
+    /// lease and expiry, and the route's severities, approval and fallback settings. Every one is a column the managed <c>mcp</c> role may SELECT:
+    /// the destination and signing key columns are bearer secrets that role is refused on purpose (#6231, #6394), so the gate must not name one.
+    /// A test holds this list against <see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/>.
+    /// </summary>
+    public static readonly IReadOnlyList<string> NotificationRoutesAgentColumns = new[]
+    {
+        "route_id", "metric_match", "smtp_recipients", "enabled", "scope_server_id", "scope_tag_id",
+        "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes",
+        "send_resolutions", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person",
+        "slack_bot_channel", "slack_bot_channel_set_at",
+    };
+
+    /// <summary>The select over <see cref="NotificationRoutesAgentColumns"/>, ordered by <c>route_id</c> like <see cref="NotificationRoutesSelectSql"/>.</summary>
+    public static readonly string NotificationRoutesAgentSelectSql =
+        "SELECT " + string.Join(", ", NotificationRoutesAgentColumns) + " FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>
+    /// The routes as the agent action gate needs them (#9728): <see cref="ReadNotificationRoutesAsync"/> without the destination and signing
+    /// key columns, which the <c>mcp</c> role (the gate's connection) cannot read. The destination fields of a returned route are empty and
+    /// it holds no signing keys, so the routes are for <see cref="NotificationRouter.ResolveAgent"/> and the gate's reads of a route's agent
+    /// settings, never for delivery. Scope is expanded the same way.
+    /// </summary>
+    internal static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesForAgentAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var routes = new List<NotificationRoute>();
+        using (var command = new NpgsqlCommand(NotificationRoutesAgentSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+        using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            var id = reader.GetOrdinal("route_id");
+            var metric = reader.GetOrdinal("metric_match");
+            var smtp = reader.GetOrdinal("smtp_recipients");
+            var enabled = reader.GetOrdinal("enabled");
+            var scopeServer = reader.GetOrdinal("scope_server_id");
+            var scopeTag = reader.GetOrdinal("scope_tag_id");
+            var level = reader.GetOrdinal("agent_level");
+            var perHour = reader.GetOrdinal("agent_max_per_hour");
+            var perDay = reader.GetOrdinal("agent_max_per_day");
+            var lease = reader.GetOrdinal("agent_lease_minutes");
+            var expiry = reader.GetOrdinal("agent_expiry_minutes");
+            var resolutions = reader.GetOrdinal("send_resolutions");
+            var fallback = reader.GetOrdinal("fallback_route_id");
+            var severities = reader.GetOrdinal("severities");
+            var notice = reader.GetOrdinal("report_notice");
+            var approval = reader.GetOrdinal("action_approval");
+            var singlePerson = reader.GetOrdinal("approval_single_person");
+            var botChannel = reader.GetOrdinal("slack_bot_channel");
+            var botChannelSetAt = reader.GetOrdinal("slack_bot_channel_set_at");
+            while (await reader.ReadAsync(ct))
+            {
+                routes.Add(new NotificationRoute(
+                    reader.GetInt32(id), reader.GetString(metric), "", "", "", "", reader.GetString(smtp), reader.GetBoolean(enabled))
+                {
+                    ScopeServerId = reader.IsDBNull(scopeServer) ? null : reader.GetInt32(scopeServer),
+                    ScopeTagId = reader.IsDBNull(scopeTag) ? null : reader.GetInt32(scopeTag),
+                    AgentLevel = reader.IsDBNull(level) ? null : reader.GetInt16(level),
+                    AgentMaxPerHour = reader.GetInt32(perHour),
+                    AgentMaxPerDay = reader.GetInt32(perDay),
+                    AgentLeaseMinutes = reader.GetInt32(lease),
+                    AgentExpiryMinutes = reader.GetInt32(expiry),
+                    SendResolutions = reader.IsDBNull(resolutions) ? null : reader.GetBoolean(resolutions),
+                    FallbackRouteId = reader.IsDBNull(fallback) ? null : reader.GetInt32(fallback),
+                    Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(severities)),
+                    ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(notice)),
+                    ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(approval)),
+                    ApprovalSinglePerson = reader.GetBoolean(singlePerson),
+                    SlackBotChannel = reader.GetString(botChannel),
+                    SlackBotChannelSetAt = reader.IsDBNull(botChannelSetAt) ? null : DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(botChannelSetAt), DateTimeKind.Utc),
+                });
+            }
+        }
+
+        return await ExpandIfScopedAsync(connection, routes, logger, ct);
     }
 
     /// <summary>
@@ -3169,10 +3563,15 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.PlanContentRetentionDays = view.PlanContentRetentionDays;
         /* #6211: provider-read each cycle by the runner, so a store change reaches the next run without a restart. */
         config.QueryStoreFetchTopN = view.QueryStoreFetchTopN;
+        /* #8978: the store halves of the trigram index options, NULL when darling.json governs. The file values stay as loaded, so a column
+           set back to NULL resolves to the file again; the passes read the resolved values at their next pass. */
+        config.QueryTextTrigramIndexStoreValue = view.QueryTextTrigramIndexStoreValue;
+        config.QueryStoreTextTrigramIndexStoreValue = view.QueryStoreTextTrigramIndexStoreValue;
         /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
            config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
            ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
-           service start, not on this reload. The assignment is still required: it is the only scalar in
+           service start. Since #2918 a reload also re-asserts it on a managed or compose store (see
+           ReloadFromStoreAsync); any other store's roles are the operator's. The assignment is still required: it is the only scalar in
            StoreConfigView with a same-named DarlingConfig property, and leaving it out left the held
            value pinned to darling.json forever while the store said otherwise -- a future reader of
            config.ComposeStatementTimeoutSeconds would have silently gotten the file value. */
@@ -3381,6 +3780,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// </summary>
     public static IReadOnlyList<string> ResolveDatabaseScope(string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides)
     {
+        /* #8784: object_inventory and object_dependencies run under index_object_stats's scope, so the object list, the dependency list and the
+           usage counters cover the same databases. */
+        collectorName = PerformanceMonitor.Collectors.DatabaseScopeFilter.ScopeOwner(collectorName);
+
         ScheduleOverride? perServer = null;
         ScheduleOverride? fleet = null;
         if (overrides is not null)
@@ -3515,6 +3918,12 @@ public sealed class StoreConfigView
     /// 0 = every new plan, the behaviour before the setting.
     /// </summary>
     public int QueryStoreFetchTopN { get; init; } = QueryStoreFetchSelection.DefaultTopN;
+
+    /// <summary>#8978: <c>config_service.query_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryTextTrigramIndexStoreValue { get; init; }
+
+    /// <summary>#8978: <c>config_service.query_store_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryStoreTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryStoreTextTrigramIndexStoreValue { get; init; }
 
     /// <summary>
     /// The per-session <c>statement_timeout</c> for the viewer and mcp roles, in seconds (#2357). Read

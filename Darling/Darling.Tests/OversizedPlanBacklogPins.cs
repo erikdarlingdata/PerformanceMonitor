@@ -50,14 +50,7 @@ public sealed class OversizedPlanBacklogPins
     [Fact]
     public void V121_IsRegisteredInTheLadder_AndCarriesBothFactColumnsPlusTheBacklogTable()
     {
-        /* The "I am the top rung" claims have moved ON to PgAlertCountKnobRungTests (V122), the same
-           handoff this file received from DeadlockRateBandRungTests (V120). Asserting `Scripts[^1].Version
-           == 121` here would claim this rung is still the newest, which is how the NEXT rung's build goes
-           red. What stays is the ladder-top agreement (rung-agnostic) and this rung's own registration,
-           stated against its own number. */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(121, V121.Version);
-        Assert.True(V121.Version < StorageVersion.SchemaVersion);
         Assert.Equal("oversized-plan-backlog", V121.Name);
 
         /* BOTH fact tables. Only adding one would leave the other's capped rows permanently undescribable,
@@ -782,7 +775,7 @@ public sealed class OversizedPlanBacklogPins
     {
         /* The DDL and the DML live in one file so they cannot drift — this checks that they in fact agree,
            column by column, rather than resting on their proximity. */
-        var insertList = Between(OversizedPlanBacklog.UpsertSightingSql, "AS b\r\n(", ")\r\nVALUES");
+        var insertList = Between(OversizedPlanBacklog.RecordSightingsSql, "AS b\r\n    (", ")\r\n    SELECT\r\n        $1");
         var columns = insertList.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToArray();
 
         Assert.Equal(11, columns.Length);
@@ -795,7 +788,7 @@ public sealed class OversizedPlanBacklogPins
     [Fact]
     public void ASightingClearsAStandingExpiry_AndNeverTouchesCapturedContent()
     {
-        var upsert = OversizedPlanBacklog.UpsertSightingSql;
+        var upsert = OversizedPlanBacklog.RecordSightingsSql;
 
         /* A collector only sees a row while its plan is in cache, so a fresh sighting is positive evidence
            the handle resolves — which retires whatever made the previous fetch come back empty. Without the

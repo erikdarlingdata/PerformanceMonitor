@@ -33,7 +33,7 @@ This catches people most on the MCP and web blocks. The two halves of one JSON o
 | `mcp.network` and `web.network` (`listen`, `allowFrom`, `encryptedToken`) | the file, always. No store equivalent exists | editing `darling.json`, then restarting the service |
 | `postgres.*` (including `postgres.network`) | the file, always | editing `darling.json`, then restarting the service |
 | SQL-auth secrets (`encryptedPassword`) | the file, always. The service never writes them to the store | editing `darling.json` |
-| `servers` | seeded once, then the store | the Viewer's Add Server, the `add_servers` MCP tool, or `--add-server` |
+| `servers` | seeded once, then the store | the Viewer's Add Server, the `add_servers` MCP tool, or `--add-server`. A registered server is changed with the Viewer's Manage Servers, the `edit_server` MCP tool or `--edit-server` |
 
 For example, if you change `mcp.port` in the Viewer, that changes where MCP binds. A different `mcp.port` in the file does not override it. When the two disagree, the service says so once per start, and the message names both sides:
 
@@ -52,7 +52,7 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 ## Step 1: Prerequisites
 
-- Windows on the service host. The bundled store, the DPAPI credential protection and the Windows-service lifetime are all Windows-only. A Linux path exists (see [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804), or [Run Darling on Kubernetes](kubernetes.md) for the Helm chart), but it is a different procedure. The WPF viewer is Windows either way.
+- Windows on the service host. The bundled store, the DPAPI credential protection and the Windows-service lifetime are all Windows-only. A Linux path exists, but it is a different procedure: [Install Darling on Linux with systemd](linux.md), [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804) for Docker Compose, or [Run Darling on Kubernetes](kubernetes.md) for the Helm chart. The commands on this page are the Windows form, and [Service verbs on Linux](linux.md#service-verbs-on-linux) gives the Linux form of each. The WPF viewer is Windows either way.
 - No .NET runtime to install. The service and the viewer in the zip carry their own .NET runtime, so they are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release.
 - A monitored SQL Server and a login on it. The server can be SQL Server 2016 SP2 to 2025 (2017 needs CU3 or later), Azure SQL MI, AWS RDS or Azure SQL DB. The login needs `VIEW SERVER STATE` and the rest of the [monitoring grants](monitored-servers.md#permissions-on-monitored-servers).
 - Nothing else. In the shipped default (`postgres.managed = true`), the service runs its own bundled PostgreSQL 18 and TimescaleDB. You do not provision a database.
@@ -61,7 +61,7 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 The release also has `PerformanceMonitorDarling-<version>.msi`. To install with the MSI instead of the zip, read [Installing with the MSI](#installing-with-the-msi) and skip to step 7.
 
-Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
+Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at, into a new, empty folder. Every release names its checksum file `SHA256SUMS.txt`, so a download into the folder of an earlier release replaces that release's file. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
 
 ```powershell
 $zip = 'PerformanceMonitorDarling-<version>.zip'    # the file you downloaded
@@ -209,6 +209,8 @@ The install has not hung. Do not kill it. The internal `initdb` timeout alone is
 Get-Content "$env:ProgramData\PerformanceMonitorDarling\logs\darling-service_$(Get-Date -Format yyyyMMdd).log" -Wait -Tail 40
 ```
 
+On Linux the file log is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. See [Logs](linux.md#logs) on the Linux page.
+
 **Proof:** these lines, in this order:
 
 ```
@@ -223,16 +225,17 @@ Least-privilege roles ready (admin: ...; viewer: ...; web: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 PerformanceMonitor Darling collection loop started
-[SQL2022] Connected (major <major>, edition <edition>, server_id <id>)
-  [SQL2022] wait_stats => <count> rows (sql:<ms>ms, pg:<ms>ms)
+[SQL2022] Connected (major <major>, engine <engine type>, edition <edition>, server_id <id>)
 ```
 
-`PerformanceMonitor Darling collection loop started` means ready. The per-collector `=> N rows` lines that repeat on every sweep mean working. On the hypertable line, both numbers must be equal. A converted count below the total means that a table stayed plain, and the line above it names which table.
+`PerformanceMonitor Darling collection loop started` means ready. One `Connected` line for each server means that the service reached it. The per-collector `=> N rows (sql:Nms, pg:Nms)` lines are written at `Debug`, which the default log level does not write (see [Logs](operations.md#logs)). To see that the collectors run, open the Viewer's Collection Health tab, or read `collect.collection_log` with the check in [Watching the service from outside](operations.md#watching-the-service-from-outside). On the hypertable line, both numbers must be equal. A converted count below the total means that a table stayed plain, and the line above it names which table.
+
+These are the lines of the managed store. On a store that you bring (`postgres.managed` off), the lines about the bundled runtime, the cluster, `Managed Postgres started`, `Creating the 'darling' database` and `Least-privilege roles ready` do not appear. [Step 9 of the Linux page](linux.md#step-9-proof-that-it-collects) lists the lines for that shape.
 
 Two things look wrong on a first start and are not:
 
 - One-time `discarding and regenerating` warnings about the role `.dpapi` credential files. A role password can be asserted again, so the service does that. The ownership check is working.
-- A collector that reports `YIELDED`. The one-second lock-timeout guard fired on a busy target. The guard stops Darling from becoming the problem that it monitors.
+- A collector that reports `YIELDED`. A short lock-timeout guard (one to five seconds) fired on a busy target. The guard stops Darling from becoming the problem that it monitors.
 
 If the service idles instead, the message is literal and named: `Cannot load configuration`, `Configuration problem: <field>`, or `Cannot reach or migrate the Postgres store`. See [Troubleshooting](troubleshooting.md).
 
@@ -279,13 +282,15 @@ If you hit a problem that this list and [Troubleshooting](troubleshooting.md) do
 
 ## Install reference
 
-This part of the page is the detail behind the steps above. It moved here from the Darling operator guide. The Linux install is in [the Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd).
+This part of the page is the detail behind the steps above. It moved here from the Darling operator guide. The Linux install is in [Install Darling on Linux with systemd](linux.md) and, for Docker Compose, in [the Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd).
 
 ### Prerequisites
 
 - **A store host sized for your estate.** The [store sizing guide](../darling-store-sizing.md) gives the disk, RAM and vCPUs by server count, from the stores we measured.
 - **Windows** for the viewer (WPF) and for a Windows-service host (Windows-service lifetime, DPAPI password protection). A Linux host also runs the service: see [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
-- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](managed-postgresql.md#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](operations.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
+- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](managed-postgresql.md#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. [Set up the store](linux.md#step-3-set-up-the-store) on the Linux page has the commands, the settings and the rights that the login needs. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](operations.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
+  - **PostgreSQL 19 as the store.** TimescaleDB has no release for PostgreSQL 19 yet. A store on PostgreSQL 19 runs in plain PostgreSQL mode until it does. That means no hypertables and no chunk retention. The service logs `extension "timescaledb" is not available`, and collection works. The managed store stays on PostgreSQL 18.
+  - **Upgrading your own store to PostgreSQL 19.** PostgreSQL 19 makes full text search and pg_trgm use the locale provider of the database. If your store uses an ICU or builtin locale, rebuild its trigram indexes after `pg_upgrade`. They are `collect.ix_query_text_dim_trgm` and `collect.ix_query_store_text_server_trgm`, and a store has them only when the query text search indexes are turned on. `REINDEX INDEX CONCURRENTLY` rebuilds each one without blocking collection. The managed store uses the C locale, so this does not apply to it.
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way. The detection is also **re-run hourly for as long as it says no** (#3815), so a service that fell back because the store was restarting, failing over or momentarily unreachable at its own start returns to hypertable mode within the hour instead of at the next restart.
 - **A Windows that is current on its updates.** .NET 10 apps need them to start on a CPU with CET (a hardware protection). Without them the service and the viewer both stop at start with exit code `0x80131506`. Install all available Windows updates and restart. If you cannot do that yet, [a short-term workaround](#windows-stops-at-start-the-cet-error) exists.
 - **No .NET runtime to install on Windows.** The service and the bundled `viewer\` folder in the zip carry their own .NET runtime. They are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release. The Linux tarball is different: see [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). You need the .NET 10 SDK only to build from source.
@@ -360,7 +365,7 @@ It prompts for the password on stdin (so the plaintext never lands in your shell
 
 Each Entra identity needs a user in the database, and the service host needs a network route to the server. See [Azure SQL Database](monitored-servers.md#permissions-on-monitored-servers).
 
-**excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
+**excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. An entry may hold `*` as a wildcard: `*` matches any run of characters, so `archive_*` skips every database whose name starts with archive_. The wildcard also covers databases created later. An entry made only of `*` is ignored; the Viewer and the MCP tool refuse it. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
 
 ### Validate the Config (Pre-flight)
 

@@ -127,6 +127,54 @@ FROM generate_series(1, " + Samples + ") AS s(g)",
         Assert.Equal(Anchor.AddMinutes(-1), ParseUtc(small.GetProperty("events")[2].GetProperty("sample_time").GetString()!));
     }
 
+    /// <summary>
+    /// #9337: several samples can share one second (one per memory node), and the window total counts events, one per notification
+    /// and second. A page of raw rows set against that total once printed "newest 200 of 80" and a negative left-out figure. 240
+    /// rows over 80 seconds, three a second: the page of 200 rows covers 67 events, so shown never passes the total.
+    /// </summary>
+    [Fact]
+    public async Task RowsSharingASecond_AreCountedAsEvents_ShownNeverPassesTheTotal_AndNothingIsNegative()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await _seed.ExecuteAsync(@"
+INSERT INTO memory_pressure_events (collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system, memory_node_id)
+SELECT $1 + g, $2, $3, $4, $2 - ((g // 3) * INTERVAL 1 SECOND) - INTERVAL 1 SECOND, 'RESOURCE_MEMPHYSICAL_LOW', 0, 1, g % 3
+FROM generate_series(0, 239) AS s(g)",
+            1L, Naive(Anchor), _serverId, ServerName);
+        _seed.Flush();
+
+        var root = JsonDocument.Parse(await CallAsync()).RootElement;
+
+        Assert.Equal(200, root.GetProperty("rows_returned").GetInt32());
+        Assert.Equal(200, root.GetProperty("events").GetArrayLength());
+        var total = root.GetProperty("summary").GetProperty("total_events").GetInt64();
+        var shown = root.GetProperty("events_returned").GetInt64();
+        Assert.Equal(80, total);
+        Assert.Equal(67, shown);
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.DoesNotContain("-", root.GetProperty("limit_note").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#9337: rows cut from a window whose every event is already shown leave nothing out, so the page is not truncated.</summary>
+    [Fact]
+    public async Task RowsCutThatOnlyRepeatShownEvents_AreNotTruncated()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await _seed.ExecuteAsync(@"
+INSERT INTO memory_pressure_events (collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system, memory_node_id)
+SELECT $1 + g, $2, $3, $4, $2 - INTERVAL 1 MINUTE, 'RESOURCE_MEMPHYSICAL_LOW', 0, 1, g
+FROM generate_series(0, 249) AS s(g)",
+            1L, Naive(Anchor), _serverId, ServerName);
+        _seed.Flush();
+
+        var root = JsonDocument.Parse(await CallAsync()).RootElement;
+
+        Assert.Equal(1, root.GetProperty("summary").GetProperty("total_events").GetInt64());
+        Assert.Equal(1, root.GetProperty("events_returned").GetInt64());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("limit_note").ValueKind);
+    }
+
     [Fact]
     public async Task AWindowUnderTheLimit_ReturnsEveryRow_NotTruncated_WithTheSummary()
     {

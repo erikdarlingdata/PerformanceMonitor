@@ -30,20 +30,6 @@ public sealed class QueryStoreHealthStoreTests
     [Fact]
     public void TheRungIsTheTopOfADenseLadder()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2312 added V77, so this rung is no longer the top — the "I am the top" claim moves to the
-           newest rung's own test (ActivityDrivenPlanFetchStoreTests) and this one keeps the invariants
-           that stay true forever: the rung is PRESENT, the ladder is ordered and dense, and the build's
-           schema version tracks the maximum. */
-        Assert.Contains(76, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Dense above the one sanctioned historical hole at V45. */
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
-
         Assert.Equal("query-store-health", PgMigrations.Scripts.Single(s => s.Version == 76).Name);
     }
 

@@ -127,7 +127,7 @@ public sealed class TopRankingNoticeBehaviourTests
         var run = Run("floorOnly");
         foreach (var card in Cards)
         {
-            Assert.Equal([FloorNote], NoticesOf(run, card));
+            Assert.Equal([FloorNote.Replace("raw query_stats", "raw query statistics", StringComparison.Ordinal)], NoticesOf(run, card));
         }
     }
 

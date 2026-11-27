@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -310,7 +311,7 @@ ORDER BY w.collection_time";
         double? snapshotAgeSeconds = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var settings = new Dictionary<string, (string? Setting, string? Unit)>(StringComparer.Ordinal);
             DateTime? snapshotTime = null;
@@ -350,7 +351,7 @@ ORDER BY w.collection_time";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var samples = new List<HostMemorySample>();
             using (var cmd = new NpgsqlCommand(PgTargetMemoryHostSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })

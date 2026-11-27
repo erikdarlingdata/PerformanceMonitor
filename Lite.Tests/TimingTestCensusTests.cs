@@ -44,6 +44,7 @@ public sealed class TimingTestCensusTests
         ["CollectionResetGateTests.cs"] = OwnCollection + "; the 200 ms bound is a lower bound (the reset waited for the gate), which load only lengthens",
         ["DuckDbSentinelConnectionTests.cs"] = OwnCollection + " (CollectionResetGate)",
         ["PostCollectionCheckpointBudgetTests.cs"] = OwnCollection + " (CollectionResetGate)",
+        ["ReadLockWaitLogTests.cs"] = OwnCollection + " (app-logger-statics); the 150 ms is a lower bound the writer holds the lock for, which load only lengthens",
         ["QuerySnapshotPlanOnDemandTests.cs"] = Diagnostic + " (old and new read shapes compared on rows and allocations)",
         ["QueryWindowTruncationTests.cs"] = Diagnostic + " (written to the console)",
         ["ServerTabOpenNativeMemoryTests.cs"] = Diagnostic + " (the Overview open's time after a trim and warm goes into the table the test writes, #8535)",

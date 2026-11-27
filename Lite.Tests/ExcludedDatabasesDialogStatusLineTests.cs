@@ -22,7 +22,8 @@ namespace PerformanceMonitorLite.Tests;
 /// long enough to name the server and say what to do must fit the dialog at its own width instead of being cut at the right edge.
 /// The dialog's content is shown in a host of the dialog's size; the dialog window stays unshown, since shown it would connect to the server named in it.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ExcludedDatabasesDialogStatusLineTests
 {
     [Theory]

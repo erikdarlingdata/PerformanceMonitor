@@ -325,6 +325,119 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         => PreviousPass(serverId, group, (DateTime?)observedTime);
 
     /// <summary>
+    /// #9533: the oldest a read watermark may be, measured on the host from the run that armed it. A longer gap reads the
+    /// collector's whole fallback window. It is the 10-minute window query_stats has always read, so a missed run costs
+    /// what it cost before the watermark and never a row.
+    /// </summary>
+    public const int MaxReadWatermarkGapSeconds = 600;
+
+    /// <summary>#9533: the margin added to the measured gap, for the connect and queue time the host does not measure.</summary>
+    public const int ReadWatermarkGapMarginSeconds = 30;
+
+    private sealed record ArmedWatermark(DateTime ChangedSince, DateTime ArmedAt);
+
+    /// <summary>#9533: serverId -> scope -> the watermark the last successful read armed. Memory only, so a restart reads whole.</summary>
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ArmedWatermark>> _readWatermarks = new();
+
+    /// <summary>
+    /// #9533: serverId -> scope -> key -> the <c>last_execution_time</c> of the key the last time a read returned it. What
+    /// <see cref="AdvanceUnreturnedBaselines"/> needs to know which keys an idle read would have returned.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ConcurrentDictionary<string, DateTime>>> _lastActive = new();
+
+    /// <inheritdoc />
+    public ReadWatermark? TakeReadWatermark(int serverId, string scope, DateTime collectionTime)
+    {
+        if (!_readWatermarks.TryGetValue(serverId, out var byScope) || !byScope.TryRemove(scope, out var armed))
+        {
+            return null;
+        }
+
+        var gap = (collectionTime - armed.ArmedAt).TotalSeconds;
+        if (gap < 0 || gap > MaxReadWatermarkGapSeconds)
+        {
+            return null;
+        }
+
+        var maxAge = (int)Math.Min(MaxReadWatermarkGapSeconds, Math.Ceiling(gap) + ReadWatermarkGapMarginSeconds);
+        return new ReadWatermark(armed.ChangedSince, maxAge, armed.ArmedAt);
+    }
+
+    /// <inheritdoc />
+    public void ArmReadWatermark(int serverId, string scope, DateTime changedSince, DateTime collectionTime)
+        => _readWatermarks.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ArmedWatermark>())[scope]
+            = new ArmedWatermark(changedSince, collectionTime);
+
+    /// <inheritdoc />
+    public void ClearReadWatermark(int serverId, string scope, DateTime collectionTime)
+    {
+        if (_readWatermarks.TryGetValue(serverId, out var byScope)
+            && byScope.TryGetValue(scope, out var armed)
+            && armed.ArmedAt == collectionTime)
+        {
+            byScope.TryRemove(new KeyValuePair<string, ArmedWatermark>(scope, armed));
+        }
+    }
+
+    /// <inheritdoc />
+    public void AdvanceUnreturnedBaselines(int serverId, string scope, IReadOnlyList<string> groups,
+        IReadOnlyDictionary<string, DateTime> returned, DateTime? windowStart, bool advance, DateTime time)
+    {
+        var active = _lastActive
+            .GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentDictionary<string, DateTime>>())
+            .GetOrAdd(scope, _ => new ConcurrentDictionary<string, DateTime>());
+        foreach (var (key, lastExecution) in returned)
+        {
+            active[key] = lastExecution;
+        }
+
+        if (!windowStart.HasValue)
+        {
+            return;
+        }
+
+        _cache.TryGetValue(serverId, out var serverCache);
+        foreach (var entry in active)
+        {
+            if (entry.Value < windowStart.Value)
+            {
+                active.TryRemove(entry);
+                continue;
+            }
+
+            if (!advance || serverCache is null || returned.ContainsKey(entry.Key))
+            {
+                continue;
+            }
+
+            foreach (var group in groups)
+            {
+                if (serverCache.TryGetValue(group, out var groupCache)
+                    && groupCache.TryGetValue(entry.Key, out var baseline)
+                    && baseline.Timestamp is { } stamp && stamp < time)
+                {
+                    groupCache.TryUpdate(entry.Key, (baseline.Value, time), baseline);
+                }
+            }
+        }
+
+        if (advance)
+        {
+            /* An idle read rolled every group's pass window on the first key it met. A read that returned nothing,
+               or nothing that moved, rolls them here, so the series-age credit measures the same gap it always did. */
+            foreach (var group in groups)
+            {
+                PreviousPass(serverId, group, (DateTime?)time);
+            }
+        }
+    }
+
+    /// <summary>#9533: true when <paramref name="scope"/> is <paramref name="group"/> or one of its per-database scopes (<c>group|database</c>).</summary>
+    private static bool ScopeIsOfGroup(string scope, string group)
+        => scope.Equals(group, StringComparison.Ordinal)
+           || (scope.Length > group.Length && scope[group.Length] == '|' && scope.StartsWith(group, StringComparison.Ordinal));
+
+    /// <summary>
     /// The discontinuity accounts (#3653 A5) a definition handed to <see cref="ClearServer"/> or
     /// <see cref="ClearGroups"/> and no host has logged yet: serverId -> the lines, in the order they were
     /// given. The calculator is the one object a definition and its host both hold, so it is where the
@@ -353,6 +466,9 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
            credit a full counter to an interval that never happened. */
         _passes.TryRemove(serverId, out _);
         _sweeps.TryRemove(serverId, out _);
+        /* #9533: a read watermark and the activity record belong to the baselines they were measured against. */
+        _readWatermarks.TryRemove(serverId, out _);
+        _lastActive.TryRemove(serverId, out _);
         NoteDiscontinuity(serverId, discontinuity);
     }
 
@@ -392,6 +508,29 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
             foreach (var group in groups)
             {
                 serverSweeps.TryRemove(group, out _);
+            }
+        }
+
+        /* #9533: the watermark and the activity record of a forgotten group go with its baselines, per-database scopes included. */
+        if (_readWatermarks.TryGetValue(serverId, out var serverWatermarks))
+        {
+            foreach (var scope in serverWatermarks.Keys)
+            {
+                if (Array.Exists(groups, group => ScopeIsOfGroup(scope, group)))
+                {
+                    serverWatermarks.TryRemove(scope, out _);
+                }
+            }
+        }
+
+        if (_lastActive.TryGetValue(serverId, out var serverActive))
+        {
+            foreach (var scope in serverActive.Keys)
+            {
+                if (Array.Exists(groups, group => ScopeIsOfGroup(scope, group)))
+                {
+                    serverActive.TryRemove(scope, out _);
+                }
             }
         }
 

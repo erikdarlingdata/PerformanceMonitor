@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # --signDisableDeep is NOT a Windows option: vpk 1.2.0 answers "Unrecognized command
+        # --signDisableDeep is NOT a Windows option: vpk 1.2.0 (measured then) answers "Unrecognized command
         # or argument" for it, and the string in the assembly belongs to the macOS variant.
         # The axis that matters is batch size: vpk invokes the template once per batch and
         # each invocation is one SignPath approval. Default is 10, and 2000 is rejected, so
@@ -93,7 +93,7 @@ jobs:
       - name: Pack with the probe as the signing tool
         shell: pwsh
         env:
-          VPK_VERSION: '1.2.0'
+          VPK_VERSION: '1.2.161'
         run: |
           dotnet tool install -g vpk --version $env:VPK_VERSION
           New-Item -ItemType Directory -Force -Path probe/out | Out-Null

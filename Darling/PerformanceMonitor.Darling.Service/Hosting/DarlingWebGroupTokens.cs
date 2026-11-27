@@ -44,21 +44,24 @@ internal sealed class DarlingWebGroupTokens : IDisposable
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _refresh = new(1,1);
     private volatile Snapshot _snapshot = new(false,null,Array.Empty<Match>());
+    private readonly Func<bool> _storeReady;
     private bool _warned;
 
     internal DarlingWebGroupTokens(Func<NpgsqlDataSource?> owner, NpgsqlDataSource web,
         Func<IPasswordKeyRing> ring, string sharedToken, DarlingWebTokenSet? fileTokens,
-        IReadOnlyList<string>? mcpTokens, ILogger logger)
-        : this(()=>owner() is { } source ? new WebAccessGroupStore(source) : null, new WebAccessGroupStore(web), ring, sharedToken, fileTokens, mcpTokens, logger)
+        IReadOnlyList<string>? mcpTokens, ILogger logger, Func<bool>? storeReady = null)
+        : this(()=>owner() is { } source ? new WebAccessGroupStore(source) : null, new WebAccessGroupStore(web), ring, sharedToken, fileTokens, mcpTokens, logger, storeReady)
     {
     }
 
     /// <summary>The owner-side credential reads and the web-side metadata reads behind their seams, so the guards are provable without a store.</summary>
+    /// <param name="storeReady">Whether the service has finished its store start (the collector phase is Collecting). Before that a read can
+    /// fail only because migrations have not run yet, so the unavailable sentence waits for it. Null means always ready.</param>
     internal DarlingWebGroupTokens(Func<IWebAccessGroupCredentials?> owner, IWebAccessGroupMetadata metadata,
         Func<IPasswordKeyRing> ring, string sharedToken, DarlingWebTokenSet? fileTokens,
-        IReadOnlyList<string>? mcpTokens, ILogger logger)
+        IReadOnlyList<string>? mcpTokens, ILogger logger, Func<bool>? storeReady = null)
     {
-        _owner=owner; _metadata=metadata; _ring=ring; _logger=logger;
+        _owner=owner; _metadata=metadata; _ring=ring; _logger=logger; _storeReady=storeReady ?? (()=>true);
         _reservedNames=(fileTokens?.Named.Select(entry=>entry.Name) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
         _reservedTokens=new[]{sharedToken}.Concat(fileTokens?.Named.Select(entry=>entry.Token) ?? Array.Empty<string>())
             .Concat(mcpTokens ?? Array.Empty<string>()).Where(value=>!string.IsNullOrEmpty(value)).ToArray();
@@ -79,6 +82,14 @@ internal sealed class DarlingWebGroupTokens : IDisposable
         await _refresh.WaitAsync(ct);
         try
         {
+            // Before the store is ready its migrations may not have run, so config.web_access_advanced may not exist yet and the read
+            // would log a store ERROR for a table that is about to appear. Make no store call: the snapshot stays unavailable (nothing
+            // is honoured, the fail-closed state a failed read gives) and the next supervisor tick reads once the store is ready.
+            if (!_storeReady())
+            {
+                _snapshot = new(false, null, Array.Empty<Match>());
+                return;
+            }
             var epoch = await _metadata.ReadAdvancedSessionEpochAsync(ct);
             if (epoch is null)
             {
@@ -147,9 +158,11 @@ internal sealed class DarlingWebGroupTokens : IDisposable
     private void Unavailable()
     {
         _snapshot=new(false,null,Array.Empty<Match>());
-        if(!_warned)
+        // Before the store is ready the failure is the start itself (migrations still running, key still loading), not a fault: stay quiet
+        // and let the next supervisor tick judge it. A failure that outlives the start is said once.
+        if(!_warned && _storeReady())
             _logger.LogWarning("Managed web group credentials are unavailable; managed access remains refused.");
-        _warned=true;
+        if(_storeReady()) _warned=true;
     }
 
     internal Match? FindMatch(string presented)

@@ -858,6 +858,7 @@ public partial class FinOpsTab
     /// <summary>Runs a FinOps loader with the same status-bar error surfacing the shell's <see cref="LoadInnerTabAsync"/> uses.</summary>
     private async Task RunFinOpsLoad(Func<Task> loader)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await loader();
@@ -865,7 +866,7 @@ public partial class FinOpsTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: FinOps", null, clock.ElapsedMilliseconds, ex));
         }
     }
 }

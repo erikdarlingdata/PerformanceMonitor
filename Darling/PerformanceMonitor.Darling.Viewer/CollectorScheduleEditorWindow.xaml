@@ -60,11 +60,12 @@
             <TextBlock Text="Preset:" VerticalAlignment="Center" Margin="0,0,8,0"/>
             <ComboBox x:Name="PresetCombo" Width="150" VerticalAlignment="Center"
                       SelectionChanged="PresetCombo_SelectionChanged"
-                      ToolTip="Bulk-set collection frequencies; enabled state and retention are not affected">
+                      ToolTip="Aggressive, Balanced and Low-Impact bulk-set collection frequencies and leave retention alone. They leave enabled state alone too, unless every collector is off, and then they turn the collectors that are on by default back on. Off turns every collector off and keeps frequencies, run times and retention.">
                 <ComboBoxItem Content="Custom"/>
                 <ComboBoxItem Content="Aggressive"/>
                 <ComboBoxItem Content="Balanced"/>
                 <ComboBoxItem Content="Low-Impact"/>
+                <ComboBoxItem Content="Off"/>
             </ComboBox>
             <Button x:Name="ResetDefaultsButton" Content="_Reset to Defaults" Margin="16,0,0,0" Click="ResetDefaults_Click"
                     ToolTip="Replace the current values with the built-in default frequencies and retention, and clear every run time"/>

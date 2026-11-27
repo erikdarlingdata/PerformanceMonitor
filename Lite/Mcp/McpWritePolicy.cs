@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -34,6 +35,27 @@ internal static class McpWritePolicy
     /// <summary>The settings.json key that serves the write tools.</summary>
     internal const string WritesSetting = "mcp_allow_writes";
 
+    /// <summary>The settings.json key that additionally serves <see cref="ServerAdminTools"/> (#9640), the twin of Darling's
+    /// <c>mcp.allowServerAdmin</c>.</summary>
+    internal const string ServerAdminSetting = "mcp_allow_server_admin";
+
+    /// <summary>
+    /// The tools that change which servers Lite connects to, or where (#9640). They save a login Lite then presents to whatever host the
+    /// caller names, so they sit behind their own setting too: <see cref="ServerAdminSetting"/> on AND <see cref="WritesSetting"/> on
+    /// (and a usable token), exactly as Darling's <c>DarlingMcpWritePolicy.ServerAdminTools</c>. Every one is also in
+    /// <see cref="WriteTools"/> (the annotation hints and the census count them as writes); this set only adds the second switch.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> ServerAdminTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "add_servers",
+        "remove_server",
+        "edit_server",
+    };
+
+    /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start logs, built from
+    /// <see cref="ServerAdminTools"/> so a tool added to the set is named without an edit to the text.</summary>
+    internal static string ServerAdminToolList => string.Join("/", ServerAdminTools.Order(StringComparer.Ordinal));
+
     /// <summary>
     /// Every registered tool that writes to what Lite stores: the analysis mute and its undo, and the notification-route disable and delete. The other tools
     /// only read. <c>analyze_server</c> persists the findings it derives but changes no setting of the
@@ -51,8 +73,21 @@ internal static class McpWritePolicy
         "set_notification_route_enabled",
         "delete_notification_route",
 
+        /* #9639: authoring a route, the twins of Darling's create_notification_route and update_notification_route. */
+        "create_notification_route",
+        "update_notification_route",
+
+        /* #9639: the mute-rule writes, Darling's twins. get_mute_rules is a read. */
+        "create_mute_rule",
+        "update_mute_rule",
+        "delete_mute_rule",
+        "set_mute_rule_enabled",
+
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
+        /* #9640: set_server_excluded_databases is a plain write, as on Darling. */
+        "set_server_excluded_databases",
+
         "create_query_tag",
         "update_query_tag",
         "delete_query_tag",
@@ -61,29 +96,46 @@ internal static class McpWritePolicy
         "create_query_tag_rule",
         "update_query_tag_rule",
         "delete_query_tag_rule",
+
+        /* #9640: add_servers, remove_server and edit_server are also in ServerAdminTools, which adds mcp_allow_server_admin as a
+           second switch, the shape of Darling's DarlingMcpWritePolicy. */
+        "add_servers",
+        "remove_server",
+        "edit_server",
+
+        /* #9640: Darling's reset_collector_schedules twin. get_collector_schedules is a read. */
+        "reset_collector_schedules",
+
+        /* #9639: the alert-settings update, Darling's twin. get_alert_settings is a read. */
+        "update_alert_settings",
     };
 
+    /// <summary>A write, a server administration tool included (every one is also in <see cref="WriteTools"/>).</summary>
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
+
+    internal static bool IsServerAdmin(string toolName) => ServerAdminTools.Contains(toolName);
+
+    /// <summary>True when a tool is served under the two switches: a server admin tool needs both, any other write needs
+    /// <paramref name="allowWrites"/>, a read is always served.</summary>
+    internal static bool IsServed(string toolName, bool allowWrites, bool allowServerAdmin) =>
+        IsServerAdmin(toolName) ? allowWrites && allowServerAdmin : !IsWrite(toolName) || allowWrites;
 
     /// <summary>
     /// Removes every write tool from <paramref name="tools"/> IN PLACE unless <paramref name="allowWrites"/> is
     /// true (the host runs this once, when the SDK's options are built, so every route serves the narrowed set),
     /// and stamps the annotation hints on the rest. Null-safe for a host with no tools registered.
     /// </summary>
-    internal static void Apply(McpServerPrimitiveCollection<McpServerTool>? tools, bool allowWrites)
+    internal static void Apply(McpServerPrimitiveCollection<McpServerTool>? tools, bool allowWrites, bool allowServerAdmin = false)
     {
         if (tools is null)
         {
             return;
         }
 
-        if (!allowWrites)
+        var refused = tools.Where(tool => !IsServed(tool.ProtocolTool.Name, allowWrites, allowServerAdmin)).ToList();
+        foreach (var tool in refused)
         {
-            var refused = tools.Where(tool => IsWrite(tool.ProtocolTool.Name)).ToList();
-            foreach (var tool in refused)
-            {
-                tools.Remove(tool);
-            }
+            tools.Remove(tool);
         }
 
         ApplyAnnotations(tools);
@@ -92,7 +144,7 @@ internal static class McpWritePolicy
     /// <summary>A fresh collection holding only the tools that are served under <paramref name="allowWrites"/>;
     /// the input is untouched. The same shape as Darling's <c>FilterToolCollection</c>.</summary>
     internal static McpServerPrimitiveCollection<McpServerTool> FilterToolCollection(
-        McpServerPrimitiveCollection<McpServerTool>? allTools, bool allowWrites)
+        McpServerPrimitiveCollection<McpServerTool>? allTools, bool allowWrites, bool allowServerAdmin = false)
     {
         var served = new McpServerPrimitiveCollection<McpServerTool>();
 
@@ -100,7 +152,7 @@ internal static class McpWritePolicy
         {
             foreach (var tool in allTools)
             {
-                if (allowWrites || !IsWrite(tool.ProtocolTool.Name))
+                if (IsServed(tool.ProtocolTool.Name, allowWrites, allowServerAdmin))
                 {
                     served.Add(tool);
                 }
@@ -132,6 +184,9 @@ internal static class McpWritePolicy
             annotations.ReadOnlyHint = !write && !stateOnly;
             annotations.DestructiveHint = write;
             protocol.Annotations = annotations;
+
+            /* #9065: a tool that changes state takes database_name in its exact spelling only, and its description says so. */
+            McpDatabaseNameResolver.DescribeMatching(protocol);
         }
     }
 
@@ -143,11 +198,12 @@ internal static class McpWritePolicy
     /// #5789: it also sets the server instructions, from the tool names before and after the narrowing, so their
     /// census counts the set <c>tools/list</c> serves; they used to carry a fixed catalog count.
     /// </summary>
-    internal static IServiceCollection AddMcpWritePolicy(this IServiceCollection services, bool allowWrites, McpHostService.McpServing? serving = null) =>
+    internal static IServiceCollection AddMcpWritePolicy(this IServiceCollection services, bool allowWrites, McpHostService.McpServing? serving = null,
+        bool allowServerAdmin = false) =>
         services.PostConfigure<McpServerOptions>(options =>
         {
             var catalog = ToolNames(options.ToolCollection);
-            Apply(options.ToolCollection, allowWrites);
+            Apply(options.ToolCollection, allowWrites, allowServerAdmin);
             options.ServerInstructions = McpInstructions.Build(catalog, ToolNames(options.ToolCollection), serving);
         });
 

@@ -17,6 +17,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -156,7 +157,7 @@ public sealed class PgPlanForceActionStore : IPlanForceActionStore
             throw new ArgumentNullException(nameof(record));
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync(ct);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.PlanForceAction, ct);
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.plan_force_actions (
     action_time, server_id, server_name, database_name, query_id, plan_id,
@@ -233,7 +234,7 @@ RETURNING action_id", connection)
 
         var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
 
-        await using var connection = await _postgres.OpenConnectionAsync(ct);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.PlanForceAction, ct);
         await using var command = new NpgsqlCommand(@"
 SELECT
     (SELECT MAX(pfa.action_time)
@@ -376,7 +377,7 @@ SELECT
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
         int serverId, DateTime nowUtc, CancellationToken ct)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(ct);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.PlanForceAction, ct);
         await using var command = new NpgsqlCommand(@"
 SELECT pfa.action_id, pfa.action_time, pfa.server_id, pfa.server_name, pfa.database_name,
        pfa.query_id, pfa.plan_id, pfa.action, pfa.mode, pfa.actor, pfa.decision, pfa.reasons,
@@ -519,7 +520,7 @@ LIMIT 16", connection)
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetRecentActionsAsync(
         int? serverId, DateTime sinceUtc, int limit, CancellationToken ct)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(ct);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.PlanForceAction, ct);
         await using var command = new NpgsqlCommand(@"
 SELECT pfa.action_id, pfa.action_time, pfa.server_id, pfa.server_name, pfa.database_name,
        pfa.query_id, pfa.plan_id, pfa.action, pfa.mode, pfa.actor, pfa.decision, pfa.reasons,

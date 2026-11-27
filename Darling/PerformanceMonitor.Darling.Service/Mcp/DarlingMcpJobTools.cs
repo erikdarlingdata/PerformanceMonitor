@@ -42,6 +42,7 @@ public sealed class DarlingMcpJobTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the captured_at on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree. LATEST IS A TIME: this reads the newest running-jobs snapshot, not a window, and captured_at is the instant it was collected - a job listed here was running AT that stamp, and current_duration_seconds is how long it had been running AT that stamp, not now.")]
     public static async Task<string> GetRunningJobs(
         NpgsqlDataSource postgres,
@@ -128,6 +129,7 @@ public sealed class DarlingMcpJobTools
     /// <summary>The run statuses <c>get_job_history</c> accepts, by their <c>sysjobhistory</c> codes 0 to 3.</summary>
     private static readonly string[] HistoryStatuses = ["Failed", "Succeeded", "Retry", "Canceled"];
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_job_history"), Description("Gets retained SQL Agent job runs ending at as_of, newest first, for a server or fleet. Filters apply before limit. Times UTC. Empty: none matched; not_collected: this engine has no Agent. window_truncated: floor, not limit; effective_start: reach; truncated: limit cut. Agent: agent_running, agent_status_desc, next_run, captured_at (empty: hints); fleet: agents_total/_running (servers with a snapshot), agents_not_running (stopped or unknown).")]
     public static async Task<string> GetJobHistory(
         NpgsqlDataSource postgres,

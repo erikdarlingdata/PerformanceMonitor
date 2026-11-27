@@ -368,24 +368,20 @@ public sealed class ServerHealthClassifierTests
 
     [Fact]
     public void ThreadsSeverity_NoSnapshot_IsUnknown() =>
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.ThreadsSeverity(null, null, 0, 0));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.ThreadsSeverity(null, 0, 0));
 
     [Fact]
     public void ThreadsSeverity_WorkQueueStarvation_IsCritical() =>
-        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.ThreadsSeverity(512, 412, 0, 3));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.ThreadsSeverity(512, 0, 3));
 
     [Fact]
     public void ThreadsSeverity_ManyRunnable_IsWarning() =>
-        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.ThreadsSeverity(512, 412, 20, 0));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.ThreadsSeverity(512, 20, 0));
 
     [Fact]
-    public void ThreadsSeverity_LowAvailable_IsWarning() =>
-        // available 42 < 10% of 512 (51.2)
-        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.ThreadsSeverity(512, 42, 0, 0));
+    public void ThreadsSeverity_NothingWaiting_IsHealthy() =>
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.ThreadsSeverity(512, 0, 0));
 
-    [Fact]
-    public void ThreadsSeverity_Ample_IsHealthy() =>
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.ThreadsSeverity(512, 400, 0, 0));
 
     /* ── overall reduce ── */
 
@@ -618,7 +614,7 @@ public sealed class ServerHealthClassifierTests
             DeadlockCount = 99,
             DeadlockWindow = TimeSpan.FromHours(1),   // #3368: 99/hr, so this metric really is maxed
             TotalThreads = 512,
-            AvailableThreads = 1,
+            ThreadsWaitingForCpu = 50,
             FailedCollectorCount = 1,
         };
         var maxedWarning = ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Warning, maxed);

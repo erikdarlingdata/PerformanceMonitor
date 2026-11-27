@@ -64,6 +64,21 @@ public sealed class AlertHistoryRowSeverityLiteTests
         Assert.False(legacy.IsWarning);
     }
 
+    /// <summary>#9583: an Instance Restarted row is an amber warning row, not a resolution, whatever its name says.</summary>
+    [Fact]
+    public void TheInstanceRestartedRow_IsAWarning_NotAResolution()
+    {
+        foreach (var json in new[] { WithSeverity(AlertSeverityLevel.Warning), null })
+        {
+            var row = Row("Instance Restarted", json);
+            Assert.True(row.IsWarning);
+            Assert.False(row.IsCritical);
+            Assert.False(row.IsResolved);
+        }
+
+        Assert.True(Row("Agent Restarted", null).IsResolved);
+    }
+
     /// <summary>The other direction: a CRITICAL-graded low-disk fire (#1136) was an amber row by name and is
     /// red by tier; the presence-flat metrics carry no tier and keep the name's colour exactly.</summary>
     [Fact]

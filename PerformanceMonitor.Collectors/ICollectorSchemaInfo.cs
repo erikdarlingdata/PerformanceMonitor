@@ -34,6 +34,13 @@ public interface ICollectorSchemaInfo
     CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
 
     /// <summary>
+    /// Whether the collector runs once per database, reachable by name without the row type so a fault sentence can say whether an
+    /// extension has to be created in one database or in each. A default interface implementation, so a test double needs no change;
+    /// <see cref="ICollectorDefinition{TRow}"/> declares the same member and every definition overrides it.
+    /// </summary>
+    bool RunsPerDatabase(CollectorTargetInfo target) => false;
+
+    /// <summary>
     /// The query this definition builds for <paramref name="context"/>, reachable without its row type (#7681): the service
     /// registers the shape of every PostgreSQL collector's statement at startup from the catalog. Null for a definition that
     /// does not build one. A default interface implementation, so a test double needs no change; <see cref="ICollectorDefinition{TRow}"/>
@@ -189,13 +196,23 @@ public interface ICollectorSchemaInfo
     /// (<c>TimescaleSupport.HypertableTables</c>), and the hypertable count is a grid decision: the compression band,
     /// the worker sizing and the refresh watch lines all derive from it (#3035, #3044, #3107). An exception to the
     /// rule therefore has to be explicit, named in one place and counted by a census test, so it cannot spread
-    /// silently. The one holder is the attention collector, whose rows are low volume (the ring buffer caps the
-    /// detail at 1,000 events per read, the ring_buffer MAX_EVENTS_LIMIT default, and a healthy server reads near zero).</para>
+    /// silently. The holders are the small collectors whose rows are low volume, such as the forced-plans and hints tables.</para>
     ///
     /// <para>A default interface implementation, the choice <see cref="RequiredPgExtensions"/> made, so the existing
     /// definitions and the test doubles need no change.</para>
     /// </summary>
     bool StaysPlainTable => false;
+
+    /// <summary>
+    /// True when this collector's table becomes a TimescaleDB hypertable (<c>TimescaleSupport.ConvertToHypertablesAsync</c>) but
+    /// joins no part of the compression grid: no phase slot and no count in the worker sizing (#8967). False for every other
+    /// definition. Such a table is NOT in <c>TimescaleSupport.HypertableTables</c>, so <c>HypertableCount</c>, the phase order and
+    /// the worker sizing do not move. Its compression settings and policy come from a step of their own (the attention table's is
+    /// <c>TimescaleSupport.EnsureAttentionEventsCompressionAsync</c>, #9216), so the walk of the grid never reaches it. A table
+    /// takes a slot at the end of the phase order only by a grid decision (#3035, #3044, #3107). Only meaningful with
+    /// <see cref="StaysPlainTable"/> false. A default interface implementation, the choice <see cref="StaysPlainTable"/> made.
+    /// </summary>
+    bool CompressionOffGrid => false;
 
     /// <summary>
     /// True when only Darling stores and schedules this collector: Lite creates no table for it, lists no schedule row and never
@@ -214,6 +231,14 @@ public interface ICollectorSchemaInfo
     bool ReadsAuroraFunctions => false;
 
     /// <summary>
+    /// When set, the host runs this PostgreSQL collector's read with a local <c>work_mem</c> sized from the target's
+    /// <c>pg_stat_statements.max</c> and this many bytes an entry (#9062), so a function in FROM that returns one row per
+    /// entry keeps its result in memory instead of spilling a temp file on every call. Null (the default) leaves the
+    /// target's setting alone. A default interface implementation, the choice <see cref="ReadsAuroraFunctions"/> made.
+    /// </summary>
+    int? ReadWorkMemBytesPerEntry => null;
+
+    /// <summary>
     /// Whether the query <see cref="ICollectorDefinition{TRow}.BuildQuery"/> builds for <paramref name="context"/> reads an
     /// object of <paramref name="extension"/> (#6888). True for every declared extension except where the collector
     /// runs without it on this target: the Aurora-native source in place of pg_stat_statements, the service-side
@@ -223,4 +248,13 @@ public interface ICollectorSchemaInfo
     /// <see cref="ReadsAuroraFunctions"/> made.
     /// </summary>
     bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context) => true;
+
+    /// <summary>
+    /// True when this definition writes query-tag sightings (#9705): it overrides <c>DescribeQueryTagSightings</c>, so its rows
+    /// put keys into <c>collect.query_tag_sightings</c>. Reachable by name without the row type, so the retention sweep can ask
+    /// the catalog which collectors feed the sightings table and keep a sighting as long as the longest of their raw retentions.
+    /// <see cref="CollectorDefinitionBase{TRow}"/> derives it from the override itself, so there is no second list to keep in
+    /// step with the writers. A default interface implementation, so a test double needs no change.
+    /// </summary>
+    bool WritesQueryTagSightings => false;
 }

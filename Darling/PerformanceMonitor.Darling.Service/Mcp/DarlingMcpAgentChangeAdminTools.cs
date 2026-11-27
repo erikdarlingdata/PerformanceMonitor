@@ -54,6 +54,7 @@ public sealed class DarlingMcpAgentChangeAdminTools
     /// <summary>The journal actor of these two writes: the MCP actor <see cref="DarlingMcpServerActionTools.ActorOf"/> spells (#3684: alias, do not copy).</summary>
     internal static string ActorOf() => DarlingMcpServerActionTools.ActorOf();
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_agent_actions_enabled"), Description(
         "Turns the service-wide agent-actions switch OFF (over MCP it never turns it on): the one brake over every change an investigation agent can make (mute rules, custom rules, threshold overrides, signature merges, plan force, plan evict, session kill). Off refuses every agent change with actions_off; nothing already done is undone. enabled true is refused and writes nothing, because an MCP client must not give agents back actions a person took away; a person turns them on in the Viewer (Agent changes) or the web dashboard. Per-server switches (set_server_action) are separate and still apply. Answers the state before and after, and journals agent_actions_switched. Refused, writing nothing, when the store has no service row yet. Admin only: never offered to an investigation agent.")]
     public static Task<string> SetAgentActionsEnabled(
@@ -112,6 +113,7 @@ public sealed class DarlingMcpAgentChangeAdminTools
         return refusal;
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "undo_agent_change"), Description(
         "Undoes ONE agent change that is not a plan force or unforce: a mute rule, a custom alert rule, a threshold override or a deadlock signature merge, by its called_id from get_agent_changes (can_undo true). Puts the rule or override back to what it was before the agent's change, in one transaction, and journals action_undone. Refuses, writing nothing, when the change was already undone (already_undone), is not in the journal (not_found), is older than 365 days (expired), changed since the agent made it (changed_since: a person's later edit is kept), or has no undo (not_undoable). A plan force or unforce is refused with a pointer to undo_plan_change. Answers the state before and after. Admin only: never offered to an investigation agent.")]
     public static Task<string> UndoAgentChange(

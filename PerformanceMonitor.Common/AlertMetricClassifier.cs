@@ -84,6 +84,12 @@ namespace PerformanceMonitor.Common
             if (string.Equals(metricName, "External Alerts Delivered Again", StringComparison.Ordinal))
                 return true;
 
+            /* #9583 (the alert is #8884): "Instance Restarted" is a Warning fire, an event that says the instance restarted. The word
+               "Restarted" below is there for "Agent Restarted", the recovery that follows "Agent Not Running". Named here, as the
+               exact name above is, so the fire is styled, counted and badged as the warning it fires at. */
+            if (string.Equals(metricName, "Instance Restarted", StringComparison.Ordinal))
+                return false;
+
             return metricName.Contains("Cleared", StringComparison.Ordinal)
                 || metricName.Contains("Resolved", StringComparison.Ordinal)
                 || metricName.Contains("Restored", StringComparison.Ordinal)
@@ -191,13 +197,16 @@ namespace PerformanceMonitor.Common
                more; it is kept solely so already-stored rows format like the new ones.
                "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
                share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
-            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
+            "High CPU" or "Capacity at ceiling" or "tempdb Space" or "tempdb Log Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
                 or "Collection Falling Behind" or "Identity Capacity" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
                window on both engines (before that, SQL Server's average ms per wait; rows from then still
                render in the same unit, which is why the arm did not change). Long-running query carries
                elapsed minutes. */
+            /* #8882: tempdb Growth Fit carries megabytes, not a percentage: the next growth step the volume cannot hold, and the free space on that volume. */
+            "tempdb Growth Fit" => $"{value:F0} MB",
+
             "Poison Wait" => $"{value:F0} ms",
 
             /* #5641: Runnable Queue carries the window's average runnable tasks per scheduler, and the bar it crossed. */
@@ -229,7 +238,8 @@ namespace PerformanceMonitor.Common
                with no expiry, past every expiry the product offers. "Store Settings Need Attention" (#4215)
                is the same shape again: the count of conditions in force (a last-good fallback, a kept hand
                edit, a rejected value) on a managed store's darling-managed.conf. "Store Autovacuum Behind" (#7368) counts the big tables past 3 times their
-               autoanalyze threshold. "Collector Cost Digest" (#3443) counts
+               autoanalyze threshold. "Store Vacuum Stalled" (#8950) counts the store tables behind on autovacuum or with it
+               cancelled repeatedly. "Collector Cost Digest" (#3443) counts
                the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
                STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
@@ -239,7 +249,7 @@ namespace PerformanceMonitor.Common
                Failing" (#4750) counts a webhook channel's failures in a row. "External Alerts Undelivered" (#5654)
                counts the external alerts the drain gave up on in the last hour. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention" or "Store Autovacuum Behind"
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention" or "Store Autovacuum Behind" or "Store Vacuum Stalled"
                 or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" or "Daily Health Report"
                 or "Notification Channel Failing" or "External Alerts Undelivered" => $"{value:F0}",
 
@@ -385,7 +395,10 @@ namespace PerformanceMonitor.Common
                     or "Refresh Job Stuck"
                     or "Retention Job Stuck"
                     /* #8302: a daily rollup behind its source fires with the same state-only sentinel. */
-                    or "Daily Rollup Stale" => true,
+                    or "Daily Rollup Stale"
+                    /* #9583: the Instance Restarted fire carries a start-time sentence, not a measurement. It was state-only only
+                       by being read as a resolution, which this fix ends, so it is listed; its fire site passes the 0 sentinel. */
+                    or "Instance Restarted" => true,
                 _ => false,
             };
         }

@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -21,8 +22,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// policy that token's role is served. The bearer gate sets it on the request; the tool set, the Level 2 gate, the investigation
 /// reads and the route tools read it from there. <see cref="DataDetail"/> is the level the token's own <c>dataDetail</c> asks for (#7023),
 /// null when the entry sets none and for the legacy token; <see cref="DarlingMcpTokenSet.DetailFor"/> turns it into the level served.
+/// <see cref="Role"/> is set for a personal token (#8737), whose role is not in <c>mcp.tokens</c>; null for every file token.
 /// </summary>
-internal sealed record McpCaller(string? Name, DarlingMcpWritePolicy.Effective Policy, McpDataDetail? DataDetail = null);
+internal sealed record McpCaller(string? Name, DarlingMcpWritePolicy.Effective Policy, McpDataDetail? DataDetail = null, string? Role = null);
 
 /// <summary>
 /// The bearer tokens one MCP start serves (#6542): the legacy single token (<c>mcp.network.token</c> or <c>encryptedToken</c>), whose
@@ -65,6 +67,17 @@ internal sealed class DarlingMcpTokenSet
     /// <summary>True when at least one named token is served, so each request's tool set follows its token.</summary>
     internal bool HasNamed => Named.Count > 0;
 
+    /// <summary>The personal MCP tokens (#8737) this start serves beside the file tokens, or null when it serves none. A front door never
+    /// sets it.</summary>
+    internal PersonalTokenSettings? Personal { get; init; }
+
+    /// <summary>True when each request's tool set, instructions and data detail follow the caller the bearer gate stored: a named token
+    /// is served, or personal tokens are.</summary>
+    internal bool PerRequest => HasNamed || Personal is not null;
+
+    /// <summary>The prefix of a personal token's caller name, <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>.</summary>
+    internal const string PersonalNamePrefix = "personal:";
+
     /// <summary>True when any token at all gates the listener.</summary>
     internal bool HasAnyToken => LegacyToken.Length > 0 || HasNamed;
 
@@ -78,6 +91,27 @@ internal sealed class DarlingMcpTokenSet
         McpTokenEntry.AgentRole => new DarlingMcpWritePolicy.Effective(false, false, true, entry.Name),
         _ => new DarlingMcpWritePolicy.Effective(false, false, false, entry.Name),
     };
+
+    /// <summary>The policy a personal token's role is served (#8737): <c>operator</c> as a named operator token is served (the server admin
+    /// tools only with both settings on, and never the personal token tools, #9643), anything else as a reader. A personal token never holds the investigation tools.</summary>
+    internal DarlingMcpWritePolicy.Effective PolicyForRole(string role, string? name) => role switch
+    {
+        McpTokenEntry.OperatorRole => new DarlingMcpWritePolicy.Effective(true, _serverAdmin, false, name, PersonalToken: true),
+        _ => new DarlingMcpWritePolicy.Effective(false, false, false, name, PersonalToken: true),
+    };
+
+    /// <summary>The caller a live personal token is: named <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>, served the personal tokens' own
+    /// <c>dataDetail</c> and its row's role, except that an <c>operator</c> row is served <c>operator</c> only while
+    /// <c>mcp.personalTokens.adminRole</c> is operator: a row minted before the setting was lowered is served as a reader, whatever the file
+    /// tokens put in the start's tool set.</summary>
+    internal McpCaller PersonalCaller(PersonalTokenRow row)
+    {
+        var name = PersonalNamePrefix + row.Subject + "/" + row.TokenName;
+        var role = string.Equals(row.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal) && Personal?.AdminMayMintOperator == true
+            ? McpTokenEntry.OperatorRole
+            : McpTokenEntry.ReaderRole;
+        return new McpCaller(name, PolicyForRole(role, name), Personal?.DataDetail, role);
+    }
 
     /// <summary>The level a call is served (#7023): the service's <c>mcp.dataDetail</c>, or the caller's own <c>dataDetail</c> when that is
     /// stricter (full, then maskLiterals, then metadataOnly). A token can narrow the service's level, never widen it. No matched caller (stdio,
@@ -113,6 +147,15 @@ internal sealed class DarlingMcpTokenSet
             foreach (var entry in Named)
             {
                 var policy = PolicyFor(entry);
+                writes |= policy.Writes;
+                admin |= policy.ServerAdmin;
+                investigations |= policy.Investigations;
+            }
+
+            /* #8737: the strongest role a personal token may hold, operator only when an admin may mint one. */
+            if (Personal is not null)
+            {
+                var policy = PolicyForRole(Personal.AdminMayMintOperator ? McpTokenEntry.OperatorRole : McpTokenEntry.ReaderRole, null);
                 writes |= policy.Writes;
                 admin |= policy.ServerAdmin;
                 investigations |= policy.Investigations;
@@ -322,7 +365,8 @@ internal sealed class DarlingMcpTokenSet
     /// <see cref="Check"/> passes. Each problem is logged once, at Critical when the token it names is not served and at Warning for
     /// <see cref="LegacyBesideNamedAdvice"/>, which names no unserved token. Never logs a value.
     /// </summary>
-    internal static DarlingMcpTokenSet Resolve(McpConfig mcp, string legacyToken, DarlingMcpWritePolicy.Effective legacyPolicy, ILogger? logger)
+    internal static DarlingMcpTokenSet Resolve(McpConfig mcp, string legacyToken, DarlingMcpWritePolicy.Effective legacyPolicy, ILogger? logger,
+        PersonalTokenSettings? personal = null)
     {
         var problems = Check(mcp, legacyToken, ResolveEntry, out var usable);
         foreach (var problem in problems)
@@ -338,6 +382,6 @@ internal sealed class DarlingMcpTokenSet
         }
 
         /* An operator token gets the server admin tools only when writes AND server admin are both on: the rule Resolve applies to the legacy token. */
-        return new DarlingMcpTokenSet(legacyToken, legacyPolicy, usable, mcp.AllowWrites && mcp.AllowServerAdmin);
+        return new DarlingMcpTokenSet(legacyToken, legacyPolicy, usable, mcp.AllowWrites && mcp.AllowServerAdmin) { Personal = personal };
     }
 }

@@ -310,6 +310,7 @@ public static class FactAdvice
             "DB_CONFIG" => ComposeDbConfig(factsByKey),
             "QUERY_STORE_ERROR" => ComposeQueryStoreError(factsByKey),
             "FILE_AUTOGROWTH_PERCENT" => ComposeFileAutogrowth(factsByKey),
+            "TEMPDB_FILE_SETUP" => ComposeTempdbFileSetup(factsByKey),
             "MISSING_INDEX" => ComposeMissingIndex(factsByKey),
             "PLAN_WARNING" => ComposePlanWarning(factsByKey),
             "RUNNING_JOBS" => ComposeRunningJobs(factsByKey),
@@ -2724,6 +2725,85 @@ public static class FactAdvice
         };
     }
 
+    /// <summary>
+    /// #8883: TEMPDB_FILE_SETUP composed. The fact's value is the number of failed checks and its metadata names each one with
+    /// its numbers (TempDbFileSetup.BuildFact), so the advice gives one fix line per failed check, with those numbers.
+    /// </summary>
+    private static AdviceBlock ComposeTempdbFileSetup(IReadOnlyDictionary<string, Fact> facts)
+    {
+        const string Key = "TEMPDB_FILE_SETUP";
+        var fallback = _byKey[Key];
+        if (!facts.TryGetValue(Key, out var fact))
+            return fallback;
+
+        bool Failed(string check) => fact.Metadata.TryGetValue(check, out var v) && v > 0;
+        double Meta(string name) => fact.Metadata.TryGetValue(name, out var v) ? v : 0;
+
+        var found = new List<string>();
+        var fixes = new List<string>();
+
+        if (Failed("check_data_file_count"))
+        {
+            var dataFiles = Meta("data_file_count");
+            var schedulers = Meta("scheduler_count");
+            var target = Meta("recommended_data_file_count");
+            found.Add($"{Plural(dataFiles, "data file")} for {Plural(schedulers, "scheduler")}");
+            fixes.Add($"tempdb has {Plural(dataFiles, "data file")} and the server has {Plural(schedulers, "scheduler")}. Add data files up to {target:N0}, all the same size and growth.");
+        }
+
+        if (Failed("check_data_file_sizes"))
+        {
+            var largest = Meta("data_file_largest_mb");
+            var smallest = Meta("data_file_smallest_mb");
+            found.Add($"data files from {smallest:N0} MB to {largest:N0} MB");
+            fixes.Add($"The tempdb data files are not the same size: the largest is {largest:N0} MB and the smallest is {smallest:N0} MB. Resize them all to the same size, so SQL Server spreads writes across them evenly.");
+        }
+
+        if (Failed("check_data_file_growth"))
+        {
+            var kinds = Meta("data_file_growth_setting_count");
+            found.Add($"{kinds:N0} different growth settings on the data files");
+            fixes.Add($"The tempdb data files use {kinds:N0} different growth settings. Give them all the same fixed growth step, so they grow together and stay the same size.");
+        }
+
+        if (Failed("check_percent_growth"))
+        {
+            var percent = Meta("percent_growth_file_count");
+            found.Add($"{Plural(percent, "file")} on percent growth");
+            fixes.Add(Math.Abs(percent - 1) < 0.5
+                ? "1 tempdb file grows by a percentage. Switch it to a fixed size growth step, so every growth is the same bounded size."
+                : $"{percent:N0} tempdb files grow by a percentage. Switch each to a fixed size growth step, so every growth is the same bounded size.");
+        }
+
+        if (Failed("check_autogrow_all_files"))
+        {
+            var off = Meta("autogrow_all_files_off_count");
+            found.Add("AUTOGROW_ALL_FILES off");
+            fixes.Add($"AUTOGROW_ALL_FILES is off on {Plural(off, "tempdb data file")}. Turn it on for the tempdb data filegroup, so one growth grows every data file and they stay the same size.");
+        }
+
+        if (Failed("check_log_file_count"))
+        {
+            var logs = Meta("log_file_count");
+            found.Add($"{logs:N0} log files");
+            fixes.Add($"tempdb has {logs:N0} log files. SQL Server writes the log one file at a time, so extra log files add no speed. Keep one.");
+        }
+
+        if (fixes.Count == 0)
+            return fallback;
+
+        return fallback with
+        {
+            Headline = $"tempdb file setup fails {Plural(fixes.Count, "check")}: {string.Join(", ", found)}",
+            Investigation =
+                "tempdb's data files share the allocation work for temporary objects. When there are too few of them, or they differ in size or growth, " +
+                "one file takes most of the writes and sessions queue on its allocation pages (PAGELATCH waits on tempdb). " +
+                "This server fails " + Plural(fixes.Count, "tempdb file setup check") + ": " + string.Join("; ", found) + ". " +
+                "The drill-down lists every tempdb file with its size and growth.",
+            Remediation = string.Join(" ", fixes)
+        };
+    }
+
     /// <summary>MISSING_INDEX composed: states the suggestion count and the strongest estimated impact.</summary>
     private static AdviceBlock ComposeMissingIndex(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -3619,6 +3699,14 @@ public static class FactAdvice
                 "The offending files are attached (database, logical name, type, size, configured percent). Percentage growth on a large file means an ever-larger single allocation: 10% of a 200 GB file is a 20 GB extend, and every transaction that triggers it waits for the whole allocation. Log growths are always zeroed, so a large percentage log growth stalls every writer until it finishes.",
             Remediation:
                 "Switch the flagged files to a fixed-MB autogrowth so each growth is bounded and predictable: 1024 MB for data files, 64 MB for log files. A ready-to-run ALTER statement per file is attached that applies exactly that. This is a metadata-only change and is safe to run online.");
+
+        t["TEMPDB_FILE_SETUP"] = new AdviceBlock(
+            Headline:
+                "tempdb's file setup can cause allocation contention or uneven file use",
+            Investigation:
+                "The tempdb files are attached with their size and growth. tempdb's data files share the allocation work for temporary objects, so the best setup is data files up to the lesser of 8 and the schedulers, all the same size and growth, growing together, on fixed size growth steps, with a single log file.",
+            Remediation:
+                "Add or resize the data files so they match, switch percent growth to a fixed step, turn on AUTOGROW_ALL_FILES for the data filegroup, and keep one log file.");
 
         // ─────────────────────────────────────────────────────────────────
         // Server config (WS3) — one advisory per per-setting CONFIG_* root key

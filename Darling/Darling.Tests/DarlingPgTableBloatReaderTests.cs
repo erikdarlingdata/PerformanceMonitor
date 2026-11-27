@@ -39,7 +39,7 @@ public class DarlingPgTableBloatReaderTests
     public void ScopesToOneServerAndOneWindow()
     {
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", Sql);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 50", Sql, StringComparison.Ordinal);

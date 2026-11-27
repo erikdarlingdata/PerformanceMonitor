@@ -35,7 +35,8 @@ namespace PerformanceMonitorLite.Tests;
 /// because GetSmtpPassword reads the real Credential Manager. That collection starts only after the parallel classes
 /// finish, so the App statics stay as guarded as they were.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("app-alert-statics")]
 public class AppAlertSettingsTests
 {
     /// <summary>

@@ -109,7 +109,7 @@ public sealed class PgRegistryPanelPlacementTests
         @"\b(?<name>LoadPg[A-Za-z]+Async)\b", RegexOptions.Compiled);
 
     private static readonly Regex DispatcherArm = new(
-        @"case\s+(?<constant>Pg\w+InnerTabIndex):\s*\r?\n\s*await\s+(?<loader>LoadPg\w+Async)\(\);",
+        @"case\s+(?<constant>Pg\w+InnerTabIndex):\s*\r?\n\s*await\s+(?<loader>LoadPg\w+Async)\((?:timer)?\);",
         RegexOptions.Compiled);
 
     private static readonly Regex IndexConstant = new(

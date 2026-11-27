@@ -42,12 +42,8 @@ public class ExternalAlertRenderTests
 
     private static List<string> AllStrings(string payload) => Strings(JsonDocument.Parse(payload).RootElement).ToList();
 
-    /* A MessageCard's summary is the plain-text notification preview, not markdown, so card-text checks leave it out. */
-    private static List<string> CardStrings(string payload)
-    {
-        var root = JsonDocument.Parse(payload).RootElement;
-        return root.EnumerateObject().Where(p => p.Name != "summary").SelectMany(p => Strings(p.Value)).ToList();
-    }
+    /* Every string the Teams card shows as markdown (TextBlock texts, fact titles and values), TextRun texts, and the action's title. */
+    private static List<string> CardStrings(string payload) => TeamsCard.Parse(payload).AllText.ToList();
 
     /* ---------------- Slack ---------------- */
 
@@ -172,29 +168,27 @@ public class ExternalAlertRenderTests
         var payload = WebhookAlertService.BuildTeamsPayload(
             "High CPU", "SRV1", "95%", "90%", Branding, detailText: "CPU at 95% for 5 minutes");
 
-        var root = JsonDocument.Parse(payload).RootElement;
-        var section = root.GetProperty("sections")[0];
-        var facts = section.GetProperty("facts").EnumerateArray()
-            .ToDictionary(f => f.GetProperty("name").GetString()!, f => f.GetProperty("value").GetString()!);
+        var card = TeamsCard.Parse(payload);
+        var facts = card.Facts.ToDictionary(f => f.Title, f => f.Value);
 
         Assert.Equal("SRV1", facts["Server"]);
         Assert.Equal("95%", facts["Current Value"]);
-        Assert.Equal("CPU at 95% for 5 minutes", root.GetProperty("sections")[1].GetProperty("text").GetString());
+        Assert.Equal(["CPU at 95% for 5 minutes"], card.Section("Details").Texts);
         Assert.DoesNotContain("External", payload, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Teams_AnExternalAlertTitle_NamesTheSource_AndABuiltInTitleDoesNot()
     {
-        var external = JsonDocument.Parse(WebhookAlertService.BuildTeamsPayload(
+        var external = WebhookAlertService.BuildTeamsPayload(
             "External:billing:queue-depth", "PROD01", "warning", "", Branding,
-            context: External(), displayName: "Server Unreachable")).RootElement;
-        var builtIn = JsonDocument.Parse(WebhookAlertService.BuildTeamsPayload(
-            "Server Unreachable", "PROD01", "down", "", Branding, displayName: "Server Unreachable")).RootElement;
+            context: External(), displayName: "Server Unreachable");
+        var builtIn = WebhookAlertService.BuildTeamsPayload(
+            "Server Unreachable", "PROD01", "down", "", Branding, displayName: "Server Unreachable");
 
-        Assert.EndsWith(@"\[External: billing\] Server Unreachable", external.GetProperty("sections")[0].GetProperty("activityTitle").GetString(), StringComparison.Ordinal);
-        Assert.Contains("[External: billing] Server Unreachable", external.GetProperty("summary").GetString(), StringComparison.Ordinal);
-        Assert.DoesNotContain("External", builtIn.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.EndsWith(@"\[External: billing\] Server Unreachable", TeamsCard.Parse(external).Title, StringComparison.Ordinal);
+        Assert.EndsWith(" Server Unreachable", TeamsCard.Parse(builtIn).Title, StringComparison.Ordinal);
+        Assert.DoesNotContain("External", builtIn, StringComparison.Ordinal);
     }
 
     /* ---------------- PagerDuty and email ---------------- */
@@ -259,7 +253,7 @@ public class ExternalAlertRenderTests
     public void TeamsEscape_EscapesLinkEmphasisAndMentionCharacters_AndLeavesOrdinaryTextAlone(string input, string expected) =>
         Assert.Equal(expected, WebhookAlertService.TeamsEscape(input));
 
-    /* ---------------- Header length, record code spans and escaped cuts ---------------- */
+    /* ---------------- Header length, record texts and escaped cuts ---------------- */
 
     private const string LongestSource = "abcdefghijklmnopqrstuvwxyz01234";
 
@@ -309,34 +303,33 @@ public class ExternalAlertRenderTests
         return context;
     }
 
-    private static string TeamsRecordValue(AlertContext context)
-    {
-        using var doc = JsonDocument.Parse(WebhookAlertService.BuildTeamsPayload(
-            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: context));
-        var section = Assert.Single(doc.RootElement.GetProperty("sections").EnumerateArray(),
-            s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Top Queries");
-        return Assert.Single(section.GetProperty("facts").EnumerateArray()).GetProperty("value").GetString()!;
-    }
+    private static TeamsCardSection TeamsRecordSection(AlertContext context) =>
+        TeamsCard.Parse(WebhookAlertService.BuildTeamsPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: context)).Section("Top Queries");
 
     [Fact]
-    public void Teams_ARecordTextWithABlankLine_StaysInOneCodeSpan()
+    public void Teams_ARecordTextWithABlankLine_StaysOnOneLineInOneTextRun_ExactlyAsItIs()
     {
         var text = "SELECT 1 /*\n\n[Open the runbook](https://example.invalid)\r\n\r\n*/ `x`\r- y\u0085z";
 
-        var value = TeamsRecordValue(WithRecord("", text));
+        var section = TeamsRecordSection(WithRecord("", text));
 
-        Assert.Equal("`SELECT 1 /* [Open the runbook](https://example.invalid) */ 'x' - y z`", value);
-        Assert.DoesNotContain('\n', value);
-        Assert.DoesNotContain('\r', value);
-        Assert.Equal(2, value.Count(c => c == '`'));
+        /* A TextRun is not markdown: the link characters and the backticks are the text itself, and nothing is escaped. */
+        var run = Assert.Single(section.Runs);
+        Assert.Equal("SELECT 1 /* [Open the runbook](https://example.invalid) */ `x` - y z", run);
+        Assert.DoesNotContain('\n', run);
+        Assert.DoesNotContain('\r', run);
+        Assert.Equal([("#1", "")], section.Facts);
+        Assert.Empty(section.Texts);
     }
 
     [Fact]
-    public void Teams_ARecordWithTwoTexts_KeepsEachInItsOwnOneLineSpan()
+    public void Teams_ARecordWithTwoTexts_KeepsEachInItsOwnOneLineRun_UnderItsItalicLabel()
     {
-        var value = TeamsRecordValue(WithRecord("", "a\n\nb", "c`d\n"));
+        var section = TeamsRecordSection(WithRecord("", "a\n\nb", "c`d\n"));
 
-        Assert.Equal("_Query Text_  \n`a b`  \n_Query Text_  \n`c'd `", value);
+        Assert.Equal(["_Query Text_", "_Query Text_"], section.Texts);
+        Assert.Equal(["a b", "c`d "], section.Runs);
     }
 
     private static bool HasHalfEntity(string text) =>

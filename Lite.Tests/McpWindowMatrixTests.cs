@@ -82,6 +82,7 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     /// </summary>
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
+        ["get_slow_mcp_calls"] = "reads its own slow-call table and the in-memory call figures, never a collected metric, and this test builds its recorder as an empty object (#9423)",
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }

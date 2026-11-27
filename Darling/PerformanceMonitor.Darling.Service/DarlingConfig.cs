@@ -17,6 +17,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.FrontDoor;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
@@ -235,11 +236,61 @@ public sealed class DarlingConfig
     /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store
     /// login can, then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never
     /// ahead of collection. When false the service drops the index if it exists. A failed build is dropped, reported by
-    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. A file-only knob (not seeded into the
-    /// control-plane store), so an edit takes effect on the next restart.
+    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. #8978: this file value is the fallback. While
+    /// <c>config.config_service.query_text_trigram_index_enabled</c> is NULL (the default; it is never seeded from the file) the file
+    /// governs and an edit takes effect on the next restart; a store value (written by <c>update_service_flags</c>) overrides it and
+    /// takes effect at the next pass without a restart. The pass reads <see cref="QueryTextTrigramIndexResolved"/>.
     /// </summary>
     [JsonPropertyName("queryTextTrigramIndexEnabled")]
     public bool QueryTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
+    /// #8978: the store's value of the plan-cache trigram index option, <c>config.config_service.query_text_trigram_index_enabled</c>, as the
+    /// last config load or reload read it. NULL means darling.json governs. Never serialized: the file never holds it.
+    /// </summary>
+    [JsonIgnore]
+    public bool? QueryTextTrigramIndexStoreValue { get; set; }
+
+    /// <summary>#8978: the plan-cache trigram index option the pass acts on: the store's value when it holds one, else the file's.</summary>
+    [JsonIgnore]
+    public bool QueryTextTrigramIndexResolved => ResolveTrigramIndexOption(QueryTextTrigramIndexStoreValue, QueryTextTrigramIndexEnabled);
+
+    /// <summary>
+    /// Whether the service builds a GIN index on the Query Store text keyed by server (<c>collect.query_store_text (server_id,
+    /// query_sql_text)</c>, <c>btree_gin</c> and <c>pg_trgm</c>, #8570), which <c>find_queries_by_text</c> searches a server's Query Store
+    /// text through. Default FALSE: on a seeded store of 1,000,000 texts of about 250 characters the index is 315 MB (86% of the table), a
+    /// build takes about 30 seconds and it adds about 0.02 ms to each inserted row; the cost grows with the store's text. The liveness touch stamps a separate narrow table
+    /// (<c>collect.query_store_text_seen</c>), so it writes nothing to the index. When true the service creates the <c>pg_trgm</c> and <c>btree_gin</c> extensions if the store login can,
+    /// then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never ahead of
+    /// collection, and then drops the index on the text alone that it replaces. When false the service drops both if they exist. A failed build is dropped, reported by <c>get_store_metrics</c> (<c>query_store_text_index</c>)
+    /// and retried with a growing wait. Independent of <see cref="QueryTextTrigramIndexEnabled"/>. #8978: this file value is the fallback.
+    /// While <c>config.config_service.query_store_text_trigram_index_enabled</c> is NULL (the default; it is never seeded from the file) the
+    /// file governs and an edit takes effect on the next restart; a store value (written by <c>update_service_flags</c>) overrides it and
+    /// takes effect at the next pass without a restart. The pass reads <see cref="QueryStoreTextTrigramIndexResolved"/>.
+    /// </summary>
+    [JsonPropertyName("queryStoreTextTrigramIndexEnabled")]
+    public bool QueryStoreTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
+    /// #8978: the store's value of the Query Store trigram index option, <c>config.config_service.query_store_text_trigram_index_enabled</c>,
+    /// as the last config load or reload read it. NULL means darling.json governs. Never serialized: the file never holds it.
+    /// </summary>
+    [JsonIgnore]
+    public bool? QueryStoreTextTrigramIndexStoreValue { get; set; }
+
+    /// <summary>#8978: the Query Store trigram index option the pass acts on: the store's value when it holds one, else the file's.</summary>
+    [JsonIgnore]
+    public bool QueryStoreTextTrigramIndexResolved => ResolveTrigramIndexOption(QueryStoreTextTrigramIndexStoreValue, QueryStoreTextTrigramIndexEnabled);
+
+    /// <summary>
+    /// #8978: a trigram index option's resolved value. A store value wins; NULL defers to the file, the way a NULL
+    /// <c>analysis_uncorroborated_route</c> defers to darling.json (V137). Pure.
+    /// </summary>
+    public static bool ResolveTrigramIndexOption(bool? storeValue, bool fileValue) => storeValue ?? fileValue;
+
+    /// <summary>#8978: where a trigram index option's resolved value comes from: <c>"store"</c> when the store holds a value, else <c>"file"</c>.</summary>
+    public static string TrigramIndexOptionSource(bool? storeValue) =>
+        storeValue.HasValue ? QueryTextTrigramIndexTracker.SourceStore : QueryTextTrigramIndexTracker.SourceFile;
 
     /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
@@ -265,6 +316,25 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("procedureStatsPlanCycleInterval")]
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
+
+    /// <summary>
+    /// #9374: how many minutes pass between the service's measurements of the size of every relation the Store Health reads size (the
+    /// tables and indexes of the store, chunks included). Each measurement is written to the store (<c>collect.store_relation_sizes_latest</c>),
+    /// so the Viewer's Store Health tab can show the last sizes at once when it opens. The default, 60, is the cadence of the store's own
+    /// size telemetry (<c>collect.store_metrics</c>, hourly). A pass takes several seconds on a store with thousands of chunks, so a short cadence
+    /// costs the store that much work each time. Clamped to [5,1440]; a nonsense value (0 or less) reads as the default.
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next restart.</para>
+    /// </summary>
+    [JsonPropertyName("storeHealthSizesIntervalMinutes")]
+    public int StoreHealthSizesIntervalMinutes { get; set; } = DefaultStoreHealthSizesIntervalMinutes;
+
+    /// <summary>The default of <see cref="StoreHealthSizesIntervalMinutes"/>.</summary>
+    public const int DefaultStoreHealthSizesIntervalMinutes = 60;
+
+    /// <summary><see cref="StoreHealthSizesIntervalMinutes"/> as the service uses it: a value of 0 or less is the default, anything else is held to [5,1440].</summary>
+    public static TimeSpan ClampStoreHealthSizesInterval(int minutes) =>
+        TimeSpan.FromMinutes(minutes <= 0 ? DefaultStoreHealthSizesIntervalMinutes : Math.Clamp(minutes, 5, 1440));
 
     /// <summary>
     /// #8146: the <c>max_events_limit</c> every deadlock, blocked-process and long-query session is created with. The
@@ -427,6 +497,21 @@ public sealed class DarlingConfig
     }
 
     private HealthConfig _health = new();
+
+    /// <summary>
+    /// #9013: the opt-in Prometheus <c>/metrics</c> port, gauges only behind a bearer token. FILE-ONLY: the control plane never
+    /// writes it, and a change needs a restart. Optional; omit the section entirely.
+    /// </summary>
+    [JsonPropertyName("metrics")]
+    public MetricsConfig Metrics
+    {
+        get => _metrics;
+
+        /* "metrics": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _metrics = value ?? new();
+    }
+
+    private MetricsConfig _metrics = new();
 
     /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
@@ -1038,6 +1123,30 @@ public sealed class AlertsConfig
     [JsonPropertyName("tempDbSpaceThresholdPercent")]
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
 
+    /// <summary>The TempDB Log Space alert (#8881): on by default. Stored as <c>config_alert_settings.tempdb_log_space_enabled</c> (V269); the service
+    /// replaces this from the store at every start, so the file only seeds a new store.</summary>
+    [JsonPropertyName("tempDbLogSpaceEnabled")]
+    public bool TempDbLogSpaceEnabled { get; set; } = true;
+
+    /// <summary>Fire when the tempdb log is at or above this percent used (#8881). Stored as
+    /// <c>config_alert_settings.tempdb_log_space_threshold_percent</c> (V269).</summary>
+    [JsonPropertyName("tempDbLogSpaceThresholdPercent")]
+    public int TempDbLogSpaceThresholdPercent { get; set; } = 80;
+    /// <summary>
+    /// The TempDB Growth Won't Fit alert (#8882): on by default. Kept in <c>config_alert_settings.tempdb_growth_fit_enabled</c> (V270),
+    /// so the stored value governs once the row exists and this one seeds a new store.
+    /// </summary>
+    [JsonPropertyName("tempDbGrowthFitEnabled")]
+    public bool TempDbGrowthFitEnabled { get; set; } = true;
+
+    /// <summary>The Instance Restarted alert (#8884): on by default. Stored in <c>config_alert_settings.instance_restarted_enabled</c> (V271).</summary>
+    [JsonPropertyName("instanceRestartedEnabled")]
+    public bool InstanceRestartedEnabled { get; set; } = true;
+
+    /// <summary>The Memory Dumps alert (#8884): on by default. Stored in <c>config_alert_settings.memory_dumps_enabled</c> (V271).</summary>
+    [JsonPropertyName("memoryDumpsEnabled")]
+    public bool MemoryDumpsEnabled { get; set; } = true;
+
     [JsonPropertyName("lowDiskEnabled")]
     public bool LowDiskEnabled { get; set; } = true;
 
@@ -1083,6 +1192,20 @@ public sealed class AlertsConfig
     /// which is what stops 400 GB free on a 4 TB volume reading as "act now".</summary>
     [JsonPropertyName("selfDiskFreeWarnGb")]
     public int SelfDiskFreeWarnGb { get; set; } = 50;
+
+    /// <summary>#9000: the Store Growth alert's switch. On by default. Stored as <c>config_alert_settings.self_store_growth_enabled</c> (V276).</summary>
+    [JsonPropertyName("selfStoreGrowthEnabled")]
+    public bool SelfStoreGrowthEnabled { get; set; } = true;
+
+    /// <summary>#9000: the whole store must grow at least this many GB in the last 24 hours before Store Growth fires, on top of growing 3 times
+    /// faster than its own baseline. 0 removes the floor. Stored as <c>config_alert_settings.self_store_growth_floor_gb</c> (V276).</summary>
+    [JsonPropertyName("selfStoreGrowthFloorGb")]
+    public int SelfStoreGrowthFloorGb { get; set; } = 5;
+
+    /// <summary>#9000: the same floor for one object (a hypertable, a dimension table or a continuous aggregate). 0 removes the floor. Stored as
+    /// <c>config_alert_settings.self_store_growth_object_floor_gb</c> (V276).</summary>
+    [JsonPropertyName("selfStoreGrowthObjectFloorGb")]
+    public int SelfStoreGrowthObjectFloorGb { get; set; } = 2;
 
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
     /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
@@ -1557,6 +1680,11 @@ public sealed class SmtpConfig
     [JsonIgnore]
     internal LegacyPin? SecretPin { get; set; }
 
+    /// <summary>True while the one-time pin step is waiting to run when the configuration is read (#5456, #9749). An old-format
+    /// password with no pin then opens once the step has run, so its refusal says to wait and is not a failure that needs an operator.</summary>
+    [JsonIgnore]
+    internal bool SecretPinWaiting { get; set; }
+
     /// <summary>The binding a sealed SMTP password must have been sealed for.</summary>
     [JsonIgnore]
     internal PasswordBinding SecretBinding => PasswordBinding.ForSmtp(Host, Port, UseSsl, Username);
@@ -1716,10 +1844,51 @@ public sealed class McpConfig
     [JsonPropertyName("tokens")]
     public List<McpTokenEntry>? Tokens { get; set; }
 
+    /// <summary>
+    /// Personal MCP tokens (#8737): a person signed in to the web dashboard through <c>web.network.oidc</c> mints their own
+    /// short-lived MCP token. Default off, and then nothing changes for the tokens in <see cref="Tokens"/> or the legacy token.
+    /// Served only with <c>web.enabled</c> true in <c>darling.json</c>, <c>web.network.oidc</c> configured, no front door and
+    /// <see cref="AllowTokenlessLoopback"/> off; otherwise one start warning names the missing piece and the feature stays off.
+    /// File-only and restart-only. See <see cref="McpPersonalTokensConfig"/>.
+    /// </summary>
+    [JsonPropertyName("personalTokens")]
+    public McpPersonalTokensConfig? PersonalTokens { get; set; }
+
     /// <summary>True when <see cref="Tokens"/> has an entry. An entry that cannot be served (no value, a bad name or role) still counts:
     /// named tokens were asked for, so a start must not fall back to serving without credentials.</summary>
     [JsonIgnore]
     public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
+}
+
+/// <summary>
+/// The <c>mcp.personalTokens</c> block (#8737). Out-of-range numbers are clamped and an unknown <see cref="AdminRole"/> is served as
+/// <c>reader</c>, each with one start warning; an unparseable <see cref="DataDetail"/> leaves the feature off. See
+/// <c>DarlingPersonalTokenSettings</c>.
+/// </summary>
+public sealed class McpPersonalTokensConfig
+{
+    /// <summary>Default OFF.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>The longest a personal token may live, in days (1 to 365).</summary>
+    [JsonPropertyName("maxLifetimeDays")]
+    public int MaxLifetimeDays { get; set; } = 30;
+
+    /// <summary>How many live personal tokens one person may hold (1 to 50).</summary>
+    [JsonPropertyName("maxTokensPerPerson")]
+    public int MaxTokensPerPerson { get; set; } = 5;
+
+    /// <summary>The strongest role an admin's personal token may take: <c>reader</c> (the default) or <c>operator</c>. An operator personal
+    /// token gets the write tools whatever <c>mcp.allowWrites</c> and <c>web.allowAdminWrites</c> say, as a named operator file token does, so it
+    /// is opt-in. A person who is not an admin always gets <c>reader</c>.</summary>
+    [JsonPropertyName("adminRole")]
+    public string AdminRole { get; set; } = McpTokenEntry.ReaderRole;
+
+    /// <summary>Optional: <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>.
+    /// An unrecognized value leaves personal tokens off.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 }
 
 /// <summary>
@@ -1920,8 +2089,8 @@ public sealed class McpNetworkConfig
     public string? HostName { get; set; }
 
     /// <summary>
-    /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
-    /// NOT the same as "exposed".
+    /// True when any field is set, the token included. NOT the same as "exposed", and NOT the BYO "network.* is
+    /// ignored" test: a token is honored in bring-your-own mode, so that warning uses <see cref="ByoIgnoredFields"/>.
     /// </summary>
     [JsonIgnore]
     public bool IsConfigured =>
@@ -1931,6 +2100,25 @@ public sealed class McpNetworkConfig
         || !string.IsNullOrWhiteSpace(Token)
         || !string.IsNullOrWhiteSpace(HostName)
         || (Tls?.IsConfigured ?? false);
+
+    /// <summary>
+    /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores,
+    /// for the start-up warning. The token and encrypted token are NOT here: the MCP server on loopback uses
+    /// them, and the write tools need them. Names are the JSON keys, in a fixed order.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> ByoIgnoredFields
+    {
+        get
+        {
+            var fields = new List<string>();
+            if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
+            if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
+            if (!string.IsNullOrWhiteSpace(HostName)) { fields.Add("hostName"); }
+            if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
+            return fields;
+        }
+    }
 
     /// <summary>
     /// The bare DNS name a raw <see cref="HostName"/> stands for, or null when there is none to use (#5288). PURE:
@@ -2243,6 +2431,142 @@ public sealed class HealthConfig
 }
 
 /// <summary>
+/// #9013: the Prometheus <c>/metrics</c> port's config. Off by default. FILE-ONLY: the control plane never writes it, and a
+/// change needs a restart. Unlike the health port it serves fleet numbers, so it needs a bearer <see cref="Token"/> (a literal,
+/// <c>env:</c> or <c>file:</c>) and takes an optional <see cref="AllowFrom"/> address filter. There is no TLS in v1.
+/// </summary>
+public sealed class MetricsConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 5155;
+
+    /// <summary>
+    /// The address to bind. Empty means <c>0.0.0.0</c> inside a container and <c>127.0.0.1</c> outside one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string Listen { get; set; } = "";
+
+    /// <summary>
+    /// The bearer token a scraper presents: a literal, <c>env:NAME</c> or <c>file:PATH</c>. Required when the port is on.
+    /// </summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    /// <summary>
+    /// CIDRs separated by commas, or a JSON array of CIDR strings, like <c>web.network.allowFrom</c>: the converter joins an array
+    /// with commas and <see cref="Hosting.CidrAllowList"/> parses either. Empty or absent means no address filter.
+    /// </summary>
+    [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
+    public string? AllowFrom { get; set; }
+
+    /// <summary>
+    /// #9013: what makes the metrics host refuse to listen, empty when the block is usable or off. Not part of
+    /// <see cref="DarlingConfig.Validate"/>, for the reason given on <see cref="HealthConfig.Problems"/>: a bad block turns off only
+    /// the port, with one Critical line, and collection keeps running. <paramref name="healthPort"/> is null when
+    /// <c>health.enabled</c> is false (a disabled health port binds nothing to clash with). Problem texts name the key, never the
+    /// token value. <paramref name="resolveSecret"/> defaults to <see cref="DarlingSecretSource.Resolve"/>.
+    /// </summary>
+    internal static MetricsCheck Check(MetricsConfig m, int? webPort, int? mcpPort, int? healthPort, Func<string, string, string>? resolveSecret = null)
+    {
+        var problems = new List<string>();
+        if (!m.Enabled)
+        {
+            return new MetricsCheck(problems, null, default, false);
+        }
+
+        if (m.Port is < 1 or > 65535)
+        {
+            problems.Add($"metrics.port must be between 1 and 65535 (got {m.Port}).");
+        }
+        else if (m.Port == webPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as web.port — give the metrics listener its own port.");
+        }
+        else if (m.Port == mcpPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as mcp.port — give the metrics listener its own port.");
+        }
+        else if (m.Port == healthPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as health.port — give the metrics listener its own port.");
+        }
+
+        if (HealthConfig.ResolveListenAddress(m.Listen, inContainer: false) is null)
+        {
+            problems.Add($"metrics.listen (\"{m.Listen}\") is not an IP address.");
+        }
+
+        string? token = null;
+        var tokenIsLiteral = false;
+        if (string.IsNullOrWhiteSpace(m.Token))
+        {
+            problems.Add("metrics.token is required when metrics.enabled is true.");
+        }
+        else
+        {
+            tokenIsLiteral = !DarlingSecretSource.IsReference(m.Token);
+            try
+            {
+                token = (resolveSecret ?? DarlingSecretSource.Resolve)(m.Token, "metrics.token");
+            }
+            catch (InvalidOperationException ex)
+            {
+                /* The resolver's message names the setting and the env var or file, never the secret. */
+                problems.Add($"metrics.token could not be resolved: {ex.Message}");
+            }
+
+            /* #9013: the floor is the shared one (DescribeTokenProblem decides), but the shared text points at --configure-network and
+               an "exposed surface", neither of which is the metrics port's, so the floor is named here in the port's own words. Like
+               the shared text it never gives the token's length. */
+            if (token is not null && DarlingHostBinding.DescribeTokenProblem(token) is not null)
+            {
+                problems.Add(string.IsNullOrWhiteSpace(token)
+                    ? "metrics.token resolves to an empty value."
+                    : $"metrics.token is too short or too repetitive: the metrics port needs a token of at least {DarlingHostBinding.MinimumTokenLength} characters, "
+                        + $"at least {DarlingHostBinding.MinimumDistinctTokenCharacters} of them different (to make one, see the token note in the README).");
+                token = null;
+            }
+        }
+
+        var allowList = default(CidrAllowList);
+        if (!string.IsNullOrWhiteSpace(m.AllowFrom) && !CidrAllowList.TryParse(m.AllowFrom, out allowList))
+        {
+            problems.Add("metrics.allowFrom is not a comma-separated list of CIDRs (for example \"10.0.0.0/8,192.168.1.0/24\").");
+        }
+
+        return new MetricsCheck(problems, problems.Count == 0 ? token : null, allowList, tokenIsLiteral);
+    }
+}
+
+/// <summary>
+/// #9013: the outcome of <see cref="MetricsConfig.Check"/>. <see cref="Token"/> is the resolved token, set only when there are no
+/// <see cref="Problems"/>; <see cref="AllowList"/> is <c>default</c> (Count 0, no address filter) when <c>allowFrom</c> is blank.
+/// A class, not a record, so no generated <c>ToString</c> can print the resolved token into a log line.
+/// </summary>
+internal sealed class MetricsCheck
+{
+    internal MetricsCheck(IReadOnlyList<string> problems, string? token, CidrAllowList allowList, bool tokenIsLiteral)
+    {
+        Problems = problems;
+        Token = token;
+        AllowList = allowList;
+        TokenIsLiteral = tokenIsLiteral;
+    }
+
+    internal IReadOnlyList<string> Problems { get; }
+
+    internal string? Token { get; }
+
+    internal CidrAllowList AllowList { get; }
+
+    internal bool TokenIsLiteral { get; }
+}
+
+/// <summary>
 /// Opt-in NETWORK exposure for the embedded web dashboard (#1562), the twin of <see cref="McpNetworkConfig"/>.
 /// Omit the whole <c>network</c> object for the secure default = loopback-only HTTP. When present with a
 /// non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid <see cref="AllowFrom"/>, the web
@@ -2348,8 +2672,8 @@ public sealed class WebNetworkConfig
     public List<WebTokenEntry>? Tokens { get; set; }
 
     /// <summary>
-    /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
-    /// NOT the same as "exposed".
+    /// True when any field is set, the tokens included. NOT the same as "exposed", and NOT the BYO "network.* is
+    /// ignored" test: the tokens are honored in bring-your-own mode, so that warning uses <see cref="ByoIgnoredFields"/>.
     /// </summary>
     [JsonIgnore]
     public bool IsConfigured =>
@@ -2361,6 +2685,28 @@ public sealed class WebNetworkConfig
         || (Oidc?.IsConfigured ?? false)
         || (TrustedProxies?.Length ?? 0) > 0
         || HasNamedTokens;
+
+    /// <summary>
+    /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores, for
+    /// the start-up warning. The bind ladder never exposes the dashboard there, so the host reads <c>tls</c>, <c>oidc</c>
+    /// and <c>trustedProxies</c> only on an exposed start. The <c>oidc</c> entry is worded "oidc (the sign-in provider)" because
+    /// <c>oidc.tokenSignIn</c> is still read in this mode and <c>off</c> stops the loopback dashboard. The shared token, <c>encryptedToken</c> and <c>tokens</c> are
+    /// NOT here: they gate the loopback dashboard. Names are the JSON keys, in a fixed order.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> ByoIgnoredFields
+    {
+        get
+        {
+            var fields = new List<string>();
+            if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
+            if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
+            if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
+            if (Oidc?.IsConfigured ?? false) { fields.Add("oidc (the sign-in provider)"); }
+            if ((TrustedProxies?.Length ?? 0) > 0) { fields.Add("trustedProxies"); }
+            return fields;
+        }
+    }
 
     /// <summary>True when <see cref="Tokens"/> has an entry, served or not.</summary>
     [JsonIgnore]
@@ -2512,6 +2858,17 @@ public sealed class WebOidcConfig
     /// </summary>
     [JsonPropertyName("clientSecret")]
     public string? ClientSecret { get; set; }
+
+    /// <summary>
+    /// Whether the web token sign-in form (<c>POST /auth/login</c>) is open (#8735): <c>on</c> (the default, also for a missing or
+    /// blank value) accepts it from every connection; <c>loopback</c> accepts it only on a loopback connection (a forwarded
+    /// <c>127.0.0.1</c> through a remote trusted proxy is not one; a sidecar proxy that sends no <c>X-Forwarded-For</c> hides the client, so use <c>off</c> behind one); <c>off</c> refuses it everywhere, leaving OIDC the only way in. It covers all three token kinds
+    /// (the shared token, the <c>web.network.tokens</c> entries and the Viewer's managed group tokens) and none of the MCP tokens.
+    /// An unknown value fails closed, as <c>off</c>. File-only and restart-only: no API or store writes it, and a running service
+    /// does not re-read it. It does not count toward <see cref="IsConfigured"/>.
+    /// </summary>
+    [JsonPropertyName("tokenSignIn")]
+    public string? TokenSignIn { get; set; }
 
     /// <summary>Space-separated scopes. Default <c>openid profile email</c>; <c>openid</c> is always included
     /// even when this names a set without it, because without it there is no ID token and no sign-in.</summary>
@@ -3315,6 +3672,12 @@ public sealed class MonitoredServer
     [JsonIgnore]
     internal bool EncryptedPasswordDeclaredByFile { get; set; }
 
+    /// <summary>True when darling.json declares the reference in <see cref="EncryptedPassword"/> for this server with connection
+    /// settings that differ from this row's (#9693). It never lets the reference resolve: it only chooses the refusal's sentence.
+    /// Set where a server is built from a store row (<c>StoreConfigProvider.MarkSlotsTheFileDeclares</c>), never from a stored value.</summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredForOtherSettings { get; set; }
+
     /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
     [JsonIgnore]
     internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }
@@ -3338,6 +3701,12 @@ public sealed class MonitoredServer
     /// <summary>The pin taken at upgrade for the remediation slot, when the store holds one (#5366).</summary>
     [JsonIgnore]
     internal LegacyPin? RemediationPin { get; set; }
+
+    /// <summary>True while the one-time pin step is waiting to run when the configuration is read (#5456, #9749). It is a fact about the
+    /// service, not about one slot: it covers the <c>encryptedPassword</c> and remediation slots alike. An old-format password with no pin
+    /// then opens once the step has run, so its refusal says to wait and is not a failure that needs an operator.</summary>
+    [JsonIgnore]
+    internal bool SecretPinWaiting { get; set; }
 
     /// <summary>
     /// The connection settings this server's saved password is bound to (#5366). Throws <see cref="ArgumentException"/> when a

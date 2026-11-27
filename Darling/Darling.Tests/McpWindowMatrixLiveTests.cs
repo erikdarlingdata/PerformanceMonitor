@@ -413,6 +413,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
         ["get_database_protection"] = SnapshotSearch,
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
+        /* #9485: not a data window by design. hours_back is how far back a change window ended, read from the declared windows table, not a span of collected data. */
+        ["get_change_windows"] = "declared change windows: hours_back is how far back a window ended, not a collected-data window (#9485)",
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         /* #7609: a fleet read of one query_hash across every server (no server_name to probe a collector table for), so it is in the NoNotice group with the other fleet reads. */
         ["get_query_fleet_summary"] = NoNotice,
@@ -427,9 +429,22 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wait_stats"] = UnavailableBare,
         ["get_pg_xmin_horizon"] = UnavailableBare,
         ["get_plan_cache_bloat"] = SnapshotSearch,
+        /* #9440: a log of events read live from TimescaleDB, not a series: a window with no run is the answer, and the answer says how far back TimescaleDB keeps history, so there is no data floor to notice. */
+        ["get_store_job_runs"] = "job run log read live from TimescaleDB: the answer names the oldest row TimescaleDB still holds (#9440)",
         /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
            denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
+        /* #9413: only the table_activity mode windows (hours_back and as_of); the size answers have no window to anchor, refuse as_of and carry no truncation notice. */
+        ["get_store_metrics"] = "size answers have no hours window; only the table_activity mode takes hours_back and as_of (#9413)",
+        /* #9437: a per-minute sample series. The answer states retention_days and returns the minutes it has, so a window that starts before the first sample
+           is told by the oldest minute returned, and the window_truncated notice is not rolled out to it. */
+        ["get_store_connections"] = NoNotice,
         ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
+        /* #9439: a log of events, not a series: a window with no row is the answer (no wait of 5 seconds or more happened then, or the log did not record it: the precondition status names a setting that stops the log recording it, and unavailable names a window the store log was never captured in), and the table holds nothing before the store was migrated to it, so there is no data floor to notice. */
+        ["get_store_lock_waits"] = "lock wait log: an hour with no row means no wait of 5 seconds or more was logged, so there is no data floor to name, and a window with no store-log capture answers unavailable, not empty (#9439)",
+        ["get_store_checkpoints"] = "store-checkpoint window: a window with no checkpoint rows answers with the reason (log_checkpoints off, or the store log unread), not an empty success (#9414)",
+        /* #9411: a log of events, not a series: a window with no row is the answer (the pass recorded nothing then), and the table holds nothing before the store was migrated to it, so there is no data floor to notice. */
+        ["get_store_pass_steps"] = "pass step log: an hour with no row means the pass recorded nothing, so there is no data floor to name (#9411)",
+        ["get_service_starts"] = "service start history: hours_back keeps the starts that began in the window, and a window with no start is a true negative (the service did not start), so there is no data floor to name (#9438)",
         /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
            it on purpose, and no collector table backs it for a coverage probe. */
         ["get_sweep_reports"] = "sweep timeline of the store's own run records; the latest sweep is read outside the window (#7010)",

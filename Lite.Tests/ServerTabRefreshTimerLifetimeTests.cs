@@ -26,7 +26,8 @@ namespace PerformanceMonitorLite.Tests;
 /// switch inside a <c>TabControl</c> unloads the tab too, and that must not stop the timer: the tab is still in its window and
 /// shows again on the next click.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabRefreshTimerLifetimeTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

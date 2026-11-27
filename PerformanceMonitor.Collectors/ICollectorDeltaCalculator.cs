@@ -27,6 +27,13 @@ namespace PerformanceMonitor.Collectors;
 public readonly record struct RowResetDecision(bool AnyReset = false, bool CreditedInGap = false, int IntervalSeconds = 0);
 
 /// <summary>
+/// #9533: the point a collector may read from instead of its whole fallback window, and how old that point may be. The point
+/// is on the monitored server's clock. The age is the gap the host measured since the read that set it, plus a margin.
+/// <paramref name="ArmedAt"/> is the collection time of the run that set it.
+/// </summary>
+public readonly record struct ReadWatermark(DateTime ChangedSince, int MaxAgeSeconds, DateTime ArmedAt);
+
+/// <summary>
 /// #7419: the baselines (and pass windows) of some keys as they stood before a run advanced them, so a run that
 /// computed deltas but never stored them can put them back and leave the next run's delta spanning both intervals.
 /// </summary>
@@ -282,4 +289,45 @@ public interface ICollectorDeltaCalculator
     /// </summary>
     IDeltaBaselineSnapshot? CapturePass(int serverId, string group, DateTime observedTime)
         => null;
+
+    /// <summary>
+    /// #9533: hands a collector the read watermark its previous successful read left for (<paramref name="serverId"/>,
+    /// <paramref name="scope"/>), and FORGETS it, so a run that fails before it arms a new one finds none. Null when there is
+    /// none (first run, a restart, a failed or rolled-back run, a server or scope cleared since) or when the gap since the read
+    /// that armed it, measured against <paramref name="collectionTime"/>, is negative or over <see cref="CollectorDeltaCalculator.MaxReadWatermarkGapSeconds"/>.
+    /// Default-implemented to return null, like every member here, so a collector reads its whole window on a calculator that keeps none.
+    /// </summary>
+    ReadWatermark? TakeReadWatermark(int serverId, string scope, DateTime collectionTime)
+        => null;
+
+    /// <summary>
+    /// #9533: arms the watermark the NEXT run may read from, set by the read that has just advanced its baselines.
+    /// <paramref name="collectionTime"/> is that run's, so <see cref="ClearReadWatermark"/> clears only what the same run armed.
+    /// </summary>
+    void ArmReadWatermark(int serverId, string scope, DateTime changedSince, DateTime collectionTime)
+    {
+    }
+
+    /// <summary>
+    /// #9533: forgets the watermark the run at <paramref name="collectionTime"/> armed, because the run's baselines were rolled back.
+    /// Does nothing when a later run has armed its own.
+    /// </summary>
+    void ClearReadWatermark(int serverId, string scope, DateTime collectionTime)
+    {
+    }
+
+    /// <summary>
+    /// #9533: after a read that returned only the keys that changed since its watermark, keeps the baselines of the keys it did
+    /// not return as fresh as an idle read would have. Every key in <paramref name="returned"/> (key to its
+    /// <c>last_execution_time</c>) is remembered under <paramref name="scope"/>. When <paramref name="advance"/> is true, every
+    /// remembered key that the read did not return and whose remembered time is not before <paramref name="windowStart"/> has the
+    /// timestamp of its baseline in each of <paramref name="groups"/> moved to <paramref name="time"/>, with the value untouched,
+    /// and each group's pass window rolls to <paramref name="time"/>. Those keys came back idle before the watermark and got
+    /// exactly that. A remembered key before <paramref name="windowStart"/> is forgotten, and a null
+    /// <paramref name="windowStart"/> (no server clock for the run) forgets nothing and advances nothing.
+    /// </summary>
+    void AdvanceUnreturnedBaselines(int serverId, string scope, IReadOnlyList<string> groups,
+        IReadOnlyDictionary<string, DateTime> returned, DateTime? windowStart, bool advance, DateTime time)
+    {
+    }
 }

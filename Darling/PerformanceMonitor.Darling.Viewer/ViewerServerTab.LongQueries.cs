@@ -70,13 +70,15 @@ public partial class ViewerServerTab
             return;
         }
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await RefreshActiveInnerTabAsync();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            LatestSnapshotIndicator.Text = "Could not read active queries: " + ex.Message;
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in place of the driver's text. */
+            LatestSnapshotIndicator.Text = ViewerRefreshFailure.Report($"{_server.DisplayName}: Active Queries", null, clock.ElapsedMilliseconds, ex);
         }
     }
 
@@ -91,13 +93,15 @@ public partial class ViewerServerTab
             return;
         }
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await LoadLongQueriesAsync();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            LongQueriesDisabledWarning.Text = "Could not read long queries: " + ex.Message;
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in place of the driver's text. */
+            LongQueriesDisabledWarning.Text = ViewerRefreshFailure.Report($"{_server.DisplayName}: Long Query Completions", null, clock.ElapsedMilliseconds, ex);
             LongQueriesDisabledWarning.Visibility = Visibility.Visible;
         }
     }

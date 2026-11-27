@@ -120,7 +120,8 @@ internal static class DarlingAgentActionGate
     internal static async Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>> LoadRoutesAsync(NpgsqlConnection connection, ILogger logger,
         CancellationToken cancellationToken)
     {
-        var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, logger, cancellationToken);
+        /* #9728: the gate's connection is the mcp role's, which is refused the destination and signing key columns, so it reads the agent columns only. */
+        var routes = await StoreConfigProvider.ReadNotificationRoutesForAgentAsync(connection, logger, cancellationToken);
         return (metric, serverId, severity) => NotificationRouter.ResolveAgent(metric, routes, serverId, severity);
     }
 

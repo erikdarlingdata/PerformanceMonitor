@@ -126,6 +126,29 @@
                                 <TextBlock Text="Query text and plan XML are fetched for each database-hour's top N plans on CPU, duration, physical reads, writes, memory grant, tempdb and executions (0-100000, default 100), plus forced plans and plans the engine's plan correction names. A plan outside the top N keeps its runtime statistics, shows as not collected, and is fetched by a later run if it ranks then. 0 fetches every new plan. Takes effect on the next collection cycle, no restart."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <!-- #9638: the three settings darling.json only seeds on first start. Their live values are these store columns. -->
+                                <Grid Margin="0,12,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="80"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="PlanContentRetentionDaysLabel" Grid.Column="0" Text="Plan retention (days):" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=PlanContentRetentionDaysLabel}" x:Name="PlanContentRetentionDaysTextBox" Grid.Column="1" Margin="8,0,16,0"/>
+                                    <TextBlock x:Name="ComposeStatementTimeoutSecondsLabel" Grid.Column="2" Text="Query timeout (s):" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=ComposeStatementTimeoutSecondsLabel}" x:Name="ComposeStatementTimeoutSecondsTextBox" Grid.Column="3" Margin="8,0,16,0"/>
+                                    <TextBlock x:Name="PlanXmlCompressionLabel" Grid.Column="4" Text="Plan storage:" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=PlanXmlCompressionLabel}" x:Name="PlanXmlCompressionComboBox" Grid.Column="5" Margin="8,0,0,0"/>
+                                </Grid>
+                                <TextBlock x:Name="ServiceSeedSettingsHelp"
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="0,4,0,0"/>
                             </StackPanel>
                         </Border>
 
@@ -348,6 +371,27 @@
                                     <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
+                                <!-- #8884: on by default. Instance Restarted fires when the instance start time moves later under the same server name.
+                                     Memory Dumps fires when a new memory dump file appears. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertInstanceRestartedCheckBox" Content="Instance restarted" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertMemoryDumpsCheckBox" Content="Memory dump created" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertTempDbLogSpaceCheckBox" Content="tempdb log used over" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertTempDbLogSpaceCheckBox}" x:Name="AlertTempDbLogSpaceThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertTempDbGrowthFitCheckBox" Content="tempdb next autogrowth will not fit on its volume" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLowDiskCheckBox" Content="Volume free space under" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -506,7 +550,7 @@
                                 <TextBlock x:Name="AlertExcludedDatabasesLabel" Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedDatabasesLabel}" x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. It applies to blocking, deadlock, and long-running query alerts"
+                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. * matches any run of characters, so archive_* skips every database whose name starts with archive_. It applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <TextBlock x:Name="AlertExcludedVolumesLabel" Text="Exclude volumes from the Volume Free Space alert (one per line):"
@@ -549,6 +593,17 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Straight collection failures" x:Name="AlertCollectionFailureThresholdBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="straight failures" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <!-- #9000: Store Growth. The store or one object grew at least 3 times its own typical day, over a floor. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertSelfStoreGrowthCheckBox" Content="Store growth: the store grew over" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Store growth floor in 24 hours, GB" x:Name="AlertSelfStoreGrowthFloorGbBox" Width="45" Text="5" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="GB or one object over" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Object growth floor in 24 hours, GB" x:Name="AlertSelfStoreGrowthObjectFloorGbBox" Width="45" Text="2" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="GB in 24 hours, and 3 times its typical day (0 GB = no floor)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <!-- #2136: the store's own background jobs — warn when a run reaches this percent of its cadence. -->
@@ -968,7 +1023,7 @@
                                     <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" />: Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" />: Warning (High CPU)
+                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" />: Warning (High CPU, Capacity at ceiling)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
                                     <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" />: Resolved (Server Restored)

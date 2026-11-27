@@ -33,7 +33,7 @@ public sealed partial class ViewerDataService : IThresholdOverrideGateway
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ThresholdOverrideStore.UpsertAsync(connection, transaction, serverId, database, key, value, setBy, null, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -49,7 +49,7 @@ public sealed partial class ViewerDataService : IThresholdOverrideGateway
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ThresholdOverrideStore.UpsertTagAsync(connection, transaction, tagId, key, value, setBy, null, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -64,7 +64,7 @@ public sealed partial class ViewerDataService : IThresholdOverrideGateway
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ThresholdOverrideStore.DeleteTagAsync(connection, transaction, tagId, key, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -80,7 +80,7 @@ public sealed partial class ViewerDataService : IThresholdOverrideGateway
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ThresholdOverrideStore.DeleteAsync(connection, transaction, serverId, database, key, cancellationToken);
             await transaction.CommitAsync(cancellationToken);

@@ -36,7 +36,42 @@ public sealed class AgCollectorDefinitionTests
     };
 
     private const string ExpectedReplicaQuery = @"
+SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ars.replica_id),
+    ars.role_desc,
+    ars.operational_state_desc,
+    ars.connected_state_desc,
+    ars.recovery_health_desc,
+    ars.synchronization_health_desc,
+    is_local = CONVERT(bit, ars.is_local)
+INTO #pm_ag_replica_states
+FROM sys.dm_hadr_availability_replica_states AS ars;
+
+SELECT /* PerformanceMonitorLite */
+    group_id = CONVERT(uniqueidentifier, ags.group_id),
+    ags.primary_replica
+INTO #pm_ag_group_states
+FROM sys.dm_hadr_availability_group_states AS ags;
+
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    group_id = CONVERT(uniqueidentifier, ar.group_id),
+    ar.replica_server_name,
+    ar.availability_mode_desc,
+    ar.failover_mode_desc,
+    ar.endpoint_url
+INTO #pm_ag_replicas
+FROM sys.availability_replicas AS ar;
+
+SELECT /* PerformanceMonitorLite */
+    group_id = CONVERT(uniqueidentifier, ag.group_id),
+    ag.name,
+    ag.is_distributed
+INTO #pm_ag_groups
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
@@ -52,12 +87,12 @@ SELECT /* PerformanceMonitorLite */
     is_local = ars.is_local,
     group_id = CONVERT(nvarchar(36), ag.group_id),
     primary_replica = ags.primary_replica
-FROM sys.availability_replicas AS ar
-JOIN sys.availability_groups AS ag
+FROM #pm_ag_replicas AS ar
+JOIN #pm_ag_groups AS ag
   ON ar.group_id = ag.group_id
-JOIN sys.dm_hadr_availability_replica_states AS ars
+JOIN #pm_ag_replica_states AS ars
   ON ar.replica_id = ars.replica_id
-LEFT JOIN sys.dm_hadr_availability_group_states AS ags
+LEFT JOIN #pm_ag_group_states AS ags
   ON ag.group_id = ags.group_id
 WHERE COALESCE(ag.is_distributed, 0) = 0
 ORDER BY
@@ -66,7 +101,45 @@ ORDER BY
 OPTION(RECOMPILE);";
 
     private const string ExpectedDatabaseQuery = @"
+SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorLite */
+    database_id = CONVERT(integer, hdrs.database_id),
+    group_id = CONVERT(uniqueidentifier, hdrs.group_id),
+    replica_id = CONVERT(uniqueidentifier, hdrs.replica_id),
+    is_local = CONVERT(bit, hdrs.is_local),
+    hdrs.synchronization_state_desc,
+    hdrs.last_hardened_lsn,
+    hdrs.last_commit_lsn,
+    hdrs.log_send_queue_size,
+    hdrs.redo_queue_size,
+    hdrs.log_send_rate,
+    hdrs.redo_rate,
+    is_suspended = CONVERT(bit, hdrs.is_suspended),
+    hdrs.suspend_reason_desc,
+    hdrs.secondary_lag_seconds,
+    hdrs.last_commit_time,
+    hdrs.last_hardened_time,
+    hdrs.last_redone_time,
+    hdrs.last_received_time
+INTO #pm_ag_database_replica_states
+FROM sys.dm_hadr_database_replica_states AS hdrs;
+
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    group_id = CONVERT(uniqueidentifier, ar.group_id),
+    ar.replica_server_name,
+    ar.availability_mode_desc
+INTO #pm_ag_replicas
+FROM sys.availability_replicas AS ar;
+
+SELECT /* PerformanceMonitorLite */
+    group_id = CONVERT(uniqueidentifier, ag.group_id),
+    ag.name,
+    ag.is_distributed
+INTO #pm_ag_groups
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
@@ -91,11 +164,11 @@ SELECT /* PerformanceMonitorLite */
     est_redo_completion_time_min = CONVERT(float, (hdrs.redo_queue_size * 1.0 / NULLIF(hdrs.redo_rate, 0)) / 60.0),
     est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0),
     group_id = CONVERT(nvarchar(36), ag.group_id)
-FROM sys.dm_hadr_database_replica_states AS hdrs
-JOIN sys.availability_replicas AS ar
+FROM #pm_ag_database_replica_states AS hdrs
+JOIN #pm_ag_replicas AS ar
   ON  hdrs.replica_id = ar.replica_id
   AND hdrs.group_id = ar.group_id
-JOIN sys.availability_groups AS ag
+JOIN #pm_ag_groups AS ag
   ON hdrs.group_id = ag.group_id
 JOIN sys.databases AS d
   ON hdrs.database_id = d.database_id

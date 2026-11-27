@@ -1290,7 +1290,8 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     /// #4989: the chart draws each bucket's slowest run, so one slow run still shows as it did when every run was a point,
     /// and the hover says what stands behind the point: how many runs it is the slowest of and their average. A 7-day range
     /// of one run a minute is bucketed (far fewer points than runs, and every run counted once), and the one 9-second run
-    /// in it is the height of its bucket's point.
+    /// in it is the height of its bucket's point. The range is open at its start: the run stamped exactly on it belongs to
+    /// the range before, so 10,080 of the 10,081 seeded runs are counted.
     /// </summary>
     [Fact]
     public async Task DurationTrends_ASevenDayRange_DrawsEachBucketsSlowestRun_AndNamesTheAverageAndCountInTheHover()
@@ -1311,8 +1312,8 @@ WHERE collector_name = 'wait_stats' AND collection_time = (SELECT MIN(collection
 
         var buckets = await Service().GetCollectorDurationTrendAsync(ServerId, fromDate: start, toDate: end);
 
-        Assert.True(buckets.Count < 2000, $"{buckets.Count} points for 10,081 runs: the read buckets");
-        Assert.Equal(10081, buckets.Sum(b => b.RunCount));
+        Assert.True(buckets.Count < 2000, $"{buckets.Count} points for 10,080 runs: the read buckets");
+        Assert.Equal(10080, buckets.Sum(b => b.RunCount));
         Assert.True(buckets.All(b => b.BucketStart >= start.AddTicks(-10)), "no bucket starts before the range");
         var slow = Assert.Single(buckets, b => b.MaxDurationMs == 9000);
         Assert.True(slow.RunCount >= 2);

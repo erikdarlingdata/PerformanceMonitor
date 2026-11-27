@@ -79,7 +79,7 @@ public static class PgLogFamilies
     /// <summary><c>log_temp_files</c>: one event per spilled file, <c>bytes</c> lifted, the statement fingerprinted (#3602).</summary>
     public const string TempFile = "temp_file";
 
-    /// <summary><c>log_autovacuum_min_duration</c>: one event per completed run — relation, duration, pages, tuples, buffers, WAL (#3603).</summary>
+    /// <summary><c>log_autovacuum_min_duration</c> (and <c>log_autoanalyze_min_duration</c> for analyze runs on PostgreSQL 19 and later): one event per completed run — relation, duration, pages, tuples, buffers, WAL (#3603).</summary>
     public const string Autovacuum = "autovacuum";
 
     /// <summary><c>log_checkpoints</c>: recognised, stored generic.</summary>

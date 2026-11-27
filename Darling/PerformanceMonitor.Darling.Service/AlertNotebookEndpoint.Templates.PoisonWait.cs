@@ -17,13 +17,28 @@ namespace PerformanceMonitor.Darling.Service;
 internal static partial class AlertNotebookEndpoint
 {
     /// <summary>Poison Wait template version (#4223). Bumped only if this template's SHAPE changes.</summary>
-    internal const int PoisonWaitTemplateVersion = 2;
+    internal const int PoisonWaitTemplateVersion = 3;
 
     /// <summary>The one wait type this alert fires on, RESOURCE_SEMAPHORE (ordinal, case-insensitive) — the
     /// only type whose remedy is "raise a memory grant/worker ceiling", so its two supporting reads
     /// (<see cref="BuildPoisonWaitCells"/>'s memory-grant cells) are wasted panels on every other poison
     /// type and are gated on this string rather than shown unconditionally.</summary>
     internal const string ResourceSemaphoreWaitType = "RESOURCE_SEMAPHORE";
+
+    /// <summary>#9339: the wait type whose episodes starve the collector's own connection, so its step warns that the snapshot reads are
+    /// often empty for the episode.</summary>
+    internal const string ThreadPoolWaitType = "THREADPOOL";
+
+    /// <summary>#9339: the THREADPOOL step. Worker threads that are all in use also block the monitor's own connection, so the
+    /// snapshot reads above can be empty or thin for the episode, and the empty answer itself says when slots were skipped. The reads
+    /// named here are the ones that are still recorded: the wait stats deltas, the scheduler and system health events read afterwards
+    /// from the monitored server, and the memory pressure events.</summary>
+    internal const string ThreadPoolStepText =
+        "THREADPOOL means every worker thread was in use. That also starves the monitor's own connection, so the waiting tasks snapshot above is often "
+        + "empty or thin for this episode, and an empty answer does not mean nothing was waiting. When the monitor skipped slots, the answer says how many. "
+        + "These are still recorded: the wait stats and the wait trend below (their deltas do not need a connection during the episode), "
+        + "get_health_parser_scheduler_issues and get_health_parser_system_health (the monitored server's own events, read after the episode), "
+        + "and get_memory_pressure_events.";
 
     /// <summary>Poison Wait (#4223, both engines): header, status, <c>get_wait_stats</c> /
     /// <c>get_pg_wait_stats</c> (each engine's own top-waits read, titled by engine so the wrong-engine read
@@ -62,6 +77,15 @@ internal static partial class AlertNotebookEndpoint
             AuthoredReadCell("get_waiting_tasks", "Waiting tasks", serverName, asOf,
                 ("hours", "1"), ("limit", "30")),
         };
+
+        if (string.Equals(waitType, ThreadPoolWaitType, StringComparison.OrdinalIgnoreCase))
+        {
+            cells.Add(new JsonObject
+            {
+                ["type"] = "markdown",
+                ["text"] = ThreadPoolStepText,
+            });
+        }
 
         if (string.Equals(waitType, ResourceSemaphoreWaitType, StringComparison.OrdinalIgnoreCase))
         {

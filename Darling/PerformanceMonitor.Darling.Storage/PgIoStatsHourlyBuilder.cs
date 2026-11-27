@@ -220,7 +220,7 @@ DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT server_id FROM
         using var buildLink = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hardCap);
         var buildToken = buildLink.Token;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.PgIoHourly, cancellationToken);
         await using (var gc = new NpgsqlCommand(GcSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
             await gc.ExecuteNonQueryAsync(cancellationToken);

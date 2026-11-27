@@ -57,6 +57,23 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
+    /// #9640: whether the server admin tools (<see cref="McpWritePolicy.ServerAdminTools"/>) are also
+    /// served. Default OFF. Read from <c>mcp_allow_server_admin</c> (<see cref="McpWritePolicy.ServerAdminSetting"/>) at start, so a
+    /// change needs a restart. It does nothing unless <see cref="AllowWrites"/> is on too and a usable token is held: the twin of
+    /// Darling's <c>mcp.allowServerAdmin</c>. A file setting only, no Settings window control, like <c>mcp_allow_writes</c>.
+    /// </summary>
+    public bool AllowServerAdmin { get; set; } = false;
+
+    /// <summary>
+    /// #9640: whether <c>add_servers</c> and <c>edit_server</c> may save Windows authentication over a connection whose server identity is not
+    /// verified (<c>trust_server_certificate</c> true, or <c>encrypt_mode</c> Optional). Default OFF: they refuse it before any connection test, so the
+    /// Windows account Lite runs as is never presented to a host nothing confirms. Read from <c>mcp_allow_windows_auth_over_unverified_tls</c>
+    /// (<see cref="McpUnverifiedWindowsAuthScreen.Setting"/>) at start, so a change needs a restart. The twin of Darling's
+    /// <c>mcp.allowWindowsAuthOverUnverifiedTls</c>. A file setting only, no Settings window control, like <c>mcp_allow_server_admin</c>.
+    /// </summary>
+    public bool AllowWindowsAuthOverUnverifiedTls { get; set; } = false;
+
+    /// <summary>
     /// Whether the state-changing investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820; the two
     /// investigation reads are ordinary reads, #8461) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
@@ -182,6 +199,26 @@ internal sealed class McpSettings
                 }
 
                 settings.AllowWrites = allowWrites.GetBoolean();
+            }
+
+            if (root.TryGetProperty("mcp_allow_server_admin", out var allowServerAdmin))
+            {
+                if (allowServerAdmin.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(McpWritePolicy.ServerAdminSetting, allowServerAdmin, "true or false"));
+                }
+
+                settings.AllowServerAdmin = allowServerAdmin.GetBoolean();
+            }
+
+            if (root.TryGetProperty("mcp_allow_windows_auth_over_unverified_tls", out var allowWindowsAuth))
+            {
+                if (allowWindowsAuth.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(McpUnverifiedWindowsAuthScreen.Setting, allowWindowsAuth, "true or false"));
+                }
+
+                settings.AllowWindowsAuthOverUnverifiedTls = allowWindowsAuth.GetBoolean();
             }
 
             if (root.TryGetProperty("mcp_allow_investigations", out var allowInvestigations))

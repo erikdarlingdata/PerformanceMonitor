@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// date and its state word, fits inside the card at a 900x600 window. Each card is the real control, bound as the Overview binds
 /// it, laid out with the theme loaded and read back from what rendered.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class OfflineServerCardTests
 {
     private const string UnknownGrey = "#888888";

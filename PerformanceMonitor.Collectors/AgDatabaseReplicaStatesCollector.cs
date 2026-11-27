@@ -89,6 +89,10 @@ namespace PerformanceMonitor.Collectors;
 /// which is the honest answer; it is deliberately never coerced to 0, which would read as "drains
 /// instantly" — the exact opposite of the truth.</para>
 ///
+/// <para>sys.dm_hadr_database_replica_states and both AG catalog views are staged into #temp tables before
+/// the join, for the reason <see cref="AgReplicaStatesCollector"/> gives (#8889); sys.databases stays in
+/// the join.</para>
+///
 /// <para>PERMISSIONS: this query joins the same two AG catalog views, which require VIEW ANY
 /// DEFINITION and hide rows rather than erroring without it — see
 /// <see cref="AgReplicaStatesCollector"/> for the full trap and the fingerprint that identifies it.</para>
@@ -125,8 +129,52 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
         double? EstSendDrainTimeMin,
         string? GroupId);
 
+    /* #9539: the three staging statements carry no OPTION(RECOMPILE), the one exception the rule in CONTRIBUTING.md
+       allows. Each reads one view with no parameters, and its row count follows the availability group layout,
+       which does not swing between runs the way a catch-up window does. Measured on SQL Server 2022 and 2025 against
+       the hinted batch: 31 to 35% less CPU per run with no groups and 25 to 27% less with 20 groups. The plan
+       compiled with no groups, reused with 20, still cost less than the hinted batch, and the rows matched. The
+       final SELECT joins the staged rows and sys.databases and keeps its hint. */
     private const string QueryText = @"
+SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorLite */
+    database_id = CONVERT(integer, hdrs.database_id),
+    group_id = CONVERT(uniqueidentifier, hdrs.group_id),
+    replica_id = CONVERT(uniqueidentifier, hdrs.replica_id),
+    is_local = CONVERT(bit, hdrs.is_local),
+    hdrs.synchronization_state_desc,
+    hdrs.last_hardened_lsn,
+    hdrs.last_commit_lsn,
+    hdrs.log_send_queue_size,
+    hdrs.redo_queue_size,
+    hdrs.log_send_rate,
+    hdrs.redo_rate,
+    is_suspended = CONVERT(bit, hdrs.is_suspended),
+    hdrs.suspend_reason_desc,
+    hdrs.secondary_lag_seconds,
+    hdrs.last_commit_time,
+    hdrs.last_hardened_time,
+    hdrs.last_redone_time,
+    hdrs.last_received_time
+INTO #pm_ag_database_replica_states
+FROM sys.dm_hadr_database_replica_states AS hdrs;
+
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    group_id = CONVERT(uniqueidentifier, ar.group_id),
+    ar.replica_server_name,
+    ar.availability_mode_desc
+INTO #pm_ag_replicas
+FROM sys.availability_replicas AS ar;
+
+SELECT /* PerformanceMonitorLite */
+    group_id = CONVERT(uniqueidentifier, ag.group_id),
+    ag.name,
+    ag.is_distributed
+INTO #pm_ag_groups
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
@@ -151,11 +199,11 @@ SELECT /* PerformanceMonitorLite */
     est_redo_completion_time_min = CONVERT(float, (hdrs.redo_queue_size * 1.0 / NULLIF(hdrs.redo_rate, 0)) / 60.0),
     est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0),
     group_id = CONVERT(nvarchar(36), ag.group_id)
-FROM sys.dm_hadr_database_replica_states AS hdrs
-JOIN sys.availability_replicas AS ar
+FROM #pm_ag_database_replica_states AS hdrs
+JOIN #pm_ag_replicas AS ar
   ON  hdrs.replica_id = ar.replica_id
   AND hdrs.group_id = ar.group_id
-JOIN sys.availability_groups AS ag
+JOIN #pm_ag_groups AS ag
   ON hdrs.group_id = ag.group_id
 JOIN sys.databases AS d
   ON hdrs.database_id = d.database_id
@@ -176,7 +224,10 @@ OPTION(RECOMPILE);";
     /// Gated off for Azure SQL Database only, matching <see cref="AgReplicaStatesCollector"/> —
     /// see that definition for the reasoning.
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
+    // #9099: also off below the supported version floor, because is_distributed and secondary_lag_seconds do not exist before SQL Server 2016.
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        !target.IsAzureSqlDb
+        && target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 

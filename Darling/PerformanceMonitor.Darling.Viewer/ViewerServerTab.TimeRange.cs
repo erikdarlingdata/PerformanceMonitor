@@ -130,16 +130,24 @@ public partial class ViewerServerTab
 
     private void HostWindow_Closed(object? sender, EventArgs e) => _autoRefreshTimer?.Stop();
 
-    private async void OnAutoRefreshTick(object? sender, EventArgs e)
+    private async void OnAutoRefreshTick(object? sender, EventArgs e) => await AutoRefreshTickAsync();
+
+    /// <summary>
+    /// The auto-refresh tick (#8810). It is a poll: a load already running is refreshing the tab right now, so the tick starts
+    /// nothing and queues nothing, and the next tick refreshes as usual. Queueing it, as a user's range pick or sub-tab switch is,
+    /// ran the whole load again the moment the first one ended, so a slow store answered the same reads twice in a row and the status
+    /// stamp came after both. Lite's tick does the same through <c>RefreshCoordinator.PollAsync</c> (#5371).
+    /// </summary>
+    internal Task AutoRefreshTickAsync()
     {
         /* Only the VISIBLE server tab auto-refreshes (the viewer's visible-only rule); a background tab's
            timer no-ops until the user switches to it, at which point MainWindow reloads it on activation. */
-        if (!IsVisible)
+        if (!IsVisible || _refreshInFlight)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        await RefreshActiveInnerTabAsync();
+        return RefreshActiveInnerTabAsync();
     }
 
 
@@ -336,10 +344,17 @@ public partial class ViewerServerTab
     {
         try
         {
-            var clock = await _dataService.GetServerClockAsync(_server.ServerId);
-            if (clock is not null)
+            if (_server.IsPostgres)
             {
-                _serverClock = clock;
+                await RefreshPgServerClockAsync();
+            }
+            else
+            {
+                var clock = await _dataService.GetServerClockAsync(_server.ServerId);
+                if (clock is not null)
+                {
+                    _serverClock = clock;
+                }
             }
         }
         catch

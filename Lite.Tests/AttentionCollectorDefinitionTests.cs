@@ -43,7 +43,14 @@ public sealed class AttentionCollectorDefinitionTests
         };
 
     private static object[] Event(DateTime time, string? text = "SELECT 1", string app = "app")
-        => new object[] { time, "db", app, "host", 55, 0, 350L, (object?)text ?? DBNull.Value };
+        => new object[] { time, "db", app, "host", 55, 0, 350L, (object?)text ?? DBNull.Value, AttentionCollector.KindSample, DBNull.Value };
+
+    /* One captured call (#9507): a completed event that ended aborted, with its elapsed time and, for an RPC, its object name. */
+    private static object[] CapturedCall(DateTime time, long durationUs, string? text, string? objectName, string app = "app")
+        => new object[]
+        {
+            time, "db", app, "host", 55, 0, durationUs, (object?)text ?? DBNull.Value, AttentionCollector.KindAborted, (object?)objectName ?? DBNull.Value,
+        };
 
     private static object[][] Trailer(long? executionCount, long? eventCount, bool gated = false)
         => new[] { new object[] { (object?)executionCount ?? DBNull.Value, (object?)eventCount ?? DBNull.Value, gated } };
@@ -81,7 +88,7 @@ public sealed class AttentionCollectorDefinitionTests
     {
         var text = AttentionCollector.BuildText(AttentionCollector.XeSessionName, azure);
 
-        var guard = text.IndexOf("IF NOT EXISTS", StringComparison.Ordinal);
+        var guard = text.IndexOf("IF @xe_address IS NULL", StringComparison.Ordinal);
         var firstTargetRead = text.IndexOf("target_name = N'ring_buffer'", StringComparison.Ordinal);
         Assert.True(guard >= 0 && guard < firstTargetRead, "the missing-session guard comes first");
         Assert.Contains("THROW 50000, N'XE session [PerformanceMonitor_Attention] is not running', 1;", text, StringComparison.Ordinal);
@@ -234,6 +241,71 @@ public sealed class AttentionCollectorDefinitionTests
 
         Assert.Equal("107", context.StagedItemState[AttentionCollector.CountStateKey]);
         Assert.Equal("77", context.StagedItemState[XeShredGate.StateKey]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WritesACapturedCallAsAnAbortedRow_WithItsElapsedTimeAndTheObjectNamedBeforeTheStatement()
+    {
+        var context = MakeContext(state: Prior(100));
+        var t1 = Now.AddSeconds(-30);
+        /* The text is the sql_text action: the call's own statement with its parameters declared and no values (#9507). */
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[]
+            {
+                CapturedCall(t1, 2_003_000L, "(@id int)EXEC dbo.slow_proc @id;", "dbo.slow_proc"),
+                CapturedCall(t1.AddSeconds(1), 31_000_000L, "SELECT 1", null),
+                Event(t1.AddSeconds(2)),
+            },
+            Trailer(77, 101));
+
+        var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var aborted = rows.Where(r => r.EventKind == AttentionCollector.KindAborted).ToList();
+        Assert.Equal(2, aborted.Count);
+        Assert.Equal(2_003_000L, aborted[0].InterruptDurationUs);
+        Assert.Equal("dbo.slow_proc: (@id int)EXEC dbo.slow_proc @id;", aborted[0].StatementText);
+        Assert.NotNull(aborted[0].StatementFingerprint);
+        Assert.Equal("SELECT 1", aborted[1].StatementText);
+        Assert.All(aborted, r => Assert.Equal(0, r.AttentionCount));
+        Assert.All(aborted, r => Assert.NotNull(r.EventTime));
+        Assert.Equal(55, aborted[0].SessionId);
+        Assert.Equal("app", aborted[0].ClientAppName);
+
+        /* A captured call is detail only: it never moves the attention count, which stays the exact counter delta. */
+        Assert.Equal(1, Assert.Single(rows, r => r.EventKind == AttentionCollector.KindCount).AttentionCount);
+        Assert.Equal(1, rows.Sum(r => r.AttentionCount));
+        Assert.Single(rows, r => r.EventKind == AttentionCollector.KindSample);
+    }
+
+    /* #9507: a stored-procedure RPC has an object name and, when the sql_text action is empty or absent, no text at all. The row
+       holds the object name alone, and an empty string reads as no text (the completed events still send empty statement and
+       batch_text nodes). Both missing leaves no text. A sample row (an attention) never takes an object name. */
+    [Fact]
+    public async Task ReadAsync_ACapturedRpcWithNoSqlText_HoldsTheObjectNameAlone_AndAnEmptyTextReadsAsNone()
+    {
+        var context = MakeContext(state: Prior(100));
+        var t1 = Now.AddSeconds(-30);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[]
+            {
+                CapturedCall(t1, 2_003_000L, null, "dbo.slow_proc"),
+                CapturedCall(t1.AddSeconds(1), 3_000_000L, string.Empty, "dbo.other_proc"),
+                CapturedCall(t1.AddSeconds(2), 4_000_000L, string.Empty, null),
+                CapturedCall(t1.AddSeconds(3), 5_000_000L, null, null),
+            },
+            Trailer(77, 100));
+
+        var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var aborted = rows.Where(r => r.EventKind == AttentionCollector.KindAborted).ToList();
+        Assert.Equal(4, aborted.Count);
+        Assert.Equal("dbo.slow_proc", aborted[0].StatementText);
+        Assert.NotNull(aborted[0].StatementFingerprint);
+        Assert.Equal("dbo.other_proc", aborted[1].StatementText);
+        Assert.Null(aborted[2].StatementText);
+        Assert.Null(aborted[2].StatementFingerprint);
+        Assert.Null(aborted[3].StatementText);
+        Assert.Null(aborted[3].StatementFingerprint);
     }
 
     [Fact]

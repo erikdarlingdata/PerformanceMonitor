@@ -443,18 +443,59 @@ public sealed class FinOpsHighImpactBoundedReadLiveTests
         }
     }
 
+    /// <summary>
+    /// Rows of one hash from one collection (several plans or databases) share the collection time. When they also share
+    /// the execution count, the text is the one of the newest plan creation; with that equal too, the first by text. The
+    /// same pick on every read, and the same one Lite makes.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_PicksTheSameTextForRowsTiedOnCountAndCollection()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live high-impact lookup test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var at = DarlingMcpTestData.Naive(At);
+
+            /* The newer plan creation wins although its text sorts last. */
+            await PlantPayload(connection, ct, at, "0xTIECREATE", exec: 8, cpuUs: 900_000L, reads: 10L, writes: 0L,
+                inlineText: "a older plan", creationTime: at.AddDays(-2));
+            await PlantPayload(connection, ct, at, "0xTIECREATE", exec: 8, cpuUs: 900_000L, reads: 10L, writes: 0L,
+                inlineText: "z newer plan", creationTime: at.AddDays(-1));
+
+            /* Same creation too: the text breaks it, whatever order the rows were written in. */
+            foreach (var text in new[] { "b second", "a first", "c third" })
+            {
+                await PlantPayload(connection, ct, at, "0xTIETEXT", exec: 8, cpuUs: 1_000L, reads: 5_000_000L, writes: 0L,
+                    inlineText: text, creationTime: at.AddDays(-1));
+            }
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var actual = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, HoursBack, 60, ct, topN: 1);
+        var byHash = actual.ToDictionary(r => r.QueryHash, StringComparer.Ordinal);
+        Assert.Equal("z newer plan", byHash["0xTIECREATE"].FullQueryText);
+        Assert.Equal("a first", byHash["0xTIETEXT"].FullQueryText);
+    }
+
     private static async Task PlantPayload(NpgsqlConnection c, CancellationToken ct, DateTime at, string hash,
         long exec, long cpuUs, long reads, long writes,
-        byte[]? textDigest = null, byte[]? planDigest = null, string? inlineText = null, string? inlinePlan = null)
+        byte[]? textDigest = null, byte[]? planDigest = null, string? inlineText = null, string? inlinePlan = null,
+        DateTime? creationTime = null)
     {
         await DarlingMcpTestData.ExecAsync(c, ct,
             @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name,
                 query_hash, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
                 delta_logical_writes, max_grant_kb, sample_interval_seconds, last_execution_time,
-                query_text, query_text_digest, query_plan_xml, query_plan_digest)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+                query_text, query_text_digest, query_plan_xml, query_plan_digest, creation_time)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
             CollectionIdGenerator.Next(), at, ServerId, ServerName, "Db0", hash, exec, cpuUs, cpuUs * 2, reads, writes, 1_024L, 60, at,
-            inlineText, textDigest, inlinePlan, planDigest);
+            inlineText, textDigest, inlinePlan, planDigest, creationTime);
     }
 
     private static IEnumerable<JsonElement> Flatten(JsonElement node)

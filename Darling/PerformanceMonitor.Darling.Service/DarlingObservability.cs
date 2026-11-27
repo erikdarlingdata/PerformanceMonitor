@@ -102,7 +102,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using var command = new NpgsqlCommand(MarkConnectFailedSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(config.ServerId);
@@ -226,7 +226,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             /* #6351: what the registry held before, so a connect that CHANGES the identity can be told from one that restates it. */
             string? priorIdentity;
             using (var prior = new NpgsqlCommand(PriorMachineIdentitySql, connection))
@@ -329,7 +329,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var changed = await command.ExecuteNonQueryAsync(cancellationToken);
@@ -463,7 +463,7 @@ ON CONFLICT (server_id) DO UPDATE SET
                 message = message.Substring(0, 4000);
             }
 
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
@@ -600,7 +600,7 @@ ON CONFLICT (server_id) DO UPDATE SET
 
             var elapsed = durationMs > int.MaxValue ? int.MaxValue : (int)durationMs;
 
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
             command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
@@ -718,7 +718,7 @@ ON CONFLICT (server_id) DO UPDATE SET
 
             var (elapsed, target, storage) = SplitSweepPhases(durationMs, targetMs);
 
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
             command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
@@ -826,7 +826,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Observability, cancellationToken);
             using var command = new NpgsqlCommand(WriteAnalysisStateSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);

@@ -8,10 +8,12 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -86,8 +88,8 @@ public partial class LocalDataService
 {
     /// <summary>
     /// #5643: this server's late cycles in the 24 h ending at <paramref name="asOfUtc"/> (default now), from the
-    /// <c>collection_cycle</c>/<c>SKIPPED</c> rows the collection loop writes. The window is inclusive at both ends. The
-    /// newest row (ties broken by <c>log_id</c>) supplies the "last" fields.
+    /// <c>collection_cycle</c>/<c>SKIPPED</c> rows the collection loop writes. The window leaves its start out and keeps its
+    /// end. The newest row (ties broken by <c>log_id</c>) supplies the "last" fields.
     /// </summary>
     public async Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(int serverId, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
@@ -123,7 +125,7 @@ FROM
     WHERE server_id = $1
     AND   collector_name = $2
     AND   status = $3
-    AND   collection_time >= $4
+    AND   collection_time > $4
     AND   collection_time <= $5
 ) t";
 
@@ -156,4 +158,60 @@ FROM
             LastDurationMs = reader.IsDBNull(6) ? null : ToInt64(reader.GetValue(6))
         };
     }
+
+    /// <summary>
+    /// #9339: the skipped slots and the collector's failed runs inside one window, for the note an empty snapshot answer carries. The
+    /// window leaves its start out and keeps its end, as Darling's <c>DarlingCollectionGapReader</c> does. Skipped slots come from the
+    /// <c>collection_cycle</c>/<c>SKIPPED</c> rows (one row stands for several slots: their counts are summed, so each slot counts once).
+    /// A failed run is a row of <paramref name="collectorName"/> whose status is not in
+    /// <see cref="EnumeratedCollectorDriver.FreshnessSuccessStatuses"/> (SUCCESS and SKIPPED), so a collector's own SKIPPED run is
+    /// healthy here, as everywhere else, and is not counted a second time beside the slot rows. A WARNING run still counts.
+    /// </summary>
+    public async Task<CollectionGapFacts> GetCollectionGapsAsync(
+        int serverId, string collectorName, DateTime windowStartUtc, DateTime windowEndUtc, CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+SELECT
+    COALESCE(SUM(CASE WHEN collector_name = $2 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN collector_name = $2 THEN COALESCE(fanout_item_count, 0) ELSE 0 END), 0),
+    MIN(CASE WHEN collector_name = $2 THEN collection_time END),
+    MAX(CASE WHEN collector_name = $2 THEN collection_time END),
+    COALESCE(SUM(CASE WHEN collector_name = $4 THEN 1 ELSE 0 END), 0),
+    MIN(CASE WHEN collector_name = $4 THEN collection_time END),
+    MAX(CASE WHEN collector_name = $4 THEN collection_time END)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time > $5
+AND   collection_time <= $6
+AND   (   (collector_name = $2 AND status = $3)
+       OR (collector_name = $4 AND status NOT IN ({HealthyStatusList})))";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.CollectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.Status });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = windowStartUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = windowEndUtc });
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new CollectionGapFacts(0, 0, null, null, 0, null, null);
+        }
+
+        static DateTime? Utc(System.Data.Common.DbDataReader r, int i) =>
+            r.IsDBNull(i) ? null : DateTime.SpecifyKind(r.GetDateTime(i), DateTimeKind.Utc);
+
+        return new CollectionGapFacts(
+            ToInt64(reader.GetValue(0)), ToInt64(reader.GetValue(1)), Utc(reader, 2), Utc(reader, 3),
+            ToInt64(reader.GetValue(4)), Utc(reader, 5), Utc(reader, 6));
+    }
+
+    /// <summary><see cref="EnumeratedCollectorDriver.FreshnessSuccessStatuses"/> as a SQL list. Every element is a compile-time constant
+    /// of this repo, never operator input.</summary>
+    private static readonly string HealthyStatusList = string.Join(
+        ", ",
+        EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(status => "'" + status + "'"));
 }

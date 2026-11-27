@@ -324,6 +324,16 @@ public sealed partial class DarlingWorker
             _nextAutovacuumCheckUtc = DateTime.UtcNow.Add(s_autovacuumCheckInterval);
             await _selfAlerts.EvaluateAutovacuumBehindAsync(
                 _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
+
+            /* #8950: on the same hourly cadence, store tables past their autovacuum start point with no vacuum in 24 hours, or with
+               autovacuum cancelled repeatedly. One catalog read plus one day of one store log class, bounded by the MCP read
+               deadline. Also two true reads in a row, failure-isolated and gated on the master switch inside. */
+            await _selfAlerts.EvaluateVacuumStalledAsync(
+                _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
+
+            /* #9000: the store and each object against their own growth baseline. It runs under _nextAutovacuumCheckUtc. The sizes it reads are written by
+               SweepStoreSelfMetricsAsync on its own cadence, so the two stamps drift and a day can lack a sample near an anchor (the read allows 3 hours). */
+            await _selfAlerts.EvaluateStoreGrowthAsync(_postgres, TryReadStoreFreeBytes(config), stoppingToken);
         }
 
         /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
@@ -448,6 +458,10 @@ public sealed partial class DarlingWorker
             _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
             await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
         }
+
+        /* #9432: the upgrade run file beside the install, recorded on the same five-minute store-side pass but on its own stamp, so it runs with
+           the alert engine off too. The upgrade restarts the service before its script ends, so the result and the verified state are read here. */
+        await RunUpgradeRunPassAsync(AppContext.BaseDirectory, stoppingToken);
     }
 
     /// <summary>
@@ -517,6 +531,13 @@ public sealed partial class DarlingWorker
     {
             await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
 
+            /* #9549: which store operations suffered inside a checkpoint sync of at least the read deadline in the window the launch
+               just took. Judged
+               once, after the sweep stored the hour's checkpointer row (so a read that began inside the window's last
+               sync has had its deadline to land), with or without the alert engine, and kept where get_store_metrics
+               reads it: the Store Checkpointer Pressure check below and that tool are handed one verdict. */
+            var checkpointHarm = StoreHarmLog.Shared.JudgeAndKeep(DateTime.UtcNow, _checkpointSyncSampler.TakenSyncs(), _readFailures);
+
             /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
                regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
             if (_selfAlerts is not null)
@@ -537,11 +558,12 @@ public sealed partial class DarlingWorker
                    the alert judges the hour the sweep measured rather than the one before it. Both
                    master-gated inside and failure-isolated inside; the outer catch is the belt.
                    #4834: the checkpointer check reads the hour's longest single sync from the row the
-                   sweep just wrote, the same value get_store_metrics publishes. */
+                   sweep just wrote, the same value get_store_metrics publishes. #9549: it fires on the
+                   harm verdict above (or a requested checkpoint), and the sync figures are its attribution. */
                 try
                 {
                     await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, checkpointHarm);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -958,6 +980,10 @@ public sealed partial class DarlingWorker
         {
             /* Expected on shutdown drain. */
         }
+        catch (Exception ex) when (IsStopping(ex, ct))
+        {
+            /* #9392: a dependency the host disposed while the tick was still using it, once the service is stopping. */
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "{Tick} failed", name);
@@ -1093,6 +1119,31 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #9411: the recorder the passes write each step's row through (<see cref="StorePassSteps"/>). Made on first use, after the store is open, and
+    /// never fails or slows a step: a write that fails is logged and the pass goes on.
+    /// </summary>
+    private StorePassSteps.Recorder PassSteps => _passSteps ??= new StorePassSteps.Recorder(_postgres!, _logger, shutdown: _stoppingToken);
+
+    private StorePassSteps.Recorder? _passSteps;
+
+    /// <summary>#9411: the host's stopping token, kept so the step recorder can tell a shutdown from a step that ran out its own time slice.</summary>
+    private CancellationToken _stoppingToken;
+
+    /// <summary>#9411: the step row's note for builds a tick left to the next one, or null when it left none.</summary>
+    private static string? DeferredText(int deferred) => deferred > 0 ? $"{deferred} left for the next tick" : null;
+
+    /// <summary>
+    /// #9711: the host hourly rollup tick as step counts. A prune slice that failed is caught inside the tick so the builds still run. It counts as
+    /// one failure here and its text leads the detail, ahead of the deferred note, so the step records as failed while the rollup grows past its horizon.
+    /// </summary>
+    internal static StorePassSteps.StepCounts HostHourlyStepCounts(QueryStatsHostHourly.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}; {deferred}";
+        return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+    }
+
+    /// <summary>
     /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
     /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
     /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
@@ -1102,8 +1153,12 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
-            await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "module_map_refresh", async () =>
+            {
+                await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ModuleMap, stoppingToken);
+                var rows = await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: rows);
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1121,7 +1176,11 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "pg_io_stats_hourly", async () =>
+            {
+                var tick = await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1137,7 +1196,13 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await PlanRegressionDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "plan_regression_daily", async () =>
+            {
+                var tick = await PlanRegressionDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Built + tick.BlocksBuilt, Removed: tick.DaysRemoved + tick.BlocksRemoved,
+                    Failed: tick.Failed + tick.BlocksFailed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1157,8 +1222,13 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await QueryStoreComposeStamp.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.QueryStoreComposePass, "query_store_compose_stamp", async () =>
+            {
+                var tick = await QueryStoreComposeStamp.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Built + tick.DaysBuilt, Removed: tick.HoursRemoved, Failed: tick.Failed + tick.DaysFailed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1185,7 +1255,7 @@ public sealed partial class DarlingWorker
         IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures;
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ComposeStuckCheck, cancellationToken);
             failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1208,12 +1278,152 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await QueryStoreTopDaily.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_store_top_daily", async () =>
+            {
+                var tick = await QueryStoreTopDaily.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Removed: tick.DaysRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Query Store top daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
+        /* #8784: the per-day module execution summary is copied from the days the pass above just built, so it runs straight after it, on the
+           same tick. Its own catch, so a failure here leaves the Query Store summary's work standing. */
+        try
+        {
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_executions_daily", async () =>
+            {
+                var tick = await ObjectExecutionsDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Copied, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object executions daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
+        /* #8784 part 2: the per-day summary of the names Query Store statements referenced, built from the same days and applying the
+           retention the pass above just applied, so it runs straight after it. Its own catch, so a failure here leaves the work above standing. */
+        try
+        {
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_references_daily", async () =>
+            {
+                var tick = await ObjectReferencesDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object references daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
+        /* #9110: the per-day successful job outcomes the Job History read's per-job average and last success read whole days from, built by collection_time against a watermark. It reads
+           job_history, not the Query Store tables, so it has no dependence on the passes above; it sits here to run on the same hourly tick,
+           with its own catch so a failure leaves their work standing. */
+        try
+        {
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "job_outcome_daily", async () =>
+            {
+                var tick = await JobOutcomeDaily.RunTickAsync(_postgres!, null, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Steps, Removed: tick.DaysRemoved, Failed: tick.Failed, Detail: tick.Deferred ? "the rest follows on the next tick" : null);
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Job outcome daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
+        /* #9349: the persisted object usage chain get_object_usage reads: each pair's new index_object_stats snapshots are folded forward in
+           the builder's own transactions. It reads index_object_stats, not the Query Store tables, so it has no dependence on the passes above;
+           bounded by its step cap and MaxTickDuration, with its own catch so a failure leaves their work standing. Never on a request path. */
+        try
+        {
+            var chain = default(ObjectUsageChainTick.TickResult);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_usage_chain", async () =>
+            {
+                chain = await ObjectUsageChainTick.RunTickAsync(_postgres!, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: chain.Steps, Failed: chain.Failed, Detail: chain.Deferred ? "the rest follows on the next tick" : null);
+            });
+            if (chain.Steps > 0 || chain.Failed > 0 || chain.Deferred)
+            {
+                _logger.LogInformation(
+                    "Object usage chain: {Steps} snapshot(s) folded over {Pairs} pair(s), {Failed} failed{Deferred}",
+                    chain.Steps, chain.PairsBuilt, chain.Failed, chain.Deferred ? "; the rest follows on the next tick" : string.Empty);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object usage chain could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
+        /* #9111: the closed-day rollups the Query Store grid and its slicer read whole UTC days from. It reads the interval table the
+           daily summary above reads and writes its own three tables, so it has its own catch and a failure leaves the passes above standing. */
+        await RunQueryStoreClosedDayTickAsync(stoppingToken);
+
+        /* #9164: the hourly host rollup of query_stats the top-queries read ranks whole hours from. It reads query_stats and the count ledger,
+           and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. It takes the retention
+           query_stats' raw rows are purged on, resolved the way the purge resolves it, and takes the gated raw horizon instead on a store where
+           raw is a raw hypertable (#9684). Its prune runs in slices under the retention purge's WAL pacer. */
+        try
+        {
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_stats_host_hourly", async () =>
+            {
+                var tick = await QueryStatsHostHourly.RunTickAsync(
+                    _postgres!,
+                    DateTime.UtcNow,
+                    DarlingRetention.EffectivePurgeRetentionDays("query_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_stats", _scheduleOverrides)),
+                    _logger,
+                    stoppingToken,
+                    async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
+                return HostHourlyStepCounts(tick);
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query stats host hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #9690: the step row for one closed-day tick. A prune slice that failed counts as one failure and its text leads the detail, ahead of the deferred
+    /// text: the tick goes on to the builds, but a prune that fails every tick must show as a failed step and not as an ok one.
+    /// </summary>
+    internal static StorePassSteps.StepCounts QueryStoreClosedDayStepCounts(QueryStoreClosedDayRollup.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred + tick.HoursDeferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}. {deferred}";
+        return new StorePassSteps.StepCounts(
+            Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
+            Failed: tick.Failed + tick.HoursFailed + tick.ClutterDaysFailed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+    }
+
+    /// <summary>
+    /// The closed-day rollup pass of the hourly store-maintenance tick (#9111), with its own catch so a failure leaves the passes before it
+    /// standing. The hourly clutter step follows the retention <c>query_store_stats</c>' raw rows are purged on (#9173), taken from
+    /// <see cref="DarlingRetention.QueryStoreStatsPurgeRetentionDays"/> so the clutter step and the purge agree (#9221).
+    /// </summary>
+    internal async Task RunQueryStoreClosedDayTickAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_store_closed_day", async () =>
+            {
+                var tick = await QueryStoreClosedDayRollup.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
+                    DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
+                    _logger, stoppingToken,
+                    async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
+                return QueryStoreClosedDayStepCounts(tick);
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store closed-day rollups could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
@@ -1256,6 +1466,10 @@ public sealed partial class DarlingWorker
         catch (OperationCanceledException)
         {
             /* Expected on shutdown drain. */
+        }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            /* #9392: a dependency the host disposed while the purge was still using it, once the service is stopping. */
         }
         catch (Exception ex)
         {
@@ -1313,7 +1527,8 @@ public sealed partial class DarlingWorker
             config.PlanContentRetentionDays,
             paceWal: true,
             collectionPressure: _collectionPressure,
-            queryTextPruneGate: _queryTextPruneGate);
+            queryTextPruneGate: _queryTextPruneGate,
+            livenessAdopt: _livenessAdopt);
 
         /* #5592: a pass the wall budget stopped brings the next scheduled pass forward to within the hour. */
         NotePurgePassEnded(purgeSummary, DateTime.UtcNow);
@@ -1346,7 +1561,7 @@ public sealed partial class DarlingWorker
             DateTime.UtcNow,
             async token =>
             {
-                await using var moduleMapConnection = await postgres.OpenConnectionAsync(token);
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(StoreSessionNames.ModuleMap, token);
                 var outcome = new ModuleMapRefreshOutcome();
                 await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, outcome, token);
                 return !outcome.Failed;
@@ -1365,7 +1580,7 @@ public sealed partial class DarlingWorker
                 var budgetBytes = await ResolveRawChunkIntervalBudgetBytesAsync(postgres, config, stoppingToken);
                 if (budgetBytes is double resolvedBudget)
                 {
-                    await using var reconcileConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                    await using var reconcileConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, stoppingToken);
                     await RawChunkIntervalReconciler.ReconcileAsync(
                         reconcileConnection, resolvedBudget, DateTime.UtcNow, _logger, stoppingToken);
                 }
@@ -1373,6 +1588,10 @@ public sealed partial class DarlingWorker
             catch (OperationCanceledException)
             {
                 /* Expected on shutdown drain. */
+            }
+            catch (Exception ex) when (IsStopping(ex, stoppingToken))
+            {
+                /* #9392: a dependency the host disposed while the reconcile was still using it, once the service is stopping. */
             }
             catch (Exception ex)
             {
@@ -1409,7 +1628,7 @@ public sealed partial class DarlingWorker
             return RawChunkIntervalPlanner.ManagedBudgetBytes(DarlingManagedPostgres.QuantizeRam(hostFacts.Memory.TotalBytes));
         }
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
         await using var command = new NpgsqlCommand(
             "SELECT pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('effective_cache_size'))",
             connection)
@@ -1477,7 +1696,8 @@ public sealed partial class DarlingWorker
                 config.PlanContentRetentionDays,
                 paceWal: true,
                 runLabel: runLabel,
-                collectionPressure: _collectionPressure);
+                collectionPressure: _collectionPressure,
+                livenessAdopt: _livenessAdopt);
 
             _logger.LogInformation(
                 "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",
@@ -1507,7 +1727,7 @@ public sealed partial class DarlingWorker
             List<RawPurgeNowEntry> rawTables;
             try
             {
-                await using var rawConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await using var rawConnection = await postgres.OpenConnectionAsync(StoreSessionNames.PurgeNow, stoppingToken);
 
                 /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
                    report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at

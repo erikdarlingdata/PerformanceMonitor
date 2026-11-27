@@ -127,6 +127,10 @@ const GROUP_LABELS = {
   identity_capacity: "Identity capacity",
   long_running_query: "Long-running query",
   tempdb_space: "TempDB space",
+  tempdb_log_space: "TempDB log space",
+  tempdb_growth_fit: "TempDB growth fit",
+  instance_restarted: "Instance restarted",
+  memory_dumps: "Memory dumps",
   low_disk: "Low disk",
   self_alerts: "Monitor self-alerts",
   pvs: "Version store (PVS)",
@@ -184,7 +188,7 @@ export function settingLabel(prefix, key) {
 export const SETTING_SECTIONS = [
   {
     title: "Alert Thresholds",
-    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
+    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "tempdb_log_space", "tempdb_growth_fit", "instance_restarted", "memory_dumps", "low_disk",
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
@@ -219,6 +223,10 @@ export const GROUP_FIELDS = {
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
+  tempdb_log_space: ["enabled", "threshold_percent"],
+  tempdb_growth_fit: ["enabled"],
+  instance_restarted: ["enabled"],
+  memory_dumps: ["enabled"],
   low_disk: ["enabled", "threshold_percent", "threshold_gb", "critical_free_percent", "critical_free_gb"],
   self_alerts: ["disk_free_warn_percent", "disk_free_warn_gb", "collection_stale_minutes", "collection_failure_threshold",
     "store_job_cadence_warn_percent", "retention_hold_warn_ratio", "retention_hold_critical_ratio"],
@@ -719,17 +727,24 @@ export function reapplyValues(original, values, current) {
   return merged;
 }
 
-/** `text` with every copy of the typed password replaced by "[redacted]" (plain split and join, no pattern); with no
-    password the text is returned as it is. Applied to any service sentence before it is shown. */
-export function redactPassword(text, ...secrets) {
-  let out = text;
+/** The sentence shown in place of a text that repeats a typed secret (#9693), in the service's own words
+    (DarlingMcpServerAdminTools.WithheldText), so the page and the service say one thing. `what` names the text. */
+export function withheldText(what) {
+  return what + " is withheld because it repeats the password or the AWS external ID sent with this request.";
+}
+
+/** `text` as it is, or the withheld sentence in its place when it repeats a typed secret (#9693). Applied to any
+    sentence before it is shown. A text is replaced whole and never rewritten around the secret: the words left either
+    side of a cut-out copy can give the secret away. A secret is looked for as typed and with the spaces at its ends
+    dropped, by plain search with no pattern, and with no secret the text is returned as it is. */
+export function withheldIfSecretRepeated(text, what, ...secrets) {
+  const shown = asText(text);
   for (const secret of secrets) {
     if (typeof secret !== "string" || secret === "") continue;
-    out = asText(out).split(secret).join("[redacted]");
     const trimmed = secret.trim();
-    if (trimmed !== "" && trimmed !== secret) out = asText(out).split(trimmed).join("[redacted]");
+    if (shown.includes(secret) || (trimmed !== "" && shown.includes(trimmed))) return withheldText(what);
   }
-  return out;
+  return text;
 }
 
 export const TABS = [
@@ -1163,7 +1178,7 @@ function showConflict(f, out, say) {
   const changes = conflictChanges(f.original, current, f.values);
   const list = changes.length
     ? el("ul", { class: "admin-conflict-list", "data-role": "conflict-list", "aria-label": "Changed since you opened this server" },
-      changes.map((c) => el("li", { "data-conflict-field": c.key, text: say(c.text) })))
+      changes.map((c) => el("li", { "data-conflict-field": c.key, text: say(c.text, "The change") })))
     : el("div", { class: "muted", "data-role": "conflict-none", text: CONFLICT_NONE });
   mount(f.conflictBox, el("div", { class: "admin-conflict" }, [
     list,
@@ -1204,7 +1219,7 @@ function refillEdit(f, current, keepMine) {
      learns what the save did. */
 function landEdit(f, out, password, externalId) {
   const here = editForm === f;
-  const say = (sentence) => redactPassword(sentence, password, externalId);
+  const say = (sentence, what = "The message") => withheldIfSecretRepeated(sentence, what, password, externalId);
   if (out.close) {
     if (here) closeEdit();
     if (out.notice) showOutcome(say(out.notice), out.kind === "readonly");
@@ -1239,7 +1254,7 @@ async function submitEdit() {
   if (problem) {
     f.passwordInput.value = "";
     f.externalIdInput.value = "";
-    showBanner(f, redactPassword(problem, password, externalId));
+    showBanner(f, withheldIfSecretRepeated(problem, "The message", password, externalId));
     return;
   }
   const body = buildEditBody(f.original, f.values, f.token, password, externalId);

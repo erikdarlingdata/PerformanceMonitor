@@ -111,7 +111,7 @@ public sealed class DarlingManagedRolesTests
     /// A bring-your-own store gets the web login from the script, so the script must give <c>web</c> every write and EXECUTE the
     /// managed batch gives it, give <c>viewer</c> none, and take from <c>viewer</c> each write an earlier version of the script
     /// granted it. The batch revokes in one statement per kind; the script revokes per table, so one table a store has not
-    /// migrated to yet cannot skip the others. The record_custom_alert_resolution function is the one the script does not create.
+    /// migrated to yet cannot skip the others.
     /// </summary>
     [Fact]
     public void TheByoScript_GivesTheWebRoleTheBatchsWrites_AndViewerNone()
@@ -122,7 +122,6 @@ public sealed class DarlingManagedRolesTests
 
         var webWrites = Regex.Matches(batch, writePrivilege + @"[^;]*? TO [^;]*\bweb\b[^;]*;")
             .Select(match => match.Value)
-            .Where(grant => !grant.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
             // The transaction advisory lock grant is the one statement the script cannot carry: the functions belong to a superuser, so security.md's doc block has it.
             .Where(grant => !grant.Contains("pg_catalog.pg_advisory_xact_lock", StringComparison.Ordinal) && !grant.Contains("pg_catalog.pg_try_advisory_xact_lock", StringComparison.Ordinal))
             .Distinct()
@@ -149,7 +148,6 @@ public sealed class DarlingManagedRolesTests
 
         var revokedFunctions = Regex.Matches(batch, @"REVOKE EXECUTE ON FUNCTION [^;]*? FROM viewer;")
             .Select(match => match.Value)
-            .Where(revoke => !revoke.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
             .ToList();
         Assert.True(revokedFunctions.Count >= 8, $"expected the batch to revoke the moved functions from viewer, found {revokedFunctions.Count}");
         foreach (var revoke in revokedFunctions)
@@ -929,7 +927,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
 
-        var utilityOff = byo.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
+        var utilityOff = byo.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal);
         Assert.True(utilityOff >= 0, "provision-roles.sql no longer turns utility tracking off for its own session");
         Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN PASSWORD", StringComparison.Ordinal),
             "provision-roles.sql sends a password before it turns utility tracking off");

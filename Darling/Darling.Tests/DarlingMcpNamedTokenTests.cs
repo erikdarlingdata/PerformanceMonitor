@@ -63,7 +63,7 @@ public sealed class DarlingMcpNamedTokenTests
 
     /// <summary>The <c>instructions</c> an <c>initialize</c> request returns to the token presented; the transport may frame the
     /// reply as an SSE <c>data:</c> line or as bare JSON.</summary>
-    private static async Task<string> InstructionsAsync(Microsoft.AspNetCore.TestHost.TestServer server, string bearer)
+    internal static async Task<string> InstructionsAsync(Microsoft.AspNetCore.TestHost.TestServer server, string bearer)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -101,17 +101,17 @@ public sealed class DarlingMcpNamedTokenTests
     private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
         catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action" };
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "add_alert_source", "rotate_alert_source", "remove_alert_source", "new_password_key", "reset_password_key", "mint_personal_token", "revoke_personal_token", "get_personal_tokens", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access", "get_web_access_groups" };
 
     [Fact]
-    public void ServerAdminToolsList_IsTheFourToolsTheDocsName()
+    public void ServerAdminToolsList_IsTheToolsTheDocsName()
     {
         Assert.Equal(ServerAdminToolNames.OrderBy(n => n, StringComparer.Ordinal), DarlingMcpWritePolicy.ServerAdminTools.OrderBy(n => n, StringComparer.Ordinal));
     }
 
     /// <summary>Review round 2, finding 2 of 2: <c>mcp.allowServerAdmin</c> does nothing unless <c>mcp.allowWrites</c> is on
     /// (<see cref="DarlingMcpWritePolicy.Resolve"/>). An operator token keeps that precondition, so adding <c>mcp.tokens</c> to a
-    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the four server admin tools.</summary>
+    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the server admin tools.</summary>
     [Theory]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]
@@ -223,7 +223,12 @@ public sealed class DarlingMcpNamedTokenTests
         var agentTools = await ToolNamesAsync(server, AgentToken);
 
         Assert.DoesNotContain(agentTools, DarlingMcpWritePolicy.NeverAgentTools.Contains);
-        Assert.All(agentTools.Where(DarlingMcpWritePolicy.IsWrite), t => Assert.Contains(t, DarlingMcpWritePolicy.AgentActionTools));
+        /* The Level 2 action tools, and the change window tools (#9485), which an agent token holds under the investigations arm without
+           an agent_action, behind the per-call agent switch. */
+        Assert.All(agentTools.Where(DarlingMcpWritePolicy.IsWrite),
+            t => Assert.True(
+                DarlingMcpWritePolicy.AgentActionTools.Contains(t) || DarlingMcpWritePolicy.ChangeWindowTools.Contains(t),
+                $"{t} is a write an agent token is served beyond the Level 2 action tools and the change window tools"));
         Assert.DoesNotContain(agentTools, DarlingMcpWritePolicy.IsServerAdmin);
         Assert.Contains("list_servers", agentTools);
     }

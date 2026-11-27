@@ -50,6 +50,40 @@ SET NOCOUNT ON;
 SELECT query_plan
 FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
 
+    /// <summary>
+    /// The plan of one statement of the batch (#9195): the same plan_handle, narrowed by the statement's byte offsets
+    /// into the batch text. <c>@statement_end_offset</c> of -1 runs to the end of the batch. The text DMV returns the
+    /// plan as <c>nvarchar(max)</c>, which the live plan read takes in chunks like the batch plan's <c>xml</c>.
+    /// </summary>
+    public const string StatementPlanQuery = @"
+SET NOCOUNT ON;
+SELECT query_plan
+FROM sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @plan_handle, 1), @statement_start_offset, @statement_end_offset);";
+
+    /// <summary>
+    /// The command that fetches a live plan: the one statement's plan when <paramref name="statement"/> carries its
+    /// byte offsets (the end offset is passed as it is, -1 included), otherwise the whole batch's plan.
+    /// </summary>
+    internal static SqlCommand CreatePlanCommand(SqlConnection connection, string planHandle, (int Start, int End)? statement)
+    {
+        SqlCommand command;
+        if (statement is { } offsets)
+        {
+            command = new SqlCommand(StatementPlanQuery, connection);
+            command.Parameters.AddWithValue("@plan_handle", planHandle);
+            command.Parameters.Add(new SqlParameter("@statement_start_offset", SqlDbType.Int) { Value = offsets.Start });
+            command.Parameters.Add(new SqlParameter("@statement_end_offset", SqlDbType.Int) { Value = offsets.End });
+        }
+        else
+        {
+            command = new SqlCommand(PlanQuery, connection);
+            command.Parameters.AddWithValue("@plan_handle", planHandle);
+        }
+
+        command.CommandTimeout = 15;
+        return command;
+    }
+
     private readonly Func<int, string?> _connectionStringResolver;
     private readonly ILogger? _logger;
 
@@ -59,7 +93,15 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
         _logger = logger;
     }
 
-    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
+    public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken) =>
+        FetchAsync(serverId, planHandle, null, cancellationToken);
+
+    public Task<string?> FetchStatementPlanXmlAsync(
+        int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken) =>
+        FetchAsync(serverId, planHandle, (statementStartOffset, statementEndOffset), cancellationToken);
+
+    private async Task<string?> FetchAsync(
+        int serverId, string planHandle, (int Start, int End)? statement, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(planHandle))
         {
@@ -84,17 +126,10 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
             await using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
-            await using var command = new SqlCommand(PlanQuery, connection);
-            command.CommandTimeout = 15;
-            command.Parameters.AddWithValue("@plan_handle", planHandle);
+            await using var command = CreatePlanCommand(connection, planHandle, statement);
 
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result == null || result is DBNull)
-            {
-                return null;
-            }
-
-            return result.ToString();
+            // #9195: a batch plan can be ten megabytes, and ExecuteScalarAsync's CPU grows faster than the plan does.
+            return await LivePlanXmlRead.FirstValueAsync(command, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

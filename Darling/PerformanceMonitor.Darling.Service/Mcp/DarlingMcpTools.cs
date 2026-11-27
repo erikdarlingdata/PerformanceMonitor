@@ -50,6 +50,7 @@ public sealed class DarlingMcpTools
         "Filter to one source category from the engine's full registry; an unrecognized value is refused with the accepted list. "
         + "Omit for all. pg_ sources apply only to a PostgreSQL target.";
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "analyze_server"), Description("Inference engine: scores wait, blocking, memory and config facts into evidence-scored findings; confidence is evidence, not probability or diagnosis. Needs 24h+ history, else insufficient_data. Window ends at as_of (default now), length hours_back; anomaly baseline: rolling 30-day hour-of-day x day-of-week buckets. unavailable: window unobserved (dead collector), no verdict either way. empty: window observed, nothing fired (a true all-clear). Unanchored runs persist findings to the store; as_of runs are exploratory, not saved. remediation_command is advisory, never auto-executed. <<GUIDE>> Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation_command follows the store's forcing and automatic-plan-correction state read at the moment of the call: a target that state blocks is absent from it as a statement and is named in comment lines with its blockers (a NOT ELIGIBLE line), a target the read found no row for keeps its statement under a NOT CHECKED comment line saying its state is unknown and to check before forcing, and when the whole read failed the command opens with one NOT CHECKED line and keeps every statement; parameter_sensitivity_cofired and secondary_replica_evidence alone keep the statement under their caution. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields, eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently, each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires, and once it has reverted or expired the guidance says the engine has backed out and a manual force is yours to decide), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts, so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present: hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note, and when the response budget cuts an anchored reply the findings left off are not in the store either: truncation_note then names hours_back, not get_analysis_findings. When one or more fact families could not be read this pass (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the status prose says so; the field is absent on a clean pass, and an empty result over unread families is not an all-clear. The empty envelope also states fact_count (facts the scorer saw) and facts_scored (those graded above zero), so scored-but-nothing-fired is told apart from no-fact-emitted. A finding whose root fact ranked several objects (the autovacuum-disabled and vacuum-backlog cards, the bloat and growth trends, the spilled-queries and parameter-sensitivity cards) carries root_fact.ranked: the top objects the card's prose names, worst first, as [{object_name, database_name, value, figures}] with each family's own figures under its own metadata names - so an agent reads which tables instead of parsing them out of the advice sentence. The field is ABSENT unless two or more objects ride (a card about one object already says so in object_name), and it is capped at three because a card is a summary - Darling's get_pg_autovacuum_health and get_pg_table_bloat are the full lists. A finding read back from the store (get_analysis_findings) does not carry it: the rank is a projection of the pass that scored the fact, and the names that persist are the ones the advice text states. SIZE: the reply fits the shared 32 KB response budget. When every finding does not fit, the most severe stay (the findings are severity-first), truncated is true, findings_returned says how many of finding_count ride, and truncation_note points at get_analysis_findings (limit) for the rest; finding_count always counts every finding, and an unanchored run persisted them all before the cut.")]
     public static async Task<string> AnalyzeServer(
         DarlingAnalysisService analysisService,
@@ -122,7 +123,8 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when each collector last succeeded." +
+                    /* #8910: a window retention removed has nothing for collection health to say. */
+                    WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
                     unobservedCollection.Attach(new
                     {
@@ -329,7 +331,8 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence: the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name, and the same value except on QUERY_SPILLS, where it is that query's own spilled pages and the fact value is the window total). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. The PLAN_REGRESSION fact leaves out a regression whose statement is OPTION (RECOMPILE), whose newer plan returns 10x the rows per call with the cost gone per row, or whose two plans were compiled for different parameter values over unchanged statistics, and counts them in cross_input_excluded_count. Its worst_input_basis says how the worst kept offender's two plans were compared: 1 both plans were compiled for the same parameter values, 2 the compiled values differ and the statistics were updated between the compiles (a possible statistics-update flip), 0 not checked (a plan or the statement text was missing or withheld). source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them; filters echoes the two values applied. QUERY_SPILLS and PARAMETER_SENSITIVITY facts also carry object_name even for one query: the worst query as database/query_hash, or database/query_hash/query_plan_hash.")]
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence: the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name, and the same value except on QUERY_SPILLS, where it is that query's own spilled pages and the fact value is the window total). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. The PLAN_REGRESSION fact leaves out a regression whose statement is OPTION (RECOMPILE), whose newer plan returns 10x the rows per call with the cost gone per row, or whose two plans were compiled for different parameter values over unchanged statistics, and counts them in cross_input_excluded_count. Its worst_input_basis says how the worst kept offender's two plans were compared: 1 both plans were compiled for the same parameter values, 2 the compiled values differ and the statistics were updated between the compiles (a possible statistics-update flip), 0 not checked (a plan or the statement text was missing or withheld). source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact the read collected before the source and min_severity filters (with source set, the read collects only the fact families that source and its scoring need, so the count covers those); shown counts the facts that passed them; filters echoes the two values applied. QUERY_SPILLS and PARAMETER_SENSITIVITY facts also carry object_name even for one query: the worst query as database/query_hash, or database/query_hash/query_plan_hash.")]
     public static async Task<string> GetAnalysisFacts(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -357,8 +360,45 @@ public sealed class DarlingMcpTools
 
         try
         {
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
+               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer, RetentionBoundary? retentionRemoved = null)
+            {
+                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                return await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken, retentionRemoved: retentionRemoved);
+            }
+
+            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
+               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
+            async Task<RetentionBoundary?> RetentionRemovedAsync()
+            {
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                var boundary = await analysisService.ReadRetentionBoundaryAsync(coverageTable, resolved.ServerId, cancellationToken);
+                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention, and no fact
+               statement can find anything in it (the coverage table the facts are windowed on starts there). Say so from the one MIN
+               and read no fact. A window that straddles the oldest row reads the facts as before. */
+            if (anchor is not null && await RetentionRemovedAsync() is { } removedBeforeRead)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    WindowEmptyText.RemovedFactsMessage(resolved.DisplayName, removedBeforeRead),
+                    DarlingMcpWindowNotice.AttachToHints(
+                        new CollectionCaveatState([], 0).Attach(new { secondary_replica_note = (string?)null, coverage = (object?)null }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true, removedBeforeRead)));
+            }
+
+            /* #8570: with a source, the read collects only the families that source and its scoring need, and each fact of
+               that source is the one the whole read scores. */
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor,
+                sources: source is null ? null : new HashSet<string>([source], StringComparer.OrdinalIgnoreCase), cancellationToken: cancellationToken);
 
             /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
                availability group, as of the window end; the facts below were trimmed of them. Built from the set the
@@ -370,32 +410,25 @@ public sealed class DarlingMcpTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
-            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
-               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
-            var noticeStart = windowEnd.AddHours(-hours_back);
-            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
-            {
-                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
-                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
-                return await DarlingMcpWindowNotice.ReadAsync(
-                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
-                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
-            }
-
-            if (facts.Count == 0)
+            /* #8570: a read narrowed to a source that finds none of it over an observed window answers with no facts shown, as
+               the whole read answers when the server has other facts. */
+            if (facts.Count == 0 && !(collection.SourcesNarrowed && coverage is { IsObserved: true }))
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
                    not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case).
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
-                const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
+                var removedWindow = await RetentionRemovedAsync();
+                var noFacts = removedWindow is null
+                    ? "No facts collected. The collector may not have run yet, or no data exists in the requested time range."
+                    : $"No facts were collected in the requested window. {removedWindow.Describe()} This is NOT an all-clear.";
                 var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
                 return McpHelpers.Status(
                     "unavailable",
                     collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -406,15 +439,18 @@ public sealed class DarlingMcpTools
                    "wait stats as fraction-of-period, blocking rates"; none of those can be shown, so
                    this is the unavailable envelope, with the count of what COULD be read so a caller
                    after configuration alone knows audit_config still has it. */
+                var removedWindow = await RetentionRemovedAsync();
                 return McpHelpers.Status(
                     "unavailable",
-                    $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when each collector last succeeded." +
+                    (removedWindow is null
+                        ? $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. "
+                        : $"{removedWindow.Describe()} The requested window for {resolved.DisplayName} is gone from the store, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. ") +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those." +
+                    WindowEmptyText.HealthPointer(removedWindow is not null) +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             var filtered = facts.AsEnumerable();
@@ -462,7 +498,7 @@ public sealed class DarlingMcpTools
 
             var dataNotice = await NoticeAsync(emptyAnswer: false);
             /* #8572: the ranked objects carry stored doubles; the reply is rounded as a whole. */
-            return DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
+            var factsReply = DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -481,6 +517,15 @@ public sealed class DarlingMcpTools
                 coverage = coverage.ToPayload(),
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)), dataNotice);
+
+            /* #9195: Lite's twin answered 33.1 to 33.5 KB at its default window with no key saying the answer was over the response budget
+               (#9140). The cut comes after the window notice so the notice's keys count against the budget. The facts are worst first, so the
+               cut drops the mildest, and budget_truncated and budget_note say so. total_facts, shown and coverage count what was scored, not
+               what fit. */
+            return McpResponseBudget.CapArrayInReply(
+                factsReply, "facts", "highest severity first", "facts",
+                _ => "Narrow the read with source or min_severity, or use a shorter hours_back, to see the rest. total_facts and shown count every fact that was scored.",
+                "budget_truncated", "budget_note");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -488,6 +533,7 @@ public sealed class DarlingMcpTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "compare_analysis"), Description("Compares two windows: comparison (hours_back long, ends at as_of/now) vs an earlier baseline, baseline_hours_back back (>= 2 x hours_back, else refused). Verdicts band worse/better/stable: sigma where a per-server baseline exists, else ladder position; band_source/band_rules say which. Grouped by cause; BAD_ACTOR_<hash> is plan_cache_churn, never new/resolved. N=1 vs N=1: never proves causation. unavailable = BOTH windows had zero facts. coverage_caveat flags a partly-collected side. Unobserved side: comparable=false, rows not_compared. For 30-day baselines use analyze_server. <<GUIDE>> Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window, same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. A side the collector never observed (coverage unobserved: true) is not compared at all: the reply has comparable false and a caveat that names the window, every row keeps its values with status not_compared, summary and families count worse, better, new_issues and resolved_issues as 0 and add not_compared, and plan_cache_churn is empty. Point-in-time facts such as a setting's current value stay visible and are still true. Note: for routine anomaly detection, use analyze_server instead, it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons. baseline_hours_back also fixes the baseline period's length: it is always the same duration as the comparison period.")]
     public static async Task<string> CompareAnalysis(
         DarlingAnalysisService analysisService,
@@ -645,6 +691,9 @@ public sealed class DarlingMcpTools
                shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
                the stable tail; summary and families above still count every fact. */
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            string? CutNote(int factCount) => factCount < factRows.Count
+                ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                : null;
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -679,9 +728,10 @@ public sealed class DarlingMcpTools
                 truncated = factCount < factRows.Count,
                 facts_returned = factCount,
                 facts_total = factRows.Count,
-                size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
-                    : null,
+                size_note = CutNote(factCount),
+                /* #9195: the budget keys every other read carries (#9140), the same sentence as size_note, which stays for readers of the older key. */
+                budget_truncated = factCount < factRows.Count,
+                budget_note = CutNote(factCount),
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
         }
@@ -691,6 +741,7 @@ public sealed class DarlingMcpTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size / shared_buffers as not_applicable on Aurora, where the engine manages checkpointing and sizes shared_buffers from the instance's capacity. A row with status ok only states the setting and its value, and advice appears on the rows that fired plus the context settings (checkpoint_timeout, wal_compression, work_mem). get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
@@ -1158,6 +1209,7 @@ public sealed class DarlingMcpTools
     /// <summary>See <see cref="DefaultFindingLimit"/>.</summary>
     private const int FindingTextPreviewLength = 160;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_analysis_findings"), Description("Persisted findings from PAST analysis runs, not a new analysis: deduplicated to the LATEST occurrence per chain plus occurrence stats (occurrences, first_seen, last_seen, peak_severity). empty: no findings in the window, a true zero; run analyze_server for new ones. truncated (see truncation_note) flags a read cap, so occurrence stats may under-report. confidence_basis flags rows persisted before this scoring existed as path-shape, not corroboration. remediation_command/structured_remediation are advisory, never executed. Recurrence fields are LABELS at unchanged severity. <<GUIDE>> Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0: confidence_basis labels those rows path-shape and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation_command follows the store's forcing and automatic-plan-correction state read at the moment of the call: a target that state blocks is absent from it as a statement and is named in comment lines with its blockers (a NOT ELIGIBLE line), a target the read found no row for keeps its statement under a NOT CHECKED comment line saying its state is unknown and to check before forcing, and when the whole read failed the command opens with one NOT CHECKED line and keeps every statement; parameter_sensitivity_cofired and secondary_replica_evidence alone keep the statement under their caution. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields, eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently, each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires, and once it has reverted or expired the guidance says the engine has backed out and a manual force is yours to decide), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts, so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed). limit pages the returned chains (default 18, still-firing first then by severity); findings_truncated (see findings_truncated_note) flags when the window held more chains than were returned: raise limit or narrow hours_back rather than assume nothing else fired. confidence_basis and advice's investigation/remediation preview to 160 characters by default (confidence_basis_truncated/advice_truncated flag it); full_text returns both untruncated for every returned finding. remediation_command is never previewed, at any setting. Three recurrence fields ride on every entry, read off the representative's frozen advice where the analysis pass wrote them: recurring_at_this_hour is true when the chain fired in the same hour×weekday slot on the server's clock for three or more consecutive weeks counting the latest, recurrence_weeks is that count (null when not labelled), and maintenance_window_moved is true when a long-running Agent job the chain is tied to ran in a different slot last week than this. These are LABELS at unchanged severity (a weekly problem is still a problem), and the advice text carries the sentence that states the slot. include_drilldown's drill_down rows are things like the parameter-sensitive plans or top spill queries behind the finding; they default off because they can be bulky and the summary usually suffices. SIZE: a force-plan finding's structured_remediation alone runs about 15 KB and drill_down about 3 KB per chain, so a 6-hour read at the default limit can pass 75 KB and be cut by the client. Start with limit 5, then raise it.")]
     public static async Task<string> GetAnalysisFindings(
         DarlingAnalysisService analysisService,
@@ -1403,6 +1455,7 @@ public sealed class DarlingMcpTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> previous is null for a new mute, and undo is the unmute_analysis_finding call for the same scope (None needed when the mute was already there). Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence: the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0: the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way the read tools and remove_server resolve it: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         DarlingAnalysisService analysisService,
@@ -1511,6 +1564,7 @@ public sealed class DarlingMcpTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "unmute_analysis_finding"), Description("Write: removes the mute that mute_analysis_finding registered for story_path_hash, in the scope of server_name (all servers when omitted), so the pattern appears in later analysis runs again. status: unmuted (removed is at least 1), not_muted (that scope held no mute; nothing changed), error (the delete failed; the mute may still be in force). <<GUIDE>> Undoes a mute. Served only when the operator sets mcp.allowWrites or the token is a named operator, with mute_analysis_finding. A mute registered for all servers is not removed by naming one server, and a per-server mute is not removed by omitting server_name: pass the same server_name (or none) the mute used. removed is the number of registry rows deleted; previous lists them (mute_id, story_path, reason, muted_utc), and undo is the mute_analysis_finding call that puts the mute back (the new row gets a new mute_id and date). Findings the pattern would have produced while it was muted were never stored, so nothing comes back until the next analysis pass finds the pattern again. server_name resolves the way mute_analysis_finding resolves it: exact, else partial, a name matching several servers answers \"ambiguous\" with the candidates and one matching none answers \"not_found\"; either way nothing changes. An error status can be partial: removed counts the rows that were deleted before the failure, and the rest of the mute is still in force.")]
     public static async Task<string> UnmuteAnalysisFinding(
         DarlingAnalysisService analysisService,
@@ -1916,6 +1970,11 @@ internal static class ToolRecommendations
             new("audit_config", "Check server-level configuration"),
             new("get_blocking", "Check if RCSI-off databases have blocking")
         ],
+        ["TEMPDB_FILE_SETUP"] =
+        [
+            new("get_database_sizes", "See tempdb's files with their sizes and growth settings"),
+            new("get_wait_stats", "Check for PAGELATCH waits on tempdb allocation pages")
+        ],
         ["FILE_AUTOGROWTH_PERCENT"] =
         [
             new("get_database_sizes", "See per-file sizes and autogrowth settings"),
@@ -2050,14 +2109,14 @@ internal static class ToolRecommendations
         ],
         ["PAGELATCH_EX"] =
         [
-            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_active_queries", "See the page and the indexes the latch waits sit on", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
         ],
         ["PAGELATCH_UP"] =
         [
             new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
-            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_active_queries", "See the allocation page the waits sit on", new() { ["wait_type"] = "PAGELATCH_UP" }),
             new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
         ],
         ["MISSING_INDEX"] =

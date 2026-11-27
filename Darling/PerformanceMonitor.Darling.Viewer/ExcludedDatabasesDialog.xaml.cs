@@ -60,6 +60,8 @@ public partial class ExcludedDatabasesDialog : Window
         else
         {
             HeaderText.Text = $"Excluded Databases: {displayName}";
+            ManualAddBox.ToolTip = "Enter a database name the service has not collected yet, or a pattern such as archive_*, then click Add. "
+                + "* matches any run of characters, so archive_* skips every database whose name starts with archive_.";
         }
 
         Loaded += async (_, _) => await LoadAsync();

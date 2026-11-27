@@ -278,7 +278,7 @@ public static class ServiceCommandDeadlines
     /// shutdown or its own post-<c>pg_upgrade</c> statistics pass.</para>
     ///
     /// <para><b>BELOW the budget the same startup path gives its heaviest statements.</b>
-    /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung, and its lock wait is five
+    /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung by default, and its lock wait is seven
     /// multiples of that. Those bound data-MOVING DDL on a cold busy store. The sites here are catalog
     /// reads, single-row <c>config</c> seeds, one <c>count(*)</c>, one idempotent grant batch and the
     /// first start's <c>CREATE DATABASE</c> (a copy of the few-megabyte <c>template1</c>, measured at
@@ -461,14 +461,19 @@ public static class ServiceCommandDeadlines
     /// degrades to one missing log line, not to a stalled start, and the deadline stays short rather than
     /// generous — the collection loop must not sit behind a diagnostic.</para>
     ///
-    /// <para><b>ABOVE the one query it wraps, not an independent number.</b>
-    /// <c>GatherSettingProfilesAsync</c>'s single <c>pg_settings</c> read already carries
+    /// <para><b>ABOVE the slowest query it wraps, not an independent number.</b>
+    /// <c>GatherSettingProfilesAsync</c> reads <c>pg_settings</c> once, then (#9418) three more catalog reads
+    /// for where each setting's value comes from: a role-privilege check, <c>pg_file_settings</c>, and a second
+    /// <c>pg_settings</c> read for source, file, line and the <c>SHOW</c> text. Each statement carries
     /// <see cref="CliStoreReadSeconds"/> as its own <c>CommandTimeout</c> — it is the same shared helper
-    /// <c>--check-settings</c> calls, so that per-statement bound is not this constant's to change. This
-    /// constant only has to backstop what that command timeout does not cover: <c>OpenAsync</c> and the
-    /// eight settings' conf-file reads (local disk, small files, sub-millisecond in practice). Set to
-    /// <see cref="CliStoreReadSeconds"/> + 5 for the same reason <see cref="CliBudgetBackstopSeconds"/> sits
-    /// above the query it backstops rather than tying it.</para>
+    /// <c>--check-settings</c> calls, so that per-statement bound is not this constant's to change. The four
+    /// run one after another on the same connection and all take the same cancellation token, so this deadline
+    /// cuts the gather off at the statement that is running when it passes: it is a backstop and does not have
+    /// to clear four ceilings. On a healthy store the four together take a few milliseconds (the live test
+    /// <c>ManagedConfVerdictsLiveTests</c> times them). This constant also backstops what the command timeouts do
+    /// not cover: <c>OpenAsync</c> and the eight settings' conf-file reads (local disk, small files,
+    /// sub-millisecond in practice). Set to <see cref="CliStoreReadSeconds"/> + 5 for the same reason
+    /// <see cref="CliBudgetBackstopSeconds"/> sits above the query it backstops rather than tying it.</para>
     /// </summary>
     public const int StartupHostProfileSeconds = CliStoreReadSeconds + 5;
 
@@ -492,6 +497,8 @@ public static class ServiceCommandDeadlines
     /// <c>GatherAsync</c> runs, sequentially, the version/buffer/stored-size/uncompressed-chunk reads
     /// (<c>GatherStoreFactsAsync</c>, each individually bounded at <see cref="CliStoreReadSeconds"/>) and
     /// then the <c>pg_settings</c> read (<c>GatherSettingProfilesAsync</c>, same per-statement bound) plus
+    /// its three provenance reads (#9418: a role-privilege check, <c>pg_file_settings</c>, and a second
+    /// <c>pg_settings</c> read, all catalog reads that take milliseconds) plus
     /// eight local conf-file reads (sub-millisecond). This surface asks for the hourly sweep's STORED size
     /// (#5718), so the live <c>StoreSizeSql</c> walk is not on this path: the one statement that scales with
     /// the store is <c>UncompressedChunkSizeSql</c> (<c>SerialLoopStoreSizeSourceTests</c>' regex), and the

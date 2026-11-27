@@ -36,6 +36,13 @@ internal static class FinOpsShowReloadPolicy
         firstShowSinceStart || lastLoadStartedUtc is not DateTime last || nowUtc - last >= MinAge;
 
     /// <summary>
+    /// True when a selection change should run the whole per-server load now (#9233): only while the tab is shown. A hidden tab
+    /// leaves the load to its first show, which always runs it (<see cref="ShouldReloadOnShow"/>), so window start does not run
+    /// fifteen store reads, High Impact the heaviest, for a tab nobody has opened.
+    /// </summary>
+    internal static bool ShouldLoadOnSelectionChange(bool tabVisible) => tabVisible;
+
+    /// <summary>
     /// True when a collection for the selected server that finished at <paramref name="lastCollectionUtc"/> should reload the
     /// visible tab: it finished after the last whole load began (that load may have read the window before it), and that load began
     /// at least <see cref="CollectionReloadMinAge"/> ago. No load yet reloads.

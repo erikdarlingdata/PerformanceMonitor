@@ -22,7 +22,8 @@ namespace Lite.Tests;
 /// BasedOn, drops the implicit theme style and renders as the stock light-gray Windows button, whose face the dark
 /// themes' light text cannot be read on. Each theme is loaded as the app's theme, as the app loads it.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class SidebarFooterThemeTests
 {
     [Theory]

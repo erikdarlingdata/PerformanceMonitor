@@ -158,18 +158,18 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
     }
 
     [Fact]
-    public async Task AWindowWithItsEdgeNearTheSpringForward_KeepsExactlyTheEventsInsideIt_EdgesIncluded()
+    public async Task AWindowWithItsEdgeNearTheSpringForward_KeepsTheEventsAfterItsStart_UpToAndIncludingItsEnd()
     {
         var table = NewTable();
         AddEvent(table, Naive(2026, 3, 8, 1, 0), "01-00");   // 06:00Z, before the window
-        AddEvent(table, Naive(2026, 3, 8, 1, 30), "01-30");  // 06:30Z, on the start edge
+        AddEvent(table, Naive(2026, 3, 8, 1, 30), "01-30");  // 06:30Z, on the start edge: left out
         AddEvent(table, Naive(2026, 3, 8, 3, 15), "03-15");  // 07:15Z, inside
-        AddEvent(table, Naive(2026, 3, 8, 4, 30), "04-30");  // 08:30Z, on the end edge
+        AddEvent(table, Naive(2026, 3, 8, 4, 30), "04-30");  // 08:30Z, on the end edge: kept
         AddEvent(table, Naive(2026, 3, 8, 5, 0), "05-00");   // 09:00Z, after the window
 
         var rows = await ReadAsync(table, Eastern(snapshotOffsetMinutes: -300), Naive(2026, 3, 8, 6, 30), Naive(2026, 3, 8, 8, 30));
 
-        Assert.Equal(["04-30", "03-15", "01-30"], rows.Select(r => r.DatabaseName).ToArray());
+        Assert.Equal(["04-30", "03-15"], rows.Select(r => r.DatabaseName).ToArray());
     }
 
     [Fact]

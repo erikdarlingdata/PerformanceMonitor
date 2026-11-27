@@ -155,7 +155,7 @@ public sealed class DarlingManagedPostgres
     /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
     /// and only the role name told them apart before this.
     /// </summary>
-    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+    public const string ServiceApplicationName = PerformanceMonitor.Darling.Storage.StoreSessionNames.ServicePrefix;
 
     /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
     /// each a one-shot process distinct from the running service.</summary>
@@ -559,11 +559,11 @@ public sealed class DarlingManagedPostgres
     /// <para><b>The checkpoint interval ships separately, in v16.</b> A longer <c>checkpoint_timeout</c> would
     /// cut WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one
     /// 5-minute cycle's images repeated the previous cycle's — but it risks the store's own checkpointer
-    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a
-    /// checkpoint's sync phase averages more than 10 seconds, a bar that exists because sync phases of 14.0s
-    /// and 25.2s killed reads on a production store. #3892 found that a longer interval puts more files into
-    /// each checkpoint, which makes each sync phase longer, so a 15-minute interval risks trading WAL volume
-    /// for killed reads and for alerts firing on a healthy store. One production store measured the interval
+    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) is the 10-second read
+    /// deadline a sync is set against, a line that exists because sync phases of 14.0s and 25.2s killed reads
+    /// on a production store, and the alert fires when a read or a write suffers inside a sync (#9549). #3892
+    /// found that a longer interval puts more files into each checkpoint, which makes each sync phase longer,
+    /// so a 15-minute interval risks trading WAL volume for killed reads. One production store measured the interval
     /// first, through <c>ALTER SYSTEM</c> and a reload rather than this block; it now ships as
     /// <see cref="ConfMarkerV16"/>, its own marker, gated on that measurement staying under the sync bar.</para>
     ///
@@ -595,9 +595,10 @@ public sealed class DarlingManagedPostgres
     ///
     /// <para><b>The risk this carries.</b> A longer interval puts more dirty pages, and so more files, into
     /// each checkpoint's sync phase, which is what makes the phase take longer.
-    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync
-    /// phase averages more than 10 seconds — the bar #3892 traced to sync phases of 14.0s and 25.2s that
-    /// killed reads on a production store. This block ships only because the trial's measurement stayed
+    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) is the 10-second read deadline a
+    /// sync is set against — the line #3892 traced to sync phases of 14.0s and 25.2s that killed reads on a
+    /// production store; the self-alert fires when a read or a write suffers inside a sync (#9549), not on the
+    /// length alone. This block ships only because the trial's measurement stayed
     /// under that bar; a store that regresses past it needs a shorter interval, not a self-alert override.</para>
     ///
     /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
@@ -2681,6 +2682,38 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
+    /* ===================== lock-wait logging (#9267) ===================== */
+
+    /// <summary>PostgreSQL's setting for logging a session that waits on a lock longer than <c>deadlock_timeout</c>.</summary>
+    internal const string LogLockWaitsSetting = "log_lock_waits";
+
+    /// <summary>The value <see cref="BuildLogLockWaitsConfAppend"/> writes: <c>on</c>.</summary>
+    internal const string LogLockWaitsValue = "on";
+
+    /// <summary>
+    /// The lock-wait logging block (#9267): <c>log_lock_waits = on</c> only. Rendered into <c>darling-managed.conf</c> by
+    /// <see cref="ManagedConfFile.RenderBody"/> and not appended to <c>postgresql.conf</c> as a numbered legacy block: it has no
+    /// marker, like the planner page cost and telemetry lines, and it reaches an existing store the same way
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), with the same guard for an operator's own line above the include
+    /// (<see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/>).
+    ///
+    /// <para><b>Why.</b> PostgreSQL's default is off. When a store write runs for seconds there is no way to tell from the log
+    /// whether it waited on a lock or on I/O. With the setting on, a session that waits on a lock longer than
+    /// <c>deadlock_timeout</c> (1 s by default) logs one line when the wait ends, and a wait that ends in a deadlock check logs
+    /// one while it waits. The cost is those lines, written only for a wait over the timeout.</para>
+    ///
+    /// <para><b>Context and precedence.</b> The setting is <c>superuser</c>-context, so a reload applies it. A value set with
+    /// <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c>, which is read after this file and wins. Nothing here reads or
+    /// writes that file.</para>
+    /// </summary>
+    public static string BuildLogLockWaitsConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(LogLockWaitsSetting).Append(" = ").Append(LogLockWaitsValue).Append('\n');
         return builder.ToString();
     }
 
@@ -5084,6 +5117,13 @@ FROM (
     /// logger; <paramref name="win32Error"/> is <see cref="Marshal.GetLastWin32Error"/> on a clean false.
     /// </summary>
     internal static bool TryReadWindowsPhysicalMemoryBytes(out long totalPhysicalMemoryBytes, out int win32Error, out Exception? thrown)
+        => TryReadWindowsMemoryStatus(out totalPhysicalMemoryBytes, out _, out win32Error, out thrown);
+
+    /// <summary>
+    /// The same <c>GlobalMemoryStatusEx</c> read with the memory the machine can still hand out (<c>ullAvailPhys</c>) beside the total (#9437): the
+    /// struct already holds it, so the store connection sample's available-memory figure is no second call or P/Invoke.
+    /// </summary>
+    internal static bool TryReadWindowsMemoryStatus(out long totalPhysicalMemoryBytes, out long availablePhysicalMemoryBytes, out int win32Error, out Exception? thrown)
     {
         try
         {
@@ -5091,6 +5131,7 @@ FROM (
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
                 totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                availablePhysicalMemoryBytes = (long)status.ullAvailPhys;
                 win32Error = 0;
                 thrown = null;
                 return true;
@@ -5102,12 +5143,14 @@ FROM (
         {
             thrown = ex;
             totalPhysicalMemoryBytes = 0;
+            availablePhysicalMemoryBytes = 0;
             win32Error = 0;
             return false;
         }
 
         thrown = null;
         totalPhysicalMemoryBytes = 0;
+        availablePhysicalMemoryBytes = 0;
         return false;
     }
 

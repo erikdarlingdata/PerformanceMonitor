@@ -185,6 +185,10 @@ public partial class RemoteCollectorService
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
+    /* #9529: the estimated plans query_snapshots fetched recently, kept between runs so a statement that is still
+       running is not asked for the same plan every minute. One per service, like the delta calculator. */
+    private readonly QuerySnapshotPlanCache _snapshotPlanCache = new();
+
     /// <summary>
     /// Limits how many SQL connections are <em>opened</em> at once, smoothing the login storm when many
     /// servers are polled together. A slot is held for one connect attempt - from the top of the attempt,
@@ -370,6 +374,12 @@ public partial class RemoteCollectorService
     /// </summary>
     private readonly HashSet<int> _serversSeenOffline = new();
 
+    /// <summary>
+    /// The reason last announced for each server the sweep skips (#9769), so a server that stays skipped for the same reason is
+    /// named once rather than every cycle. A new reason announces again, and a server coming back online forgets its entry.
+    /// </summary>
+    private readonly Dictionary<int, string> _skipReasonsAnnounced = new();
+
     public RemoteCollectorService(
         DuckDbInitializer duckDb,
         ServerManager serverManager,
@@ -436,10 +446,12 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Clears collector health entries for a server that has been removed.
-    /// Prevents stale error counts from showing in the status bar.
+    /// Prevents stale error counts from showing in the status bar. The server's blocked process threshold refusal goes with
+    /// it (#9743), so a server removed and added again is asked again.
     /// </summary>
     public void ClearHealthForServer(int serverId)
     {
+        BlockedProcessThresholdBootstrap.Forget(serverId);
         lock (_healthLock)
         {
             var keys = _collectorHealth.Keys.Where(k => k.ServerId == serverId).ToList();
@@ -470,7 +482,7 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Records a collector execution result for health tracking.
     /// </summary>
-    internal void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null, bool xeSessionUnavailable = false)
+    internal void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null, bool xeSessionUnavailable = false, bool timedOut = false)
     {
         lock (_healthLock)
         {
@@ -527,14 +539,22 @@ public partial class RemoteCollectorService
             {
                 entry.LastErrorMessage = errorMessage;
                 entry.ConsecutiveErrors++;
-                /* A different answer from the server: the refusal streak ends. */
-                GetRefusedBackoff(serverId).Record(collectorName, refused: false, null, DateTime.UtcNow, TimeSpan.Zero);
+                /* #8891: a statement that timed out extends its own streak under one fixed answer, so a collector that times out
+                   run after run is tried less often instead of holding up the collectors after it in this server's sweep. Any
+                   other error is a different answer from the server, and the streak ends. */
+                var timeout = timedOut && status == "ERROR";
+                GetRefusedBackoff(serverId).Record(
+                    collectorName,
+                    refused: timeout,
+                    timeout ? RefusedCollectorBackoff.TimedOutAnswer : null,
+                    DateTime.UtcNow,
+                    timeout ? RefusalInterval(serverId, collectorName) : TimeSpan.Zero);
             }
         }
     }
 
-    /* #6186: per server, the collectors the server keeps refusing with the same answer and when each is tried next. In memory:
-       a restart tries every collector once at its normal interval. */
+    /* #6186: per server, the collectors the server keeps refusing with the same answer, or whose statement keeps timing out
+       (#8891), and when each is tried next. In memory: a restart tries every collector once at its normal interval. */
     private readonly ConcurrentDictionary<int, RefusedCollectorBackoff> _refusedBackoffs = new();
 
     internal RefusedCollectorBackoff GetRefusedBackoff(int serverId) =>
@@ -550,8 +570,9 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// #6186: true while a collector the server has refused with the same answer run after run is waiting out its backoff, so
-    /// the sweep skips it without a run or a log row. False after the wait, and after its first success or a different answer.
+    /// #6186: true while a collector the server has refused with the same answer run after run, or whose statement has timed out
+    /// run after run (#8891), is waiting out its backoff, so the sweep skips it without a run or a log row. False after the
+    /// wait, and after a run that ends some other way.
     /// </summary>
     internal bool IsCollectorBackedOff(int serverId, string collectorName) =>
         _refusedBackoffs.TryGetValue(serverId, out var backoff)
@@ -651,6 +672,7 @@ public partial class RemoteCollectorService
             {
                 skippedOffline++;
                 NoteServerOffline(server);
+                AnnounceSkippedServer(server, serverStatus.UnreachableReason ?? serverStatus.ErrorMessage);
                 AppLogger.Debug("Scheduler", $"Skipping offline server '{server.DisplayName}'");
                 continue;
             }
@@ -658,9 +680,10 @@ public partial class RemoteCollectorService
             /* A server whose host this user has not confirmed is not connected to at all: its status and the Edit dialog
                say why. Every connection string is refused for it anyway; skipping here keeps the cycle from logging one
                refusal per collector. */
-            if (_serverManager.HostChange(server) != null)
+            if (_serverManager.HostChange(server) is { } hostChange)
             {
                 skippedOffline++;
+                AnnounceSkippedServer(server, hostChange.Describe(server));
                 AppLogger.Debug("Scheduler", $"Skipping server '{server.DisplayName}': its host is not confirmed");
                 continue;
             }
@@ -829,6 +852,7 @@ public partial class RemoteCollectorService
         string? errorMessage = null;
         int rowsCollected = 0;
         bool xeSessionUnavailable = false;
+        bool timedOut = false;
 
         /* Clear the per-call fields HERE, not only inside the definition runner: everything below can
            throw before the runner is ever entered — the XE session ensure for deadlocks /
@@ -883,11 +907,11 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            // Back off collectors the server keeps refusing with the same permission denial (#857, #6186):
-            // tried less often, not every interval, and never stopped for good.
+            // Back off collectors the server keeps refusing with the same permission denial (#857, #6186), or whose statement
+            // keeps timing out (#8891): tried less often, not every interval, and never stopped for good.
             if (IsCollectorBackedOff(GetServerId(server), collectorName))
             {
-                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - permission denied repeatedly, backing off");
+                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - refused or timed out repeatedly, backing off");
                 return;
             }
 
@@ -975,6 +999,12 @@ public partial class RemoteCollectorService
             };
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+
+            /* #9270: a database_config capture that holds a database still restoring or recovering is retaken in minutes, not a day. */
+            if (string.Equals(collectorName, "database_config", StringComparison.Ordinal))
+            {
+                await ScheduleTransitionalRecaptureAsync(server, cancellationToken);
+            }
 
             /* #4938: a new server_properties row is the server's clock arriving or changing; a run time reads it from the next check. */
             if (string.Equals(collectorName, "server_properties", StringComparison.Ordinal))
@@ -1078,12 +1108,15 @@ public partial class RemoteCollectorService
                TARGET rather than a monitoring fault. A 1222 from any collector without the guard flag
                falls through to the ERROR catch below, unchanged. */
             status = "YIELDED";
-            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
-            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - 1s lock-timeout guard fired (target lock contention)");
+            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the short LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - lock-timeout guard fired (target lock contention)");
         }
         catch (SqlException ex)
         {
             status = "ERROR";
+            /* #8891: a command timeout counts toward the repeat-failure backoff. Lite opens the run's connection itself and a
+               server it reads as offline is not swept at all, so every -2 that reaches here counts. */
+            timedOut = ex.Number == -2;
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
                 + AzureDmvPermissionHint.For(
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
@@ -1155,7 +1188,14 @@ public partial class RemoteCollectorService
         }
 
         // Track collector health
-        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
+        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable, timedOut);
+        if (timedOut
+            && status == "ERROR"
+            && GetRefusedBackoff(GetServerId(server)).Streak(collectorName) is var timeoutStreak
+            && timeoutStreak == RefusedCollectorBackoff.FreeRefusals + 1)
+        {
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} timed out {timeoutStreak} times in a row: it is tried less often (up to every {RefusedCollectorBackoff.MaxDelay}) until a run ends some other way (#8891)");
+        }
 
         /* #4938: a run that did not succeed still wrote a collection_log row below, and the start-up read counts that
            row as the last run whatever its status. For a daily-or-longer collector, with or without a run time, the
@@ -1330,6 +1370,30 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// Names a server the sweep skips, with the reason (#9769), at Info: the "N offline, skipped" count says how many servers were
+    /// left out and not which or why. Said once per state change, so a server that stays down for the same reason adds no line per
+    /// cycle: the same reason is not repeated, a different one is announced, and <see cref="NoteServerOnline"/> clears the memory so a
+    /// later outage is announced again. The reason is the one the sidebar shows (the connection error, or the host confirmation rule).
+    /// </summary>
+    internal void AnnounceSkippedServer(ServerConnection server, string? reason)
+    {
+        var text = string.IsNullOrWhiteSpace(reason) ? "no connection error is recorded for it" : reason;
+        var serverId = GetServerId(server);
+
+        lock (_azureMasterLock)
+        {
+            if (_skipReasonsAnnounced.TryGetValue(serverId, out var announced) && announced == text)
+            {
+                return;
+            }
+
+            _skipReasonsAnnounced[serverId] = text;
+        }
+
+        AppLogger.Info("Scheduler", $"[{server.DisplayName}] skipped, not collected from: {text}");
+    }
+
+    /// <summary>
     /// Handles a server coming back after an outage by dropping the master-inaccessible verdict.
     ///
     /// An outage and a permission problem are not distinguishable from the error number alone —
@@ -1347,6 +1411,7 @@ public partial class RemoteCollectorService
         bool returnedFromOutage;
         lock (_azureMasterLock)
         {
+            _skipReasonsAnnounced.Remove(serverId);
             returnedFromOutage = _serversSeenOffline.Remove(serverId);
             if (returnedFromOutage)
             {
@@ -1590,15 +1655,17 @@ public partial class RemoteCollectorService
         if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
             return (string.Empty, new List<SqlParameter>());
 
-        var paramNames = new List<string>(excludedDatabaseNames.Count);
-        var sqlParams = new List<SqlParameter>(excludedDatabaseNames.Count);
-        for (int i = 0; i < excludedDatabaseNames.Count; i++)
+        /* #9050: one rule for what an entry means (a name, or a pattern holding *), so this copy delegates to the
+           shared builder rather than keeping a second spelling. A list with no * produces the text and parameters
+           this method always did. */
+        var (clause, parameters) = DatabaseExclusionFilter.Build(excludedDatabaseNames.ToList(), columnExpression);
+        var sqlParams = new List<SqlParameter>(parameters.Count);
+        foreach (var parameter in parameters)
         {
-            string p = $"@excl_db_{i}";
-            paramNames.Add(p);
-            sqlParams.Add(new SqlParameter(p, System.Data.SqlDbType.NVarChar, 128) { Value = excludedDatabaseNames[i] });
+            int size = parameter.Type == CollectorParameterType.NVarChar260 ? 260 : 128;
+            sqlParams.Add(new SqlParameter(parameter.Name, System.Data.SqlDbType.NVarChar, size) { Value = parameter.Value });
         }
-        return ($"AND {columnExpression} NOT IN ({string.Join(", ", paramNames)})", sqlParams);
+        return (clause, sqlParams);
     }
 
     /// <summary>
@@ -1615,13 +1682,8 @@ public partial class RemoteCollectorService
         if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
             return string.Empty;
 
-        string escapedQuote = forNestedDynamicSql ? "''" : "'";
-        string Escape(string s) => forNestedDynamicSql
-            ? s.Replace("'", "''''")
-            : s.Replace("'", "''");
-
-        var quoted = excludedDatabaseNames.Select(n => $"N{escapedQuote}{Escape(n)}{escapedQuote}");
-        return $"AND {columnExpression} NOT IN ({string.Join(", ", quoted)})";
+        /* #9050: delegates to the shared builder, so a pattern (an entry holding *) means the same here. */
+        return DatabaseExclusionFilter.BuildLiteralClause(excludedDatabaseNames.ToList(), columnExpression, forNestedDynamicSql);
     }
 
     /* #2220: delegates to the shared rule — see AzureSweepScope for why this is not duplicated per host. */

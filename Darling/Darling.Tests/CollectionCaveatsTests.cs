@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// the family count, the sentence, the block, and above all the rule that a CLEAN pass's payload is the
 /// same object through the same serializer call, so its bytes cannot have moved.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectionCaveatsTests
 {
     [Theory]
@@ -91,10 +92,10 @@ public sealed class CollectionCaveatsTests
         /* 20 PostgreSQL-target families (the census in PgTargetFactCollectorTests names them — sixteen through the
            wave-3 blocking stub, nineteen since the #3691 v3 plumbing added the plan, kernel and memory stubs, twenty
            since lane 38 added the object-growth family with no stub in between; a stub is a family read that happens
-           to return nothing, and the denominator counts reads, not facts); 32 SQL Server reads (thirty-one families
+           to return nothing, and the denominator counts reads, not facts); 33 SQL Server reads (thirty-two families
            plus the coverage witness, the class doc's count). */
         Assert.Equal(20, CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector)));
-        Assert.Equal(32, CollectionCaveats.CountFamilies(typeof(PgFactCollector)));
+        Assert.Equal(33, CollectionCaveats.CountFamilies(typeof(PgFactCollector)));
     }
 
     [Fact]

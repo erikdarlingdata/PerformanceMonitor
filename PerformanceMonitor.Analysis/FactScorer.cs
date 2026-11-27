@@ -589,6 +589,11 @@ public class FactScorer
                 // Base 0.3 when at least one large percent-growth file was found; 0 otherwise.
                 return fact.Metadata.GetValueOrDefault("file_count") > 0 ? 0.3 : 0.0;
 
+            // #8883: the value is how many tempdb file-setup checks the server fails, and the collectors emit
+            // the fact only when that is above zero. Advisory like FILE_AUTOGROWTH_PERCENT: no alert reads it.
+            case "TEMPDB_FILE_SETUP":
+                return fact.Value > 0 ? 0.3 : 0.0;
+
             // MAXDOP at 0 = unlimited parallelism — bad. Any other value is operator-chosen.
             case "CONFIG_MAXDOP":
                 return fact.Value == 0 ? 0.4 : 0.0;

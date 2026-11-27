@@ -121,16 +121,17 @@ public partial class ViewerServerTab : UserControl
     /// (Task.WhenAll of the five) — but the reads are genuinely async, so there is no Task.Run wrap.
     /// LoadInnerTabAsync owns the try/catch that surfaces failures on the status bar.
     /// </summary>
-    private async Task LoadConfigurationAsync()
+    private async Task LoadConfigurationAsync(ViewerLoadTimer? timer = null)
     {
         using var readFanOut = ViewerReadFanOut.Of(6);
 
-        var serverConfigTask = _dataService.GetLatestServerConfigAsync(_server.ServerId);
-        var databaseConfigTask = _dataService.GetLatestDatabaseConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
-        var databaseScopedConfigTask = _dataService.GetLatestDatabaseScopedConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
-        var queryStoreHealthTask = _dataService.GetLatestQueryStoreHealthAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
-        var automaticTuningTask = _dataService.GetLatestAutomaticTuningAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
-        var traceFlagsTask = _dataService.GetLatestTraceFlagsAsync(_server.ServerId);
+        /* #9112: every read is named on the load's clock, and the grid builds are one named client step. */
+        var serverConfigTask = Timed(timer, "Server Configuration read", _dataService.GetLatestServerConfigAsync(_server.ServerId));
+        var databaseConfigTask = Timed(timer, "Database Configuration read", _dataService.GetLatestDatabaseConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter));
+        var databaseScopedConfigTask = Timed(timer, "Database Scoped Configuration read", _dataService.GetLatestDatabaseScopedConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter));
+        var queryStoreHealthTask = Timed(timer, "Query Store Health read", _dataService.GetLatestQueryStoreHealthAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter));
+        var automaticTuningTask = Timed(timer, "Automatic Tuning read", _dataService.GetLatestAutomaticTuningAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter));
+        var traceFlagsTask = Timed(timer, "Trace Flags read", _dataService.GetLatestTraceFlagsAsync(_server.ServerId));
 
         await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
@@ -138,28 +139,34 @@ public partial class ViewerServerTab : UserControl
            against contention that has already finished. */
         readFanOut.Release();
 
-        _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
-        _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
-        _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+        ClientStep(timer, "Configuration grid build", () =>
+        {
+            _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
+            _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
+            _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+        });
         /* #8576: each Query Store row says how old it is once it is older than its collector's cadence. The interval read follows the
            fan-out and is skipped when no row exists to carry it. */
         if (queryStoreHealthTask.Result.Count > 0)
         {
-            var healthInterval = await _dataService.GetQueryStoreHealthIntervalMinutesAsync(_server.ServerId);
+            var healthInterval = await Timed(timer, "Query Store Health interval read", _dataService.GetQueryStoreHealthIntervalMinutesAsync(_server.ServerId));
             foreach (var healthRow in queryStoreHealthTask.Result)
             {
                 healthRow.CollectorIntervalMinutes = healthInterval;
             }
         }
 
-        _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
-        _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
-        _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+        ClientStep(timer, "Query Store, Automatic Tuning and Trace Flags grid build", () =>
+        {
+            _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
+            _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
+            _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+        });
 
         /* Where the collector cannot run (Azure SQL Database) or has never run for this server, an empty grid says so. Keyed on the
            unfiltered row count. */
-        await ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
-        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true);
+        await Timed(timer, "Server Configuration engine gap read", ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count));
+        await Timed(timer, "Trace Flags engine gap read", ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true));
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

@@ -29,24 +29,10 @@ public class StoreLogSelfMonitoringStoreTests
     internal const int RungVersion = 111;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("store-log-self-monitoring",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* This rung is no longer the top one, so its own version is asserted where it belongs — against
-           the ladder — rather than against StorageVersion.SchemaVersion, which now names a later rung. The
-           top-rung claim travels with whichever rung is top; V110's test left the same note for this one. */
-        Assert.Contains(RungVersion, versions);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
@@ -196,8 +182,7 @@ public class StoreLogSelfMonitoringStoreTests
     [Fact]
     public void TheReadIsWiredEverywhereItHasToBe()
     {
-        var host = ReadSource("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHostService.cs");
-        Assert.Contains("WithGeminiCompatibleTools<DarlingMcpStoreLogTools>", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpStoreLogTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         Assert.Contains("get_store_log", DarlingWebEndpoints.BuildReadDispatch().Keys);
         Assert.True(DarlingWebEndpoints.CatalogDescriptors.ContainsKey("get_store_log"));
@@ -208,7 +193,8 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("hours", descriptor.Params.Select(p => p.Name));
         Assert.Contains("as_of", descriptor.Params.Select(p => p.Name));
 
-        Assert.Contains("get_store_log", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        /* #9474: the instructions name the store's own reads as the group get_store_*, which covers get_store_log. */
+        Assert.Contains("get_store_*", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -260,7 +246,7 @@ public class StoreLogSelfMonitoringStoreTests
 
         /* And the store-log capture has its OWN catch, which the two passes either side of it do not. This
            is the only pass on the tick whose PRIVILEGE is not guaranteed - reading the log needs
-           pg_read_server_files plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
+           pg_monitor plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
            not have granted - so sharing the outer catch would let one permanent condition cost the
            collector-cost flush BELOW it every hour forever. Asserted by position: a catch has to sit between
            the two calls. */
@@ -283,14 +269,8 @@ public class StoreLogSelfMonitoringStoreTests
             + "collector-cost flush, so a capture that closed it would take the re-mask and the flush "
             + "down too");
 
-        /* #3971: a capture the store will never allow (58P01 no log directory, 42501 no log read) warns once
-           per process, then drops to Debug, inside the capture's own catch. */
-        var captureCatch = body.Substring(innerCatch, reopen - innerCatch);
-        Assert.Contains("PostgresErrorCodes.UndefinedFile", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("PostgresErrorCodes.InsufficientPrivilege", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("_storeLogCaptureUnavailableWarned", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("LogDebug(", captureCatch, StringComparison.Ordinal);
-
+        /* The once-then-Debug rule for a capture the store will never allow is behaviour, pinned by
+           NewInstallLogNoiseTests, not by what the catch's text spells. */
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);

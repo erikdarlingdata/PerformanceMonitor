@@ -185,6 +185,12 @@ public sealed class DarlingAnalysisService
     public string? WindowEmptyMessage { get; private set; }
 
     /// <summary>
+    /// True when <see cref="WindowEmptyMessage"/> says retention removed the window (#8910) rather than that collection may
+    /// have missed it. The MCP tools read it to drop their pointer at collection health, which is green for that window.
+    /// </summary>
+    public bool WindowEmptyRemovedByRetention { get; private set; }
+
+    /// <summary>
     /// How much of the last pass's window the collector actually observed (#3538 A2), stamped by the
     /// fact collector and carried out here the way <see cref="WindowEmptyMessage"/> is, because the
     /// findings list cannot say it: a pass over a window with a three-hour hole returns the SAME shape as
@@ -311,12 +317,15 @@ public sealed class DarlingAnalysisService
     /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
     /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
     /// — today's behavior, byte-for-byte.</param>
+    /// <param name="sqlServerCollectorWrapper">#9149 test seam: wraps the SQL Server set's fact collector so a test can watch the
+    /// context a pass hands it (how many family reads it lets run at once). Null (every production caller) keeps the collector as is.</param>
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
         ILogger? logger = null,
         BaselineCache? baselineCache = null,
-        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
+        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -327,7 +336,9 @@ public sealed class DarlingAnalysisService
         /* The SQL Server set: the five objects this service always composed, in the same order. */
         var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
-            new PgFactCollector(postgres, logger, analyzerConfig),
+            sqlServerCollectorWrapper is null
+                ? new PgFactCollector(postgres, logger, analyzerConfig)
+                : sqlServerCollectorWrapper(new PgFactCollector(postgres, logger, analyzerConfig)),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
             new InferenceEngine(new RelationshipGraph()),
             new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
@@ -391,6 +402,9 @@ public sealed class DarlingAnalysisService
                live. */
             ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
             RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,
+            /* #9149: an on-demand pass overlaps its family reads. The scheduled pass (the one caller that persists caveats)
+               keeps the serial loop, because its sweeps already share the store's pool. */
+            FamilyParallelism = persistCollectionCaveats ? 1 : PgFactCollector.MaxFamilyParallelism,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -416,6 +430,7 @@ public sealed class DarlingAnalysisService
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
+        WindowEmptyRemovedByRetention = false;
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
@@ -435,7 +450,14 @@ public sealed class DarlingAnalysisService
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.CancellationToken);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.TimeRangeEnd, context.CancellationToken);
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours)
+                && await WindowEndsBeforeTheOldestRowAsync(engineKind, context))
+            {
+                /* No upper bound: every row the store holds. */
+                dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, DateTime.MaxValue, context.CancellationToken);
+            }
+
             if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
                 InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
@@ -459,6 +481,23 @@ public sealed class DarlingAnalysisService
                     "[DarlingAnalysisService] Skipping analysis for {Server}: {Have:F1}h data, need {Need}h",
                     context.ServerName, dataSpanHours, MinimumDataHours);
 
+                LastAnalysisTime = DateTime.UtcNow;
+                return [];
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention. The coverage
+               witness reads that same table, so every fact statement below would find nothing in it and the pass would land on the
+               unobserved-window answer; one MIN (index-ordered on server_id, collection_time) says so first, and the facts are not
+               read. A window that straddles the oldest row keeps the full pass. Only a replay can end that early. */
+            if (context.AsOfUtc is not null
+                && await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken) is { } removedBoundary
+                && removedBoundary.RemovedWindow(context.TimeRangeEnd))
+            {
+                WindowEmptyMessage = WindowEmptyText.ComposeRemovedBeforeRead(context, removedBoundary);
+                WindowEmptyRemovedByRetention = true;
+                _logger?.LogInformation(
+                    "[DarlingAnalysisService] No collection in the analysis window for {Server} ({Start} to {End}) because retention removed it, not because collection is down (no fact was read). {Retention}",
+                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, removedBoundary.Describe());
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
@@ -543,12 +582,28 @@ public sealed class DarlingAnalysisService
                    read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
                    "unstamped" is not a third state here — Coverage is null only when collection threw, and
                    that unwinds through the catch below, never through this test. */
-                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count);
+                /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and the
+                   message says so instead of blaming collection. The read costs one MIN, and only on this branch. */
+                var retention = await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken);
+                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
+                WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
-                _logger?.LogWarning(
-                    "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
-                    "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
-                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
+                /* #9152: the same check that words the MCP answer words the log line. A window retention removed is not a
+                   collector that is down, so it is Information and says so; a Warning here would send the reader to
+                   collection health for a replay that was always going to be empty. */
+                if (retention is not null && WindowEmptyRemovedByRetention)
+                {
+                    _logger?.LogInformation(
+                        "[DarlingAnalysisService] No collection in the analysis window for {Server} ({Start} to {End}) because retention removed it, not because collection is down ({FactCount} point-in-time fact(s) only). {Retention}",
+                        context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, facts.Count, retention.Describe());
+                }
+                else
+                {
+                    _logger?.LogWarning(
+                        "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
+                        "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
+                        context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
+                }
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
@@ -799,9 +854,22 @@ public sealed class DarlingAnalysisService
     /// detector is the RESOLVED engine's (<see cref="AnalysisEngineSet.Detector"/>): a PostgreSQL target
     /// gets <see cref="PgTargetAnomalyDetector"/>'s <c>ANOMALY_PG_*</c> facts and a SQL Server target
     /// gets <see cref="PgAnomalyDetector"/>'s, off the one resolution this read already performs.</para>
+    ///
+    /// <para>#8570: <paramref name="sources"/>, when set, are the only sources the caller shows. The SQL Server collector then
+    /// reads the families those sources and their scoring need (<see cref="PgFactCollector.FamilySources"/>), and the
+    /// detector runs only when their scoring can read its facts, so each fact of those sources is the one the whole pass
+    /// scores. The returned list then holds only the facts of the families read.</para>
+    /// </summary>
+    public Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default) =>
+        CollectAndScoreFactsAsync(serverId, serverName, hoursBack, asOfUtc, sources: null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="CollectAndScoreFactsAsync(int, string, int, DateTime?, CancellationToken)"/> for the facts of
+    /// <paramref name="sources"/> only (#8570); null reads every family.
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
-        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
+        int serverId, string serverName, int hoursBack, DateTime? asOfUtc, IReadOnlySet<string>? sources, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -818,6 +886,9 @@ public sealed class DarlingAnalysisService
             /* #5812: get_analysis_facts with no as_of answers PLAN_REGRESSION from the candidates the last current pass
                read while they are fresh; a past as_of reads live. */
             ReusePlanRegressionCandidates = asOfUtc is null,
+            FamilyParallelism = PgFactCollector.MaxFamilyParallelism, /* #9149 */
+            /* #8570: the SQL Server collector reads only the families these sources need; null reads them all. */
+            RequestedFactSources = sources,
             CancellationToken = cancellationToken
         };
 
@@ -829,9 +900,13 @@ public sealed class DarlingAnalysisService
             {
                 /* Same detector, same context, same position as the pass (#3691). A collector that
                    observed the window but emitted no fact does not short-circuit this: the detector reads
-                   the store on its own and its facts are part of what this read shows. */
-                var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
-                facts.AddRange(anomalies);
+                   the store on its own and its facts are part of what this read shows. #8570: a SQL Server
+                   read narrowed to sources whose scoring reads no ANOMALY_* fact does not need the detector's. */
+                if (engine.Collector is not PgFactCollector || PgFactCollector.NeedsAnomalyFacts(sources))
+                {
+                    var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+                    facts.AddRange(anomalies);
+                }
             }
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
@@ -965,8 +1040,7 @@ public sealed class DarlingAnalysisService
         try
         {
             var (engine, _) = await ResolveEngineAsync(serverId, comparisonContext.CancellationToken);
-            var baselineFacts = await engine.Collector.CollectFactsAsync(baselineContext);
-            var comparisonFacts = await engine.Collector.CollectFactsAsync(comparisonContext);
+            var (baselineFacts, comparisonFacts) = await CollectBothWindowsAsync(engine, baselineContext, comparisonContext);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
@@ -986,6 +1060,30 @@ public sealed class DarlingAnalysisService
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
+    }
+
+    /// <summary>
+    /// The two windows of <see cref="ComparePeriodsAsync"/>, collected concurrently (#8570): they share nothing but the
+    /// collector, which keeps no per-call state, so each runs on its own pooled connection and the call waits on the
+    /// slower window instead of the sum of both. Both reads are awaited before either result is used, so a failed window
+    /// never leaves the other running past the call. A cancelled window ends the call as its cancellation even when the
+    /// other window faulted: <see cref="Task.WhenAll(Task[])"/> reports the fault ahead of the cancellation, and the
+    /// caller's catch must see an abandoned read as <see cref="OperationCanceledException"/>, never as a failed comparison.
+    /// </summary>
+    internal static async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts)> CollectBothWindowsAsync(
+        AnalysisEngineSet engine, AnalysisContext baselineContext, AnalysisContext comparisonContext)
+    {
+        var baselineRead = engine.Collector.CollectFactsAsync(baselineContext);
+        var comparisonRead = engine.Collector.CollectFactsAsync(comparisonContext);
+        try
+        {
+            await Task.WhenAll(baselineRead, comparisonRead);
+        }
+        catch (Exception) when (baselineRead.IsCanceled || comparisonRead.IsCanceled)
+        {
+            await (baselineRead.IsCanceled ? baselineRead : comparisonRead);
+        }
+        return (await baselineRead, await comparisonRead);
     }
 
     /// <summary>
@@ -1124,15 +1222,18 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
-    /// Lite's data-span query VERBATIM — EXTRACT(EPOCH FROM ...) is shared dialect and runs
+    /// Lite's data-span arithmetic — EXTRACT(EPOCH FROM ...) is shared dialect and runs
     /// unchanged on Postgres. Reads the raw wait_stats table (not the view) like Lite, with
     /// Lite's multi-server server_id filter (the Dashboard twin is single-server and drops it).
+    /// $2 is the end of the analysis window: the span is the history the server had by then, so a
+    /// pass replayed for an earlier as_of measures the history that existed at that as_of.
     /// Exposed const so Darling.Tests can pin the dialect ungated. The SQL Server engine set's gate.
     /// </summary>
     public const string TotalDataSpanSql = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM wait_stats
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collection_time <= $2";
 
     /// <summary>
     /// The table that proves a SQL Server target is being collected: the one <see cref="TotalDataSpanSql"/> measures and
@@ -1156,6 +1257,48 @@ WHERE server_id = $1";
         MonitoredEngineKind.IsPostgres(engineKind) ? PgTargetCoverageTable : SqlServerCoverageTable;
 
     /// <summary>
+    /// The oldest row the store holds for a server in <paramref name="coverageTable"/> and the fleet retention in force for that
+    /// collector (the fleet override or the default, <see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the rule the
+    /// purge applies), for the window-empty answer to tell a window retention removed from one collection missed (#8910).
+    /// Null when the server has no row, or when the read fails: a failed read must not turn an answer into an error, and the
+    /// answer then keeps its collection wording. An abandonment is not swallowed.
+    /// </summary>
+    public async Task<RetentionBoundary?> ReadRetentionBoundaryAsync(string coverageTable, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* The table is one of the two coverage tables, and FleetRetentionDaysSql checks the name against the catalog. */
+            var sql = $"SELECT MIN(collection_time), {DarlingRetentionHorizons.FleetRetentionDaysSql(coverageTable)} FROM {coverageTable} WHERE server_id = $1";
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
+            using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(serverId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+                return null;
+
+            var oldest = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+            var days = Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+            /* drop_chunks drops a chunk only once its whole range is past the cutoff, so a purge leaves up to one chunk of rows
+               BEFORE the horizon, and a daily sweep can lag it by a day more. A first row later than the horizon by the slack is a
+               store that never held the window. */
+            var horizon = DateTime.UtcNow.AddDays(-days);
+            return new RetentionBoundary(
+                oldest,
+                horizon,
+                horizon + RetentionBoundary.HorizonSlack,
+                horizon.AddDays(-(TimescaleSupport.ChunkIntervalDays + 1)),
+                coverageTable,
+                string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{days} days of retention for {coverageTable}"));
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
+        {
+            _logger?.LogWarning(ex, "[DarlingAnalysisService] The retention boundary read of {Table} failed; the window-empty answer keeps its collection wording.", coverageTable);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over
     /// <c>pg_database_stats</c> — the one-minute series every PostgreSQL flavour writes with no extension,
     /// and the same table the pass's coverage witness and baseline gate read, so "how long has this server
@@ -1166,7 +1309,8 @@ WHERE server_id = $1";
     public const string PgTargetDataSpanSql = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM pg_database_stats
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collection_time <= $2";
 
     /// <summary>
     /// The <c>server_config</c> snapshots the config-change attribution diffs (#3653 A10, Q2): every capture
@@ -1413,7 +1557,7 @@ ORDER BY event_time_local";
         try
         {
             var snapshots = new List<ConfigChangeDiff.ServerConfigSnapshot>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken))
             {
                 using var cmd = new NpgsqlCommand(ServerConfigSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
@@ -1513,7 +1657,7 @@ ORDER BY event_time_local";
     private async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> ReadDatabaseConfigSnapshotsAsync(AnalysisContext context)
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(DatabaseConfigSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1543,7 +1687,7 @@ ORDER BY event_time_local";
     private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(AnalysisContext context)
     {
         var times = new List<DateTime>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(EmptyTraceFlagRunsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1566,7 +1710,7 @@ ORDER BY event_time_local";
     private async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> ReadTraceFlagSnapshotsAsync(AnalysisContext context)
     {
         var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(TraceFlagSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1605,7 +1749,7 @@ ORDER BY event_time_local";
             var windowEnd = DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified);
             var rows = new List<(DateTime? EventTimeLocal, string? TextData)>();
             ServerClock? clock = null;
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
             using var cmd = new NpgsqlCommand(ReconfigureTraceLinesForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(windowStart);
@@ -1674,7 +1818,7 @@ WHERE server_id = $1";
     /// </summary>
     internal async Task<(AnalysisEngineSet Engine, string? EngineKind)> ResolveEngineAsync(int serverId, CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
 
         using var cmd = new NpgsqlCommand(ServerEngineKindSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(serverId);
@@ -1691,20 +1835,31 @@ WHERE server_id = $1";
         MonitoredEngineKind.IsPostgres(engineKind) ? _pgTargetEngine : _sqlServerEngine;
 
     /// <summary>
-    /// Returns the total span of collected data for a server (no time range filter), measured on the
+    /// True when the window ends before the oldest row the store holds for the server. Such a window has no history by its
+    /// end, which says nothing about how long the server had been monitored by then: retention may have removed those rows,
+    /// or the server was not monitored yet. The history gate then measures all the history the store holds, so the pass goes
+    /// on to the empty-window answer, which says which of the two it was.
+    /// </summary>
+    private async Task<bool> WindowEndsBeforeTheOldestRowAsync(string? engineKind, AnalysisContext context)
+        => await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken) is { } boundary
+           && context.TimeRangeEnd < boundary.OldestRowUtc;
+
+    /// <summary>
+    /// Returns the total span of data collected for a server up to <paramref name="windowEndUtc"/>, measured on the
     /// resolved engine's own series (<see cref="AnalysisEngineSet.DataSpanSql"/>).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(AnalysisEngineSet engine, int serverId, CancellationToken cancellationToken)
+    private async Task<double> GetTotalDataSpanHoursAsync(AnalysisEngineSet engine, int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
 
             using var cmd = new NpgsqlCommand(engine.DataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)

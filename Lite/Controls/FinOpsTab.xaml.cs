@@ -21,6 +21,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using static PerformanceMonitor.Ui.DataGridHelpers;
@@ -97,6 +98,10 @@ public partial class FinOpsTab : UserControl
        _perfmonPickerGen); this is that idiom with the key spelled once. */
     private readonly ScopedLoadGenerations _loads = new();
 
+    /* #9058: a whole-tab load (a server reselect, the first show, a collection refresh) cancels the one before it, so the reads the
+       older load started stop and give back their store read locks instead of running to the end for a paint nobody will see. */
+    private readonly WholeLoadScope _wholeLoads = new();
+
     /// <summary>The Server Inventory grid's filters, for the tests that drive a column filter the way the funnel does.</summary>
     internal DataGridFilterManager<ServerPropertyRow>? ServerInventoryFilters => _serverInventoryFilterMgr;
 
@@ -155,8 +160,11 @@ public partial class FinOpsTab : UserControl
         _openTabClock = openTabClock;
         _credentialResolver = serverManager.CredentialResolver;
 
+        /* #9233: the per-server load (fifteen store reads, High Impact the heaviest) runs only while the tab is shown. Window start used to run
+           it twice for a tab nobody had opened (the selector's first selection, then RefreshData), against a store the first collection
+           has not written to yet, and the first show re-runs it whole anyway (FinOpsShowReloadPolicy). Start-up keeps the fleet inventory. */
         PopulateServerSelector();
-        RefreshData();
+        _ = LoadServerInventoryAsync();
     }
 
     /// <summary>
@@ -445,21 +453,23 @@ public partial class FinOpsTab : UserControl
             _currentServerMonthlyCost = fresh?.MonthlyCostUsd ?? selectedServer.MonthlyCostUsd;
         }
 
+        using var load = _wholeLoads.Begin();
+        var token = load.Token;
         await System.Threading.Tasks.Task.WhenAll(
             LoadRecommendationsAsync(serverId),
-            LoadUtilizationAsync(serverId),
-            LoadDatabaseResourcesAsync(serverId),
-            LoadApplicationConnectionsAsync(serverId),
+            LoadUtilizationAsync(serverId, token),
+            LoadDatabaseResourcesAsync(serverId, token),
+            LoadApplicationConnectionsAsync(serverId, token),
             LoadDatabaseSizesAsync(serverId),
             LoadPvsStatsAsync(serverId),
             LoadStorageGrowthAsync(serverId),
             LoadIndexLockingAsync(serverId),
             LoadIdleDatabasesAsync(serverId),
             LoadTempdbSummaryAsync(serverId),
-            LoadWaitCategorySummaryAsync(serverId),
-            LoadExpensiveQueriesAsync(serverId),
-            LoadMemoryGrantEfficiencyAsync(serverId),
-            LoadHighImpactQueriesAsync(serverId),
+            LoadWaitCategorySummaryAsync(serverId, token),
+            LoadExpensiveQueriesAsync(serverId, token),
+            LoadMemoryGrantEfficiencyAsync(serverId, token),
+            LoadHighImpactQueriesAsync(serverId, token),
             PopulateIndexAnalysisDatabasesAsync(serverId)
         );
     }
@@ -531,14 +541,14 @@ public partial class FinOpsTab : UserControl
     internal const string RecommendationsLoadingText = "Loading recommendations…";
     internal const string RecommendationsFailedText = "Recommendations could not be read";
 
-    private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadUtilizationAsync));
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetUtilizationEfficiencyAsync(serverId));
+            var data = await Task.Run(() => _dataService.GetUtilizationEfficiencyAsync(serverId, cancellationToken));
             if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
             List<DatabaseSizeRow> dbSizes = [];
@@ -573,7 +583,7 @@ public partial class FinOpsTab : UserControl
 
             if (data != null)
             {
-                var (byTotal, byAvg) = await Task.Run(() => _dataService.GetTopResourceConsumersAsync(serverId));
+                var (byTotal, byAvg) = await Task.Run(() => _dataService.GetTopResourceConsumersAsync(serverId, cancellationToken: cancellationToken));
                 topTotal = byTotal;
                 topAvg = byAvg;
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
@@ -584,7 +594,7 @@ public partial class FinOpsTab : UserControl
 
                 var dayZone = await SelectedServerDayZoneAsync(serverId);
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
-                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId, dayZone));
+                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId, dayZone, cancellationToken));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
             }
 
@@ -599,6 +609,10 @@ public partial class FinOpsTab : UserControl
             DbSizeChartCaption.Text = chartCaption ?? "";
             DbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
             ProvisioningTrendGrid.ItemsSource = provisioningTrend;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
         }
         catch (Exception ex)
         {
@@ -765,7 +779,7 @@ public partial class FinOpsTab : UserControl
         await LoadDatabaseResourcesAsync(serverId);
     }
 
-    private async System.Threading.Tasks.Task LoadDatabaseResourcesAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadDatabaseResourcesAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadDatabaseResourcesAsync));
@@ -773,11 +787,15 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = LiteTimeRange.HoursBackOf(ResourceUsageTimeRangePicker, 24);
-            var data = await Task.Run(() => _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack));
+            var data = await Task.Run(() => _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack, cancellationToken));
             if (_loads.Superseded(nameof(LoadDatabaseResourcesAsync), gen)) return;
             _dbResourcesFilterMgr!.UpdateData(data);
             NoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             DbResourcesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "database") : "";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
         }
         catch (Exception ex)
         {
@@ -799,7 +817,7 @@ public partial class FinOpsTab : UserControl
         return ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ClockForServer(collected, openTab));
     }
 
-    private async System.Threading.Tasks.Task LoadApplicationConnectionsAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadApplicationConnectionsAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadApplicationConnectionsAsync));
@@ -813,7 +831,7 @@ public partial class FinOpsTab : UserControl
             var openTab = _openTabClock.Invoke(serverId);
             var dataService = _dataService;
             var (data, collected) = await Task.Run(async () =>
-                (await dataService.GetApplicationConnectionsAsync(serverId),
+                (await dataService.GetApplicationConnectionsAsync(serverId, cancellationToken),
                  await dataService.GetServerClockAsync(serverId)));
             if (_loads.Superseded(nameof(LoadApplicationConnectionsAsync), gen)) return;
             var clock = ServerTimeHelper.ClockForServer(collected, openTab);
@@ -821,6 +839,10 @@ public partial class FinOpsTab : UserControl
             _appConnectionsFilterMgr!.UpdateData(data);
             NoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             AppConnectionsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "application") : "";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
         }
         catch (Exception ex)
         {
@@ -888,6 +910,9 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    /// <summary>The Database Sizes grid's own empty sentence, which <see cref="ServerTab.EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string, int)"/> falls back to.</summary>
+    internal const string NoDbSizesOwnText = "No database size data collected yet";
+
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
     {
         if (_dataService == null) return;
@@ -897,6 +922,11 @@ public partial class FinOpsTab : UserControl
         try
         {
             var sizesFilter = SelectedDatabaseFilter();
+            var sizesServerName = (ServerSelector.SelectedItem as ServerConnection)?.DisplayName ?? "";
+            var (sizesMajorVersion, sizesAwsRdsKind) = _serverManager is null
+                ? (0, AwsRdsKind.None)
+                : (PerformanceMonitorLite.Mcp.McpEngineCapability.SqlMajorVersionOf(_serverManager, serverId),
+                   PerformanceMonitorLite.Mcp.McpEngineCapability.AwsRdsKindOf(_serverManager, serverId));
             /* Compute proportional cost shares. The share is of the whole server's allocated size, so a database filter narrows the
                rows without shrinking the total (#7174). */
             var monthlyCost = _currentServerMonthlyCost;
@@ -906,6 +936,10 @@ public partial class FinOpsTab : UserControl
             _dbSizesFilterMgr!.UpdateData(data);
             _dbSizesNeedReload = data.Count == 0;
 
+            /* #9099: a SQL Server older than the supported floor does not run database_size_stats, and the grid says so instead of "not collected yet".
+               The version is the connection check's, since that collector's own server_properties read does not run there either. */
+            NoDbSizesMessage.Text = ServerTab.EmptyPanelText(
+                sizesServerName, isAzureSqlDatabase: false, "database_size_stats", data.Count, sizesAwsRdsKind, sizesMajorVersion, NoDbSizesOwnText);
             NoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
             /* #2640: on Azure SQL DB this grid can only ever show ONE database, and saying so is the whole
@@ -1154,7 +1188,9 @@ public partial class FinOpsTab : UserControl
                     var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
                     var collected = await Task.Run(() => _dataService!.GetServerClockAsync(id));
                     return ServerTimeHelper.ClockForServer(collected, openTabClocks.GetValueOrDefault(id));
-                });
+                },
+                /* #9769: a server left out for want of a collected row is logged with the sidebar's connection state for it. */
+                readStatus: server => _serverManager.GetConnectionStatus(server.Id));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
             var data = build.Rows;
 
@@ -1260,7 +1296,7 @@ public partial class FinOpsTab : UserControl
         }
     }
 
-    private async System.Threading.Tasks.Task LoadHighImpactQueriesAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadHighImpactQueriesAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadHighImpactQueriesAsync));
@@ -1268,11 +1304,15 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = LiteTimeRange.HoursBackOf(HighImpactTimeRangePicker, 24);
-            var data = await Task.Run(() => _dataService.GetHighImpactQueriesAsync(serverId, hoursBack));
+            var data = await Task.Run(() => _dataService.GetHighImpactQueriesAsync(serverId, hoursBack, cancellationToken));
             if (_loads.Superseded(nameof(LoadHighImpactQueriesAsync), gen)) return;
             _highImpactFilterMgr!.UpdateData(data);
             HighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             HighImpactCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "high-impact query", "high-impact queries") : "";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
         }
         catch (Exception ex)
         {
@@ -1280,7 +1320,7 @@ public partial class FinOpsTab : UserControl
         }
     }
 
-    private async System.Threading.Tasks.Task LoadWaitCategorySummaryAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadWaitCategorySummaryAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadWaitCategorySummaryAsync));
@@ -1288,7 +1328,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = LiteTimeRange.HoursBackOf(WaitStatsTimeRangePicker, 24);
-            var data = await Task.Run(() => _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack));
+            var data = await Task.Run(() => _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack, cancellationToken));
             if (_loads.Superseded(nameof(LoadWaitCategorySummaryAsync), gen)) return;
 
             // Compute proportional cost shares — scaled to time window
@@ -1306,13 +1346,17 @@ public partial class FinOpsTab : UserControl
             _waitCategoryFilterMgr!.UpdateData(data);
             WaitCategorySummaryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
+        }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to load wait category summary: {ex.Message}", ex);
         }
     }
 
-    private async System.Threading.Tasks.Task LoadExpensiveQueriesAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadExpensiveQueriesAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadExpensiveQueriesAsync));
@@ -1320,7 +1364,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = LiteTimeRange.HoursBackOf(ExpensiveQueriesTimeRangePicker, 24);
-            var data = await Task.Run(() => _dataService.GetExpensiveQueriesAsync(serverId, hoursBack));
+            var data = await Task.Run(() => _dataService.GetExpensiveQueriesAsync(serverId, hoursBack, cancellationToken: cancellationToken));
             if (_loads.Superseded(nameof(LoadExpensiveQueriesAsync), gen)) return;
 
             // Compute proportional cost shares — scaled to time window
@@ -1339,13 +1383,17 @@ public partial class FinOpsTab : UserControl
             ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "query", "queries") : "";
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
+        }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to load expensive queries: {ex.Message}", ex);
         }
     }
 
-    private async System.Threading.Tasks.Task LoadMemoryGrantEfficiencyAsync(int serverId)
+    private async System.Threading.Tasks.Task LoadMemoryGrantEfficiencyAsync(int serverId, System.Threading.CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadMemoryGrantEfficiencyAsync));
@@ -1354,10 +1402,14 @@ public partial class FinOpsTab : UserControl
         {
             var dayZone = await SelectedServerDayZoneAsync(serverId);
             if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
-            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId, dayZone: dayZone));
+            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId, dayZone: dayZone, cancellationToken: cancellationToken));
             if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
             _memoryGrantFilterMgr!.UpdateData(data);
             MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #9058: a newer whole-tab load cancelled this read. It paints nothing, and a cancellation is not an error to log. */
         }
         catch (Exception ex)
         {
@@ -1392,6 +1444,14 @@ public partial class FinOpsTab : UserControl
            server A's rows under server B's selection, and a "Get Actual Plan" click in that window would pair the
            selected server B with A's row. */
         ClearPerServerGrids();
+
+        /* #9233: a selection that moves while the tab is hidden (the first one at start-up, a server list that changed) loads nothing. The
+           next show runs the whole load, as the first show always does. */
+        if (!FinOpsShowReloadPolicy.ShouldLoadOnSelectionChange(IsVisible))
+        {
+            _firstShowPending = true;
+            return;
+        }
 
         await LoadPerServerDataAsync();
     }

@@ -191,15 +191,22 @@ public partial class ServerTab : UserControl
     /// Null where the collector does run. The tab only knows whether the server is an Azure SQL Database, so any
     /// other server goes in as an unknown edition, which makes no claim. <paramref name="awsRdsKind"/> is the connection check's
     /// finding (#6894): on Amazon RDS the Agent collectors are closed by their own gate and never run, so the note names RDS, as the
-    /// MCP tool does, instead of the "possible cause" text that implies a setup step could fix it.
+    /// MCP tool does, instead of the "possible cause" text that implies a setup step could fix it. <paramref name="sqlMajorVersion"/> is the
+    /// probed SQL Server major (0 when unknown): a server older than the supported floor gets the version sentence for a collector whose SQL
+    /// needs a newer engine (#9099), the same one the MCP tools return. <paramref name="engineEdition"/> is the server's probed engine edition
+    /// (<see cref="CollectorEngineCapability.UnknownEngineEdition"/> when not read yet): an Azure SQL Database or Managed Instance reports
+    /// major 12, which is not a product year there, and the version sentence reads the edition to make no claim for either (#9113).
     /// </summary>
-    internal static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName, AwsRdsKind awsRdsKind) =>
+    internal static string? EngineGapNote(
+        string serverName, bool isAzureSqlDatabase, string collectorName, AwsRdsKind awsRdsKind, int sqlMajorVersion = 0,
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition) =>
         CollectorEngineCapability.NotCollectedMessage(
             serverName,
-            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition,
+            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : engineEdition,
             engineKind: null,
             collectorName,
-            awsRdsKind);
+            awsRdsKind,
+            sqlMajorVersion: sqlMajorVersion);
 
     /// <summary>The Default Trace grid's note on an Azure SQL Database, which has no default trace; null anywhere else,
     /// where the grid keeps its "no events in this window" text.</summary>

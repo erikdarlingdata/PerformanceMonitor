@@ -87,8 +87,12 @@ public sealed class ReadAdmission
         ["get_slow_reads"] = "health read: the slow-read record, the next stop after get_read_latency",
         ["get_collection_health"] = "health read: whether collection is running",
         ["get_collection_log"] = "health read: the collection log behind collection health",
+        ["get_collector_readiness"] = "health read: which due collectors have no good cycle since the service started",
         ["get_store_metrics"] = "health read: the store's own size and pressure",
         ["get_store_log"] = "health read: the store's own log",
+        ["get_store_connections"] = "health read: the store's own connections and their pressure",
+        ["get_store_job_runs"] = "health read: the store's own background job runs",
+        ["get_store_pass_steps"] = "health read: the store's own pass steps",
         ["list_servers"] = "health read: the registry every other read names a server from",
     };
 
@@ -101,6 +105,7 @@ public sealed class ReadAdmission
     {
         [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
         /* #7643: the tool is keyed by name, so every call is heavy, not only the definition text search: that one reads every definition of a database with no index. */
+        ["measure_store_table"] = "scans every row location of one store table, about a second per 250,000 pages",
         ["find_schema_objects"] = "searches the text of a database's view, computed column, default, check and index filter definitions with no index",
     };
 
@@ -136,11 +141,22 @@ public sealed class ReadAdmission
     /// every time (<see cref="WindowlessFleetRoutes"/>), and the same 5 minutes apply for the same reasons: the grid
     /// changes once per collection, a 24-hour figure moves by under 1/288th in 5 minutes, and a write (a registry edit,
     /// a rule) moves the generation and drops the entry at once.</para>
+    ///
+    /// <para><b><c>get_query_fleet_summary</c> (#8570)</b> is one statement's cost on every server: it has no server name, so a call
+    /// is the fleet form whenever its window is 24 hours or more, and its default window is 7 days. A statement that runs on most
+    /// servers took 14 to 21 s on a large store, most of it the Query Store part, which decompresses every server's hourly rows for
+    /// the compressed days of the week. The 7-day band kept a heavy answer for 60 s in a 60 s wall-clock bucket, so a read that
+    /// started late in the bucket stored an entry that lived a few seconds, and a second call for the same hash a minute later paid
+    /// the whole read again. The 5 minutes cost little here: the answer is a 7-day total per server and database,
+    /// which moves by under 1/2016th in 5 minutes, and the newest hours come from 1-minute and 5-minute collectors that a live
+    /// trend read still shows at once. The key carries the hash, the window and the limit, so another statement is its own entry,
+    /// and a write moves the generation and drops the entry at once.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
     {
         ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
         ["get_finops_inventory"] = TimeSpan.FromMinutes(5),
+        ["get_query_fleet_summary"] = TimeSpan.FromMinutes(5),
     };
 
     /// <summary>#8323: the routes in <see cref="FleetCachedRoutes"/> whose window is fixed inside the read and so take no

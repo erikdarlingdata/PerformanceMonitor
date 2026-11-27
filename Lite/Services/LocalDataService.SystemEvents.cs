@@ -327,7 +327,7 @@ public partial class LocalDataService
         command.CommandText = @"
 SELECT
     event_xml
-FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time > $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev
 ORDER BY event_time DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -715,7 +715,7 @@ ORDER BY cl.collection_time";
 
         command.CommandText = @"
 SELECT COUNT(*)
-FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev";
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time > $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1029,7 +1029,7 @@ ORDER BY event_time DESC";
                through the clock: the offset in force at the row's own date, not the newest one (#4766). The SQL
                window is only a pre-filter, so the exact UTC window is applied here. */
             var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
-            if (eventTimeUtc is { } convertedUtc && (convertedUtc < windowStartUtc || convertedUtc > windowEndUtc))
+            if (eventTimeUtc is { } convertedUtc && (convertedUtc <= windowStartUtc || convertedUtc > windowEndUtc))
                 continue;
             var eventName = reader.IsDBNull(1) ? null : reader.GetString(1);
             var severity = reader.IsDBNull(10) ? (int?)null : reader.GetInt32(10);

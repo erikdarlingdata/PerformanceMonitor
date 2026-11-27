@@ -227,34 +227,60 @@ public sealed class SmallAlertNoise7086Tests
     }
 
     [Fact]
-    public void PgLongRunning_TheDetailTextNamesTheStatement_AtFull()
+    public void PgLongRunning_TheDetailTextNamesEachSession_DatabasePidDurationAndStatement_AtFull()
     {
-        var item = DarlingWorker.BuildPgLongRunningStatementItem(Session("SELECT * FROM orders WHERE id = 42"), McpDataDetail.Full);
         var context = new AlertContext();
-        context.Details.Add(item!);
+        context.Details.AddRange(DarlingWorker.BuildPgLongRunningSessionItems(
+            new[] { Session("SELECT * FROM orders WHERE id = 42") }, McpDataDetail.Full));
 
         var text = AlertContextBuilders.ContextToDetailText(context);
 
-        Assert.Contains("Statement: SELECT * FROM orders WHERE id = 42", text);
-        Assert.Contains("pid 100 running 35m (SELECT)", text);
+        Assert.Contains("Session pid 100: 35m 0s", text);
+        Assert.Contains("Database: sales", text);
+        Assert.Contains("Program: myapp", text);
+        Assert.Contains("Query: SELECT * FROM orders WHERE id = 42", text);
+    }
+
+    [Fact]
+    public void PgLongRunning_EveryShownSessionGetsItsOwnItem_AndANullDatabaseIsLeftOutOfTheItem()
+    {
+        var first = Session("SELECT 1");
+        var second = first with { Pid = 200, DatabaseName = null, QueryDurationMs = 10_549L * 60_000L, StatementText = "SELECT 2" };
+
+        var items = DarlingWorker.BuildPgLongRunningSessionItems(new[] { first, second }, McpDataDetail.Full);
+
+        Assert.Equal(2, items.Count);
+        Assert.Equal("Session pid 200: 10549m 0s", items[1].Heading);
+        Assert.DoesNotContain(items[1].Fields, f => f.Label == "Database");
+        Assert.Contains(items[0].Fields, f => f.Label == "Database" && f.Value == "sales");
     }
 
     [Fact]
     public void PgLongRunning_TheStatementIsMaskedAtMaskLiterals_AndLeftOutAtMetadataOnly()
     {
-        var masked = DarlingWorker.BuildPgLongRunningStatementItem(Session("SELECT * FROM orders WHERE id = 42"), McpDataDetail.MaskLiterals);
-        var statement = masked!.Fields.Single(f => f.Label == "Statement").Value;
+        var masked = Assert.Single(DarlingWorker.BuildPgLongRunningSessionItems(
+            new[] { Session("SELECT * FROM orders WHERE id = 42") }, McpDataDetail.MaskLiterals));
+        var statement = masked.Fields.Single(f => f.Label == "Query").Value;
 
         Assert.DoesNotContain("42", statement);
         Assert.Contains("orders", statement);
-        Assert.Null(DarlingWorker.BuildPgLongRunningStatementItem(Session("SELECT 1"), McpDataDetail.MetadataOnly));
+
+        /* The page still names the session at the strictest level, without its statement. */
+        var metadataOnly = Assert.Single(DarlingWorker.BuildPgLongRunningSessionItems(
+            new[] { Session("SELECT 1") }, McpDataDetail.MetadataOnly));
+        Assert.DoesNotContain(metadataOnly.Fields, f => f.Label == "Query");
+        Assert.Equal("Session pid 100: 35m 0s", metadataOnly.Heading);
     }
 
     [Fact]
-    public void PgLongRunning_NoStoredText_GivesNoStatementItem()
+    public void PgLongRunning_NoStoredText_GivesTheSessionItemWithoutAQueryField()
     {
-        Assert.Null(DarlingWorker.BuildPgLongRunningStatementItem(Session(null), McpDataDetail.Full));
-        Assert.Null(DarlingWorker.BuildPgLongRunningStatementItem(Session("  "), McpDataDetail.Full));
+        foreach (var statement in new string?[] { null, "  " })
+        {
+            var item = Assert.Single(DarlingWorker.BuildPgLongRunningSessionItems(new[] { Session(statement) }, McpDataDetail.Full));
+            Assert.DoesNotContain(item.Fields, f => f.Label == "Query");
+            Assert.Contains(item.Fields, f => f.Label == "Database");
+        }
     }
 
     /* ---------------- Runnable Queue: only Critical pages ---------------- */

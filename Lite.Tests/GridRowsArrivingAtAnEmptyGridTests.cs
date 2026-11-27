@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// process reports, 1,500 broker notifications or 2,000 job runs where a dozen are in view, and the screen takes seconds to draw. Each test
 /// shows a real grid empty on the shared STA thread, hands it rows the way a load does, lays it out once and counts the row containers built.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class GridRowsArrivingAtAnEmptyGridTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

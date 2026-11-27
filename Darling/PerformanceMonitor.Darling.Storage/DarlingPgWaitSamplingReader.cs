@@ -106,7 +106,7 @@ public static class DarlingPgWaitSamplingReader
                    event_type, event, query_id, sample_count, profile_period_ms, backend_count, collection_time
             FROM pg_wait_sampling
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY event_type, event, query_id, collection_time DESC
         ),
@@ -148,7 +148,8 @@ public static class DarlingPgWaitSamplingReader
            with 0 samples, 0 ms and 0.0% it read as one. The total above is unchanged by the filter (a zero adds
            nothing), so the shares of the series that did move still divide by the same denominator. */
         WHERE sample_count > 0
-        ORDER BY 4 DESC, event_type, event
+        /* #8916: the generic Extension / Extension event (where background workers sleep) ranks after every other wait. */
+        ORDER BY (event_type IS NOT DISTINCT FROM 'Extension' AND event IS NOT DISTINCT FROM 'Extension'), 4 DESC, event_type, event
         LIMIT $4
         )
         SELECT
@@ -159,7 +160,7 @@ public static class DarlingPgWaitSamplingReader
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid   = r.query_id
-        ORDER BY r.sample_count DESC, r.event_type, r.event, r.query_id
+        ORDER BY (r.event_type IS NOT DISTINCT FROM 'Extension' AND r.event IS NOT DISTINCT FROM 'Extension'), r.sample_count DESC, r.event_type, r.event, r.query_id
         LIMIT $4
         """;
 

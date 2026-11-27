@@ -113,12 +113,13 @@ internal static class DarlingQueryStoreRegressionReader
     /// <paramref name="recentFromDaily"/> (latest only) reads the recent window's whole days from the daily totals
     /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentDays"/>, #5506): $12 the days (date[]), $13 and $14 the recent arm's
     /// live <c>first_execution_time</c> bounds. #6750 put the failure arm's two starts at $12 (its row filters) and $13 (its hours
-    /// held), so the recent days' three parameters are $14 to $16.
+    /// held), so the recent days' three parameters are $14 to $16. #9606: $17 is the watermark of their partial last day
+    /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentPartialThrough"/>, timestamp or NULL).
     /// </summary>
     internal static string BuildSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
+            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13", "$14", "$15", "$16", "$17");
 
     /// <summary>
     /// Where each arm of a regressions read started (#6750), for the answer's notice. <see cref="CostStart"/> is the start of the
@@ -329,9 +330,13 @@ internal static class DarlingQueryStoreRegressionReader
     }
 
     /// <summary>
-    /// #5809: the regression read over <c>query_store_interval_wide</c>, by <c>get_query_store_top</c>'s own tier rule
+    /// #5809: the regression read over <c>query_store_interval_wide</c>, by <c>get_query_store_top</c>'s tier rule for every database
     /// (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>, then <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>)
-    /// over the whole span the read compares, baseline start to window end, so the #5541 floor rule applies: a store whose
+    /// over the whole span the read compares, baseline start to window end. That span is never shorter than
+    /// <see cref="BaselineLookbackDays"/>, so a database filter changes nothing about the minimum window. Unlike the top read it passes
+    /// the window's end as the literal end (UseTable's clause 4): both its raw and table arms keep the snapshots collected by the window
+    /// end, so for an end before applied_through the table, which holds each interval's newest snapshot, would drop an interval raw still
+    /// counts. The #5541 floor rule applies: a store whose
     /// table does not yet cover that span (no coverage, coverage that starts after the baseline start, a pending batch, a
     /// table floor too close to raw's) reads raw. The decision and the read share ONE read-only REPEATABLE READ snapshot,
     /// as the top and history reads do, and so do the baseline's built days (#5506). Null when the gate says raw or anything
@@ -496,10 +501,16 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
-            /* #5506: $14 to $16, only on the recent-days form, the only text that names them. */
+            /* #5506: $14 to $17, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+            /* #9606: the watermark of the recent days' partial last day, NULL when every recent day is a whole build. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = plan.RecentPartialThrough is DateTime through ? DateTime.SpecifyKind(through, DateTimeKind.Unspecified) : DBNull.Value,
+            });
         }
     }
 

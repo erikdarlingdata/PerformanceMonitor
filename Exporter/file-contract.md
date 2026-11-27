@@ -20,7 +20,12 @@ The exporter writes these files under the destination prefix:
 ```
 
 - `<from>` and `<to>` use the format `yyyyMMddTHHmmZ`, for example `20260901T0000Z`.
-- A table can have more than one file for the same window. Extra files carry a `__<part>` suffix. The manifest lists every file.
+- A table can have more than one file for the same window. The manifest lists every file. The `__<part>` suffix is one of these:
+  - `p00000`, `p00001` and so on, five digits. An optional table that writes event rows names every file this way, so its only file is `__p00000`. A change-only optional table has no suffix when it writes one file and uses these labels when it writes more.
+  - `qs`. The dimension and plan feature files of the Query Store family (`--dimension-origin query_store`).
+  - `procedure`. The plan feature files that the `procedure_plan` export writes.
+  - No suffix. A core table, an hourly rollup, and a dimension table of a `query_stats` or `both` run.
+- A daily-grain optional table writes one file, `__p00000`. Its `<from>` and `<to>` are the range the exporter read, which is the `read_from` and `read_to` of its manifest entry, and not the window of the run. The manifest still carries the window of the run.
 - The manifest of a run of every core table has no suffix.
 - A run of a subset of tables, or a run with a different dimension origin, adds `__t` and eight hex digits. The digits are the start of the SHA-256 of the sorted table list. A subset run never replaces the manifest of a full run for the same window. Running the same subset again replaces its own manifest.
 - The store folder is `<store>`. A destination option can change it to `store=<store>` for Hive-style paths.
@@ -33,6 +38,8 @@ The exporter writes these files under the destination prefix:
 3. A manifest means every file it lists is complete. Read the files that the manifest lists and no others.
 4. A file with no manifest is an unfinished or failed run. Ignore it.
 5. A re-export of the same store, window and table set overwrites the same file names and the same manifest name.
+   A table that writes one part gets the same bytes and the same SHA-256 when the store holds the same rows, so a consumer can skip a file whose hash did not change.
+   A table split across parts keeps the same rows and every part is sorted, but a row can land in a different part, so the part files of that table can differ.
 6. Each manifest entry has `row_count`, `byte_size` and `sha256`. A consumer can check a file against them.
 
 ## 3. Manifest fields
@@ -49,7 +56,7 @@ A manifest is one JSON object.
 | `straggler_warning` | always | The last count of open writing transactions that started before the window's cutoff. 0 means none. The exporter only records it. It never fails a run. |
 | `straggler_wait_seconds` | always | Seconds the straggler guard waited. |
 | `tables` | always | One entry per table. See below. |
-| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped, whatever their grain. Each has `table` and `reason`. The reason is `unknown`, `absent`, `denied`, or a sentence saying why the table did not run, such as its schema gate or a window that is not its own. |
+| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped, whatever their grain. Each has `table` and `reason`. The reason is `unknown`, `absent`, `denied`, a sentence starting with `blocked:` for a table the registry marks as blocked (the `blocked` field of `describe-tables --json`), or a sentence saying why the table did not run, such as its schema gate or a window that is not its own. |
 | `failed_optional` | optional manifests | Optional tables that were attempted and failed. Each has `table` and `error`. |
 
 Each entry in `tables` has these fields.
@@ -103,13 +110,15 @@ The `source_store` column on a row is the store name. It matches the `store` fie
 
 ## 5. Tables
 
-The two tables below come from `darling-export describe-tables`.
+The two tables below are generated from `darling-export describe-tables --json`.
 Run that command for the list that matches your build.
+The Exported column of the optional table says `blocked` for a table the registry lists but does not export.
+Naming a blocked table in `--tables` writes a `skipped_optional` entry whose reason starts with `blocked:`.
 
 Notes that apply to every table:
 
 - Join rows across tables with `source_store` and `server_name`. Never join on `server_id`. The numeric id belongs to one store and does not match across stores.
-- Timestamps are UTC and have no time zone.
+- Timestamps are UTC and have no time zone, except `first_seen` and `last_seen` in `query_tag_sightings`, which are timestamps with a time zone (UTC).
 - A column keeps the unit of the store column it comes from. The exporter does not convert units. Column names end in a unit when there is one, such as `_ms`, `_us`, `_mb`, `_bytes` or `_seconds`.
 - A column that was added later in the store can be missing from older files. Treat a missing column as null.
 
@@ -158,62 +167,88 @@ Optional tables are off unless the config or the command line names them.
 
 An optional table is exported the same way wherever it is named: `--also`, `optional_tables` in the config, `--tables` on a manual run, or `families.fresh.tables`. It gets its column policy, its schema gate and its chunk guard, and its entry is in the optional manifest, never in the core manifest. A run whose `--tables` names only optional tables writes an optional manifest and no core manifest.
 
-| Table | Kind | Grain | Time column | Key columns |
-|---|---|---|---|---|
-| `plan_correction` | window | change | `collection_time` | none |
-| `default_trace_events` | window | event | `collection_time` | none |
-| `memory_grant_stats` | window | hourly | `hour` | none |
-| `plan_cache_stats` | window | event | `collection_time` | none |
-| `session_stats` | window | event | `collection_time` | none |
-| `session_summary_stats` | window | hourly | `hour` | none |
-| `waiting_tasks` | window | event | `collection_time` | none |
-| `dmv_blocking_snapshots` | window | event | `collection_time` | none |
-| `memory_clerks` | window | event | `collection_time` | none |
-| `memory_pressure_events` | window | event | `collection_time` | none |
-| `cpu_scheduler_stats` | window | hourly | `hour` | none |
-| `job_history` | window | event | `collection_time` | none |
-| `index_object_stats` | window | daily | `collection_time` | none |
-| `database_size_stats` | window | daily | `collection_time` | none |
-| `database_states` | window | change | `collection_time` | none |
-| `ag_database_replica_states` | window | change | `collection_time` | none |
-| `ag_replica_states` | window | change | `collection_time` | none |
-| `pvs_stats` | window | event | `collection_time` | none |
-| `query_store_health` | window | change | `capture_time` | none |
-| `server_config` | window | change | `capture_time` | none |
-| `server_properties` | window | change | `collection_time` | none |
-| `database_config` | window | change | `capture_time` | none |
-| `database_scoped_config` | window | change | `capture_time` | none |
-| `trace_flags` | window | change | `capture_time` | none |
-| `analysis_findings` | window | event | `analysis_time` | none |
-| `config_alert_log` | window | event | `alert_time` | none |
-| `incident_occurrences` | window | event | `occurred_at` | none |
-| `servers` | snapshot | event | `snapshot_time` | none |
-| `query_snapshots` | window | event | `collection_time` | none |
-| `pg_autovacuum_stats` | window | daily | `collection_time` | none |
-| `pg_blocking_edges` | window | event | `collection_time` | none |
-| `pg_column_stats` | window | daily | `collection_time` | none |
-| `pg_cpu_utilization` | window | hourly | `hour` | none |
-| `pg_database_size_stats` | window | daily | `collection_time` | none |
-| `pg_database_stats` | window | hourly | `hour` | none |
-| `pg_deadlocks` | window | event | `collection_time` | none |
-| `pg_extension_availability` | window | event | `collection_time` | none |
-| `pg_index_bloat` | window | daily | `collection_time` | none |
-| `pg_index_usage_stats` | window | daily | `collection_time` | none |
-| `pg_io_stats` | window | hourly | `hour` | none |
-| `pg_lock_stats` | window | event | `collection_time` | none |
-| `pg_log_events` | window | event | `collection_time` | none |
-| `pg_plan_capture_readiness` | window | event | `collection_time` | none |
-| `pg_replication_slot_stats` | window | hourly | `hour` | none |
-| `pg_replication_stats` | window | hourly | `hour` | none |
-| `pg_server_config` | window | change | `collection_time` | none |
-| `pg_session_states` | window | event | `collection_time` | none |
-| `pg_statement_stats` | window | hourly | `hour` | none |
-| `pg_table_bloat_stats` | window | daily | `collection_time` | none |
-| `pg_wait_stats` | window | hourly | `hour` | none |
-| `pg_wraparound_stats` | window | daily | `collection_time` | none |
-| `pg_write_stats` | window | hourly | `hour` | none |
-| `pg_xmin_horizon` | window | hourly | `hour` | none |
-| `pg_statement_text` | dimension | event | none | `source_store`, `server_name`, `queryid` |
+| Table | Kind | Grain | Time column | Key columns | Exported |
+|---|---|---|---|---|---|
+| `plan_correction` | window | change | `collection_time` | change key: `server_name`, `database_name`, `recommendation_name` | yes |
+| `default_trace_events` | window | event | `collection_time` | none | yes |
+| `memory_grant_stats` | window | hourly | `hour` | none | yes |
+| `plan_cache_stats` | window | event | `collection_time` | none | yes |
+| `session_stats` | window | event | `collection_time` | none | yes |
+| `session_summary_stats` | window | hourly | `hour` | none | yes |
+| `waiting_tasks` | window | event | `collection_time` | none | yes |
+| `dmv_blocking_snapshots` | window | event | `collection_time` | none | yes |
+| `memory_clerks` | window | event | `collection_time` | none | yes |
+| `memory_pressure_events` | window | event | `collection_time` | none | yes |
+| `cpu_scheduler_stats` | window | hourly | `hour` | none | yes |
+| `job_history` | window | event | `collection_time` | none | yes |
+| `index_object_stats` | window | daily | `collection_time` | none | yes |
+| `database_size_stats` | window | daily | `collection_time` | none | yes |
+| `database_states` | window | change | `collection_time` | change key: `server_name`, `database_name` | yes |
+| `ag_database_replica_states` | window | change | `collection_time` | change key: `server_name`, `ag_name`, `database_name`, `replica_server_name`, `group_id` | yes |
+| `ag_replica_states` | window | change | `collection_time` | change key: `server_name`, `ag_name`, `replica_server_name`, `group_id` | yes |
+| `pvs_stats` | window | event | `collection_time` | none | yes |
+| `query_store_health` | window | change | `capture_time` | change key: `server_name`, `database_name` | yes |
+| `server_config` | window | change | `capture_time` | change key: `server_name`, `configuration_name` | yes |
+| `server_properties` | window | change | `collection_time` | change key: `server_name` | yes |
+| `database_config` | window | change | `capture_time` | change key: `server_name`, `database_name` | yes |
+| `database_scoped_config` | window | change | `capture_time` | change key: `server_name`, `database_name`, `configuration_name` | yes |
+| `trace_flags` | window | change | `capture_time` | change key: `server_name`, `trace_flag` | yes |
+| `analysis_findings` | window | event | `analysis_time` | none | yes |
+| `config_alert_log` | window | event | `alert_time` | none | yes |
+| `incident_occurrences` | window | event | `occurred_at` | none | blocked |
+| `servers` | snapshot | event | `snapshot_time` | none | yes |
+| `attention_events` | window | event | `collection_time` | none | yes |
+| `column_stats` | snapshot | event | `snapshot_time` | none | blocked |
+| `column_stats_runs` | window | event | `collection_time` | none | yes |
+| `query_store_hints` | window | event | `collection_time` | none | yes |
+| `query_store_forced_plans` | window | event | `collection_time` | none | yes |
+| `object_inventory` | window | event | `collection_time` | none | yes |
+| `object_dependencies` | window | event | `collection_time` | none | yes |
+| `identity_capacity` | window | event | `collection_time` | none | yes |
+| `database_protection` | window | event | `collection_time` | none | yes |
+| `object_usage_snapshots` | window | event | `collection_time` | none | yes |
+| `object_usage_deltas` | window | event | `collection_time` | none | yes |
+| `query_tag_sightings` | window | event | `last_seen` | none | yes |
+| `query_tags` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_assignments` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_rules` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_map` | snapshot | event | `snapshot_time` | none | yes |
+| `query_snapshots` | window | event | `collection_time` | none | yes |
+| `pg_autovacuum_stats` | window | daily | `collection_time` | none | yes |
+| `pg_blocking_edges` | window | event | `collection_time` | none | yes |
+| `pg_buffer_usage` | window | event | `collection_time` | none | yes |
+| `pg_column_stats` | window | daily | `collection_time` | none | yes |
+| `pg_cpu_utilization` | window | hourly | `hour` | none | yes |
+| `pg_database_size_stats` | window | daily | `collection_time` | none | yes |
+| `pg_database_stats` | window | hourly | `hour` | none | yes |
+| `pg_deadlocks` | window | event | `collection_time` | none | yes |
+| `pg_extension_availability` | window | event | `collection_time` | none | yes |
+| `pg_index_bloat` | window | daily | `collection_time` | none | yes |
+| `pg_index_usage_stats` | window | daily | `collection_time` | none | yes |
+| `pg_io_stats` | window | hourly | `hour` | none | yes |
+| `pg_lock_stats` | window | event | `collection_time` | none | yes |
+| `pg_log_events` | window | event | `collection_time` | none | yes |
+| `pg_plan_capture_readiness` | window | event | `collection_time` | none | blocked |
+| `pg_replication_slot_stats` | window | hourly | `hour` | none | yes |
+| `pg_replication_stats` | window | hourly | `hour` | none | yes |
+| `pg_server_config` | window | change | `collection_time` | change key: `server_name`, `name`, `database_name`, `role_name` | yes |
+| `pg_session_states` | window | event | `collection_time` | none | yes |
+| `pg_statement_stats` | window | hourly | `hour` | none | yes |
+| `pg_table_bloat_stats` | window | daily | `collection_time` | none | yes |
+| `pg_wait_stats` | window | hourly | `hour` | none | yes |
+| `pg_wraparound_stats` | window | daily | `collection_time` | none | yes |
+| `pg_write_stats` | window | hourly | `hour` | none | yes |
+| `pg_xmin_horizon` | window | hourly | `hour` | none | yes |
+| `pg_statement_text` | dimension | event | none | `source_store`, `server_name`, `queryid` | yes |
+
+Some optional tables leave a column out, or add one the store table does not have:
+
+- `query_snapshots` leaves out `query_plan` and `live_query_plan`. The plan XML reaches the files through `plan_shape`, `plan_features`, `plan_warnings` and `plan_missing_indexes`.
+- `query_tag_sightings` leaves out `text_sample`, the query text sample kept with each sighting.
+- `object_usage_snapshots`, `object_usage_deltas`, `query_tag_sightings`, `query_tag_assignments`, `query_tag_rules` and `query_tag_map` have no `server_name` in the store, only a `server_id`. The export adds `server_name` as the first column, read from `collect.servers`. It is NULL when the server is no longer registered. In `query_tag_assignments` and `query_tag_rules` a NULL `server_name` also means the row applies to every server.
+- `query_tags`, `query_tag_assignments` and `query_tag_rules` keep their `id` column. Other tables name a row by it (`tag_id`, `rule_id`), so the `id` columns are the keys you join on. These ids belong to one store.
+- `query_tag_sightings` has no `collection_time`. It is a table of state that is updated in place, so it is read on `last_seen`: each window holds the rows touched in that window, with their `first_seen` and `seen_count` as they stood at the read. `first_seen` and `last_seen` are timestamps with a time zone, in UTC.
+- `query_tags`, `query_tag_assignments`, `query_tag_rules` and `query_tag_map` are small and have no time column. They are read whole, once a day, like `servers`.
 
 A table with grain `hourly` writes its rollup to `<table>_hourly` and no raw rows. The tables that do this are: `ag_database_replica_states`, `cpu_scheduler_stats`, `memory_grant_stats`, `pg_cpu_utilization`, `pg_database_stats`, `pg_io_stats`, `pg_replication_slot_stats`, `pg_replication_stats`, `pg_statement_stats`, `pg_wait_stats`, `pg_write_stats`, `pg_xmin_horizon`, `session_summary_stats`.
 

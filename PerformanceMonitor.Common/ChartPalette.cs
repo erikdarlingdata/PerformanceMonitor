@@ -112,6 +112,7 @@ namespace PerformanceMonitor.Common
                 ["InternalObjects"]   = "#EDA100",
                 ["UnallocatedTempdb"] = "#90A4AE", // intentional neutral: unallocated remainder
                 ["TopTempdbTask"]     = "#E34948",
+                ["TempDbLog"]         = "#6C5CE7", // tempdb log used (#8881)
                 // Duration trend charts (history windows / per-type)
                 ["QueryDuration"]     = "#2A78D6",
                 ["ProcedureDuration"] = "#008300",

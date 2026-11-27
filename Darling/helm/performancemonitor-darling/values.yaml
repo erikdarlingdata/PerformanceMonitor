@@ -69,7 +69,7 @@ extraVolumeMounts: []
 # The operator's darling.json: servers, collection settings, alerts. The chart owns these keys of it: postgres.managed,
 # postgres.connectionString, web.enabled, web.port, web.publicBaseUrl, web.network.listen, web.network.allowFrom,
 # web.network.trustedProxies, web.network.token, mcp.enabled, mcp.port, mcp.network.listen, mcp.network.allowFrom,
-# mcp.network.token, health and passwordKey. Setting one here fails the render and names the value to use instead; every
+# mcp.network.token, metrics, health and passwordKey. Setting one here fails the render and names the value to use instead; every
 # other key (postgres.webConnectionString, web.network.oidc, web.network.tls, ...) passes through.
 # Some keys are only a first-run seed: the store keeps them after the first start (see the README).
 # Strings may contain a placeholder listed in configSubstitutions; its secret value is written in when the pod starts.
@@ -107,6 +107,9 @@ secrets:
   webTokenKey: web-token
   # Key of the MCP token in the Secret. The chart generates it when the key is not in `values`.
   mcpTokenKey: mcp-token
+  # Key of the metrics token in the Secret. The chart generates it like the others when the key is not in `values`. A token
+  # you supply needs at least 16 characters and 6 different ones.
+  metricsTokenKey: metrics-token
 
 store:
   # Where Darling keeps its data. "bundled" runs a single TimescaleDB pod (a StatefulSet) with this release. It suits
@@ -115,7 +118,7 @@ store:
   mode: bundled
   bundled:
     # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.1-pg17
     persistence:
       # Size of the store's data volume. Changing it later makes helm upgrade fail (a StatefulSet's volumeClaimTemplates
       # cannot change): resize the PVC itself (see the README's Upgrades).
@@ -160,6 +163,37 @@ store:
     caSecret:
       name: ""
       key: ca.crt
+  provisionRoles:
+    # Run provision-roles.sql against the external store after every install and upgrade. Off by default. Only for
+    # store.mode external. The bundled store provisions its own roles, so the render fails there.
+    enabled: false
+    # How the Job connects: the store OWNER role (the role the service collects as), which must hold CREATEROLE, and
+    # from PostgreSQL 16 ADMIN OPTION on the four roles once they exist. Exactly one of the two. Either may name the
+    # same Secret and key the service's own connection uses, so the owner password has one copy. The Secret is mounted
+    # only into the Job pod, as a file.
+    login:
+      # A Secret key holding the owner's password. Host, port, database, username, sslMode and caSecret come from
+      # store.external. Needs the host-based store.external settings.
+      passwordSecret:
+        name: ""
+        key: password
+      # A Secret key holding a whole Npgsql connection string for the owner, in the same format as
+      # store.external.connectionStringSecret. A Root Certificate in it must be /etc/darling/store-ca/ca.crt
+      # (store.external.caSecret, which the Job mounts there).
+      connectionStringSecret:
+        name: ""
+        key: connection-string
+    # Required: a Secret you manage with the keys admin, viewer, web and mcp. Each password needs 16 or more
+    # characters from A-Z a-z 0-9 . _ ~ + / = -
+    rolePasswordsSecret: ""
+    # Point postgres.webConnectionString and postgres.mcpConnectionString at the web and mcp logins.
+    # Needs the host-based store.external settings.
+    wireConnectionStrings: true
+    # How long the Job waits for the store to reach this release's schema before it fails.
+    waitSeconds: 900
+    # The image that provides psql. Empty = store.bundled.image (the image CI pins and tests against).
+    psqlImage: ""
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
 
 # Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod (IPv4: IPv6-only
 # clusters are not supported), and allowFrom decides who is served (Darling refuses clients outside the list; a loopback
@@ -227,3 +261,26 @@ mcp:
     tls: []
     # Annotations of the Ingress.
     annotations: {}
+
+metrics:
+  # Serve the Prometheus /metrics port (token-protected). Off by default. Needs a Darling image newer than 3.13.0.
+  enabled: false
+  # Port of the metrics endpoint inside the pod. With metrics.enabled it must differ from the health port (5154),
+  # web.port and mcp.port, whether or not web and MCP are on (Darling compares the ports either way, and the
+  # control plane can turn those surfaces on later without a restart).
+  port: 5155
+  # Addresses allowed to scrape the port: CIDRs with a prefix length (10.0.0.5/32 for one address; an entry without one fails the
+  # render). Empty adds no allowFrom to darling.json; network.allowFrom never applies to metrics.
+  allowFrom: []
+  serviceMonitor:
+    # Create a Prometheus Operator ServiceMonitor for the metrics Service, scraping with the chart's token. Needs metrics.enabled and the ServiceMonitor CRD where you apply it. Off by default.
+    enabled: false
+    # Scrape interval of the ServiceMonitor: a Prometheus duration such as 30s, 1m or 1m30s.
+    interval: 60s
+    # Extra labels of the ServiceMonitor, for example the one your Prometheus selects on (release: kube-prometheus-stack). A key the
+    # chart also sets (app.kubernetes.io/name, ...) takes the value given here; the ServiceMonitor's selector keeps the chart's labels.
+    labels: {}
+    # TLS settings of the scrape, used only when config.web.network.tls is set: the ServiceMonitor then scrapes with scheme https, and the
+    # metrics port serves HTTPS only. A Prometheus Operator tlsConfig, for example { serverName: darling.example.com, ca: { secret: { name: darling-ca, key: ca.crt } } }.
+    # Empty keeps Prometheus's defaults: the certificate must chain to a CA it trusts and match the Service's host name.
+    tlsConfig: {}

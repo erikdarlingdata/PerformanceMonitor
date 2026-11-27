@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -46,7 +47,7 @@ public static class PgSecondaryReplicaScope
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, cancellationToken);
             var asOf = DateTime.SpecifyKind(asOfUtc, DateTimeKind.Unspecified);
 
             var replicaTime = await NewestAsync(connection, "ag_replica_states", serverId, asOf, cancellationToken);

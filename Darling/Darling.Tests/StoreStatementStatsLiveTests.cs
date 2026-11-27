@@ -322,12 +322,13 @@ public sealed class StoreStatementStatsLiveTests
            PUBLIC cannot run them. */
         var definers = await DefinersAsync(c, ct);
         Assert.Equal(
-            new[] { StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName },
+            new[] { StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName, StoreStatementStats.WriteCounterFunctionName },
             definers.Select(d => d.Name).ToArray());
         Assert.All(definers, d => Assert.True(d.Definer, $"{d.Name} is not SECURITY DEFINER"));
         Assert.All(definers, d => Assert.Contains("search_path=pg_catalog, pg_temp", d.Config, StringComparison.Ordinal));
         Assert.All(definers, d => Assert.Contains("standard_conforming_strings=on", d.Config, StringComparison.Ordinal));
         Assert.False(await ScalarAsync<bool>(c, $"SELECT pg_catalog.has_function_privilege('public', 'config.{StoreStatementStats.FunctionName}()', 'EXECUTE')", ct));
+        Assert.False(await ScalarAsync<bool>(c, $"SELECT pg_catalog.has_function_privilege('public', 'config.{StoreStatementStats.WriteCounterFunctionName}()', 'EXECUTE')", ct));
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var result = await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(dataSource);
@@ -344,6 +345,54 @@ public sealed class StoreStatementStatsLiveTests
 
         /* A second pass, the hourly tick's shape, reports the same state. */
         Assert.Equal(outcome, await StoreStatementStats.EnsureAsync(c, "config", ["pgss_role_that_does_not_exist"], NullLogger.Instance, ct));
+    }
+
+    /// <summary>
+    /// #9410: the store's statement history reads <c>config.store_statement_stats_v2()</c>, and the setup leaves
+    /// <c>config.store_statement_stats()</c> exactly as an older build made it. So a store that an older build set up
+    /// is set up again by this build, and the older build's own setup (its <c>CREATE OR REPLACE</c> of the old
+    /// reader) and its read (the old name and columns) still work afterwards. Rolling back needs no manual drop.
+    /// </summary>
+    [Fact]
+    public async Task AnOlderBuildsSetupAndReaderCall_StillWorkAfterThisBuildsSetupRan_AgainstScratchPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(baseConnectionString),
+            "Set DARLING_TEST_PG to a superuser connection string to run the #9410 rollback proof in a scratch database.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var c = await OpenAsync(scratch.ConnectionString, ct);
+        var preloaded = await IsPreloadedAsync(c, ct);
+        await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
+        await ExecAsync(c, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+        var extensionSchema = await ScalarAsync<string>(c,
+            "SELECT n.nspname::text FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements'", ct);
+
+        /* The older build's setup, as that build ran it: the old reader and the info reader, no write-counter reader. */
+        await ExecAsync(c, StoreStatementStats.BuildFunctionSql("config", extensionSchema), ct);
+        Assert.Equal(0L, await ScalarAsync<long>(c, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc WHERE proname = '{StoreStatementStats.WriteCounterFunctionName}'", ct));
+
+        /* This build's setup, then the older build's setup again (a rollback, then its next start). Neither fails. */
+        await StoreStatementStats.EnsureAsync(c, "config", [], NullLogger.Instance, ct);
+        await ExecAsync(c, StoreStatementStats.BuildFunctionSql("config", extensionSchema), ct);
+
+        /* Both readers exist, and the old one still returns the columns the older build reads. */
+        Assert.Equal(1L, await ScalarAsync<long>(c, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc WHERE proname = '{StoreStatementStats.WriteCounterFunctionName}'", ct));
+        var oldColumns = await ScalarAsync<string>(c,
+            $"SELECT pg_catalog.array_to_string(p.proargnames, ',') FROM pg_catalog.pg_proc AS p WHERE p.oid = 'config.{StoreStatementStats.FunctionName}()'::regprocedure", ct);
+        Assert.Equal(
+            "role_name,queryid,calls,total_exec_ms,mean_exec_ms,max_exec_ms,total_plan_ms,rows_returned,shared_blks_hit,shared_blks_read,temp_blks_written,query",
+            oldColumns);
+
+        if (preloaded)
+        {
+            /* The older build's read, by its old name and columns, and this build's, by the new name. */
+            await ScalarAsync<long>(c,
+                $"SELECT pg_catalog.count(*) FROM (SELECT role_name, queryid, calls, total_exec_ms, mean_exec_ms, max_exec_ms, total_plan_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, query FROM config.{StoreStatementStats.FunctionName}()) AS f", ct);
+            await ScalarAsync<long>(c,
+                $"SELECT pg_catalog.count(*) FROM (SELECT role_name, queryid, calls, total_exec_ms, max_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, shared_blks_dirtied, shared_blks_written, wal_fpi, wal_bytes FROM config.{StoreStatementStats.WriteCounterFunctionName}()) AS f", ct);
+        }
     }
 
     /// <summary>
@@ -504,6 +553,64 @@ ORDER BY 1", connection);
 
     private static Task<string> InfoDefinitionAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ScalarAsync<string>(connection, $"SELECT pg_catalog.pg_get_functiondef('config.{StoreStatementStats.InfoFunctionName}()'::regprocedure)", ct);
+
+    /// <summary>
+    /// #9484: the grant gives EXECUTE only to a role that already has USAGE on the config schema, so a role that does not (yet) is skipped
+    /// without an error and picks the grant up on the next pass once it has USAGE. The hourly pass is that next pass.
+    /// </summary>
+    [Fact]
+    public async Task TheGrant_SkipsARoleWithoutUsage_WithoutAnError_AndGivesItExecuteOnTheNextPassOnceItHasUsage_AgainstScratchPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(baseConnectionString),
+            "Set DARLING_TEST_PG to a superuser connection string to run the #9484 grant proof in a scratch database.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var c = await OpenAsync(scratch.ConnectionString, ct);
+        await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
+
+        var withUsage = "pgss_usage_" + RunSuffix;
+        var withoutUsage = "pgss_nousage_" + RunSuffix;
+        await ExecAsync(c, $"CREATE ROLE {withUsage} NOLOGIN", ct);
+        await ExecAsync(c, $"CREATE ROLE {withoutUsage} NOLOGIN", ct);
+        try
+        {
+            await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {withUsage}", ct);
+            string[] roles = [withUsage, withoutUsage];
+
+            var outcome = await StoreStatementStats.EnsureAsync(c, "config", roles, NullLogger.Instance, ct);
+            Assert.SkipWhen(outcome is StoreStatementStats.SetupOutcome.NotAvailable or StoreStatementStats.SetupOutcome.NotPermitted or StoreStatementStats.SetupOutcome.Outdated,
+                $"The readers are not built here ({outcome}), so there is no grant to read.");
+
+            string[] functions = [StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName, StoreStatementStats.WriteCounterFunctionName];
+            foreach (var function in functions)
+            {
+                Assert.True(await CanExecuteAsync(c, withUsage, function, ct), $"{function}: the role with USAGE got no EXECUTE");
+                Assert.False(await CanExecuteAsync(c, withoutUsage, function, ct), $"{function}: the role without USAGE got EXECUTE");
+            }
+
+            /* Once the role has USAGE, the next pass (the hourly tick) gives it EXECUTE, and the first role keeps it. */
+            await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {withoutUsage}", ct);
+            Assert.Equal(outcome, await StoreStatementStats.EnsureAsync(c, "config", roles, NullLogger.Instance, ct));
+            foreach (var function in functions)
+            {
+                Assert.True(await CanExecuteAsync(c, withoutUsage, function, ct), $"{function}: the role that gained USAGE got no EXECUTE on the next pass");
+                Assert.True(await CanExecuteAsync(c, withUsage, function, ct), $"{function}: the first role lost EXECUTE");
+            }
+        }
+        finally
+        {
+            foreach (var role in new[] { withUsage, withoutUsage })
+            {
+                await ExecAsync(c, $"DROP OWNED BY {role}", ct);
+                await ExecAsync(c, $"DROP ROLE {role}", ct);
+            }
+        }
+    }
+
+    private static Task<bool> CanExecuteAsync(NpgsqlConnection connection, string role, string function, CancellationToken ct) =>
+        ScalarAsync<bool>(connection, $"SELECT pg_catalog.has_function_privilege('{role}', 'config.{function}()', 'EXECUTE')", ct);
 
     private static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
     {

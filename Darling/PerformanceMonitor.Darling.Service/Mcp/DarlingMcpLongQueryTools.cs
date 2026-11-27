@@ -44,7 +44,8 @@ public sealed class DarlingMcpLongQueryTools
         "Long query completions have not been collected for this server yet: the long_query_completions collector is enabled but has not run its first pass yet; " +
         "read again after it does.";
 
-    [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: not_collected means it never ran, empty means it ran and found none; enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort, Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached: every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it answers not_collected, enable the 'long_query_completions' collector in the schedule, and read again after its first pass. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty." + McpHelpers.UtcStampsDescription)]
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_long_query_completions"), Description("The window's SLOWEST rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. budget_truncated: the 32 KB budget cut the page. Collector is opt-in, OFF by default: not_collected means it never ran, empty means it ran and found none; enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort, Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached: every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it answers not_collected, enable the 'long_query_completions' collector in the schedule, and read again after its first pass. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -56,7 +57,7 @@ public sealed class DarlingMcpLongQueryTools
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag, include_monitor);
+        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag, include_monitor, McpResponseBudget.DefaultBytes);
 
     /// <summary>The <c>include_monitor</c> parameter text, shared with the web grid's toggle (#7416 item 11).</summary>
     public const string IncludeMonitorDescription = "Include the monitor's own statements (program name starts PerformanceMonitor). Default false: left out. Set true to see a slow collector run.";
@@ -66,6 +67,8 @@ public sealed class DarlingMcpLongQueryTools
     /// <c>DatabaseFilter.One(database_name)</c> and the web dispatch passes the repeated keys. The cap applies after the
     /// filter, so the page is the slowest N of the chosen databases, and the empty path says "for the database X" (one name) or
     /// "for the chosen databases" (two or more), never a verdict on a database it did not read.
+    /// <paramref name="responseByteBudget"/> is the byte target the page is cut to, completions left off the end whole (the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/>); null keeps every row, as the web viewer's mirror does.
     /// </summary>
     internal static async Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
@@ -77,7 +80,8 @@ public sealed class DarlingMcpLongQueryTools
         ILogger? logger,
         CancellationToken cancellationToken,
         string? tag = null,
-        bool include_monitor = false)
+        bool include_monitor = false,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -168,10 +172,11 @@ public sealed class DarlingMcpLongQueryTools
             /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest event the page shows. The probe
                reads the table on collection_time while the page is ranked by duration, so a first run's backfilled event can be older
                than the probe's floor. The page is the slowest N, so its oldest event depends on limit; that cannot make a false
-               notice, as the floor only moves earlier, and a first run reads back 10 minutes, well inside the 90-minute slack. */
-            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+               notice, as the floor only moves earlier, and a first run reads back 10 minutes, well inside the 90-minute slack. The response
+               budget can leave the slowest-ranked tail off the page, so a notice is read for every length it can be cut to. */
+            var notices = await DarlingMcpWindowNotice.ReadEventPrefixesAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
-                page.Min(r => r.EventTime), windowStart, now, "long_query_completions", logger: logger, cancellationToken: cancellationToken);
+                page.Select(r => r.EventTime).ToList(), windowStart, now, "long_query_completions", logger: logger, cancellationToken: cancellationToken);
 
             var result = page.Select(r => new
             {
@@ -196,50 +201,63 @@ public sealed class DarlingMcpLongQueryTools
                    is the key to group by: the real hash, else a fingerprint of the scrubbed statement text. */
                 query_hash = r.QueryHash,
                 query_identity = r.QueryIdentity
-            });
-
-            var payloadNode = JsonSerializer.SerializeToNode(new
-            {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
-                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
-                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
-                database_name = databaseFilter.Describe(),
-                /* #3541 A3: the page described as a page. Under a duration RANKING the two stamps bound the
-                   slowest runs, not the reach — the description says so, and QueryStoreTopWindowTests states
-                   the general trap for cost-ranked pages. */
-                completions_returned = page.Count,
-                truncated,
-                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
-                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
-                order = "duration_ms_desc",
-                completions = result
-            }, McpHelpers.JsonOptions)!.AsObject();
-
-            /* #5984 round 1: the answer names the tag that cut its population, beside the database echo (present only when a tag was sent). */
-            if (tagFilter.Named is { } completionTagName)
-            {
-                payloadNode["tag_filter"] = completionTagName;
-            }
+            }).ToList();
 
             /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
-            if (payloadNode["completions"] is JsonArray completionRows)
+            var rowNodes = JsonSerializer.SerializeToNode(result, McpHelpers.JsonOptions)!.AsArray().ToList();
+            await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, rowNodes.OfType<JsonObject>(),
+                row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            var lossRuns = await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken);
+
+            /* The slowest completions that fit the response budget: rows are left off the end whole, never cut, and every field that
+               describes the page (the count, the span, the window notice) is that of the rows it kept. `truncated` is true for either cut,
+               the row limit or the budget; budget_truncated is the budget alone. */
+            string Reply(int kept)
             {
-                await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, completionRows.OfType<JsonObject>(),
-                    row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+                var notice = notices[kept];
+                var payloadNode = JsonSerializer.SerializeToNode(new
+                {
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                       window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                       for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                    database_name = databaseFilter.Describe(),
+                    /* #3541 A3: the page described as a page. Under a duration RANKING the two stamps bound the
+                       slowest runs, not the reach — the description says so, and QueryStoreTopWindowTests states
+                       the general trap for cost-ranked pages. */
+                    completions_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "slowest first", "completions",
+                            "Narrow the page with database_name, tag or a smaller hours_back to read the completions left out.")
+                        : null,
+                    oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.EventTime)),
+                    newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.EventTime)),
+                    order = "duration_ms_desc",
+                    completions = rowNodes.Take(kept)
+                }, McpHelpers.JsonOptions)!.AsObject();
+
+                /* #5984 round 1: the answer names the tag that cut its population, beside the database echo (present only when a tag was sent). */
+                if (tagFilter.Named is { } completionTagName)
+                {
+                    payloadNode["tag_filter"] = completionTagName;
+                }
+
+                var json = payloadNode.ToJsonString(McpHelpers.JsonOptions);
+
+                /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+                return RingBufferLossAnswer.Attach(notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json, lossRuns, !databaseFilter.IsAll);
             }
 
-            var json = payloadNode.ToJsonString(McpHelpers.JsonOptions);
-
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
-            return RingBufferLossAnswer.Attach(
-                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll);
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

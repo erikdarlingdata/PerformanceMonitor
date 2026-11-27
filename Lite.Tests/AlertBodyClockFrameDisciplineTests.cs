@@ -222,6 +222,24 @@ public class AlertBodyClockFrameDisciplineTests
                 TopConsumerSessionId = 91, TopConsumerMb = 12_000, MaxSizeMb = 51_200
             })),
 
+        /* #8881: the log card. Its holder's begin time is the instant the card turns into an age against the
+           alert's own clock, so it is planted here. */
+        ("BuildTempDbLogSpaceContext", () => AlertContextBuilders.BuildTempDbLogSpaceContext(
+            new TempDbSpaceInfo
+            {
+                CollectionTimeUtc = AnchorUtc, LogTotalMb = 10_000, LogUsedMb = 9_100, LogUsedPercent = 91,
+                LogReuseWaitDesc = "ACTIVE_TRANSACTION", LogTruncationHoldupReason = "ACTIVE_TRANSACTION",
+                HolderSessionId = 57, HolderLoginName = "etl_login", HolderProgramName = "nightly load",
+                HolderBeginTimeUtc = AnchorUtc.AddMinutes(-42), HolderLogBytesUsed = 734_003_200, HolderLogBytesReserved = 1_048_576_000
+            }, AnchorUtc)),
+        ("BuildTempDbGrowthFitContext", () => AlertContextBuilders.BuildTempDbGrowthFitContext(
+            new TempDbGrowthFitResult
+            {
+                FileCount = 9, DataFileCount = 8, JudgedFileCount = 9, DataFilesUnableToGrow = 1,
+                FilesUnableToGrow = ["tempdev8"],
+                Shortfalls = [new TempDbGrowthShortfall("T:\\", IsLog: false, ["tempdev1", "tempdev2"], NeededMb: 8_192, FreeMb: 2_048)]
+            })),
+
         /* The two server-sourced instants. Planted on the server's clock with the fleet offset, which is
            the shape the defect was measured in. */
         ("BuildAnomalousJobContext", () => AlertContextBuilders.BuildAnomalousJobContext(
@@ -237,7 +255,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 600, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes, StepId = 2, StepName = "extract",
                 Message = "the step failed"
             }],
@@ -293,7 +311,7 @@ public class AlertBodyClockFrameDisciplineTests
 
         /* And the census is closed, not a floor: a builder that vanishes has to be a deliberate edit here
            rather than a silently shorter scan. */
-        Assert.Equal(10, reflected.Count);
+        Assert.Equal(12, reflected.Count);
     }
 
     [Fact]
@@ -342,7 +360,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes
             }]), "Failed At");
         Assert.Equal(expected, failed);
@@ -361,7 +379,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 330
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 330
             }]), "Failed At");
         Assert.NotEqual(expected, eastOfUtc);
         Assert.Equal(AlertTimestamp.Utc(AnchorOnServerClock.AddMinutes(-330)), eastOfUtc);
@@ -374,7 +392,7 @@ public class AlertBodyClockFrameDisciplineTests
                 Server,
                 [new FailedJobInfo
                 {
-                    JobName = "nightly-export", RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 0
+                    JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 0
                 }]), "Failed At"));
     }
 
@@ -385,7 +403,7 @@ public class AlertBodyClockFrameDisciplineTests
            only thing the reader came for — but it is not dressed as UTC. */
         var failed = Field(AlertContextBuilders.BuildFailedJobContext(
             Server,
-            [new FailedJobInfo { JobName = "nightly-export", RunDateTime = AnchorOnServerClock }]), "Failed At");
+            [new FailedJobInfo { JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock }]), "Failed At");
 
         Assert.Equal(
             AnchorOnServerClock.ToString(AlertTimestamp.Format, System.Globalization.CultureInfo.InvariantCulture)
@@ -458,7 +476,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes
             }],
             windowEndUtc: AnchorUtc, lookbackMinutes: 60);
@@ -484,7 +502,7 @@ public class AlertBodyClockFrameDisciplineTests
         /* Omitted when the caller supplies no clock — the window is a fact about the read, so it is stated
            only when it is actually known. */
         var noWindow = AlertContextBuilders.BuildFailedJobContext(
-            Server, [new FailedJobInfo { JobName = "nightly-export", RunDateTime = AnchorOnServerClock }]);
+            Server, [new FailedJobInfo { JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock }]);
         Assert.DoesNotContain(noWindow!.Details, d => d.Heading == AlertContextBuilders.FailureWindowHeading);
     }
 

@@ -217,6 +217,9 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     /// <summary>
     /// One <c>pg_stat_activity</c> snapshot, as the sampler arm reads it: four columns, one row per backend
     /// that is waiting on something the profile counts or is on CPU. Public so a test can run it alone.
+    /// <para>#8916: the generic <c>Extension</c> / <c>Extension</c> wait of a backend that is not a <c>client backend</c> is
+    /// dropped here. It is the wait background workers (the pg_cron launcher, the TimescaleDB scheduler) sleep in, around
+    /// the clock. A client session's generic Extension wait still counts.</para>
     /// <para><c>query_id</c> exists from PostgreSQL 14; on 13 (or an unknown version reading as 0 — which the
     /// gates treat as "newest", so it selects the column) the caller passes <paramref name="hasQueryId"/>
     /// false and the column is a constant NULL (#6836): "not reported", not the 0 that means "belongs to no
@@ -232,7 +235,9 @@ FROM pg_stat_activity AS a
 WHERE a.pid <> pg_backend_pid()
   AND coalesce(a.application_name, '') NOT IN ('" + ServiceApplicationName + "', '" + ServiceRemediationApplicationName + @"')
   AND (a.wait_event_type IS NOT NULL OR a.state = 'active')
-  AND coalesce(a.wait_event_type, 'CPU') NOT IN (" + IgnoredTypeList + ")";
+  AND coalesce(a.wait_event_type, 'CPU') NOT IN (" + IgnoredTypeList + @")
+  AND NOT (a.wait_event_type IS NOT DISTINCT FROM 'Extension' AND a.wait_event IS NOT DISTINCT FROM 'Extension'
+           AND coalesce(a.backend_type, 'client backend') <> 'client backend')";
 
     /// <summary>
     /// The sampler arm's whole cycle as ONE command: snapshot, then (sleep one period, clear the backend

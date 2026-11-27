@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -245,7 +246,7 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PgTargetReplicationLagSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -358,7 +359,7 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PgTargetReplicationSlotsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);

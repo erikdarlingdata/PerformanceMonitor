@@ -9,11 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -31,6 +33,10 @@ namespace Darling.Tests;
 /// its own server-scoped session in the own-name form and never touches the shared sessions a live install collects from.
 /// <c>DARLING_TEST_SQL_READONLY=1</c> skips the class: it creates a session, and a server that holds real monitoring data
 /// must not get one.</para>
+///
+/// <para>#9518: the blocked-process batch reads <c>blocked process threshold (s)</c> first and reads nothing of its session when
+/// the setting is 0 in use. No test here changes that server-wide setting. Each blocked-process test reads it and runs on the
+/// side it covers: the gate test where the threshold is set, the threshold-off test where it is 0.</para>
 /// </summary>
 public sealed class XeShredGateLiveSqlTests
 {
@@ -105,6 +111,17 @@ public sealed class XeShredGateLiveSqlTests
         return context.Measurements.Single(m => m.Label == measurementLabel).Value;
     }
 
+    /// <summary>#9518: the server's <c>blocked process threshold (s)</c> in use, which decides the path the blocked-process batch takes.</summary>
+    private static async Task<int> BlockedProcessThresholdAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(
+            "SELECT CONVERT(integer, c.value_in_use) FROM sys.configurations AS c WHERE c.name = N'" + BlockedProcessThresholdOffNote.SettingName + "';",
+            connection) { CommandTimeout = 60 };
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
     private static string CreateSql(string sessionName, string eventName)
         => "CREATE EVENT SESSION [" + sessionName + "] ON SERVER ADD EVENT " + eventName
            + " ADD TARGET package0.ring_buffer (SET max_memory = 4096)"
@@ -117,6 +134,10 @@ public sealed class XeShredGateLiveSqlTests
         var connectionString = ConnectionString("pm-6868-bpr-live-test");
         Assert.SkipWhen(connectionString is null, SkipMessage);
         var ct = TestContext.Current.CancellationToken;
+        /* #9518: with the threshold at 0 the batch never reaches the gate. BlockedProcessBatch_ThresholdZero_ReadsNothingOfTheSession covers that server. */
+        Assert.SkipWhen(
+            await BlockedProcessThresholdAsync(connectionString!, ct) == 0,
+            "This server's 'blocked process threshold (s)' is 0 in use, so the blocked-process batch does not reach the gate.");
         var sessionName = AlwaysOnXeSessions.OwnNameFor(
             LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.BlockedProcess);
 
@@ -130,6 +151,77 @@ public sealed class XeShredGateLiveSqlTests
                 BlockedProcessReportCollector.ShredGatedMeasurement, sessionName, "0", ct));
             Assert.Equal(0, await RunAndReadShredGatedAsync(connectionString!, BlockedProcessReportCollector.Instance,
                 BlockedProcessReportCollector.ShredGatedMeasurement, sessionName, null, ct));
+        }
+        finally
+        {
+            if (created)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #9518: on a server whose threshold is 0 the real batch, pointed at a session that exists and is running, reads the setting
+    /// and nothing of the session. The session's counter reads 0 there, which a batch that read it would stage and gate on, so
+    /// no staged state and no gate verdict is the proof it was not read. The run carries the off count and the batch still hands
+    /// the host its probe-failure result set.
+    /// </summary>
+    [Fact]
+    public async Task BlockedProcessBatch_ThresholdZero_ReadsNothingOfTheSession()
+    {
+        var connectionString = ConnectionString("pm-9518-bpr-off-live-test");
+        Assert.SkipWhen(connectionString is null, SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        var threshold = await BlockedProcessThresholdAsync(connectionString!, ct);
+        Assert.SkipWhen(
+            threshold != 0,
+            "Runs only where 'blocked process threshold (s)' is 0 in use. This server's is " + threshold.ToString(CultureInfo.InvariantCulture) + ".");
+        var sessionName = AlwaysOnXeSessions.OwnNameFor(
+            LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.BlockedProcess);
+
+        var created = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, CreateSql(sessionName, "sqlserver.blocked_process_report"), ct);
+            created = true;
+
+            foreach (var capturePlanXml in new[] { false, true })
+            {
+                var context = new CollectorContext
+                {
+                    ServerId = 1,
+                    ServerName = "live-sql",
+                    CollectionTime = DateTime.UtcNow,
+                    Deltas = null!,
+                    State = CollectorContext.NoState,
+                    AlwaysOnSessionName = sessionName,
+                    Watermark = DateTime.UtcNow.AddMinutes(-10),
+                    CapturePlanXml = capturePlanXml,
+                };
+                var query = BlockedProcessReportCollector.Instance.BuildQuery(context);
+
+                await using var connection = new SqlConnection(connectionString);
+                await connection.OpenAsync(ct);
+                await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 60);
+                await using DbDataReader reader = await command.ExecuteReaderAsync(ct);
+
+                /* The empty payload has the payload's own shape. */
+                Assert.Equal(capturePlanXml ? 7 : 5, reader.FieldCount);
+
+                var rows = await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, ct);
+
+                Assert.Empty(rows);
+                Assert.Empty(context.StagedItemState);
+                Assert.DoesNotContain(context.Measurements, m => m.Label == BlockedProcessReportCollector.ShredGatedMeasurement);
+                Assert.Equal(1, context.Measurements.Single(m => m.Label == BlockedProcessReportCollector.ThresholdOffMeasurement).Value);
+                Assert.True(BlockedProcessThresholdOffNote.TryParse(CollectorMeasurementNote.Render(context.Measurements)));
+
+                /* The host reads the probe-failure set next: present, and empty. */
+                Assert.True(await reader.NextResultAsync(ct));
+                Assert.False(await reader.ReadAsync(ct));
+                Assert.False(await reader.NextResultAsync(ct));
+            }
         }
         finally
         {

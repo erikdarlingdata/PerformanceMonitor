@@ -73,6 +73,14 @@ public static class StoreStatementStats
     /// covers.</summary>
     public const string InfoFunctionName = "store_statement_stats_info";
 
+    /// <summary>
+    /// The reader the store's own statement history takes its snapshot from (#9410): the same rows as <see cref="FunctionName"/>, without the
+    /// statement text, plus the four write counters. A new function beside the old one because <c>CREATE OR REPLACE</c> cannot change a function's
+    /// result columns, so widening the old one would make an older build's setup fail until someone dropped it by hand. The older build keeps
+    /// calling the old function, which this one never touches.
+    /// </summary>
+    public const string WriteCounterFunctionName = "store_statement_stats_v2";
+
     /// <summary>The oldest extension version the reader can serve. 1.8 (PostgreSQL 13) renamed <c>total_time</c>
     /// to <c>total_exec_time</c> and added the plan-time columns the reader selects. <c>pg_upgrade</c> never
     /// updates an extension, so a store upgraded from PostgreSQL 12 can still carry 1.7; it is reported as
@@ -315,7 +323,69 @@ REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
     }
 
     /// <summary>
-    /// <c>GRANT EXECUTE</c> on both reader functions to each of <paramref name="roles"/> that EXISTS. A BYO store
+    /// The write-counter reader (<see cref="WriteCounterFunctionName"/>, #9410), built with the same guards as <see cref="BuildFunctionSql"/>: owned by
+    /// whoever runs it, <c>search_path</c> and <c>standard_conforming_strings</c> pinned, scoped to the current database, every row returned.
+    /// It returns no statement text, so it needs no text filter. Call counts and times are the extension's own, summed by the history snapshot.
+    /// </summary>
+    public static string BuildWriteCounterFunctionSql(string configSchema, string extensionSchema)
+    {
+        var config = QuoteIdentifier(configSchema);
+        var extension = QuoteIdentifier(extensionSchema);
+        var readerBody = $@"    SELECT
+        COALESCE(r.rolname::text, s.userid::text),
+        s.queryid,
+        s.calls,
+        s.total_exec_time,
+        s.max_exec_time,
+        s.rows,
+        s.shared_blks_hit,
+        s.shared_blks_read,
+        s.temp_blks_written,
+        s.shared_blks_dirtied,
+        s.shared_blks_written,
+        s.wal_fpi,
+        s.wal_bytes
+    FROM {extension}.pg_stat_statements AS s
+    LEFT JOIN pg_catalog.pg_roles AS r
+      ON r.oid = s.userid
+    WHERE s.dbid =
+    (
+        SELECT d.oid
+        FROM pg_catalog.pg_database AS d
+        WHERE d.datname = pg_catalog.current_database()
+    );";
+        var tag = DollarTag("fn", readerBody);
+
+        return $@"
+CREATE OR REPLACE FUNCTION {config}.{WriteCounterFunctionName}()
+RETURNS TABLE
+(
+    role_name text,
+    queryid bigint,
+    calls bigint,
+    total_exec_ms double precision,
+    max_exec_ms double precision,
+    rows_returned bigint,
+    shared_blks_hit bigint,
+    shared_blks_read bigint,
+    temp_blks_written bigint,
+    shared_blks_dirtied bigint,
+    shared_blks_written bigint,
+    wal_fpi bigint,
+    wal_bytes numeric
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET standard_conforming_strings = on
+AS {tag}
+{readerBody}
+{tag};
+REVOKE ALL ON FUNCTION {config}.{WriteCounterFunctionName}() FROM PUBLIC;";
+    }
+
+    /// <summary>
+    /// <c>GRANT EXECUTE</c> on the reader functions to each of <paramref name="roles"/> that EXISTS. A BYO store
     /// has no <c>mcp</c> role and may have renamed the others, so a missing role is skipped rather than failing
     /// the grant for the rest.
     /// </summary>
@@ -489,9 +559,11 @@ DECLARE
 BEGIN
     FOREACH grantee IN ARRAY ARRAY[{array}]::text[]
     LOOP
-        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee) THEN
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee)
+        AND pg_catalog.has_schema_privilege(grantee, {QuoteLiteral(configSchema)}, 'USAGE') THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{FunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{InfoFunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);
+            EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{WriteCounterFunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);
         END IF;
     END LOOP;
 END
@@ -629,6 +701,11 @@ FROM
         await using (var function = new NpgsqlCommand(BuildFunctionSql(configSchema, extensionSchema, withInfoView), connection) { CommandTimeout = SetupTimeoutSeconds })
         {
             await function.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var writeCounters = new NpgsqlCommand(BuildWriteCounterFunctionSql(configSchema, extensionSchema), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            await writeCounters.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using (var grant = new NpgsqlCommand(BuildGrantSql(configSchema, readerRoles), connection) { CommandTimeout = SetupTimeoutSeconds })

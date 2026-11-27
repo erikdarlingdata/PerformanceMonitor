@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// the drill-down enrichment port (PgDrillDownCollector), the worker's analysis due-loop
 /// constants, and the notification adapter. Ungated: the orchestrator carries the twins'
 /// method/property/event surface with Lite's 24h gate default and Lite's multi-server
-/// data-span SQL; the drill-down exposes EXACTLY Lite's 17 collect-method surface and every
+/// data-span SQL; the drill-down exposes EXACTLY Lite's 19 collect-method surface and every
 /// query passes the PG-dialect hygiene pins (no QUALIFY, no bare NOW()/CURRENT_TIMESTAMP, no
 /// read_parquet, $N positional only) with every FROM/JOIN target resolving to a V4 view or
 /// collector table; the worker's hardcoded cadence/budget mirror Lite's App defaults
@@ -147,6 +147,7 @@ public sealed class DarlingAnalysisPipelineTests
         "CollectReconstructedBlockingChains",
         "CollectRegressedQueries",
         "CollectTempDbBreakdown",
+        "CollectTempDbSetupFiles",
         "CollectTopBlockingChains",
         "CollectTopCpuQueries",
         "CollectTopDeadlocks",
@@ -172,7 +173,7 @@ public sealed class DarlingAnalysisPipelineTests
     [Fact]
     public void DrillDown_AllSql_CoversEveryQuery_TwoForTheSpikeMethod()
     {
-        /* 17 collect methods, one query each, except CollectQueriesAtSpike (peak lookup +
+        /* 19 collect methods, one query each, except CollectQueriesAtSpike (peak lookup +
            queries-at-peak = 2). The reconstructed-chain method's DMV-snapshot fallback runs
            through the shared PgBlockingPairRowQuery.DmvSnapshotSql, already pinned in the
            fact-collector suite. Plus the regressed-queries read's #3953 table twin, which Lite has no
@@ -284,9 +285,11 @@ public sealed class DarlingAnalysisPipelineTests
             /* #5794: JOIN LATERAL (subquery) names no relation, and unnest() is a set-returning function, not a table. */
             scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
             scanSql = Regex.Replace(scanSql, @"\bFROM\s+unnest\s*\(", "FROM (", RegexOptions.IgnoreCase);
+            /* #9492: EXTRACT(epoch FROM col) is a function's argument syntax, so its FROM names a column, not a relation. */
+            scanSql = Regex.Replace(scanSql, @"\bEXTRACT\s*\(\s*\w+\s+FROM\b", "EXTRACT(", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
-            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
+            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(", RegexOptions.Singleline)
                 .Select(m => m.Groups[1].Value)
                 .ToHashSet(StringComparer.Ordinal);
 

@@ -20,7 +20,8 @@ name: Darling MSI
 # Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
 # package yet.
 #
-# Triggers: a pull request touching the package, the scripts it runs, or this check; a manual dispatch; and a call from
+# Triggers: a pull request touching the package, the scripts it runs, this check, or anything that can change the payload
+# (the package versions, the shipped projects and the viewer lock file, #9358); a manual dispatch; and a call from
 # another workflow (`workflow_call`), which no workflow makes yet - the nightly does not run these legs. `pull_request`, never `pull_request_target`: the legs run the pull request's own
 # scripts and package, so they must run with the pull request's read-only token and no secrets.
 on:
@@ -31,6 +32,24 @@ on:
       - '.github/workflows/darling-msi.yml'
       - '.github/scripts/darling-msi.ps1'
       - '.github/scripts/assert-msi-signatures.ps1'
+      # #9358: what can change the payload the package is built from: the package versions and build properties, the
+      # projects the service and the viewer ship (their project references, all of them) and the viewer's lock file (the
+      # only one of these projects with a lock file).
+      - 'Directory.Packages.props'
+      - 'Directory.Build.props'
+      - 'Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj'
+      - 'Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj'
+      - 'Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj'
+      - 'Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj'
+      - 'Darling/PerformanceMonitor.Darling.Viewer/packages.lock.json'
+      - 'PerformanceMonitor.Alerting/PerformanceMonitor.Alerting.csproj'
+      - 'PerformanceMonitor.Analysis/PerformanceMonitor.Analysis.csproj'
+      - 'PerformanceMonitor.Collectors/PerformanceMonitor.Collectors.csproj'
+      - 'PerformanceMonitor.Common/PerformanceMonitor.Common.csproj'
+      - 'PerformanceMonitor.Notifications/PerformanceMonitor.Notifications.csproj'
+      - 'PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj'
+      - 'PerformanceMonitor.Ui/PerformanceMonitor.Ui.csproj'
   workflow_call:
   workflow_dispatch:
 

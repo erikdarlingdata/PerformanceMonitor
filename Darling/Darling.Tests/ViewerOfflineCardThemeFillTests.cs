@@ -165,7 +165,7 @@ public sealed class ViewerOfflineCardThemeFillTests
 
         Assert.Equal("Offline", offline.StatusText);
         /* The stamp, and in Server Time its clock's offset in brackets after it. */
-        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( \(UTC[+-]\d{2}:\d{2}\))?$", offline.LastCollectText);
+        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( \(UTC\u2060[+-]\d{2}:\d{2}\))?$", offline.LastCollectText);
 
         /* The fill: the card background, the same as a healthy card's, beside every row sampled. */
         foreach (var (where, dark, calm) in new[]

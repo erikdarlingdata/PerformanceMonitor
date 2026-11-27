@@ -33,7 +33,7 @@ internal static class SettingsImport
     internal static readonly string[] RootFiles = ["alert_state.json"];
 
     /// <summary>The <c>settings.json</c> keys that loosen the MCP server's checks. They are dropped from an imported file.</summary>
-    internal static readonly string[] McpGateKeys = ["mcp_allow_tokenless_loopback", "mcp_allow_writes", "mcp_allow_investigations"];
+    internal static readonly string[] McpGateKeys = ["mcp_allow_tokenless_loopback", "mcp_allow_writes", "mcp_allow_server_admin", "mcp_allow_windows_auth_over_unverified_tls", "mcp_allow_investigations"];
 
     private const string SettingsFileName = "settings.json";
 

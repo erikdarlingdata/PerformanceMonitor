@@ -10,10 +10,15 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -327,6 +332,76 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
             var restore = directory.GetAccessControl();
             restore.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
             directory.SetAccessControl(restore);
+        }
+    }
+
+    /// <summary>
+    /// #9747: the provider buffers lines for up to five seconds and writes them on a timer, so a line logged in the last seconds before
+    /// the process exits, the <c>collection loop stopped</c> line among them, reaches the file only if the host's container disposes
+    /// the provider. The process exits within a second of that line, so no timer tick and no explicit flush happens in between: the
+    /// container's disposal is the only thing that can write it. Registered as an instance, the provider is never disposed and the line is lost.
+    /// </summary>
+    [Fact]
+    public void ADisposedHost_WritesTheLinesLoggedSinceTheLastFlush_ToTheFileLog()
+    {
+        var logDir = Path.Combine(_tempRoot, "logs");
+        var provider = new DarlingFileLoggerProvider(logDir, _ => { });
+        var services = new ServiceCollection();
+        services.AddLogging(logging => DarlingProcessServices.AddFileLog(logging, provider));
+        var root = services.BuildServiceProvider();
+
+        root.GetRequiredService<ILoggerFactory>().CreateLogger("PerformanceMonitor.Darling.Service.DarlingWorker")
+            .LogInformation("PerformanceMonitor Darling collection loop stopped");
+        Assert.False(File.Exists(provider.CurrentLogFile()), "the line was written before the host stopped, so the test would not tell a disposed provider from a flush timer");
+
+        root.Dispose();
+
+        Assert.Contains("collection loop stopped", File.ReadAllText(provider.CurrentLogFile()), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #9747: a <c>darling.json</c> the service rejects is logged by the worker, the process stays up, and the stopped marker sends the
+    /// operator to the file log for the error. The error is in that file once the service is stopped, however soon after the start
+    /// that is: an operator who fixes the file and restarts the service reads the file of the run that rejected it.
+    /// </summary>
+    [Fact]
+    public async Task ARejectedConfiguration_HasItsErrorInTheFileLog_WhenTheServiceStopsRightAfterTheStart()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var logDir = Path.Combine(_tempRoot, "logs");
+        Directory.CreateDirectory(_tempRoot);
+        var configPath = Path.Combine(_tempRoot, "darling.json");
+        await File.WriteAllTextAsync(configPath, "{ \"postgres\": ", ct);
+        var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
+        try
+        {
+            var rejection = Assert.ThrowsAny<Exception>(() => DarlingConfig.Load());
+
+            var provider = new DarlingFileLoggerProvider(logDir, _ => { });
+            var services = new ServiceCollection();
+            services.AddLogging(logging => DarlingProcessServices.AddFileLog(logging, provider));
+            var root = services.BuildServiceProvider();
+            var state = new CollectorRuntimeState();
+            var worker = new DarlingWorker(
+                root.GetRequiredService<ILogger<DarlingWorker>>(), root.GetRequiredService<ILoggerFactory>(), new McpRuntimeState(),
+                new WebRuntimeState(), new MonitoredServerRegistryState(), state, new WebTlsCertificateState(), new BaselineCache(),
+                new ReadLatencyAccumulator());
+
+            await worker.StartAsync(ct);
+            await worker.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(60), ct);
+            var stopped = state.Read();
+            Assert.Equal(CollectorRuntimeState.CollectorPhase.Stopped, stopped?.Phase);
+            Assert.Equal(CollectorRuntimeState.StartupStep.Configuration, stopped?.Step);
+
+            await worker.StopAsync(ct);
+            root.Dispose();
+
+            Assert.Contains(rejection.Message, File.ReadAllText(provider.CurrentLogFile()), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
         }
     }
 

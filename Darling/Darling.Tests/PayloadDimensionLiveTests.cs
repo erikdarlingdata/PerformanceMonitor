@@ -71,6 +71,52 @@ public sealed class PayloadDimensionLiveTests
         return (-Random.Shared.Next(1_000_000, int.MaxValue), "pm1767-" + suffix);
     }
 
+    /// <summary>How far an orphan is planted below the older of the live clock and the fact floor the dimension GC measures.</summary>
+    private const int OrphanDaysBelowTheFloor = 400;
+
+    /// <summary>
+    /// The sighting time of an orphan the dimension GC must reclaim: <see cref="OrphanDaysBelowTheFloor"/> days older than both the live clock and
+    /// the oldest surviving digest-carrying fact, measured the way the GC measures it (the oldest chunk of a hypertable, emptied chunks included,
+    /// else the oldest row of a plain table). The GC prunes only content older than that floor minus a day, and a class that ran earlier on the
+    /// same store can leave chunks anywhere (#9809), so a distance from the clock alone can land above the floor and the orphan is kept.
+    /// </summary>
+    private static async Task<DateTime> OrphanSeenAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var oldest = DateTime.UtcNow;
+        bool hasChunks;
+        await using (var probe = new NpgsqlCommand("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL", connection))
+        {
+            hasChunks = (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
+        {
+            object? floor = null;
+            if (hasChunks)
+            {
+                await using var chunk = new NpgsqlCommand(
+                    "SELECT range_start AT TIME ZONE 'UTC' FROM timescaledb_information.chunks " +
+                    "WHERE hypertable_schema = 'collect' AND hypertable_name = $1 ORDER BY range_start LIMIT 1", connection);
+                chunk.Parameters.AddWithValue(factTable);
+                floor = await chunk.ExecuteScalarAsync(cancellationToken);
+            }
+
+            if (floor is not DateTime)
+            {
+                var timeColumn = CollectorCatalog.All.First(c => string.Equals(c.TargetTable, factTable, StringComparison.Ordinal)).PrefixTimeColumnName;
+                await using var rows = new NpgsqlCommand($"SELECT min({timeColumn}) FROM {factTable} WHERE {digestPredicate}", connection);
+                floor = await rows.ExecuteScalarAsync(cancellationToken);
+            }
+
+            if (floor is DateTime measured && measured < oldest)
+            {
+                oldest = measured;
+            }
+        }
+
+        return DateTime.SpecifyKind(oldest.AddDays(-OrphanDaysBelowTheFloor), DateTimeKind.Unspecified);
+    }
+
     private static async Task<NpgsqlConnection> OpenMigratedStoreAsync(string connectionString, CancellationToken cancellationToken)
     {
         var connection = new NpgsqlConnection(connectionString);
@@ -675,7 +721,7 @@ public sealed class PayloadDimensionLiveTests
 
             async Task<DateTime> LastSeenAsync()
                 => (DateTime)(await ScalarAsync(
-                    connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, digest))!;
+                    connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, digest))!;
 
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
@@ -788,19 +834,22 @@ public sealed class PayloadDimensionLiveTests
                a byte[][] argument there is covariantly assignable to object[], so C# spreads it
                across the params array (one digest per parameter) instead of binding it as ONE
                bytea[] array parameter. Explicit typing sidesteps that entirely. */
-            async Task<long> LockedRowCountAsync(byte[][] digests)
+            /* The wide rows' xmax values, one string. A row's xmax is not 0 once its stamp row was inserted (the stamp row's
+               foreign key takes a key-share lock on it, #9304), so "no lock taken" is read as "no xmax changed since the
+               rows landed", not as "xmax is 0". */
+            async Task<string> XmaxesAsync(byte[][] digests)
             {
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND xmax <> 0", connection);
+                    "SELECT coalesce(string_agg(xmax::text, ',' ORDER BY digest), '') FROM query_plan_dim WHERE digest = ANY($1)", connection);
                 command.Parameters.Add(new NpgsqlParameter
                 { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
-                return (long)(await command.ExecuteScalarAsync(ct))!;
+                return (string)(await command.ExecuteScalarAsync(ct))!;
             }
 
             async Task<long> ChangedLastSeenCountAsync(byte[][] digests, DateTime expected)
             {
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND last_seen <> $2", connection);
+                    "SELECT count(*) FROM collect.query_plan_dim_seen WHERE digest = ANY($1) AND last_seen <> $2", connection);
                 command.Parameters.Add(new NpgsqlParameter
                 { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
                 command.Parameters.Add(new NpgsqlParameter
@@ -810,14 +859,14 @@ public sealed class PayloadDimensionLiveTests
 
             // The initial collection cycle: 50 "hot" plans plus one that will go stale.
             await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
-            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            var xmaxesAtLanding = await XmaxesAsync(freshDigests);
 
             // (1) Same batch, same digests, 3 hours later -- still inside the guard's freshness
             // window (#4503: 6 hours). The pre-filter excludes every one of them before the statement
             // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
             await FlushAsync(freshPairs, t0.AddHours(3));
 
-            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            Assert.Equal(xmaxesAtLanding, await XmaxesAsync(freshDigests));
             Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
 
             // (2) and (3): 7 hours after t0 (past the guard window), the stale row is refreshed and a
@@ -825,11 +874,11 @@ public sealed class PayloadDimensionLiveTests
             await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(7));
 
             var refreshedStale = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, staleDigest))!;
             Assert.Equal(t0.AddHours(7), refreshedStale);
 
             var insertedNew = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, newDigest))!;
             Assert.Equal(t0.AddHours(7), insertedNew);
 
             bodySucceeded = true;
@@ -1470,9 +1519,9 @@ public sealed class PayloadDimensionLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
 
-        /* Far past the ~32-day cutoff, so an unguarded GC would certainly take it. */
+        /* Far past both the ~32-day cutoff and the floor the GC measures, so an unguarded GC would certainly take it. */
         var digest = PayloadDimensions.Digest("pm1782-" + Guid.NewGuid().ToString("N"));
-        var ancient = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-400), DateTimeKind.Unspecified);
+        var ancient = await OrphanSeenAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var renamed = false;
@@ -1716,7 +1765,7 @@ public sealed class PayloadDimensionLiveTests
         var heldFactTime = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
         var referencedDigest = PayloadDimensions.Digest("pm1795-referenced-" + Guid.NewGuid().ToString("N"));
         var orphanDigest = PayloadDimensions.Digest("pm1795-orphan-" + Guid.NewGuid().ToString("N"));
-        var orphanSeen = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-400), DateTimeKind.Unspecified);
+        var orphanSeen = await OrphanSeenAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 

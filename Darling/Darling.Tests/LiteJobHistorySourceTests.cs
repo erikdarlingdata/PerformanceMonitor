@@ -14,9 +14,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Lite's twins of #4487's job_history fixes, checked without a live DuckDB or a project reference to
-/// Lite: a source-text scan of the two runner files, confirming (a) the numeric watermark read is scoped
-/// to the newest batch's <c>collection_time</c> rather than a plain unscoped MAX, and (b) the pre-insert
-/// natural-key dedupe runs before the appender opens, by textual order in the method body. Runs on macOS.
+/// Lite: a source-text scan of the two runner files, confirming the numeric watermark read is scoped
+/// to the newest batch's <c>collection_time</c> rather than a plain unscoped MAX. Runs on macOS. The pre-insert natural-key
+/// dedupe of <c>WriteBatch</c> is covered by a behaviour test in Lite.Tests (<c>JobHistoryDedupeAndWatermarkLiteTests</c>).
 /// </summary>
 public sealed class LiteJobHistorySourceTests
 {
@@ -70,21 +70,5 @@ public sealed class LiteJobHistorySourceTests
             "cmd.CommandText = $\"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1\";",
             body,
             StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void WriteBatch_CallsDropAlreadyStoredJobHistoryRows_BeforeCreateAppender()
-    {
-        var text = ReadRepoFile("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs");
-        var body = ExtractMethodBody(text, "private static int WriteBatch<TRow>(");
-
-        var dedupeIndex = body.IndexOf("DropAlreadyStoredJobHistoryRows(", StringComparison.Ordinal);
-        var appenderIndex = body.IndexOf("CreateAppender(", StringComparison.Ordinal);
-
-        Assert.True(dedupeIndex >= 0, "WriteBatch no longer calls DropAlreadyStoredJobHistoryRows");
-        Assert.True(appenderIndex >= 0, "WriteBatch no longer calls CreateAppender");
-        Assert.True(
-            dedupeIndex < appenderIndex,
-            "the pre-insert dedupe must run BEFORE the appender opens, by textual order in WriteBatch's body");
     }
 }

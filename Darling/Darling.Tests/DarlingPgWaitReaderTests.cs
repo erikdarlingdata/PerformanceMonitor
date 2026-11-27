@@ -80,7 +80,7 @@ public class DarlingPgWaitReaderTests
     public void UsesTheStandardServerAndWindowParameters()
     {
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", Sql);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
     }
 
@@ -88,7 +88,7 @@ public class DarlingPgWaitReaderTests
     [Fact]
     public void OrdersByWeightAndBoundsTheResult()
     {
-        Assert.Contains("ORDER BY SUM(delta_wait_time_us) DESC", Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_wait_time_us) DESC", Sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT", Sql, StringComparison.Ordinal);
     }
 

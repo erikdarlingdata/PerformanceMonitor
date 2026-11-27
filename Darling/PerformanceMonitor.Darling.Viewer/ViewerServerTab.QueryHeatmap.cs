@@ -133,10 +133,10 @@ public partial class ViewerServerTab
     /// holds a row, so a stretch with no row has no column and cannot tell a server that did not exist yet from a quiet one; the
     /// banner names the earlier of the coverage start and the first column drawn. The read has no row cap, so only that rule applies.
     /// </summary>
-    private async Task ReadAndDrawQueryHeatmapAsync(HeatmapMetric metric, DateTime startUtc, DateTime endUtc)
+    private async Task ReadAndDrawQueryHeatmapAsync(HeatmapMetric metric, DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         var dataStartTask = _dataService.GetQueryHeatmapDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = Timed(timer, "heatmap read", _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Query Heatmap");
         var result = dataReadTask.Result;
         UpdateQueryHeatmapChart(result);
@@ -146,15 +146,17 @@ public partial class ViewerServerTab
     private async void HeatmapMetric_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded) return;
+        var timer = new ViewerLoadTimer();
         try
         {
             var (startUtc, endUtc) = GetWindowUtc();
             var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
-            await ReadAndDrawQueryHeatmapAsync(metric, startUtc, endUtc);
+            await ReadAndDrawQueryHeatmapAsync(metric, startUtc, endUtc, timer);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"heatmap metric change failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Queries > Query Heatmap", timer, ex));
         }
     }
 

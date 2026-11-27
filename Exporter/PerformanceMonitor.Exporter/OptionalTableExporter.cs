@@ -146,7 +146,11 @@ public static class OptionalTableExporter
         var hasServerName = columns.Any(c => string.Equals(c.Name, "server_name", StringComparison.Ordinal));
         var hasTimeColumn = request.TimeColumn is not null &&
             columns.Any(c => string.Equals(c.Name, request.TimeColumn, StringComparison.Ordinal));
-        var orderBy = hasServerName && hasTimeColumn ? $"server_name, {QuoteIdentifier(request.TimeColumn!)}" : null;
+        // server_name and the time column first when the table has both, then every other column, so rows that tie on those
+        // two (or a table with neither) come out in the same order on every export.
+        var orderBy = TotalOrder.Columns(
+            hasServerName && hasTimeColumn ? ["server_name", request.TimeColumn!] : [],
+            columns.Select(c => c.Name));
 
         using var partWriter = new OptionalPartWriter(request.Table, columns, outDir, store, request.FromUtc, request.ToUtc, orderBy);
         var readerColumnCount = reader.FieldCount;
@@ -277,7 +281,7 @@ public static class OptionalTableExporter
     /// Writes one optional table's rows as a series of sorted, byte-bounded Parquet parts. A fresh in-memory DuckDB
     /// instance per chunk (via <see cref="DuckDbSession.OpenInMemory"/>) is what bounds memory -- the same shape
     /// <see cref="ChunkedParquetWriter"/> uses and documents. Unlike that writer, each chunk's part IS a final
-    /// output file (sorted by server_name and the time column when both exist), never merged.
+    /// output file (sorted by server_name and the time column when both exist, then by every other column), never merged.
     /// </summary>
     private sealed class OptionalPartWriter : IDisposable
     {

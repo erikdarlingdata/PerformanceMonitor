@@ -168,6 +168,43 @@ public class OptionalTableExporterTests
     }
 
     [Fact]
+    public async Task A_timestamptz_column_round_trips_as_the_same_utc_instant()
+    {
+        // query_tag_sightings.first_seen and last_seen are timestamptz, the first such column in an optional export.
+        var outDir = NewOutDir();
+        try
+        {
+            var rows = new List<object[]>
+            {
+                new object[] { new DateTime(2026, 10, 22, 11, 30, 0, DateTimeKind.Utc) },
+                new object[] { DBNull.Value },
+            };
+            var reader = new FakeDbDataReader(["last_seen"], ["timestamptz"], rows);
+            var request = new OptionalExportRequest("tz_opt", TimeColumn: "last_seen", IsSnapshot: false, DateTime.UtcNow, DateTime.UtcNow.AddHours(1));
+
+            var result = await OptionalTableExporter.ExportAsync(
+                request, "store_a", outDir, _ => Task.FromResult<DbDataReader>(reader), CancellationToken.None);
+
+            Assert.Equal(2, result.RowCount);
+            var absolute = Path.Combine(outDir, "store_a", result.Parts[0].RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            using var connection = new DuckDBConnection("Data Source=:memory:");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT count(*) FILTER (WHERE last_seen = TIMESTAMPTZ '2026-10-22 11:30:00+00'), " +
+                                  $"count(*) FILTER (WHERE last_seen IS NULL), any_value(typeof(last_seen)) FROM read_parquet('{absolute}')";
+            using var read = await command.ExecuteReaderAsync();
+            Assert.True(await read.ReadAsync());
+            Assert.Equal(1L, read.GetInt64(0));
+            Assert.Equal(1L, read.GetInt64(1));
+            Assert.Equal("TIMESTAMP WITH TIME ZONE", read.GetString(2));
+        }
+        finally
+        {
+            Directory.Delete(outDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Non_ascii_text_round_trips()
     {
         var outDir = NewOutDir();

@@ -283,4 +283,41 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
             Assert.NotEqual("empty", root.GetProperty("status").GetString());
         });
     }
+
+    /// <summary>
+    /// #8920: Aurora readers never appear in pg_stat_replication, so the empty answer on an Aurora target says that instead of
+    /// inviting a search for a missing replica. Vanilla PostgreSQL keeps its words.
+    /// </summary>
+    [Theory]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, true)]
+    [InlineData(MonitoredEngineKind.Postgres, false)]
+    public async Task AnEmptyReplicationStatsRead_OnAnAuroraTarget_SaysReadersDoNotAppear_AgainstDevPostgres(string engineKind, bool aurora)
+    {
+        var t = Of("get_pg_replication_stats");
+        await RunAsync(t, "aurora-" + engineKind, async (c, ds, end, name) =>
+        {
+            await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-30), end);
+            await Exec(c, "UPDATE servers SET engine_kind = $2 WHERE server_id = $1", Id(name), engineKind);
+
+            var message = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end)).GetProperty("message").GetString()!;
+
+            Assert.Equal(aurora, message.Contains("Aurora readers use the shared storage volume", StringComparison.Ordinal));
+            Assert.Equal(aurora, message.Contains("No standby was streaming", StringComparison.Ordinal));
+            Assert.Equal(!aurora, message.Contains("No replica was connected", StringComparison.Ordinal));
+            Assert.Equal(!aurora, message.Contains("check get_pg_replication_slots", StringComparison.Ordinal));
+            Assert.Equal(aurora, message.Contains("That is not a replication fault", StringComparison.Ordinal));
+            Assert.Contains("expected answer", message, StringComparison.Ordinal);
+
+            /* A cut window drops the covered claim, so the reply leads with the factual sentence. */
+            var began = end.AddMinutes(-30);
+            await SeedServerAsync(c, t, name, began, began, end);
+            await Exec(c, "UPDATE servers SET engine_kind = $2 WHERE server_id = $1", Id(name), engineKind);
+            var cut = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), cut.ToString());
+            var cutMessage = cut.GetProperty("message").GetString()!;
+            Assert.Equal(aurora, cutMessage.StartsWith("No standby was streaming", StringComparison.Ordinal));
+            Assert.Equal(!aurora, cutMessage.StartsWith("No replica was connected", StringComparison.Ordinal));
+            Assert.DoesNotContain("expected answer", cutMessage, StringComparison.Ordinal);
+        });
+    }
 }

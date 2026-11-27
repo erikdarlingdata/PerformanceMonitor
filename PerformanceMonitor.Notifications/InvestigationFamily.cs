@@ -69,10 +69,14 @@ public static class InvestigationFamily
         [AlertFamily.ClientTimeoutsMetric] = QueryPerformance,
 
         ["High CPU"] = Resources,
+        /* #9501: capacity held at the configured ceiling with low instance CPU is resource pressure (memory and buffer cache). */
+        [AlertFamily.CapacityAtCeilingMetric] = Resources,
         ["Poison Wait"] = Resources,
         /* Not in the draft: the scheduler queue is CPU pressure, read the other way round. */
         ["Runnable Queue"] = Resources,
         ["tempdb Space"] = Resources,
+        ["tempdb Log Space"] = Resources,
+        ["tempdb Growth Fit"] = Resources,
         ["Version Store (PVS)"] = Resources,
         ["Volume Free Space"] = Resources,
         ["Database File Growth"] = Resources,
@@ -80,6 +84,9 @@ public static class InvestigationFamily
         ["Identity Capacity"] = Resources,
 
         ["Database State"] = Availability,
+        /* #8884: an instance that restarted, or wrote a dump, is an availability question first. */
+        ["Instance Restarted"] = Availability,
+        ["Memory Dumps"] = Availability,
         /* Not in the draft: a missing backup or CHECKDB is a restorability gap, which sits beside Database State. */
         ["Backup Overdue"] = Availability,
         ["Log Backup Overdue"] = Availability,

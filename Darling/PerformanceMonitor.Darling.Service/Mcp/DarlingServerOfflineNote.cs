@@ -191,10 +191,12 @@ internal static class DarlingServerOfflineNote
     /// With <paramref name="windowStartUtc"/> and a collection inside the window (#7724) the <c>unavailable</c> answer is <see cref="McpHelpers.CollectedThroughStatus"/> instead (the offline lead, then the collected-through sentence).
     /// Any other answer, any answer for a server that is not offline, and any answer whose window ends at or before the server's newest
     /// collection (it is inside collected history, so its emptiness is a real finding), comes back unchanged.
+    /// With <paramref name="snapshotCollector"/> and <paramref name="windowStartUtc"/> (#9339) an <c>empty</c> answer for a server that is not
+    /// offline gains <see cref="CollectionGapNote"/> when the window holds skipped slots or that collector's failed runs.
     /// </summary>
     internal static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken,
-        DateTime? windowStartUtc = null)
+        DateTime? windowStartUtc = null, string? snapshotCollector = null)
     {
         if (!IsEmptyAnswer(answer))
         {
@@ -206,6 +208,15 @@ internal static class DarlingServerOfflineNote
         var (lead, newest) = await LeadWithNewestAsync(postgres, serverId, displayName, windowEndUtc, windowEndUtc, cancellationToken);
         if (lead is null)
         {
+            /* #9339: a server that is online now can still have skipped or failed collection inside the window (a THREADPOOL episode
+               starves the collector's own connection). A snapshot read that passes its collector says so, with the count and the span,
+               so an empty answer does not read as "nothing was waiting". */
+            if (snapshotCollector is not null && windowStartUtc is { } start)
+            {
+                var gaps = await DarlingCollectionGapReader.ReadAsync(postgres, serverId, snapshotCollector, start, windowEndUtc, cancellationToken);
+                return CollectionGapNote.Apply(answer, snapshotCollector, gaps);
+            }
+
             return answer;
         }
 

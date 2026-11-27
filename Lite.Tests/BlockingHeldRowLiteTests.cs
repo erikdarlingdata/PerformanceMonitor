@@ -216,6 +216,11 @@ public sealed class BlockingHeldRowLiteTests
 
         private static object? EmptyOf(Type type)
         {
+            if (type == typeof(InstanceEventInfo))
+            {
+                return new InstanceEventInfo(null, null);
+            }
+
             if (type.IsValueType)
             {
                 return Activator.CreateInstance(type);

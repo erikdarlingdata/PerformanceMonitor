@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -107,6 +108,9 @@ public partial class NotificationRouteEditDialog : Window
         System.Collections.Generic.IEnumerable<NotificationRouteRow>? allRoutes = null)
     {
         InitializeComponent();
+        /* The form scrolls above its pinned buttons when it is taller than the work area of the monitor it is on (#8804). */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        SizeChanged += (_, _) => WindowWorkArea.Clamp(this);
         _stored = existing;
         _dataService = dataService;
 

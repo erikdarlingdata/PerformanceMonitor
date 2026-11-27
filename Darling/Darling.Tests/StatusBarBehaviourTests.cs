@@ -183,6 +183,30 @@ public sealed class StatusBarBehaviourTests
         Assert.DoesNotContain("Updated T", Strings("afterNextFleetPoll"));
     }
 
+    /// <summary>#9203: the bar names the build the service reports, last, and only when it reports one.</summary>
+    [Fact]
+    public void TheBar_NamesTheBuildTheSessionReports_AsItsLastItem()
+    {
+        if (!TryRun("build", out var r)) return;
+        var items = Items(r);
+        Assert.Equal("Version 3.13.0 (commit abcdef123)", items[^1]);
+        Assert.Contains("Access: read-write", items);
+    }
+
+    [Fact]
+    public void TheBar_ShowsNoBuildItem_WhenTheSessionNamesNone()
+    {
+        if (!TryRun("buildAbsent", out var r)) return;
+        Assert.DoesNotContain(Items(r), t => t.StartsWith("Version", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WhenTheFleetReadFails_TheBuildStaysBesideTheNotice()
+    {
+        if (!TryRun("buildFleetDown", out var r)) return;
+        Assert.Equal(["Fleet unavailable", "Version 3.13.0 (commit abcdef123)"], Items(r));
+    }
+
     [Theory]
     [InlineData("pingFails")]
     [InlineData("sessionFails")]

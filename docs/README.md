@@ -10,12 +10,13 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 - [Lite guide](lite-guide.md): install, upgrade and configure Lite.
 - [Darling guides](darling/README.md): the reading order for all Darling pages.
 - [Install Darling](darling/install.md): from a downloaded zip to a service that collects data.
-- [Darling quick start](darling-quick-start.md): the short path for Windows and Linux, plus the web dashboard.
+- [Darling quick start](darling-quick-start.md): the short path for Windows and Linux, plus the web dashboard. Linux under systemd has its own page, [Install Darling on Linux with systemd](darling/linux.md).
 - [Darling install guide (moved)](uat-onboarding.md): a pointer from the old install guide to the new pages.
 - [PostgreSQL target runbook](postgres-first-target-runbook.md): point Darling at a PostgreSQL target, with a proof point at each step.
 
 ## Run
 
+- [Run Lite headless](lite-guide.md#run-lite-headless): collect with no window, no tray and no signed-in user, started by a scheduled task.
 - [Running Darling day to day](darling/admin.md): the routine tasks after the first week.
 - [Command line reference](darling/cli.md): every verb that the Darling service exe accepts.
 - [The WPF viewer](darling/viewer.md): open the desktop viewer on the service host or on another machine.
@@ -60,6 +61,7 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 
 ## Reference
 
+- [Code map](CODEMAP.md): where each part of the code lives and which files to open first. It is generated, and also comes as [HTML](codemap.html) and [JSON](codemap.json).
 - [How collection works](how-collection-works.md): a tour of the collection pipeline.
 - [Support and sponsorship](support.md): commercial support and sponsorship.
 - [Third-party components](third-party-components.md): components that ship with the product, and their licenses.

@@ -465,6 +465,13 @@ OUTER APPLY
     public static bool PlanPhaseApplies(CollectorContext context) =>
         InlinePlanCapture(context) || DeferredPlanIdentity(context);
 
+    /// <summary>
+    /// True when this run's plan phase renders plan XML, and false when it reads only the plan identities. Rendering a
+    /// plan waits on the schema locks of the objects the plan references, so a host bounds the phase's commands when
+    /// this is true (#9535). The identity read is aggregates over <c>sys.dm_exec_query_stats</c> and takes no such lock.
+    /// </summary>
+    public static bool PlanPhaseRendersPlans(CollectorContext context) => InlinePlanCapture(context);
+
     /// <summary>The ordinal of the first identity column in the plan phase result: after <c>ord</c>, and after the plan columns when present.</summary>
     private static int IdentityOrdinal(CollectorContext context) => InlinePlanCapture(context) ? 3 : 1;
 
@@ -868,6 +875,14 @@ EXECUTE sys.sp_executesql @sql, N'" + declarations + "', " + arguments + ";",
             }
         }
     }
+
+    /// <summary>
+    /// Whole-collector version floor (#9099): the SQL below reads columns or objects that SQL Server 2014 and older do not have
+    /// (the spill columns of sys.dm_exec_procedure_stats), so on a target below the supported floor the collector does not run and reads as not collected, instead of failing
+    /// every cycle. Unknown version (0) assumes newest, and Azure SQL Database and Managed Instance are never version-gated.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     public override string Name => "procedure_stats";
 

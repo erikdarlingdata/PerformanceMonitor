@@ -26,6 +26,8 @@ on a workflow or script that reads a version from any path but `Directory.Build.
 
 Verify no other files contain hardcoded version strings that need updating.
 
+Right after the release is tagged (step 11), open a PR to `dev` that bumps `<Version>` to the next minor. Nightlies then sort above the release just shipped, and `MigrationUpgradeLadderLiveTests.TheMostRecentRelease_HasALadderFixture` checks for that release's fixture instead of the one before it.
+
 ### 2. CHANGELOG
 
 Ensure `CHANGELOG.md` has an entry for the new version with:
@@ -66,6 +68,10 @@ Cross-reference `README.md` against the changelog and ensure all user-facing cha
 
 Do NOT add internal/implementation changes — only user-facing features and behavior.
 
+### 2c. Refresh the code map
+
+Run `python tools/codemap/codemap.py` and commit `docs/codemap.json`, `docs/CODEMAP.md` and `docs/codemap.html` if they changed. The script fails when `tools/codemap/areas.json` lists a file or folder that no longer exists. Fix that list, then run it again.
+
 ### 3. Upgrade Scripts — Schema Change Audit (conditional)
 
 Applies ONLY when `install/` or `upgrades/` changed since the last release. The frozen Dashboard in the zip reads this schema, so its schema discipline still holds when it IS touched:
@@ -82,7 +88,7 @@ dotnet build PerformanceMonitor.sln -c Debug -t:Rebuild
 ```
 All projects must succeed with **0 Warning(s) / 0 Error(s)** — the repo's bar is zero-warning, test projects included (they sit outside the WarningsAsErrors gate, so a warm incremental build can hide a warning a Rebuild surfaces).
 
-The statement-column census test fails while any entry or watched writer is pending, in every Darling test run, with or without the variable. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` to see the list early; the cut proceeds only when it passes. The release workflow (build.yml, the "Statement filter release gate" step) runs the same test with the variable set before it publishes or packages anything, so a release cannot ship while an entry is pending even if this step is skipped; run it here first to see the list early.
+The statement-column census test fails while any entry or watched writer is pending, in every Darling test run, with or without the variable. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` to see the list early; the cut proceeds only when it passes. The release pull request's CI (pr.yml, the "Statement filter release gate" step, which runs only on a pull request whose base is `main`) runs the same test with the variable set before the tag, so a release cannot be tagged while an entry is pending even if this step is skipped; run it here first to see the list early. The release build, which runs after the release is published, runs no test.
 
 (The frozen Installer and Dashboard test suites are not built or run anywhere. See `deprecated/README.md`.)
 
@@ -106,7 +112,7 @@ Spin up temporary instances with the Azure CLI (`az`) and AWS CLI (`aws`):
    - server row shows engine edition 5, and no collector that does not apply to Azure SQL DB errors. The SQL Agent collectors (`running_jobs`, `job_history`, `agent_status`) are marked not applicable when the server is added (`add_servers` answers "Agent surface: not applicable") and never run, so they leave no `collection_log` row and no health entry. That is the expected result, not a gap (verified v3.10.0)
    - `collection_log` clean for the cloud server across the cycles
    - the always-on XE sessions exist in the Azure database: `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` (the client-timeout session, #5640; `SELECT name FROM sys.database_event_sessions`), or this install's own `PerformanceMonitor_Darling_<id>_...` / `PerformanceMonitor_Lite_<id>_...` fallback of the same capture. `PerformanceMonitor_Attention` has two actions that no Azure run has proved: `sqlserver.client_hostname` and `sqlserver.sql_text`. If the create is rejected with error 25744 (`The action ... is not available for Azure SQL Database`), put the named action on the closed list, as #3753 did for the long-query trace, in `AlwaysOnXeSessions.AttentionAzureRejectedActions` (a one-line edit: the Azure DDL is generated from it), and re-run
-   - the serverless DB's 60s auto-pause + resume (error 40613 transients) does not wedge collection — rows resume after the pause without a service restart
+   - the serverless DB's 60-minute auto-pause (`--auto-pause-delay` is in minutes) + resume (error 40613 transients) does not wedge collection — rows resume after the pause without a service restart
 4. Firewall churn: DELETE the allow rule, wait 3–5 minutes, re-add it. Collection must resume on its own without restarting the service. (CAVEAT, verified v3.2.0: a bare rule-deletion often does NOT sever an actively-collecting client — connection pooling keeps the open connection alive and Azure gates only NEW connections — so treat a no-outage result as inconclusive rather than a pass; the recovery logic's authoritative validation is the unit suites.) To force a real outage (verified v3.10.0): open admin sessions in each user database BEFORE deleting the rule, in case the machine you test from shares the Darling host's egress IP. Delete the rule, wait 6 minutes for it to take effect, then KILL Darling's sessions (`program_name` = `PerformanceMonitorDarling`) from those sessions. KILL is denied in master even for the server admin, so collectors pooled on master keep running. Collectors that open new connections then hit 40615: the `collection_log` message must name the firewall, and those collectors must store rows again after the rule is re-added, with the service's `started_at` unchanged.
 5. Clean up: `az group delete --name rg-release-test --yes --no-wait`
 
@@ -170,13 +176,13 @@ Run the Windows items on a disposable machine or VM, and point them at a throwaw
 
 #### (a) The Windows upgrade-shape CI job
 
-The workflow is `.github/workflows/darling-upgrade-shapes.yml`. It runs 14 legs: seven on `windows-2022` and seven on `windows-2025`. Each leg installs a real released build with that build's own scripts, then runs this commit's install or upgrade script over it. The legs cover four shapes:
+The workflow is `.github/workflows/darling-upgrade-shapes.yml`. It runs 17 legs: seven on `windows-2022` and ten on `windows-2025`. Each leg installs a real released build with that build's own scripts, then runs this commit's install or upgrade script over it. The legs cover four shapes:
 - U1: an install on the default virtual account.
 - U2: an install whose service logon was changed to a non-default local account.
 - U3: an install whose service was deleted.
 - U4: a pre-3.9 folder directly under `C:\` that must still refuse and print the move steps.
 
-The workflow runs on pull requests that touch `Darling/tools/*.ps1`, as the `Darling upgrade shapes` job in the nightly, and by manual dispatch. The release commit often carries no such check, so look for the run at its sha. In the release commit's checks or the nightly, confirm all 14 legs ran at that sha and are green, by name. A skipped leg is not a pass. If there is no run at that sha, start one with `gh workflow run darling-upgrade-shapes.yml --ref <release branch>` and wait for it.
+The workflow runs on pull requests that touch `Darling/tools/*.ps1`, as the `Darling upgrade shapes` job in the nightly, and by manual dispatch. The release commit often carries no such check, so look for the run at its sha. In the release commit's checks or the nightly, confirm all 17 legs ran at that sha and are green, by name. A skipped leg is not a pass. If there is no run at that sha, start one with `gh workflow run darling-upgrade-shapes.yml --ref <release branch>` and wait for it.
 
 Also read the two pins at the top of the workflow, `DARLING_CURRENT_RELEASE` and `DARLING_OLD_RELEASE`. The first must name the last shipped release, and the second a release from before 3.9 that is still downloadable. Record the run URL. If any leg is red or skipped, stop. A red leg blocks the release, and re-running it until it passes is not a fix.
 
@@ -185,14 +191,14 @@ Also read the two pins at the top of the workflow, `DARLING_CURRENT_RELEASE` and
 Do the whole procedure twice: once from the last release, and once from the oldest release still supported.
 
 - **Which release is the oldest supported:** the oldest `Darling/Darling.Tests/Fixtures/migration-ladder-v<version>.sql` in the tree. `MigrationUpgradeLadderLiveTests` climbs the current ladder over every fixture in that folder. Its `TheMostRecentRelease_HasALadderFixture` check keeps the newest shipped release in the set. So the oldest fixture is the oldest store the tests vouch for. Read the folder at release time, and do not copy a version number into this file. Deleting a fixture drops that release from support, so make it a deliberate decision and not a tidy-up.
-- **Set up the old install:** download that release's Darling zip and extract it to `C:\Program Files\PerformanceMonitorDarling`. Write a `darling.json` that points at one throwaway test instance. Install it the way that release documented: its `install-darling.ps1`, or the manual steps in the README's "Upgrading from a build that predates the script" section when that release has no script. Let it collect for at least two cycles. Before upgrading, record `MAX(version)` from `darling_schema_version` and the account the service runs as. Also record the row counts of two or three `collect.*` tables.
+- **Set up the old install:** download that release's Darling zip and extract it to the folder that release documented. Early releases (3.3.0 among them) used `C:\PerformanceMonitorDarling`: under `C:\Program Files\` their managed PostgreSQL bootstrap fails with "Access to the path ... pg-runtime is denied". Early releases are also framework-dependent, so install the .NET 10 runtime first on a machine that has none. From an install under `C:\`, `upgrade-darling.ps1` refuses the in-place upgrade and prints the steps that move the install. Follow them, then run the upgrade. Write a `darling.json` that points at one throwaway test instance. Install it the way that release documented: its `install-darling.ps1`, or the manual steps in the README's "Upgrading from a build that predates the script" section when that release has no script. Let it collect for at least two cycles. Before upgrading, record `MAX(version)` from `darling_schema_version` and the account the service runs as. Also record the row counts of two or three `collect.*` tables.
 - **Upgrade:** extract the new release zip to a staging folder under `C:\Program Files\` that only administrators can write to. From an elevated PowerShell, run that copy's `upgrade-darling.ps1 -Source <staging folder>`. On one of the two runs, point `-Source` at the downloaded zip with `-Sha256` from the release page, so the hash path runs too. When the old release predates the script, the new zip's script still runs over it, because it finds the install through the registered service. If the README still tells those users to take the manual procedure, walk that once as well. Record which path worked.
 - **Pass, at the script:** it exits 0 without a refusal. It prints that the SHA256 was verified (zip run), that `darling.json` is byte-identical, that the install manifest was written, and "Service is Running".
 - **Pass, 10 to 15 minutes later:** work the five checks the script prints against the store.
   1. `MAX(version)` equals the new build's top rung.
   2. `collect.collection_log` has rows for every configured server in the last 15 minutes.
-  3. The collector count is in the mid-30s, not single digits.
-  4. Every non-SUCCESS row since the restart gets read. YIELDED is the lock-timeout guard working. Anything else is a finding.
+  3. The collector count is about 50 (47 to 52 on 3.13.0), not single digits.
+  4. Every non-SUCCESS row since the restart gets read. YIELDED (the lock-timeout guard) and ANALYZED (the `analysis_pass` row, which is on every fresh and upgraded store) are expected. Anything else is a finding.
   5. One table the release added or changed shows new rows.
 
   The row counts you recorded before the upgrade must still be there, and the service account must be unchanged. A service that is Running but not collecting is a fail.
@@ -212,14 +218,14 @@ Then run `uninstall-darling.ps1`, with `-PurgeData` on a machine you will reuse,
 
 The release also attaches `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`, `PerformanceMonitorDarling-compose-<version>.tar.gz` and `SHA256SUMS-linux.txt` (#6123). The `darling-linux` job in `build.yml` builds them. The tarball is a framework-dependent publish of the service, tarred with no wrapper folder. The compose archive is the `Darling/compose/` folder from git in one wrapper folder, with the `darling` image line changed from `:latest` to `:<version>`. The `darling-linux-publish` job uploads them and pushes `ghcr.io/erikdarlingdata/performancemonitor-darling`, tagged with the version and `latest`. It starts only after the Windows `build` job has passed, signature checks included (#5804), so the Linux assets reach the release some minutes after the Windows ones; a release whose Windows build failed has no Linux assets and no new image. The tarball waits as a workflow artifact for seven days, so a "Re-run failed jobs" within a week publishes it; after that use "Re-run all jobs".
 
-Linux has no install script, no upgrade script and no systemd unit file in the tarball. The supported shapes are in the README's "Run on Linux" section. One is the compose stack, from the compose archive. The other is the tarball extracted to `/opt/darling` under a unit written from the README's example, with your own PostgreSQL. 
+The tarball has `darling.service`, `install-darling.sh`, `upgrade-darling.sh` and `darling.linux.sample.json` in its root (#9688). The supported shapes are in the README's "Run on Linux" section. One is the compose stack, from the compose archive. The other is the tarball installed by `install-darling.sh` under the tarball's unit, with your own PostgreSQL. 
 
-There is no scripted Linux upgrade path. An upgrade is the same manual steps as a fresh install, over an existing store. So the release must check this by hand:
+The scripted Linux upgrade is `upgrade-darling.sh`. The release must check this by hand:
 
 - **Artifacts:** the tarball, the compose archive and `SHA256SUMS-linux.txt` are on the release, both checksums match, and the versioned and `latest` image tags exist.
 - **Fresh install, compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz` from the release, extract it, and bring the stack up from the folder it makes, on a fresh volume. Its compose file already names this release's own image tag (`:<version>`), so no edit is needed. Check that the `darling` service's `image:` line ends in `:<version>`, not `:latest`. Pass: `docker compose ps` shows the darling container healthy (not `unhealthy`). The log shows the config load and `Postgres store ready`. `collection_log` fills, as in the Windows checks.
-- **Fresh install, systemd:** extract the tarball to `/opt/darling` and install `libgssapi-krb5-2`. Write the unit from the README. Point `DARLING_CONFIG` at a config for a throwaway PostgreSQL 15+ with TimescaleDB, and start it. Pass: the unit is active and the same store checks hold.
-- **Upgrade:** repeat each shape over a store the previous release created. For compose, keep the volume and recreate the container from this release's compose archive and image. For systemd, stop the unit, move `/opt/darling` aside, extract the new tarball, keep the config, and start the unit. Pass: the service starts, the store migrates to the new top rung, and collection continues with the earlier rows still present.
+- **Fresh install, systemd:** install `libgssapi-krb5-2`, extract the tarball to a staging folder and run its `install-darling.sh`. Fill `/etc/darling/darling.json` and its secret files for a throwaway PostgreSQL 16+ with TimescaleDB, and run the script again. Pass: the script exits `0`, the unit is active and the same store checks hold.
+- **Upgrade:** repeat each shape over a store the previous release created. For compose, keep the volume and recreate the container from this release's compose archive and image. For systemd, extract the new tarball to a staging folder and run its `upgrade-darling.sh`. It exits `0`, and `/opt/darling.previous` holds the old build. Pass: the service starts, the store migrates to the new top rung, and collection continues with the earlier rows still present.
 - **Oldest supported:** apply the same fixture rule as (b). If that release did not ship a Linux tarball, say so in the record and use the oldest release that did.
 - **Record:** the same fields as (b), plus the image digest or tarball checksum you tested.
 
@@ -229,6 +235,7 @@ Put the outcome of (a) to (d) in the release's test record. An unchecked box blo
 
 Before cutting the release, verify the nightly build has been clean:
 - Check that the most recent nightly build completed successfully (GitHub Actions) — verify the gated legs BY NAME (`build`, `Darling PostgreSQL tests`); a green wrapper exit code is not evidence, and the nightly publishes assets even when the test leg fails
+- The nightly's two Linux legs, `Darling suite on Linux` and `Darling under systemd (linux-x64 tarball)` (`darling-linux-tests.yml`, #9686), are report-only and never turn the nightly red, so open both BY NAME and read a red one as a finding before the cut
 - Confirm no community bug reports against the nightly in the last 24-48 hours
 - If any issues were reported and fixed, wait for a new clean nightly before proceeding
 
@@ -238,6 +245,7 @@ Before cutting the release, verify the nightly build has been clean:
 - Push the branch and merge it into `dev` first (open that PR with base `dev`)
 - Then open the release PR **from `dev` to `main`** — the head MUST be `dev`. `check-pr-branch.yml` rejects any PR to `main` whose head is not `dev`, so a `release/*` → `main` PR fails CI (the "all jobs failed" email)
 - Merge the `dev` to `main` release PR with **Create a merge commit**, never squash. A squash leaves `dev`'s commits out of `main`'s history, so the next release PR conflicts on every file `dev` changed. 3.10.0 was squashed, and the 3.11.0 release PR could merge only after `main` was merged into `dev` with a merge commit (#6485). An admin merge does not get past a conflict.
+- The release PR's CI is the full test gate, slow tests included. A pull request whose base is `main` plans every area, so both suites run every class (the `Cost=Slow` classes too), on the tree the release build compiles. The statement filter release gate (step 4) is one of its steps: it runs in that PR's CI, before the tag, and fails the PR's `CI result` while a statement column is pending. Every check that can block the release is green on that PR before you tag. Do not merge a red release PR and plan to look at it later.
 - At release-PR merge time, dev must equal the sha the field validation ran against (or the delta must be explicitly accepted)
 
 ### 11. Tag and Release
@@ -256,7 +264,7 @@ Then create the GitHub Release from the tag — `build.yml` triggers on `release
 gh release create v{version} --title "v{version}" --notes "See CHANGELOG.md for details."
 ```
 
-The build workflow will then run, compile all artifacts, sign them (if SignPath is configured), and attach them to the release. Monitor at https://github.com/erikdarlingdata/PerformanceMonitor/actions
+The build workflow will then run, compile all artifacts, sign them (if SignPath is configured), and attach them to the release. It does not re-run the Lite or Darling test suites (#8756): the release PR's CI was that gate, and a test failure that first shows up after publishing is too late to stop anything. It runs no test step: the statement filter gate from step 4 already ran in the release PR's CI before the tag. Monitor at https://github.com/erikdarlingdata/PerformanceMonitor/actions
 
 SignPath blocks on **seven** approval requests, in the order the workflow submits them: **Lite** (zip), **Darling** (service + viewer apphost exes), **Darling Export** (the export tool's win-x64 folder, `DarlingExport` artifact configuration: every exe and dll), **Darling MSI**, **Lite (Velopack)**, **Darling Viewer (Velopack)**, and **the executables Velopack generates** — the Dashboard/Installer signing steps left with their artifacts. The MSI is its own request since the repository variable `DARLING_MSI_SIGNING` was set to 'true' (2026-10-23): the `Sign Darling MSI` step uses the `DarlingMsi` artifact configuration (the MSI file at the root) and is skipped if the variable is unset. The seventh (#3288) comes after `vpk pack` and carries both products in one request: each `Setup.exe`, and the root launcher and `Update.exe` inside each `Portable.zip`. It uses the `SignTemplate` artifact configuration, whose `**/*.exe` and `**/*.dll` includes both need `min-matches="0"` because the batch contains no dll. Two executables per product stay unsigned by design and only inside the `.nupkg` — `lib/app/<App>_ExecutionStub.exe` and `lib/app/Squirrel.exe` — because `releases.<channel>.json` records that package's SHA256 and the delta patches against those bytes; the release guard allowlists exactly those, keyed on the container as well as the path. The `Darling` artifact-configuration slug on signpath.io signs the two apphost exes (`PerformanceMonitor.Darling.Service.exe` at the root and `viewer/PerformanceMonitor.Darling.Viewer.exe`) and leaves the `PerformanceMonitor.*` / third-party dlls and `pg-runtime.zip` alone; if it ever goes missing the single `Sign Darling` step fails the release. The Darling zip (`PerformanceMonitorDarling-{version}.zip` — service at root with `pg-runtime.zip` beside the exe, viewer in `viewer\`) joins the release assets; the pg-runtime build downloads ~340MB on a cold cache (cached across re-releases on the fetch script's content hash). Verify the Darling zip is attached and listed in `SHA256SUMS.txt`, alongside the Lite zip/Setup.exe and the Viewer Setup.exe.
 

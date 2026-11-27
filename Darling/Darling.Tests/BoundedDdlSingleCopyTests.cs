@@ -51,7 +51,7 @@ public sealed class BoundedDdlSingleCopyTests
                 && !x.l.Contains("public static string", StringComparison.Ordinal)
                 && !x.l.Contains("return EnableCompressionSql(", StringComparison.Ordinal))
             .ToArray();
-        Assert.Equal(3, uses.Length);
+        Assert.Equal(4, uses.Length);
         foreach (var (line, index) in uses)
         {
             Assert.Contains("new[] {", line, StringComparison.Ordinal);

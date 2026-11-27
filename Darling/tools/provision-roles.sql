@@ -114,14 +114,17 @@
 -- created the role cannot revoke the option itself) or drop the role. A plain membership (GRANT viewer TO
 -- some_analyst) is not refused.
 --
+-- On Kubernetes, the chart's `store.provisionRoles` runs this script for you.
+--
 -- AN OWNER WHO IS NOT A SUPERUSER can run this script, with these limits:
 --   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the four roles to set a
 --     password or take back an attribute, and it holds that option only on a role it created itself. A role a
 --     superuser made needs GRANT <role> TO <owner> WITH ADMIN OPTION from a superuser first. The guard in step 1
---     checks this before any password is sent, and stops the run when the owner cannot change one of the four
---     roles that already exist: it has no CREATEROLE, the role is a superuser, from PostgreSQL 16 it lacks ADMIN
---     OPTION on the role, or before 16 the role has REPLICATION (only a superuser can change such a role). The
---     stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
+--     checks this before any password is sent. It first stops an owner that has no CREATEROLE, before any role is
+--     created, so a fresh store gets the guard's message and not PostgreSQL's own refusal of CREATE ROLE. It then stops
+--     the run when the owner cannot change one of the four roles that already exist: the role is a superuser, from
+--     PostgreSQL 16 the owner lacks ADMIN OPTION on the role, or before 16 the role has REPLICATION (only a superuser
+--     can change such a role). The stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
 --     this script. The guard also stops the run when one of the four roles is a member of a role that would
 --     outrank the grants below (the owner, a superuser or BYPASSRLS role, pg_read_all_data, pg_write_all_data,
 --     pg_read_server_files, pg_write_server_files or pg_execute_server_program) and the owner cannot revoke that
@@ -129,15 +132,19 @@
 --     holds that option on itself. The stop names each membership. A password line that still fails (a
 --     password-check module can reject a password) is written to the server log with its password, unless step 0
 --     could turn off log_min_error_statement for the session.
---   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 fails for this owner, and
---     the guard in step 1 then stops the run before any password is sent. Either GRANT SET ON PARAMETER
---     pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0 can turn it off for this
---     session, or turn it off for the cluster (step 1b).
---   * The superuser-only lines (temp_file_limit, log_min_duration_statement, log_parameter_max_length) fail, and
---     psql carries on. SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner
---     holds that attribute itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or
---     BYPASSRLS), and a role membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for
---     each of those, so read psql's output.
+--   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 cannot switch it off for this
+--     owner (the refusal is caught and noted), and the guard in step 1 then stops the run before any password is sent.
+--     Either GRANT SET ON PARAMETER pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0
+--     can turn it off for this session, or turn it off for the cluster (step 1b).
+--   * The superuser-only settings (temp_file_limit, log_min_duration_statement, log_parameter_max_length) are applied
+--     where the owner may set them, and an owner that may not does not stop the run: each statement catches
+--     insufficient_privilege and nothing else, so the run goes on under psql -v ON_ERROR_STOP=1 and exits 0. One
+--     WARNING after step 1b then names each role that still lacks a setting and the exact ALTER ROLE ... SET
+--     statements a superuser runs once. A setting a superuser already applied is not reported.
+--     SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner holds that attribute
+--     itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or BYPASSRLS), and a role
+--     membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for each of those, so read psql's
+--     output.
 --   * Step 0 cannot turn off log_statement, log_min_duration_statement or log_min_error_statement for this session
 --     unless the owner was granted SET on them (PostgreSQL 15 and later). Where log_statement is ddl, mod or all,
 --     log_min_duration_statement is 0 or more, log_transaction_sample_rate is above 0, log_min_duration_sample is 0 or
@@ -146,19 +153,35 @@
 --     sees any of them, and you should keep the passwords out of the lines, as in BEFORE RUNNING above.
 -- ============================================================================================
 
+-- Quiet the run (#9700). The DROP ... IF EXISTS statements below each print a NOTICE when the object is not there yet,
+-- about a hundred lines on a fresh store, which hides the WARNINGs that need a read. This keeps WARNING and above for the
+-- run and puts the session's own setting back at the very end.
+DO $$ BEGIN PERFORM set_config('darling.saved_client_min_messages', current_setting('client_min_messages'), false); END $$;
+SET client_min_messages = warning;
+
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
 --    ALTER ROLE ... PASSWORD literal, and while pg_stat_statements is loaded with utility tracking on (the
 --    module's default), it records that statement VERBATIM, password included, where any superuser or
 --    pg_read_all_stats member (a monitoring agent's pg_monitor login, say) can read it. This covers this
 --    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded. When it is
---    loaded, this SET needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
---    later): for any other owner it fails, and the first statement of the guard in step 1 then stops the run
---    before a password is sent.
-SET pg_stat_statements.track_utility = off;
+--    loaded, this switch needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
+--    later): for any other owner the refusal (insufficient_privilege, and nothing else) is caught and noted, and the
+--    first statement of the guard in step 1 then stops the run before a password is sent.
+DO $$
+BEGIN
+   PERFORM set_config('pg_stat_statements.track_utility', 'off', false);
+EXCEPTION WHEN insufficient_privilege THEN
+   RAISE NOTICE 'pg_stat_statements.track_utility could not be switched off for this session (it needs a superuser, or SET on the parameter). The guard in step 1 stops the run if it is on.';
+END $$;
 
 --    pg_stat_monitor tracks utility statements through pg_stat_monitor.pgsm_track_utility (on by default), so it gets
 --    the same switch and the same stop in the guard. The setting can be changed by any role.
-SET pg_stat_monitor.pgsm_track_utility = off;
+DO $$
+BEGIN
+   PERFORM set_config('pg_stat_monitor.pgsm_track_utility', 'off', false);
+EXCEPTION WHEN insufficient_privilege THEN
+   RAISE NOTICE 'pg_stat_monitor.pgsm_track_utility could not be switched off for this session. The guard in step 1 stops the run if it is on.';
+END $$;
 
 --    The same for the server log. log_statement set to ddl, mod or all writes each ALTER ROLE ... PASSWORD line to
 --    the log as sent, and log_min_duration_statement (or log_min_duration_sample) at 0 or more writes it with its
@@ -256,6 +279,13 @@ BEGIN
    IF current_setting('pg_stat_monitor.pgsm_track_utility', true) IN ('on', 'yes', 'true', '1') THEN
       RAISE EXCEPTION 'pg_stat_monitor.pgsm_track_utility is on for this session. pg_stat_monitor tracks the password statements of this script. The script created and changed nothing. Set pg_stat_monitor.pgsm_track_utility = off in postgresql.conf and reload, which turns it off for the whole cluster, then run the script again.';
    END IF;
+   -- A role that is not a superuser needs CREATEROLE to create or change any role. This needs no role to exist, so it is
+   -- checked before step 1 creates one: a fresh store then gets this message, not PostgreSQL's own refusal of CREATE ROLE,
+   -- which on PostgreSQL 15 and earlier names no remedy. The checks below need the four roles to exist.
+   IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+      AND NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
+      RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer, web and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
+   END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
       CREATE ROLE admin LOGIN NOSUPERUSER;
       COMMENT ON ROLE admin IS 'darling-managed';
@@ -302,13 +332,10 @@ BEGIN
    -- A role that is not a superuser must also be able to change the four roles. If it cannot, each ALTER ROLE ... PASSWORD
    -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller
    -- set ON_ERROR_STOP. So a run by such a role stops here, before any password is sent. The ALTER ROLE lines need:
-   -- the CREATEROLE attribute; roles that are not superusers; from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
+   -- roles that are not superusers (the CREATEROLE attribute is checked above, before step 1); from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
    -- tests the same thing ALTER ROLE does, and a role this run just created passes because its creator holds the option);
    -- before 16, roles without REPLICATION. Every role exists at this point, and a superuser is never stopped here.
    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
-      IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
-         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer, web and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
-      END IF;
       SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
       FROM pg_roles
       WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolsuper;
@@ -522,13 +549,10 @@ ALTER ROLE mcp    SET statement_timeout = '60s';
 --     store itself (SQLSTATE 53400) rather than writing gigabytes to the store's own volume and starving the
 --     collector's writes. Keep this value in step with ComposeLimits.TempFileLimit in the service.
 --     Superuser-only (PGC_SUSET), like log_min_duration_statement below -- if the OWNER role running this
---     script is not a superuser and has not been GRANTed SET on this parameter, these two statements fail and
---     psql carries on with the rest of the script (only the role-collision guard in step 1 stops the run), so viewer
---     and mcp are left without this limit; grant the owner SET on it and run the script again (it is idempotent),
---     or run these two lines as a superuser.
-ALTER ROLE viewer SET temp_file_limit = '1GB';
-ALTER ROLE web    SET temp_file_limit = '1GB';
-ALTER ROLE mcp    SET temp_file_limit = '1GB';
+--     script is not a superuser and has not been GRANTed SET on this parameter, the statement is refused. The three
+--     temp_file_limit statements run with the log settings in the block after step 1b, where each one catches that
+--     refusal (insufficient_privilege only) and the one WARNING at the end of the block names the roles left without
+--     the limit and the statements a superuser runs once. Only the role-collision guard in step 1 stops the run.
 
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
 --     statement_timeout, capped at 5s so raising the ceiling never widens the unlogged band (#4442), is written
@@ -560,12 +584,84 @@ ALTER ROLE mcp    SET temp_file_limit = '1GB';
 --          cluster, and a web dashboard or MCP server left on the owner login (no webConnectionString /
 --          mcpConnectionString) connects as it. On a cluster shared with other applications, leave it out.
 --     The service builds its reader functions at its next start, and then within the hour.
-ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
-ALTER ROLE web    SET log_min_duration_statement = '5000ms';
-ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';
-ALTER ROLE viewer SET log_parameter_max_length = 0;
-ALTER ROLE web    SET log_parameter_max_length = 0;
-ALTER ROLE mcp    SET log_parameter_max_length = 0;
+--     The nine superuser-only statements (temp_file_limit from 1a, then the two log settings) run here, each in its own
+--     block that catches insufficient_privilege and nothing else, so a superuser, or an owner granted SET on the
+--     parameter, applies each exactly as before and any other error still ends the run. A refused statement is
+--     recorded, and ONE warning after the last one lists, for each role still missing a setting, the exact
+--     ALTER ROLE ... SET statements to run once as a superuser. A setting already stored for the role (in this database
+--     or in all of them, pg_db_role_setting) is not reported, so a store a superuser has finished runs quietly.
+DO $$
+DECLARE
+   misses text[] := ARRAY[]::text[];
+   miss text;
+   remaining text[] := ARRAY[]::text[];
+   missing_roles text;
+   statements text;
+BEGIN
+   BEGIN
+      ALTER ROLE viewer SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE viewer SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|log_parameter_max_length|0'::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|log_parameter_max_length|0'::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|log_parameter_max_length|0'::text;
+   END;
+   FOREACH miss IN ARRAY misses LOOP
+      IF NOT EXISTS (SELECT 1
+                     FROM pg_db_role_setting AS stored
+                     JOIN pg_roles AS target ON target.oid = stored.setrole
+                     WHERE target.rolname = split_part(miss, '|', 1)
+                       AND stored.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+                       AND EXISTS (SELECT 1 FROM unnest(stored.setconfig) AS entry WHERE entry LIKE split_part(miss, '|', 2) || '=%')) THEN
+         remaining := remaining || miss;
+      END IF;
+   END LOOP;
+   IF cardinality(remaining) > 0 THEN
+      SELECT string_agg(DISTINCT split_part(entry, '|', 1), ', ' ORDER BY split_part(entry, '|', 1)),
+             string_agg(format('ALTER ROLE %I SET %s = %s;', split_part(entry, '|', 1), split_part(entry, '|', 2), split_part(entry, '|', 3)),
+                        E'\n' ORDER BY split_part(entry, '|', 1), split_part(entry, '|', 2))
+      INTO missing_roles, statements
+      FROM unnest(remaining) AS entry;
+      RAISE WARNING E'The superuser-only settings below were not applied: the role running this script may not set them. Roles still missing a setting: %. A superuser runs these statements once (this script, run again by the owner, then stays quiet):\n%', missing_roles, statements;
+   END IF;
+END $$;
 
 -- 2. Schema usage + SELECT on everything that exists now (ALL TABLES covers tables AND views). collect
 --    holds no secrets, so admin+viewer read all of it. config: admin (the writer, and the Settings
@@ -1160,6 +1256,35 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+DECLARE
+    r text;
+    c text;
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
+    END IF;
+END $personal_token$;
 
 COMMIT;
 
@@ -1206,16 +1331,16 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 -- #6230: pause_collection / resume_collection queue a pause or resume command through config.request_mcp_command, so mcp holds no
 --     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
 REVOKE UPDATE (paused) ON config.config_service FROM mcp;
--- #6393: update_service_flags runs as mcp and sets exactly these five service flags (plan capture, Query Store backfill, text budget, max concurrent
---    sweeps, fetch top N): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
+-- #6393: update_service_flags runs as mcp and sets exactly these seven service flags (plan capture, Query Store backfill, text budget, max concurrent
+--    sweeps, fetch top N, and the two trigram text index options of #8978): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
 --    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
---    Skipped, with a warning, on a store the service has not upgraded to the fetch-top-N column yet (V209); re-run this script after it has.
+--    Skipped, with a warning, on a store the service has not upgraded to the trigram index option columns yet (V274); re-run this script after it has.
 DO $do$
 BEGIN
-   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_fetch_top_n') THEN
-      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO mcp;
+   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_text_trigram_index_enabled') THEN
+      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) ON config.config_service TO mcp;
    ELSE
-      RAISE WARNING 'config.config_service has no query_store_fetch_top_n column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
+      RAISE WARNING 'config.config_service has no query_store_text_trigram_index_enabled column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
    END IF;
 END
 $do$;
@@ -1999,7 +2124,7 @@ DECLARE
    v_row config.config_notification_routes%ROWTYPE;
    -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
    -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
-   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false);
+   v_operator boolean := COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -2151,7 +2276,7 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{1,64}$' THEN
+   IF p_actor IS NULL OR p_actor !~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$' THEN
       RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
@@ -2312,7 +2437,7 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false) THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -2927,6 +3052,32 @@ REVOKE INSERT, UPDATE, DELETE ON config.custom_alert_rules FROM viewer;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO web;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
 
+-- 3e1. Custom alert evaluator (#9700): the service evaluates the user-authored rules on a store it does not manage when
+--      postgres.webConnectionString names the web login. It writes a rule's recovery row through
+--      config.record_custom_alert_resolution, which only web and mcp may execute (viewer is read-only). Same function,
+--      same text, as managed provisioning rebuilds on every start: a fixed no-channel resolution row, a pinned search_path
+--      and no dynamic SQL. Re-run this script on a store that ran an earlier copy to add it.
+CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(
+   p_server_id integer,
+   p_server_name text,
+   p_metric_name text,
+   p_detail_text text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   INSERT INTO config.config_alert_log
+      (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+       alert_sent, notification_type, send_error, muted, detail_text, context_json)
+   VALUES
+      ((now() AT TIME ZONE 'UTC'), p_server_id, p_server_name, p_metric_name, 0, 0,
+       false, 'none', NULL, false, p_detail_text, NULL);
+$fn$;
+REVOKE ALL ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO web, mcp;
+
 -- 3e2. Database state expectations (#6397): the MCP set_database_state_expected tool upserts (INSERT, UPDATE) and clears
 --      (DELETE) one config.database_state_expected row, the same narrow single-table floor web holds in 3c. Its read,
 --      get_database_state_expectations, runs on mcp's SELECT on all of config (step 2). The table is V49. BRING-YOUR-OWN
@@ -3085,7 +3236,7 @@ BEGIN
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
-       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '\r\n?', E'\n', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
        p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;
@@ -3592,7 +3743,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'hold_released', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'person_deleted', 'mcp_personal_token_created', 'mcp_personal_token_revoked', 'mcp_personal_token_expiry_cut', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message', 'change_window_closed') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3802,6 +3953,21 @@ BEGIN
    GRANT SELECT ON config.investigation_person_messages TO admin;
 END $do$;
 
+-- 3j8. The planned change windows (V318, #9485), mirroring managed provisioning's section 10e8: REVOKE ALL ... CASCADE, then SELECT back to every
+--     role. The service opens requests as the owner and reads the windows to hold a request that opens inside one. It is created by V318: on a store below
+--     it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_change_windows') IS NULL THEN
+      RAISE WARNING 'The change window table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_change_windows FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_change_windows TO admin, viewer, web;
+   GRANT SELECT ON config.investigation_change_windows TO mcp;
+END $do$;
+
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is
@@ -3969,10 +4135,9 @@ GRANT CONNECT ON DATABASE darling TO mcp;
 --
 --       ALTER DATABASE darling SET search_path = collect, config, public;
 --
--- 7. Not mirrored from managed mode, deliberately: the config.record_custom_alert_resolution function
---    (#3334) the managed batch creates for web and mcp. It exists for the custom-alert evaluator, which
---    runs on a managed store only; with no evaluator there is never a firing rule for a rule delete to
---    resolve.
+-- 7. Custom alerts (#9700): step 3e1 creates config.record_custom_alert_resolution (#3334) for web and mcp, the
+--    function the custom-alert evaluator and a rule delete write a recovery row through. The service starts the
+--    evaluator on this store when postgres.webConnectionString names the web login.
 
 -- 8. Function owner. The queue functions run as the owner of config.config_command, whoever runs this script: each definer-rights
 --    function this script creates in schema config is created by the role running the script, which is a superuser on some
@@ -4003,6 +4168,7 @@ BEGIN
    'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
+   'config.record_custom_alert_resolution(integer, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',
    'config.read_mcp_command_result(bigint)',
    'config.submit_external_alert(text, text, text, text, text, text, double precision)'
@@ -4023,3 +4189,35 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+DECLARE
+    r text;
+    c text;
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
+    END IF;
+END $personal_token$;
+
+-- Put the session's own message level back (#9700).
+DO $$ DECLARE saved text := pg_catalog.current_setting('darling.saved_client_min_messages', true); BEGIN IF saved IS NULL OR saved = '' THEN RESET client_min_messages; ELSE PERFORM pg_catalog.set_config('client_min_messages', saved, false); END IF; END $$;

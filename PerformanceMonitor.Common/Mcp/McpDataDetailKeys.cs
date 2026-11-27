@@ -105,6 +105,9 @@ public static class McpDataDetailKeys
             // list_servers and get_collection_health (#7590): why the service could not connect to a server, which is the
             // connect exception's message, so it can quote the host, the port or the login the server refused.
             "last_connect_error",
+            // get_service_starts (#9415): why a migration rung failed, the database error's message, which can quote a connection detail or
+            // a value from the statement that failed.
+            "error_text",
             // Free text that can quote collected text: the generic "message" key (a tool's status sentence, which can
             // quote what the monitored server said) and the job-failure alert context label "Message" (the step's
             // output, normalized to the same entry).
@@ -128,6 +131,8 @@ public static class McpDataDetailKeys
             "owner_login_name", "session_login_name", "remediation_username",
             // The command queue and the agent-change log: who asked for a command, who undid a change, who acted.
             "requested_by", "undone_by", "actor", "paused_by",
+            // Who declared a change window (#9485), the same identity as the journal's actor.
+            "declared_by",
             // Who made a change: a threshold override's and a server action's set_by, and the investigation writes'
             // closed_by, decided_by, opened_by, saved_by and modified_by echoes, plus a note's author (the brief
             // composer already masks author and decided_by as logins by field name).

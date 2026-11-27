@@ -46,7 +46,8 @@ public sealed class McpArgumentTypeTests : IClassFixture<McpArgumentTypeTests.Ho
 
     public McpArgumentTypeTests(Hosts hosts) => _hosts = hosts;
 
-    public static TheoryData<string, string, bool, string> Rows() => McpArgumentTypeRows.All();
+    public static TheoryData<string, string, bool, string> Rows() =>
+        McpArgumentTypeRows.All(McpWholeNumberArgumentTests.LiteToolTypes().Append(typeof(McpArgumentTypeProbeTools)));
 
     [Theory]
     [MemberData(nameof(Rows))]

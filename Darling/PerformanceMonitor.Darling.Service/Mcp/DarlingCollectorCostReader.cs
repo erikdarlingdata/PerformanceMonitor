@@ -203,7 +203,17 @@ ORDER BY day";
     /// the freshness anchor the self-alert needs to tell "this regression got worse" from "the hourly flush
     /// hasn't landed a new row since I last looked", the same distinction #2704 draws with wait_stats'
     /// collection_time. Without it, re-asking this query on a cooldown that outpaces the flush hands back the
-    /// exact same latest_ms twice, and the evaluator has no way to know the second answer isn't new.</para></summary>
+    /// exact same latest_ms twice, and the evaluator has no way to know the second answer isn't new.</para>
+    ///
+    /// <para><b>The baseline needs three days with measured sql time (#9523).</b> A day whose runs booked
+    /// no sql time carries no per-run sql measurement, yet it still pulls <c>baseline_ms_per_run</c> toward
+    /// zero and drags the day count past its floor. A collector whose history starts with such days, such
+    /// as the AWS-API collectors' rows from a build that books their AWS call as storage time, would
+    /// otherwise read on its first full day of sql time as a rise from almost nothing, on every server it
+    /// runs against.
+    /// <c>baseline_cost_days</c> holds it until three prior days carry sql time, and by then the
+    /// percentile conjunct judges the latest day against the collector's own measured worst day. It is a
+    /// conjunct added, so the predicate still selects a subset of what it selected without it.</para></summary>
     public const string RegressionSql = @"
 WITH daily AS
 (
@@ -231,6 +241,7 @@ agg AS
            sum(sql_ms)                     FILTER (WHERE day < latest_day) AS baseline_total_ms,
            sum(runs)                       FILTER (WHERE day < latest_day) AS baseline_total_runs,
            count(*)                        FILTER (WHERE day < latest_day) AS baseline_days,
+           count(*)                        FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_cost_days,
            percentile_disc(0.95) WITHIN GROUP (ORDER BY ms_per_run)
                FILTER (WHERE day < latest_day)                      AS baseline_p95_ms_per_run,
            max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time,
@@ -241,7 +252,8 @@ agg AS
 scored AS
 (
     SELECT a.server_id, a.collector_name, a.latest_ms, a.latest_runs, a.baseline_ms,
-           a.baseline_days, a.latest_metric_time, a.baseline_p95_ms_per_run, a.observed_span,
+           a.baseline_days, a.baseline_cost_days, a.latest_metric_time, a.baseline_p95_ms_per_run,
+           a.observed_span,
            a.latest_ms::double precision
                / nullif(a.latest_runs, 0)          AS latest_ms_per_run,
            a.baseline_total_ms::double precision
@@ -254,6 +266,7 @@ SELECT sc.server_id, COALESCE(s.display_name, s.server_name) AS server_name, sc.
 FROM scored AS sc
 JOIN collect.servers AS s ON s.server_id = sc.server_id
 WHERE sc.baseline_days >= 3
+AND   sc.baseline_cost_days >= 3
 AND   sc.observed_span >= interval '3 days'
 AND   sc.baseline_ms >= $2
 AND   sc.latest_ms_per_run IS NOT NULL
@@ -383,7 +396,16 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
     /// inclusive reading. #6215: the days are calendar buckets, and an install's first bucket is a few hours
     /// of data counted as a day, so three buckets can sit on well under three days of history. The pair must
     /// ALSO span <c>interval '3 days'</c> between its first and last observation (<c>observed_span</c>), in
-    /// this read and in <see cref="RegressionSql"/>, so a fresh install's first hours are never a baseline. $1 = baseline window start (naive UTC), $2 = minimum absolute added ms per day
+    /// this read and in <see cref="RegressionSql"/>, so a fresh install's first hours are never a baseline.</para>
+    ///
+    /// <para><b>A prior day with runs but no sql time is left out of the baseline (#9523)</b>, the same as
+    /// a day with no runs: it carries no per-run sql measurement, and counting it would dilute the baseline
+    /// mean toward zero for the whole window, so a collector whose history starts with such days, such as
+    /// the AWS-API collectors' rows from a build that books their AWS call as storage time, would rank as
+    /// a top mover on every server until those days age out. The latest day is not filtered, so a collector
+    /// whose sql time fell to zero still appears.</para>
+    ///
+    /// <para>$1 = baseline window start (naive UTC), $2 = minimum absolute added ms per day
     /// (#3462, the paging read's own floor), $3 = row cap.</para>
     /// </summary>
     public const string MoverSql = @"
@@ -412,13 +434,13 @@ agg AS
            max(runs)     FILTER (WHERE day = latest_day) AS latest_runs,
            max(worst_ms) FILTER (WHERE day = latest_day) AS latest_worst_ms,
            max(day_ms_per_run) FILTER (WHERE day = latest_day) AS latest_ms_per_run,
-           sum(sql_ms)   FILTER (WHERE day < latest_day) AS baseline_total_ms,
-           sum(runs)     FILTER (WHERE day < latest_day) AS baseline_total_runs,
-           count(*)      FILTER (WHERE day < latest_day) AS baseline_days,
+           sum(sql_ms)   FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_total_ms,
+           sum(runs)     FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_total_runs,
+           count(*)      FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_days,
            max(last_metric_time_in_day) - min(first_metric_time_in_day) AS observed_span,
-           max(day_ms_per_run) FILTER (WHERE day < latest_day) AS baseline_worst_day_ms_per_run,
+           max(day_ms_per_run) FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_worst_day_ms_per_run,
            percentile_disc(0.95) WITHIN GROUP (ORDER BY day_ms_per_run)
-               FILTER (WHERE day < latest_day) AS baseline_p95_ms_per_run
+               FILTER (WHERE day < latest_day AND sql_ms > 0) AS baseline_p95_ms_per_run
     FROM ranked
     GROUP BY server_id, collector_name
 ),

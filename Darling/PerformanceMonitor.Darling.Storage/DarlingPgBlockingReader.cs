@@ -110,7 +110,7 @@ public static class DarlingPgBlockingReader
                 query_text_may_be_truncated
             FROM pg_blocking_edges
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         roots AS (
@@ -485,7 +485,7 @@ public static class DarlingPgBlockingReader
                 blocked_application_name
             FROM pg_blocking_edges
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         walk AS (
@@ -667,7 +667,7 @@ public static class DarlingPgBlockingReader
     /// <summary>The captures' rows in <c>collection_log</c> and the window. $2/$3 are the window (naive UTC).</summary>
     private const string PgBlockingCaptureLogWhere =
         "FROM collection_log AS l WHERE " + PgBlockingCaptureFilter + " " +
-        "AND l.collection_time >= $2 AND l.collection_time <= $3";
+        "AND l.collection_time > $2 AND l.collection_time <= $3";
 
     /// <summary>#7616: the same counts for many servers at once, one row per server that has any capture in the window. $1 is the
     /// server ids (int[]), $2/$3 the window.</summary>

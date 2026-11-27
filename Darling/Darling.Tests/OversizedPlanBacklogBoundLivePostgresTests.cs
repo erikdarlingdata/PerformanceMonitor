@@ -320,6 +320,8 @@ VALUES
             OversizedPlanBacklog.QueryStatsCollectorName,
             new[] { new OversizedPlanObservation("0xEARLIER", "0xSQL", 0, 400, Database, "0xHASH", 600002) },
             now.AddMinutes(-1),
+            PendingCap,
+            OversizedPlanBacklogSweep.MaxRowsDroppedPerServerPerTick,
             null,
             ct);
         Assert.Equal(1, written);
@@ -446,7 +448,8 @@ AND   expired_at IS NULL;");
             }
 
             var written = await OversizedPlanBacklog.RecordSightingsAsync(
-                postgres, ServerId, OversizedPlanBacklog.QueryStatsCollectorName, sightings, at, null, ct);
+                postgres, ServerId, OversizedPlanBacklog.QueryStatsCollectorName, sightings, at,
+                PendingCap, OversizedPlanBacklogSweep.MaxRowsDroppedPerServerPerTick, null, ct);
             Assert.Equal(Queries, written);
 
             var claimed = await OversizedPlanBacklogSweep.ClaimAsync(postgres, ServerId, ct);

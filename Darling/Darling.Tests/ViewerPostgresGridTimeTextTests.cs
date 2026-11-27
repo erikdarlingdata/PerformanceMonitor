@@ -431,7 +431,7 @@ public sealed class ViewerPostgresGridTimeTextTests
     {
         var source = ReadRepoFile("Darling", ViewerFolder, "ViewerServerTab.Postgres.cs");
 
-        Assert.Contains($"{grid}.ItemsSource = PgDisplay.{projection}(rows);", source, StringComparison.Ordinal);
+        Assert.Contains($"{grid}.ItemsSource = PgDisplay.{projection}(rows)", source, StringComparison.Ordinal);
         Assert.DoesNotContain($"{grid}.ItemsSource = rows;", source, StringComparison.Ordinal);
     }
 

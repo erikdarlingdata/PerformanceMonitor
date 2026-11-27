@@ -482,7 +482,7 @@ public sealed class WebDataStartNoteTests
         Assert.True(correctionsTool > 0);
         var correctionsBody = corrections[correctionsTool..];
         Assert.Contains("var truncated = rows.Count > limit;", correctionsBody, StringComparison.Ordinal);
-        Assert.Contains("oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime))", correctionsBody, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.CollectionTime))", correctionsBody, StringComparison.Ordinal);
         Assert.Contains("order = \"collection_time_desc\"", correctionsBody, StringComparison.Ordinal);
     }
 
@@ -797,8 +797,8 @@ public sealed class WebDataStartNoteTests
 
         var notices = Strings(r, "notices");
         Assert.Equal(2, notices.Length);
-        Assert.Contains(notices, n => n.StartsWith("Query Store Clutter", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
-        Assert.Contains(notices, n => n.StartsWith("Query Store Overhead", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
+        Assert.Contains(notices, n => n.StartsWith("Query Store Clutter", StringComparison.Ordinal) && n.EndsWith("Plan churn covers the last 4 days, not the whole time range.", StringComparison.Ordinal));
+        Assert.Contains(notices, n => n.StartsWith("Query Store Overhead", StringComparison.Ordinal) && n.EndsWith("The QDS wait table covers the last 3 days, not the whole time range.", StringComparison.Ordinal));
         Assert.DoesNotContain(notices, n => n.StartsWith("Query Store Memory Clerk", StringComparison.Ordinal));
     }
 
@@ -1055,13 +1055,15 @@ public sealed class WebDataStartNoteTests
     [Fact]
     public void AQueriesNoteThatNamesNoInstant_IsDrawnAsSent()
     {
-        const string Note = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        const string Sent = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        /* #9116: the page says the raw statistics table in its own words (plain-text.js); the rest of the sentence is drawn as sent. */
+        const string Note = "The window reaches further back than this server's raw query statistics retains (or this server has been monitored for less time than that), so the older part of it was not read.";
         var answer = new JsonObject
         {
             ["queries"] = new JsonArray(new JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" }),
             ["window_truncated"] = true,
             ["effective_start"] = "2026-01-02T00:00:00.0000000",
-            ["truncation_note"] = Note,
+            ["truncation_note"] = Sent,
         };
 
         foreach (var scenario in new[] { "queryStoreLocal", "topQueriesLocal" })

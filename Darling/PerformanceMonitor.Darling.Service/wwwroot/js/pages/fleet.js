@@ -314,6 +314,8 @@ async function renderStoreFleets(main, isPoll) {
       el("span", { class: "fleet-store-name", text: st.name }),
       isCurrent ? currentMark() : null,
       el("span", { class: "fleet-store-health", text: healthLabel(st.health) }),
+      /* #9203: each store's own service build next to its name, so a mixed-version setup shows. Nothing when the store did not say. */
+      st.service_build ? el("span", { class: "fleet-store-build muted", text: st.service_build }) : null,
       st.server_count != null ? el("span", { class: "muted", text: st.server_count + " server" + (st.server_count === 1 ? "" : "s") }) : null,
     ]);
     return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };
@@ -882,21 +884,15 @@ export function metricBands(c, store) {
       ? "n/a"
       : c.requests_waiting_for_threads > 0
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
-      : c.available_threads != null
-      ? fmtInt(c.available_threads) + " free"
+      : c.threads_waiting_for_cpu >= 20
+      ? fmtInt(c.threads_waiting_for_cpu) + " runnable"
       : "OK";
-  /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
-     N in use). It says how many are in use, of the total. */
-  const threadsInUse =
-    c.total_threads != null
-      ? c.available_threads != null
-        ? c.total_threads - c.available_threads
-        : c.current_workers ?? 0
-      : null;
+  /* #8778: the line under the value is the worker count over the ceiling, not threads in use: idle pooled workers and
+     the workers of system tasks are counted, so it can pass the ceiling on a server where nothing waits. */
   /* #6178: an Azure SQL Database (engine_edition 5) has no scheduler data, so its Threads chip is "n/a" for good. Say why under the "n/a". */
   const threadsDetail =
     c.total_threads != null
-      ? fmtInt(threadsInUse) + " in use / " + fmtInt(c.total_threads) + " threads"
+      ? fmtInt(c.current_workers ?? 0) + " workers / " + fmtInt(c.total_threads) + " max"
       : threadsValue === "n/a" && c.engine_edition === 5
       ? "Azure SQL Database has no thread data"
       : null;
@@ -1084,11 +1080,13 @@ function groupDigits(v) {
    sends no column (an older one) keeps the generic sentence. */
 export function identityCapacityDetail(ic) {
   const n = ic.columns_at_bar;
-  if (!ic.worst_column) return "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".";
+  if (!ic.worst_column) return "At or past 70% used, or under 30 days left (the shipped bars, the alert's own percent bars may differ). The worst is " + ic.worst_band + ".";
   const name = [ic.worst_database, ic.worst_table, ic.worst_column].filter(Boolean).join(".");
   const pct = ic.worst_percent_used == null ? "" : ": " + fmtNum(ic.worst_percent_used, ic.worst_percent_used >= 99.95 || ic.worst_percent_used === 0 ? 0 : 1) + "% used";
   const left = ic.worst_values_remaining == null ? "" : ", " + groupDigits(ic.worst_values_remaining) + " left";
-  return name + pct + left + (n > 1 ? ". The fullest of " + fmtInt(n) + " columns at 70% or more." : ".");
+  /* #8818: a column banded on its days left says so, so a column at 67% used reads as intended. */
+  const days = ic.worst_band_reason === "days" && ic.worst_days_to_exhaustion != null ? ", about " + fmtNum(ic.worst_days_to_exhaustion, ic.worst_days_to_exhaustion >= 10 ? 0 : 1) + " days to exhaustion at the current rate" : "";
+  return name + pct + left + days + (n > 1 ? ". The worst of " + fmtInt(n) + " columns at 70% or more used, or under 30 days left." : ".");
 }
 
 function identityCapacityChip(c, store) {

@@ -56,6 +56,33 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.All(toolMethods, m => Assert.True(m.ReturnType == typeof(Task<string>), $"{m.Name} must return Task<string>"));
     }
 
+    /// <summary>
+    /// #9413: <c>as_of</c> moves only the table activity window. On a size answer it is refused, not validated and then ignored, because a caller
+    /// who sent it would read the size now as the size at their instant. The refusal comes before any read, so no store is needed.
+    /// </summary>
+    [Fact]
+    public async Task AsOf_WithoutTableActivity_IsRefusedBeforeAnyRead()
+    {
+        var answer = await DarlingMcpStoreMetricsTools.GetStoreMetrics(null!, as_of: "2026-11-20T10:00:00Z", cancellationToken: TestContext.Current.CancellationToken);
+        using var json = JsonDocument.Parse(answer);
+        Assert.Equal("invalid", json.RootElement.GetProperty("status").GetString());
+        Assert.Contains("table_activity", json.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>object_kind</c> picks a kind of self-metrics object, and the table activity answer ranks the store's tables, which have no such kind.
+    /// With table_activity it is refused, not accepted and ignored, because a caller who sent it would read every table as the kind's tables.
+    /// The refusal comes before any read, so no store is needed.
+    /// </summary>
+    [Fact]
+    public async Task ObjectKind_WithTableActivity_IsRefusedBeforeAnyRead()
+    {
+        var answer = await DarlingMcpStoreMetricsTools.GetStoreMetrics(null!, object_kind: "hypertable", table_activity: true, cancellationToken: TestContext.Current.CancellationToken);
+        using var json = JsonDocument.Parse(answer);
+        Assert.Equal("invalid", json.RootElement.GetProperty("status").GetString());
+        Assert.Contains("object_kind", json.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ParamContract_DaysBackKindNameLimit_NoServerName_CeilingIsTheSweepsRetention()
     {
@@ -68,12 +95,18 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         /* Deliberately NO server_name: the store is the subject, not a monitored server. #3903 added the two
            filters and the list bound; each is optional, so a caller sending only days_back — every caller before
            #3903 — gets the summary, whose lists say what bounded them. */
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, mcpParams.Select(p => p.Name).ToArray());
+        /* #9413: table_activity switches to the per-table activity answer, which reads hours_back and rank_by beside object_name and limit. */
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "wal_hours_back", "table_activity", "hours_back", "rank_by", "as_of" }, mcpParams.Select(p => p.Name).ToArray());
         Assert.All(mcpParams, p => Assert.True(p.HasDefaultValue, $"{p.Name} must stay optional"));
         Assert.Equal(30, mcpParams[0].DefaultValue);
         Assert.Null(mcpParams[1].DefaultValue);
         Assert.Null(mcpParams[2].DefaultValue);
         Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, mcpParams[3].DefaultValue);
+        Assert.Equal(24, mcpParams[4].DefaultValue);
+        Assert.Equal(false, mcpParams[5].DefaultValue);
+        Assert.Equal(24, mcpParams[6].DefaultValue);
+        Assert.Null(mcpParams[7].DefaultValue);
+        Assert.Null(mcpParams[8].DefaultValue);
 
         /* The window ceiling is the series' own retention — past it there is nothing to read, and the two
            numbers drifting apart would let a caller ask for days the sweep deliberately deleted. */
@@ -1423,8 +1456,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     /// <summary>
     /// #4834: the checkpointer paragraph names the four fields the block emits for the per-checkpoint average, each
     /// with what the emitting code makes it: <c>timed</c> and <c>checkpoint_count</c> (timed plus requested),
-    /// <c>average_sync_ms_per_checkpoint</c> (sync_ms over that count) and <c>sync_bar_ms</c> (the bar it is judged
-    /// against, 10,000 ms).
+    /// <c>average_sync_ms_per_checkpoint</c> (sync_ms over that count) and <c>sync_bar_ms</c> (the read deadline it
+    /// is set beside, 10,000 ms, #9549).
     /// </summary>
     [Fact]
     public void TheDescription_NamesTheAveragePerCheckpointFields()
@@ -1435,7 +1468,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("timed (the checkpoints started by checkpoint_timeout inside the interval", description!, StringComparison.Ordinal);
         Assert.Contains("checkpoint_count (timed plus requested, the checkpoints the interval held)", description!, StringComparison.Ordinal);
         Assert.Contains("average_sync_ms_per_checkpoint is sync_ms divided by checkpoint_count", description!, StringComparison.Ordinal);
-        Assert.Contains("sync_bar_ms is the per-checkpoint bar in milliseconds", description!, StringComparison.Ordinal);
+        Assert.Contains("sync_bar_ms is the read deadline in milliseconds", description!, StringComparison.Ordinal);
         Assert.Equal(10_000, PerformanceMonitor.Darling.Service.DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
     }
 
@@ -1889,9 +1922,11 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
     /// is pinned is the null-versus-zero contract: <c>RowsObserved</c> is a COUNT and never null once the
     /// read completes (a zero is a zero), while <c>NewestRowAt</c> is null exactly when the view showed this
     /// connection no row at all — the two are different facts, and the whole issue is one being read as the
-    /// other. The all-time total is read DIRECTLY first, then the shipped read; rows are only ever added
-    /// between two reads (the history retention job runs monthly), so a direct total above zero must be
-    /// matched by a non-null newest row, and a direct total of zero by a null one and a zero count.</para>
+    /// other. The all-time total is read DIRECTLY before and after the shipped read; rows are only ever added
+    /// between two reads (the history retention job runs monthly), so a direct total above zero before it must
+    /// be matched by a non-null newest row, and a direct total of zero both before and after it by a null one
+    /// and a zero count. A job that runs between the two direct reads (a fresh cluster's background jobs do)
+    /// leaves the zero half undecided for that reading, so it is not judged.</para>
     ///
     /// <para><b>The predicate is cross-checked, not trusted.</b> The database-owner test is re-evaluated
     /// directly on the same connection and must agree with the record; when it holds and jobs exist, the
@@ -1928,6 +1963,12 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
 
         var evidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(postgres, logging, ct);
 
+        long directTotalAfter;
+        await using (var after = postgres.CreateCommand("SELECT count(*) FROM timescaledb_information.job_history"))
+        {
+            directTotalAfter = Convert.ToInt64(await after.ExecuteScalarAsync(ct));
+        }
+
         Assert.Equal(DarlingStoreMetricsReader.JobHistoryEvidenceStatus.Observed, evidence.Status);
         Assert.Equal(directRole, evidence.ReaderRole);
         Assert.Equal(directDbOwnerMember, evidence.ReaderIsDatabaseOwnerMember);
@@ -1940,13 +1981,13 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
         Assert.InRange(evidence.OwnerMemberJobCount!.Value, 0, evidence.JobCount!.Value);
         Assert.InRange(evidence.HistoryVisibleJobCount!.Value, 0, evidence.JobCount.Value);
 
-        /* The null-versus-zero contract. */
-        if (directTotal == 0)
+        /* The null-versus-zero contract. A row that landed between the two direct reads decides neither half. */
+        if (directTotal == 0 && directTotalAfter == 0)
         {
             Assert.Null(evidence.NewestRowAt);
             Assert.Equal(0L, evidence.RowsObserved);
         }
-        else
+        else if (directTotal > 0)
         {
             Assert.NotNull(evidence.NewestRowAt);
             Assert.Equal(DateTimeKind.Utc, evidence.NewestRowAt!.Value.Kind);

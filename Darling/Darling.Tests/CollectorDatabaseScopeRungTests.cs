@@ -57,23 +57,11 @@ public sealed class CollectorDatabaseScopeRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(
             "collector-database-scope",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which
-           stopped being true when V126 landed. The invariant that outlives the handoff is that the
-           LADDER's top and the declared version agree, which the two lines above already say. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>
@@ -413,14 +401,17 @@ public sealed class CollectorDatabaseScopeRungTests
             }
         }
 
-        /* The census count IS the get_collection_health description's census: eight enumerate. A ninth
-           name appearing here is the signal to extend that description, not loosen this pin. */
+        /* The census count IS the get_collection_health description's census: ten enumerate (object_inventory
+           joined with #8784, object_dependencies with #8784 part 2). An eleventh name appearing here is the signal to extend that
+           description, not loosen this pin. */
         Assert.Equal(
             new[]
             {
                 nameof(DatabaseScopedConfigCollector),
                 nameof(IdentityCapacityCollector),
                 nameof(IndexObjectStatsCollector),
+                nameof(ObjectDependenciesCollector),
+                nameof(ObjectInventoryCollector),
                 nameof(PlanCorrectionCollector),
                 nameof(QueryStoreCollector),
                 nameof(QueryStoreForcedPlansCollector),

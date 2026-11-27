@@ -46,7 +46,7 @@ public partial class LocalDataService
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
         var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        return await ReadAlertHistoryAsync(cutoff, until, "<=", limit, serverId, includeDismissed, metricName, family);
+        return await ReadAlertHistoryAsync(cutoff, ">", until, "<=", limit, serverId, includeDismissed, metricName, family);
     }
 
     /// <summary>The metric and family predicate of an alert history read (#6074), with its parameter appended when one is needed.
@@ -80,11 +80,11 @@ public partial class LocalDataService
     /// </summary>
     public Task<List<AlertHistoryRow>> GetAlertHistoryWindowAsync(DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, int limit = 500)
         => untilUtc is { } end
-            ? ReadAlertHistoryAsync(sinceUtc, end, "<", limit, serverId, includeDismissed: false)
-            : ReadAlertHistoryAsync(sinceUtc, DateTime.UtcNow, "<=", limit, serverId, includeDismissed: false);
+            ? ReadAlertHistoryAsync(sinceUtc, ">=", end, "<", limit, serverId, includeDismissed: false)
+            : ReadAlertHistoryAsync(sinceUtc, ">=", DateTime.UtcNow, "<=", limit, serverId, includeDismissed: false);
 
     private async Task<List<AlertHistoryRow>> ReadAlertHistoryAsync(
-        DateTime cutoff, DateTime until, string untilOperator, int limit, int? serverId, bool includeDismissed,
+        DateTime cutoff, string sinceOperator, DateTime until, string untilOperator, int limit, int? serverId, bool includeDismissed,
         string? metricName = null, string? family = null)
     {
         using var connection = await OpenConnectionAsync();
@@ -109,7 +109,7 @@ SELECT
     context_json,
     dismissed
 FROM v_config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time {sinceOperator} $1
 AND   alert_time {untilOperator} $2
 AND   server_id = $3
 AND   (dismissed = FALSE OR $5)" + "{FILTER}" + @"
@@ -141,7 +141,7 @@ SELECT
     context_json,
     dismissed
 FROM v_config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time {sinceOperator} $1
 AND   alert_time {untilOperator} $2
 AND   (dismissed = FALSE OR $4)" + "{FILTER}" + @"
 ORDER BY alert_time DESC
@@ -329,7 +329,7 @@ AND   metric_name IN ({string.Join(", ", metrics.Select((_, i) => "$" + (i + 3 +
         command.CommandText = @"
 SELECT CAST(COUNT(*) AS BIGINT)
 FROM v_config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time > $1
 AND   alert_time <= $2" + serverClause + @"
 AND   dismissed = TRUE";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });

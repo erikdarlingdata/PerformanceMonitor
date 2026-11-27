@@ -1200,6 +1200,8 @@
                                     <DataGridTextColumn Header="To Merge" Binding="{Binding IndexesToMerge, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compressible" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
+                                    <!-- #8880: heaps listed as Heap REVIEW findings, in none of the other figures. -->
+                                    <DataGridTextColumn Header="Heaps" Binding="{Binding Heaps, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>

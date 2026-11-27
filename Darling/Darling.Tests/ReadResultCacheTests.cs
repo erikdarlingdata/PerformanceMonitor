@@ -276,6 +276,7 @@ public sealed class ReadCacheInvalidationTests
     [InlineData("get_collection_log")]
     [InlineData("get_store_metrics")]
     [InlineData("get_store_log")]
+    [InlineData("get_store_connections")]
     [InlineData("list_servers")]
     [InlineData("analyze_server")]
     [InlineData("create_server_tag")]

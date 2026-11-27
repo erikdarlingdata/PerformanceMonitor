@@ -90,10 +90,10 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_58Columns()
+    public void PayloadColumns_MatchSchemaOrder_60Columns()
     {
         var names = IndexObjectStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(58, names.Length);
+        Assert.Equal(60, names.Length);
         Assert.Equal("sqlserver_start_time", names[0]);
         Assert.Equal("page_io_latch_wait_in_ms", names[43]);
         /* The Stage-1 index-definition metadata is appended after the counters (ordinals 44..57). */
@@ -107,13 +107,16 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         Assert.Equal("fill_factor", names[53]);
         Assert.Equal("allow_row_locks", names[56]);
         Assert.Equal("is_indexed_view", names[57]);
+        /* #8784: the answering instance, appended last so every ordinal above stays put. */
+        Assert.Equal("answering_server_name", names[58]);
+        Assert.Equal("is_memory_optimized", names[59]);
     }
 
     [Fact]
     public async Task ReadItem_AndWrite_RoundTrip_WithBitConversions()
     {
         var start = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
-        var input = new object[58];
+        var input = new object[60];
         input[0] = start; input[1] = "SO"; input[2] = 7; input[3] = "dbo"; input[4] = 12345;
         input[5] = "Posts"; input[6] = 1; input[7] = "PK_Posts"; input[8] = "CLUSTERED";
         input[9] = 1; input[10] = 1; input[11] = 0; input[12] = 4;
@@ -126,6 +129,7 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         input[44] = "[OwnerUserId], [CreationDate] DESC"; input[45] = "[Score]"; input[46] = DBNull.Value;
         input[47] = 0; input[48] = 1; input[49] = 0; input[50] = 0;
         input[51] = "PAGE"; input[52] = 1; input[53] = 90; input[54] = 0; input[55] = 1; input[56] = 1; input[57] = 0;
+        input[58] = "SQLNODE2"; input[59] = 1;
 
         var rows = new List<IndexObjectStatsCollector.Row>();
         using (var reader = new FakeCollectorDataReader(input))
@@ -152,10 +156,12 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         Assert.True(row.AllowPageLocks);
         Assert.True(row.AllowRowLocks);
         Assert.False(row.IsIndexedView);
+        Assert.Equal("SQLNODE2", row.AnsweringServerName);
+        Assert.True(row.IsMemoryOptimized);
 
         var writer = new RecordingCollectorRowWriter();
         IndexObjectStatsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
-        Assert.Equal(58, writer.Values.Count);
+        Assert.Equal(60, writer.Values.Count);
         Assert.Equal(start, writer.Values[0]);
         Assert.Equal(true, writer.Values[9]);
         Assert.Equal(430L, writer.Values[43]);
@@ -163,5 +169,6 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         Assert.Equal((short)90, writer.Values[53]);
         Assert.Equal(true, writer.Values[56]);
         Assert.Equal(false, writer.Values[57]);
+        Assert.Equal("SQLNODE2", writer.Values[58]);
     }
 }

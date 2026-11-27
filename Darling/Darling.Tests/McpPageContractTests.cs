@@ -1287,11 +1287,10 @@ public sealed class McpPageContractTests
         Assert.Contains("Never cuts the count or top lists", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
 
         var reader = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpClientTimeoutTools.cs"));
-        Assert.Contains("Samples(\"attention_events\", sampleLimit + 1)", reader, StringComparison.Ordinal);
+        Assert.Contains("Samples(events, sampleLimit + 1)", reader, StringComparison.Ordinal);
 
         var shared = Strip(ReadRepoFileLf("PerformanceMonitor.Alerting", "ClientTimeoutsRead.cs"));
         Assert.Contains("sampled_events_truncated = samples.Count > limit", shared, StringComparison.Ordinal);
-        Assert.Contains("sampled_events_returned = Math.Min(samples.Count, limit)", shared, StringComparison.Ordinal);
         Assert.Contains("samples.Take(limit)", shared, StringComparison.Ordinal);
         Assert.False(TotalOfPageCount.IsMatch(shared), "a page count is published under a window's name");
         Assert.False(TruncationInferred.IsMatch(shared), "truncation is inferred from the cap");

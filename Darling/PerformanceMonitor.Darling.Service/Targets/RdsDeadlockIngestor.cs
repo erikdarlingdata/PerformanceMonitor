@@ -65,10 +65,16 @@ public sealed class RdsDeadlockIngestor
     /// </summary>
     internal Func<IReadOnlyList<PgDeadlocksCollector.Row>, CancellationToken, Task<int>>? RowWriter { get; init; }
 
-    public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
+    /// <summary>
+    /// The tick source for the store time this ingestor reports on <see cref="RdsIngestOutcome.StoreMs"/> (#9523): null
+    /// is the process stopwatch. A test sets it so a duration is a stated number. Nothing in the service sets it.
+    /// </summary>
+    internal Func<long>? StoreClock { get; init; }
+
+    public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null, RdsLookupCache? lookups = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles, lookups: lookups);
         _logger = logger;
         _resume = resume;
     }
@@ -103,15 +109,21 @@ public sealed class RdsDeadlockIngestor
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
            restart resumes from the saved file and marker instead of the newest file's last lines. */
+        var store = new RdsStorePhase(StoreClock);
+
         if (_resume is not null)
         {
-            await _resume.RestoreAsync(_logs, serverId, cancellationToken);
+            await store.TimeAsync(() => _resume.RestoreAsync(_logs, serverId, cancellationToken));
         }
 
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
-        return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, cancellationToken));
+        var outcome = await RdsLogSource.RunPassesAsync(
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, store, cancellationToken));
+
+        /* #9523: the store time of the whole cycle (the restore above, each pass's COPY and position save) goes out
+           with the outcome, so the runner books it as storage time and the AWS calls and the parse as the fetch. */
+        return outcome with { StoreMs = store.ElapsedMs };
     }
 
     /// <summary>
@@ -128,6 +140,7 @@ public sealed class RdsDeadlockIngestor
         string? loginConnectionString,
         AwsRoleKey? role,
         PgLogZoneCheck? zoneCheck,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -196,7 +209,7 @@ public sealed class RdsDeadlockIngestor
 
         var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, heldReport, abandonedReport, moreCanArrive, zoneCheck, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldReport, abandonedReport, moreCanArrive, zoneCheck, store, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -235,7 +248,7 @@ public sealed class RdsDeadlockIngestor
            is rare. */
         if (_resume is not null && nextReport.Length == 0)
         {
-            await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
+            await store.TimeAsync(() => _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken));
         }
 
         return (RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped: raiseShapedSkipped,
@@ -260,6 +273,7 @@ public sealed class RdsDeadlockIngestor
         string abandonedReport,
         bool moreCanArrive,
         PgLogZoneCheck? zoneCheck,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         List<PgDeadlockLogParser.ParsedDeadlock> deadlocks;
@@ -385,9 +399,9 @@ public sealed class RdsDeadlockIngestor
         }
 
         return (
-            RowWriter is { } writeRows
-                ? await writeRows(rows, cancellationToken)
-                : await WriteAsync(serverId, storageName, rows, cancellationToken),
+            await store.TimeAsync(() => RowWriter is { } writeRows
+                ? writeRows(rows, cancellationToken)
+                : WriteAsync(serverId, storageName, rows, cancellationToken)),
             foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport);
     }
 

@@ -182,7 +182,8 @@ const scenarios = {
     const util = await import(pathToFileURL(scratch + "/util.js").href);
     out.widths = [util.bucketWidthText?.({ bucket_minutes: 1 }), util.bucketWidthText?.({ bucket_minutes: 10 }), util.bucketWidthText?.({ bucket_minutes: 60 }), util.bucketWidthText?.({ bucket_minutes: 360 }), util.bucketWidthText?.({ bucket_minutes: 1440 }), util.bucketWidthText?.({ bucket: "per-collection", bucket_minutes: null }), util.bucketWidthText?.({})];
   },
-  /* #6359: a read served from the hourly rollup trails the clock by up to two hours, and the panel says so from the read's own `source` field. */
+  /* #6359, #8801: a read served from the hourly rollup alone trails the clock, and the panel says so from the read's own `source` field.
+     A query's history reads the newest hours from the raw rows, so it carries no such sentence on either tier. */
   async hourlyTierTrail() {
     const notices = async (kind, row, payload) => {
       respond(payload);
@@ -193,6 +194,7 @@ const scenarios = {
     };
     out.hourly = await notices("procedures", procRow, { ...procTrend(), bucket: "1 hour", bucket_minutes: 60, source: "hourly" });
     out.raw = await notices("queries", queryRow, { hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40 }], bucket: "5 minutes", bucket_minutes: 5, source: "raw" });
+    out.hourlyQuery = await notices("queries", { database_name: "Orders", query_hash: "0xDEF" }, { hours_back: 168, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40 }], bucket: "1 hour", bucket_minutes: 60, source: "hourly" });
   },
   /* #6359: "Past 5 minutes" is read over the whole hour the grid ranked over. The row's History must not be cut to the 5 minutes. */
   async fiveMinuteRange() {

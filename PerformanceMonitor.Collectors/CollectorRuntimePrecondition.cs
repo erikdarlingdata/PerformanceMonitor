@@ -308,6 +308,19 @@ public static class CollectorRuntimePrecondition
         var observed = DescribeObserved(observedUtc);
         var said = DescribeServerAnswer(errorMessage);
 
+        /* #9107: the default trace is turned off on the server. The run is a SUCCESS that carries the count, so this arm reads the note,
+           not the status. Not a grant: nothing about the monitoring login changes it, and the statement that does is named here. */
+        if (string.Equals(status, CollectorSuccessStatus, StringComparison.OrdinalIgnoreCase)
+            && PerformanceMonitor.Common.DefaultTraceOffNote.TryParse(errorMessage))
+        {
+            return $"The {collectorName} collector is running against {serverName}, but the server's default trace is turned off " +
+                   $"('{PerformanceMonitor.Common.DefaultTraceOffNote.SettingName}' is 0 in sys.configurations): its last run{observed} found no " +
+                   $"default trace to read, so no default trace events are being stored. This is a setup step on the monitored server, not a " +
+                   $"permission problem and not a monitoring fault. To turn the default trace on, run: " +
+                   $"{PerformanceMonitor.Common.DefaultTraceOffNote.EnableStatement} " +
+                   PreconditionEpilogue;
+        }
+
         if (string.Equals(status, CaptureSessionMissingStatus, StringComparison.OrdinalIgnoreCase))
         {
             return $"{serverName} does not currently have the Extended Events session the {collectorName} " +

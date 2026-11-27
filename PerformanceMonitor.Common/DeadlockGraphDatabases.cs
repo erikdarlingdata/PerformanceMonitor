@@ -24,7 +24,18 @@ public static class DeadlockGraphDatabases
     /// (case-insensitive). An empty list, a graph with no database names, an empty graph or unparseable
     /// XML is never "all in".
     /// </summary>
-    public static bool AllIn(string? graphXml, IReadOnlyList<string> databases)
+    public static bool AllIn(string? graphXml, IReadOnlyList<string> databases) =>
+        AllMatch(graphXml, db => databases.Any(e => string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// The same rule over an excluded-databases list, where an entry holding <c>*</c> is a pattern (#9050,
+    /// <see cref="DatabaseNamePattern"/>). Kept apart from <see cref="AllIn"/> so the Azure sibling-database lists, which are
+    /// exact names, keep their exact meaning.
+    /// </summary>
+    public static bool AllInExcluded(string? graphXml, IReadOnlyList<string> excludedDatabases) =>
+        AllMatch(graphXml, db => DatabaseNamePattern.MatchesAny(excludedDatabases, db));
+
+    private static bool AllMatch(string? graphXml, Func<string, bool> isIn)
     {
         if (string.IsNullOrEmpty(graphXml)) return false;
         try
@@ -36,8 +47,7 @@ public static class DeadlockGraphDatabases
                 .Cast<string>()
                 .ToList();
             if (dbNames.Count == 0) return false;
-            return dbNames.All(db => databases.Any(e =>
-                string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
+            return dbNames.All(isIn);
         }
         catch { return false; }
     }

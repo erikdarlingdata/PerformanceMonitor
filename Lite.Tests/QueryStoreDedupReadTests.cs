@@ -1009,12 +1009,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             @"PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role").Count;
         var rankFilters = Regex.Matches(source, @"(?:WHERE|AND)\s+(?:qs\.)?rn = 1").Count;
 
-        Assert.Equal(6, partitions);
-        /* Ten, not six: the comparison's two deduped CTEs are each consumed THREE times — once to pick the
+        /* Five windows plus one aggregate: since #9195 the top-queries read picks the newest snapshot per interval with arg_max over the same
+           group (newest collection_time, then execution_count) instead of a ROW_NUMBER window, so it is no partition and no rn filter.
+           QueryStoreServerWideTopTests covers that dedup by behaviour. */
+        Assert.Equal(5, partitions);
+        /* Nine, not five: the comparison's two deduped CTEs are each consumed THREE times — once to pick the
            top 100 hashes, once by the value aggregate, and (#5381) once by the winner CTE that names the rows
            whose query_text is read after the ranking — and an rn filter missing from any consumer would let
            the un-deduped rows straight back into the numbers (or the text). */
-        Assert.Equal(10, rankFilters);
+        Assert.Equal(9, rankFilters);
 
         /* The top-queries read's `ranked` is a pass-through over `deduped` (WHERE 1 = 1) since #5381: the join to the
            latest snapshot's id is the only thing keeping an un-deduped row out of it (#1841). Counting rn filters does

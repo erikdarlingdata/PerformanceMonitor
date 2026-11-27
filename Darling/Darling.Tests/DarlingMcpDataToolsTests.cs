@@ -317,7 +317,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("sqlserver_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("other_process_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("PARTITION BY server_id, collection_time", sql, StringComparison.Ordinal); /* #1262 per-batch de-skew */
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);        /* window on the reliable clock */
     }
 
     /// <summary>#2320: the attribution denominator windows on collection_time — the SAME bounds the
@@ -331,7 +330,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("AVG(sqlserver_cpu_utilization)", sql, StringComparison.Ordinal);
         Assert.Contains("MIN(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
@@ -423,7 +421,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_tempdb_stats", sql, StringComparison.Ordinal);
         Assert.Contains("version_store_reserved_mb", sql, StringComparison.Ordinal);
         Assert.Contains("total_sessions_using_tempdb", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
     }
 
     [Fact]

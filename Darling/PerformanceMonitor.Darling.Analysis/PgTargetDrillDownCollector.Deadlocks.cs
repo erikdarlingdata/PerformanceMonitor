@@ -193,7 +193,7 @@ LIMIT $4";
         var exemplars = new List<PgTargetDeadlockExemplar>(DeadlockExemplarCap);
         int distinctShapes = 0, totalReports = 0, totalRows = 0;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
         using var cmd = new NpgsqlCommand(PgTargetDeadlockExemplarsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));

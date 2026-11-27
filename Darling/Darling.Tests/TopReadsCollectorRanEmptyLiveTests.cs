@@ -143,6 +143,75 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
         });
     }
 
+    /// <summary>
+    /// #9341: the collector's runs stored rows, but the one interval they hold started before the window (an hourly interval still
+    /// open). The ranking places a window by each interval's start, so it is empty, and "found no intervals to store" is false:
+    /// rows were collected. The answer names the rows and says the window holds no interval yet, with and without a database filter.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreTop_RunsStoredRowsButNoIntervalStartedInTheWindow_SaysRowsWereCollected()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-40), "SUCCESS", rows: 22);
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-10), "SUCCESS", rows: 233);
+            await PlantOpenIntervalAsync(connection, ct, now);
+
+            foreach (var database in new string?[] { null, "StackOverflow" })
+            {
+                var answer = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, database_name: database, as_of: now.ToString("o"))).RootElement;
+
+                Assert.Equal("empty", answer.GetProperty("status").GetString());
+                var hints = answer.GetProperty("hints");
+                Assert.Equal(2, hints.GetProperty("successful_runs_in_window").GetInt64());
+                Assert.Equal(255, hints.GetProperty("rows_collected_in_window").GetInt64());
+                Assert.DoesNotContain("found no", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+        });
+    }
+
+    /// <summary>#9341: the same answer when the interval table serves the database-filtered read (the filter has no minimum window, so it
+    /// asks the gate), which used to fall through to "unavailable" because only the raw tier was allowed to say the collector ran.</summary>
+    [Fact]
+    public async Task QueryStoreTop_AFilteredReadServedByTheIntervalTable_SaysRowsWereCollected()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ($1, $2, $2)",
+                ServerId, now.AddDays(-30));
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-10), "SUCCESS", rows: 255);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_store_interval_wide
+                  (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+                   query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+                   avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
+                  VALUES ($2, $1, 'StackOverflow', 1, 1, 'Regular', $4, $2, 'h1', 10, 1000, 5, 5, 5, 5, 5, 'ph', 1, $3)",
+                ServerId, now.AddMinutes(-10), now.AddMinutes(-90), now.AddDays(-5));
+
+            /* The same read the tool makes: the gate must plan the interval table for this window, or this test would pass on the raw tier. The
+               interval's first execution is days old (the table's own floor), so the gate's purge-edge clause lets the table through. */
+            var reach = await DarlingDataReader.GetQueryStoreTopWithReachAsync(
+                postgres, ServerId, now.AddHours(-1), now, 2, DatabaseFilter.One("StackOverflow"), null, null, ct);
+            Assert.NotNull(reach.Table);
+
+            var answer = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, database_name: "StackOverflow", as_of: now.ToString("o"))).RootElement;
+
+            Assert.Equal("empty", answer.GetProperty("status").GetString());
+            Assert.Equal(255, answer.GetProperty("hints").GetProperty("rows_collected_in_window").GetInt64());
+        });
+    }
+
+    /// <summary>One raw Query Store row, collected inside the window by an interval that started 90 minutes before it ends.</summary>
+    private static Task PlantOpenIntervalAsync(NpgsqlConnection connection, CancellationToken ct, DateTime now) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collect.query_store_stats
+                  (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+                   first_execution_time, last_execution_time, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+                   is_forced_plan, runtime_stats_interval_id, interval_start_time_utc, query_text)
+              VALUES ($1, $2, $3, $4, 'StackOverflow', 1, 1, 'Regular', $5, $2, 'h1', 10, 1000, 5, FALSE, 1, $5, 'SELECT 1')",
+            CollectionIdGenerator.Next(), now.AddMinutes(-10), ServerId, ServerName, now.AddMinutes(-90));
+
     /* #7442: a reply that counts the collector's runs in the window is not a window the store holds no collection for. The probe finds no
        row because the runs stored none, and the note that says so contradicted the sentence beside it. A first run within the slack of
        the start is not truncated, and its window starts at that run. */
@@ -310,7 +379,7 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM collection_log WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM collect.query_store_stats WHERE server_id = {ServerId}; DELETE FROM collect.query_store_interval_wide WHERE server_id = {ServerId}; DELETE FROM collect.query_store_interval_wide_coverage WHERE server_id = {ServerId}; DELETE FROM collection_log WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

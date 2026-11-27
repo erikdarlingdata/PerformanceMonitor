@@ -194,6 +194,20 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// #9640: puts the default schedule back to the shipped defaults and saves it (the MCP <c>reset_collector_schedules</c> with no server).
+    /// A server's own schedule is not touched. The list is replaced under the lock, the way a load replaces it.
+    /// </summary>
+    public void ResetDefaultSchedule()
+    {
+        lock (_lock)
+        {
+            _defaultSchedule = GetDefaultSchedules();
+            SaveSchedules();
+            _logger?.LogInformation("Reset the default schedule to the shipped defaults");
+        }
+    }
+
+    /// <summary>
     /// Detects which preset matches the current default schedule intervals, or returns "Custom".
     /// </summary>
     public string GetActivePreset()
@@ -704,6 +718,50 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// #9270: a <c>database_config</c> capture that holds a database in a transitional state (RESTORING, RECOVERING or RECOVERY_PENDING)
+    /// holds that database's engine defaults, and the collector's next capture is a day away. With <paramref name="recaptureDue"/> true
+    /// (<see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored captures, which hold the count of repeats, so nothing is kept here)
+    /// the collector is made due again in <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes (its last run is
+    /// recorded as that much of an interval ago). A collector with a run time keeps its time of day, and one that is switched off or not
+    /// listed is left alone. Returns whether the collector was made due early.
+    /// </summary>
+    public bool ScheduleTransitionalRecaptureForServer(string serverId, string collectorName, bool recaptureDue, DateTime nowUtc)
+    {
+        if (!recaptureDue)
+        {
+            return false;
+        }
+
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+            var schedule = schedules.FirstOrDefault(s => s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
+            if (schedule is null || !schedule.Enabled)
+            {
+                return false;
+            }
+
+            var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
+            if (intervalMinutes <= CollectorScheduleDefaults.TransitionalRecaptureMinutes
+                || ResolveRunAtMinute(serverId, schedule, intervalMinutes) is not null)
+            {
+                return false;
+            }
+
+            if (!_serverRunState.TryGetValue(serverId, out var runState))
+            {
+                runState = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                _serverRunState[serverId] = runState;
+            }
+
+            runState[collectorName] = nowUtc.AddMinutes(CollectorScheduleDefaults.TransitionalRecaptureMinutes - intervalMinutes);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// #4938: records an attempt that did not succeed (an error, a denied permission, a declined sign-in, a lock yield)
     /// as the run of a daily-or-longer collector (an effective interval of a day or more, whole days or not, by
     /// <see cref="IsDailyOrLonger"/>: the rule the start-up read uses), with or without a run time. The attempt wrote its
@@ -836,6 +894,12 @@ public class ScheduleManager
     internal static string DescribePresetMatch(List<CollectorSchedule> schedules)
     {
         var matched = DetectPreset(schedules);
+        if (matched == PresetOff)
+        {
+            /* #9569: Off has no interval table, so "every interval matches the Off preset" would say nothing true. */
+            return "Every collector is off.";
+        }
+
         if (matched != "Custom")
         {
             return $"Every collector interval matches the {matched} preset.";
@@ -948,9 +1012,17 @@ public class ScheduleManager
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to load collection_schedule.json, attempting backup restore");
+            /* #9772: the file exists and could not be read as a schedule config. The user's copy is kept before anything can
+               write collection_schedule.json: the next save writes the schedules Lite is running on over it, and a fresh start
+               with no usable backup runs on the default schedules. collection_schedule.json itself is never written here (not
+               by the load, and not by the delta-cadence clamp on a restored backup), so a file the user can still fix by hand
+               is not replaced by the defaults. A successful read that upgrades a v1 file is not a rejected read and is saved
+               in the try block above. */
+            var keptCopy = RejectedConfigCopy.Keep(_schedulePath);
 
-            /* Try to restore from backup */
+            _defaultSchedule = GetDefaultSchedules();
+            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+            var runningOn = "the default schedules (there is no collection_schedule.json.bak)";
             var bakPath = _schedulePath + ".bak";
             if (File.Exists(bakPath))
             {
@@ -959,24 +1031,29 @@ public class ScheduleManager
                     string bakJson = File.ReadAllText(bakPath);
                     if (TryLoadV2(bakJson))
                     {
-                        _logger?.LogInformation("Restored schedules from backup file");
-                        SanitizeDeltaFrequencies();
-                        return;
+                        runningOn = $"the {_defaultSchedule.Count} default collectors and {_serverOverrides.Count} server override(s) in collection_schedule.json.bak";
+                    }
+                    else
+                    {
+                        var bakConfig = JsonSerializer.Deserialize<ScheduleConfigV1>(bakJson);
+                        _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
+                        _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+                        runningOn = $"the {_defaultSchedule.Count} collectors in collection_schedule.json.bak (v1 format)";
                     }
 
-                    var bakConfig = JsonSerializer.Deserialize<ScheduleConfigV1>(bakJson);
-                    _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
-                    _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
-                    _logger?.LogInformation("Restored v1 schedules from backup file");
-                    SanitizeDeltaFrequencies();
-                    return;
+                    SanitizeDeltaFrequencies(save: false);
                 }
-                catch { /* backup also corrupt, fall through to defaults */ }
+                catch (Exception bakEx)
+                {
+                    _defaultSchedule = GetDefaultSchedules();
+                    _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+                    runningOn = $"the default schedules (collection_schedule.json.bak could not be read either: {bakEx.GetType().Name})";
+                }
             }
 
-            _defaultSchedule = GetDefaultSchedules();
-            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
-            SaveSchedules();
+            _logger?.LogWarning(
+                "Lite could not read {File}: {Error} (JSON path {JsonPath}). Lite is running on {RunningOn}. The rejected file is kept as {KeptCopy}, and collection_schedule.json is left as it is until the next save.",
+                _schedulePath, $"{ex.GetType().Name}: {ex.Message}", (ex as JsonException)?.Path ?? "none", runningOn, keptCopy);
         }
     }
 
@@ -1112,9 +1189,10 @@ public class ScheduleManager
     /// write APIs refuse such a cadence, but a hand-edited or pre-fix collection_schedule.json can still
     /// carry one, and honoring it would fabricate permanent quiet (every cycle past the gap policy
     /// re-baselines and stores a zero delta). Load-time has no user to bounce the value back to, so it
-    /// clamps and logs instead of refusing. Saves when anything changed.
+    /// clamps and logs instead of refusing. Saves when anything changed and <paramref name="save"/> is set; the load of a
+    /// rejected file clamps the backup in memory without saving, so the user's file is not written (#9772).
     /// </summary>
-    private void SanitizeDeltaFrequencies()
+    private void SanitizeDeltaFrequencies(bool save = true)
     {
         var changed = false;
 
@@ -1141,19 +1219,33 @@ public class ScheduleManager
             }
         }
 
-        if (changed)
+        if (changed && save)
         {
             SaveSchedules();
         }
     }
 
+    /// <summary>The preset that turns every collector in scope off (#9569). Not a key of <c>s_presets</c>.</summary>
+    internal const string PresetOff = "Off";
+
+    /// <summary>True when the list has at least one row and every row is off (#9569).</summary>
+    private static bool AllCollectorsOff(List<CollectorSchedule> schedules) =>
+        schedules.Count > 0 && schedules.All(s => !s.Enabled);
+
     /// <summary>
     /// Detects which preset matches a list of collector schedules, or "Custom". This is the single
     /// source of preset logic; <see cref="ApplyPreset"/> and the collector-schedule editor window both
     /// call these static methods rather than keeping a second preset table, so the two cannot drift.
+    /// "Off" (every row off, at least one row) is checked first, so the combo can pick a named preset
+    /// again and raise SelectionChanged (#9569). An empty list is never Off.
     /// </summary>
     internal static string DetectPreset(List<CollectorSchedule> schedules)
     {
+        if (AllCollectorsOff(schedules))
+        {
+            return PresetOff;
+        }
+
         foreach (var (presetName, intervals) in s_presets)
         {
             bool matches = true;
@@ -1173,15 +1265,39 @@ public class ScheduleManager
     }
 
     /// <summary>
-    /// Applies a named preset's intervals to a schedule list in place (frequencies only; enabled and
-    /// retention are untouched). An unknown preset name is a no-op. Shared with the editor window so the
-    /// preset table lives exactly once.
+    /// Applies a preset to a schedule list in place. "Off" clears Enabled on every row and touches nothing
+    /// else (#9569). A named preset sets the intervals, and when every row was off also returns each row to its
+    /// collector's shipped default (so the opt-in long_query_completions stays off, and a collector turned off on
+    /// purpose among running ones stays off). A row with no shipped default is left as it is. Retention is never
+    /// changed. An unknown preset name is a no-op. Shared with the editor window so the preset table
+    /// lives exactly once.
     /// </summary>
     internal static void ApplyPreset(List<CollectorSchedule> schedules, string presetName)
     {
+        if (string.Equals(presetName, PresetOff, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var schedule in schedules)
+            {
+                schedule.Enabled = false;
+            }
+            return;
+        }
+
         if (!s_presets.TryGetValue(presetName, out var intervals))
         {
             return;
+        }
+
+        if (AllCollectorsOff(schedules))
+        {
+            var shipped = GetDefaultSchedules().ToDictionary(d => d.Name, d => d.Enabled, StringComparer.OrdinalIgnoreCase);
+            foreach (var schedule in schedules)
+            {
+                if (shipped.TryGetValue(schedule.Name, out var shippedEnabled))
+                {
+                    schedule.Enabled = shippedEnabled;
+                }
+            }
         }
 
         foreach (var (collector, freq) in intervals)

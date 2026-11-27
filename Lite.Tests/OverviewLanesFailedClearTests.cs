@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// builds the real lanes control on the shared STA thread with the theme loaded, shows it, drives the lane through the same calls
 /// a refresh makes, and reads back what ScottPlot holds and what the crosshair would say.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class OverviewLanesFailedClearTests
 {
     private static List<(double Time, double Value)> Series(DateTime from, DateTime to, double lo, double hi) =>

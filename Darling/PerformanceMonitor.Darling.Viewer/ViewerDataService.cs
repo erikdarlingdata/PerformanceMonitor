@@ -581,16 +581,21 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
-           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.BuiltApplicationName,
+           set on the builder there, #9436); this is the BYO connection string's turn — set-if-absent, so an
            operator's own ApplicationName on a bring-your-own store wins. */
         _dataSource = NpgsqlDataSource.Create(
-            DarlingStoreConnection.PinSessionTimeZoneUtc(
-                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
+            DarlingStoreConnection.PinSessionTimeZoneUtc(NameStoreConnection(effectiveConnectionString)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
         StoreConnectionIdentity = ViewerPasswordKey.StoreIdentityOf(connectionString);
         _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
+
+    /// <summary>
+    /// The viewer's name with its build (#4479, #9436), set on the string only when it has no <c>ApplicationName</c> of its own.
+    /// </summary>
+    internal static string NameStoreConnection(string effectiveConnectionString) =>
+        DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.BuiltApplicationName);
 
     /// <summary>
     /// Builds the data service, or says why the store connection string cannot be used. The constructor
@@ -743,7 +748,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         {
             await using var command = _dataSource.CreateCommand(ReadOnlyProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            var canInsert = await command.ExecuteScalarAsync(cancellationToken);
+            var canInsert = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             IsReadOnly = canInsert is not true;
         }
         catch (Exception ex) when (IsConnectionFailure(ex))
@@ -776,7 +781,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         }
         catch (Exception ex) when (IsConnectionFailure(ex))
         {
@@ -1551,7 +1556,140 @@ SELECT
     /* V265 (#8549) adds the hourly summary of job_history's categories and its coverage table. Found by catalog, as the V264 line above is. */
     (to_regclass('collect.job_history_category_hourly') IS NOT NULL AND to_regclass('collect.job_history_category_coverage') IS NOT NULL),
     /* V266 (#8716) sets a fillfactor on the query-tag sightings table. Found by its reloptions in the catalog. */
-    COALESCE((SELECT bool_or(o LIKE 'fillfactor=%') FROM pg_class c CROSS JOIN LATERAL unnest(c.reloptions) AS o WHERE c.oid = to_regclass('collect.query_tag_sightings')), false)";
+    COALESCE((SELECT bool_or(o LIKE 'fillfactor=%') FROM pg_class c CROSS JOIN LATERAL unnest(c.reloptions) AS o WHERE c.oid = to_regclass('collect.query_tag_sightings')), false),
+    /* V267 (#8570) adds a (server_id, day) index on the per-day plan totals. Found by catalog, as the V264 line above is. */
+    to_regclass('collect.ix_plan_regression_daily_server_day') IS NOT NULL,
+    /* V268 (#8784) adds the answering instance to the index and object stats, and the module execution summary in the same rung. Found by
+       catalog so the answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71
+       finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.index_object_stats') AND attname = 'answering_server_name' AND NOT attisdropped)
+    AND to_regclass('collect.object_executions_daily_built') IS NOT NULL,
+    /* V269 (#8881) adds the tempdb log columns to the tempdb stats. Found by catalog so the answer does not depend on the connecting role's
+       privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.tempdb_stats') AND attname = 'log_used_percent' AND NOT attisdropped),
+    /* V270 (#8882) adds tempdb's autogrow-all-files flag to the database size rows. Found by catalog, as the V268 line above is. Named only in
+       this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.database_size_stats') AND attname = 'is_autogrow_all_files' AND NOT attisdropped),
+    /* V271 (#8884) adds the Instance Restarted and Memory Dumps switches to the alert settings. Found by catalog so the answer does not depend on
+       the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'memory_dumps_enabled' AND NOT attisdropped),
+    /* V272 (#8798) adds the column statistics store. Found by catalog, as the V264 line above is. */
+    to_regclass('collect.column_stats_state') IS NOT NULL,
+    /* V273 (#8824) adds the hourly wait totals (a continuous aggregate where wait_stats is a hypertable, else the plain view). Found by
+       catalog, as the V259 line above is. */
+    to_regclass('collect.wait_stats_hourly') IS NOT NULL,
+    /* V274 (#8978) adds the store's trigram text index options to the service row. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_service') AND attname = 'query_store_text_trigram_index_enabled' AND NOT attisdropped),
+    /* V275 (#8737) creates the personal MCP token table. Found by catalog, so the answer does not depend on the connecting role's privileges. */
+    to_regclass('config.mcp_personal_token') IS NOT NULL,
+    /* V276 (#9000) adds the Store Growth alert's switch and floors to the alert settings. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'self_store_growth_object_floor_gb' AND NOT attisdropped),
+    /* V277 (#8967) adds the progress table of the attention_events copy, on every store and never dropped. Found by catalog, as the V259 line above is. */
+    to_regclass('collect.attention_events_legacy_copy') IS NOT NULL,
+    /* V278 (#8865) adds the error-log facts to the database protection rows. Found by catalog, as the V268 line above is. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.database_protection') AND attname = 'replica_readable' AND NOT attisdropped),
+    /* V279 (#8570) adds the aggregate compression order history, on every store and never dropped. Found by catalog, as the V277 line above is. */
+    to_regclass('collect.aggregate_compression_order_history') IS NOT NULL,
+    /* V280 (#8570) adds the plan_correction recommendation index. Found by catalog, as the V220 line above is. */
+    to_regclass('collect.idx_plan_correction_server_db_query_time') IS NOT NULL,
+    /* V281 (#9043) adds the Query Store text liveness table, on every store and never dropped. Found by catalog, as the V279 line above is. */
+    to_regclass('collect.query_store_text_seen') IS NOT NULL,
+    /* V282 (#9110) adds the job outcome daily rollup's three plain tables, on every store and never dropped. Found by catalog, as the V281 line above is. */
+    to_regclass('collect.job_outcome_daily') IS NOT NULL AND to_regclass('collect.job_outcome_daily_days') IS NOT NULL AND to_regclass('collect.job_outcome_daily_watermark') IS NOT NULL,
+    /* V283 (#9111) adds the Query Store closed-day rollups' four plain tables, on every store and never dropped. Found by catalog, as the V282 line above is. */
+    to_regclass('collect.query_store_grid_daily') IS NOT NULL AND to_regclass('collect.query_store_slicer_hourly') IS NOT NULL AND to_regclass('collect.query_store_closed_day_built') IS NOT NULL AND to_regclass('collect.query_store_closed_day_tick') IS NOT NULL,
+    /* V284 (#9149) adds the covering hash index on the interval hourly plan cache rollup's materialization. Found by catalog so the answer does not depend on the
+       connecting role's privileges. A store without that view (no TimescaleDB, or the view not built yet) has nothing to index, so it reads as done, but only
+       once V283's tables are there too: a store behind V283 has no view yet either, and must not read as the top rung. */
+    (EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_query_stats_interval_hourly_hash_cov')
+        OR (to_regclass('collect.query_stats_interval_hourly') IS NULL AND to_regclass('collect.query_store_closed_day_tick') IS NOT NULL)),
+    /* V285 (#9148) adds the Query Store clutter rollups' two plain tables, on every store and never dropped. Found by catalog, as the V283 line above is. */
+    to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL AND to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL,
+    /* V286 (#9147) adds the query_stats per-collection summary table, on every store and never dropped. Found by catalog, as the V283 line above is. */
+    to_regclass('collect.query_stats_collection') IS NOT NULL,
+    /* V287 (#9164) adds the hourly host rollup's two plain tables, on every store and never dropped. Found by catalog, as the V283 line above is. */
+    to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.query_stats_host_hourly_built') IS NOT NULL,
+    /* V288 (#9151) gives idx_collection_log_watermark an INCLUDE column. Found by catalog (more attributes than key attributes), so the answer does not depend on the
+       connecting role's privileges. A store behind V150 has no such index and reads false, as it should. */
+    EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'collect' AND t.relname = 'collection_log' AND c.relname = 'idx_collection_log_watermark' AND i.indnatts > i.indnkeyatts),
+    /* V289 (#9173) adds the hourly Query Store clutter rollups' three plain tables, on every store and never dropped. Found by catalog, as the V285 line above is. */
+    to_regclass('collect.query_store_clutter_plan_hourly') IS NOT NULL AND to_regclass('collect.query_store_clutter_collections_hourly') IS NOT NULL AND to_regclass('collect.query_store_clutter_hour_built') IS NOT NULL,
+    /* V290 (#9193) adds the query_stats summary floor table, on every store and never dropped. Found by catalog, as the V286 line above is. */
+    to_regclass('collect.query_stats_collection_floor') IS NOT NULL,
+    /* V291 (#9215) gives the corrected hourly Query Store rollup's materialization the covering (server_id, bucket) index, under its own name. Found by catalog (more
+       attributes than key attributes), so the answer does not depend on the connecting role's privileges. A store without that view (no TimescaleDB, or the view not
+       built yet) has nothing to index, so it reads as done, but only once V290's table is there too: a store behind V290 has no view yet either, and must not read as
+       the top rung. */
+    (EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'ix_qs_corrected_hourly_server_bucket' AND i.indnatts > i.indnkeyatts)
+        OR (to_regclass('collect.query_store_stats_corrected_hourly') IS NULL AND to_regclass('collect.query_stats_collection_floor') IS NOT NULL)),
+    /* V292 (#9223) adds the covering hash index on the corrected daily Query Store rollup's materialization. Found by catalog so the answer does not depend on the
+       connecting role's privileges. A store without that view (no TimescaleDB, or the view not built yet) has nothing to index, so it reads as done, but only
+       once V290's table is there too: a store behind V290 has no view yet either, and must not read as the top rung. */
+    (EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_qs_corrected_daily_hash_bucket')
+        OR (to_regclass('collect.query_store_stats_corrected_daily') IS NULL AND to_regclass('collect.query_stats_collection_floor') IS NOT NULL)),
+    /* V293 (#9277) adds the partial counter-row index on collect.attention_events, on every store (a plain table or a hypertable). Found by catalog, so the answer does
+       not depend on the connecting role's privileges. */
+    EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'idx_attention_events_count_time'),
+    /* V294 (#9284) gives the aggregate compression order history its view-and-time index, the mark that the rung ran. The rung makes the index on every
+       store, whether or not TimescaleDB is installed, because V279's table is on every store. Found by catalog so the answer does not depend on the connecting
+       role's privileges. */
+    EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_aggregate_compression_order_history_view'),
+    /* V295 (#9225) adds the plan regression block tables. Found by relation, created on every store and never dropped. */
+    (to_regclass('collect.plan_regression_block_built') IS NOT NULL),
+    /* V296 (#9280) adds the hourly Query Store summary table with its (hour, server_id) index, on every store. The index is the mark that the rung ran. Found by
+       catalog so the answer does not depend on the connecting role's privileges. */
+    EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_query_store_top_hourly_hour_server'),
+    /* V297 (#8784 part 2) adds the dependency list and the per-day referenced-names summary, plain tables on every store and never dropped. Found by catalog, as the V283 line above is. */
+    to_regclass('collect.object_dependencies') IS NOT NULL AND to_regclass('collect.object_references_daily_databases') IS NOT NULL,
+    /* V298 (#9304) adds the payload dimension tables' stamp tables, plain tables on every store and never dropped. Found by catalog, as the V297 line above is. */
+    to_regclass('collect.query_text_dim_seen') IS NOT NULL AND to_regclass('collect.query_plan_dim_seen') IS NOT NULL,
+    /* V299 (#9349) adds the object usage chain's three tables, plain tables or hypertables, never dropped. Found by catalog, as the V298 line above is. */
+    to_regclass('collect.object_usage_snapshots') IS NOT NULL AND to_regclass('collect.object_usage_deltas') IS NOT NULL AND to_regclass('collect.object_usage_runs') IS NOT NULL,
+    /* V300 (#9357) adds the procedure_stats hour ledger and its state table, plain tables on every store and never dropped. Found by catalog, as the V299 line above is. */
+    to_regclass('collect.procedure_stats_hour_ledger') IS NOT NULL AND to_regclass('collect.procedure_stats_hour_ledger_state') IS NOT NULL,
+    /* V301 (#9374) adds the last measured relation sizes and the time they were measured, plain tables on every store and never dropped. Found by catalog, as the V300 line above is. */
+    to_regclass('collect.store_relation_sizes_latest') IS NOT NULL AND to_regclass('collect.store_relation_sizes_measured') IS NOT NULL,
+    /* V302 (#8570) adds the partial index of failed Agent job outcomes on job_history, never dropped. Found by catalog, as the V301 line above is. */
+    to_regclass('collect.idx_job_history_job_failed') IS NOT NULL,
+    /* V303 (#9384) adds the clutter-day stamp, a plain table on every store and never dropped. Found by catalog, as the V302 line above is. */
+    to_regclass('collect.query_store_clutter_day_built') IS NOT NULL,
+    /* V304 (#9410) adds the write counters to the statement history, four columns that are never dropped. The first of them is the mark that the rung ran. Found by catalog, so
+       the answer does not depend on the connecting role's privileges. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.store_statement_history') AND attname = 'delta_shared_blks_dirtied' AND NOT attisdropped),
+    /* V305 (#9419) adds the WAL columns to collect.store_metrics, never dropped. The wal_stats_reset column is the mark that the rung ran. Found by catalog, as the
+       V156 line above is, so the answer does not depend on the connecting role's privileges. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.store_metrics') AND attname = 'wal_stats_reset' AND NOT attisdropped),
+    /* V306 (#9411) adds the background pass step history, a plain table on every store and never dropped. Found by catalog, as the V305 line above is. */
+    to_regclass('collect.store_pass_steps') IS NOT NULL,
+    /* V307 (#9415) adds the service start history, two plain tables on every store and never dropped. Found by catalog, as the V306 line above is. */
+    to_regclass('collect.service_starts') IS NOT NULL AND to_regclass('collect.service_start_rungs') IS NOT NULL,
+    /* V308 (#9413) adds the per-table activity capture and its baseline, plain tables on every store and never dropped. Found by catalog, as the V307 line above is. */
+    to_regclass('collect.store_table_activity') IS NOT NULL AND to_regclass('collect.store_table_activity_baseline') IS NOT NULL,
+    /* V309 (#9414) adds the store checkpoint rows, a plain table on every store and never dropped. Found by catalog, as the V308 line above is. */
+    to_regclass('collect.store_checkpoints') IS NOT NULL,
+    /* V310 (#9452) adds the partial index of the oversized-plan backlog's pending rows, never dropped. Found by catalog, as the V309 line above is. */
+    to_regclass('collect.idx_oversized_plan_backlog_pending') IS NOT NULL,
+    /* V311 (#9438) adds what each migration rung changed, one plain table on every store and never dropped. Found by catalog, as the V310 line above is. */
+    to_regclass('collect.service_start_rung_objects') IS NOT NULL,
+    /* V312 (#9432) adds the upgrade run table, a plain table on every store and never dropped. Found by catalog, as the V311 line above is. */
+    to_regclass('collect.upgrade_runs') IS NOT NULL,
+    /* V313 (#9427) adds the store setting state and the store setting changes, plain tables on every store and never dropped. Found by catalog, as the V312 line above is. */
+    to_regclass('collect.store_setting_changes') IS NOT NULL AND to_regclass('collect.store_setting_state') IS NOT NULL,
+    /* V314 (#9437) adds the two store connection tables, never dropped. The slot table is the mark that the rung ran. Found by catalog, as the V313 line above is. */
+    to_regclass('collect.store_connection_slots') IS NOT NULL,
+    /* V315 (#9434) replaces the read_latency primary key with a unique index that names the process start, never dropped. Found by catalog, as the V314 line above is. */
+    to_regclass('collect.uq_read_latency_key') IS NOT NULL,
+    /* V316 (#9439) adds collect.store_lock_waits, a plain table never dropped. Found by catalog, as the V315 line above is. */
+    to_regclass('collect.store_lock_waits') IS NOT NULL,
+    /* V317 (#9433) adds the reply size to the slow read record and the read latency histogram, two columns that are never dropped. The slow read column is the mark that the rung ran. Found by catalog, as the V316 line above is. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.slow_reads') AND attname = 'reply_bytes' AND NOT attisdropped),
+    /* V318 (#9485) adds the planned change windows table, a plain table on every store and never dropped. Found by catalog, as the V317 line above is. */
+    to_regclass('config.investigation_change_windows') IS NOT NULL,
+    /* V319 (#9662) adds the three argument advanced web access setter, a function never dropped. Found by catalog, as the V318 line above is. */
+    to_regprocedure('config.set_web_access_advanced(boolean,text,boolean)') IS NOT NULL";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -1570,10 +1708,10 @@ SELECT
         {
             await using var command = _dataSource.CreateCommand(StoreSchemaProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132), reader.GetBoolean(133), reader.GetBoolean(134), reader.GetBoolean(135), reader.GetBoolean(136), reader.GetBoolean(137), reader.GetBoolean(138), reader.GetBoolean(139), reader.GetBoolean(140), reader.GetBoolean(141), reader.GetBoolean(142), reader.GetBoolean(143), reader.GetBoolean(144), reader.GetBoolean(145), reader.GetBoolean(146), reader.GetBoolean(147), reader.GetBoolean(148), reader.GetBoolean(149), reader.GetBoolean(150), reader.GetBoolean(151), reader.GetBoolean(152), reader.GetBoolean(153), reader.GetBoolean(154), reader.GetBoolean(155), reader.GetBoolean(156), reader.GetBoolean(157), reader.GetBoolean(158), reader.GetBoolean(159), reader.GetBoolean(160), reader.GetBoolean(161), reader.GetBoolean(162), reader.GetBoolean(163), reader.GetBoolean(164), reader.GetBoolean(165), reader.GetBoolean(166), reader.GetBoolean(167), reader.GetBoolean(168), reader.GetBoolean(169), reader.GetBoolean(170), reader.GetBoolean(171), reader.GetBoolean(172), reader.GetBoolean(173), reader.GetBoolean(174), reader.GetBoolean(175), reader.GetBoolean(176), reader.GetBoolean(177), reader.GetBoolean(178), reader.GetBoolean(179), reader.GetBoolean(180), reader.GetBoolean(181), reader.GetBoolean(182), reader.GetBoolean(183), reader.GetBoolean(184), reader.GetBoolean(185), reader.GetBoolean(186), reader.GetBoolean(187), reader.GetBoolean(188), reader.GetBoolean(189), reader.GetBoolean(190), reader.GetBoolean(191), reader.GetBoolean(192), reader.GetBoolean(193), reader.GetBoolean(194), reader.GetBoolean(195), reader.GetBoolean(196), reader.GetBoolean(197), reader.GetBoolean(198), reader.GetBoolean(199), reader.GetBoolean(200), reader.GetBoolean(201), reader.GetBoolean(202), reader.GetBoolean(203), reader.GetBoolean(204), reader.GetBoolean(205), reader.GetBoolean(206), reader.GetBoolean(207), reader.GetBoolean(208), reader.GetBoolean(209), reader.GetBoolean(210), reader.GetBoolean(211), reader.GetBoolean(212), reader.GetBoolean(213), reader.GetBoolean(214), reader.GetBoolean(215), reader.GetBoolean(216), reader.GetBoolean(217), reader.GetBoolean(218), reader.GetBoolean(219), reader.GetBoolean(220), reader.GetBoolean(221), reader.GetBoolean(222), reader.GetBoolean(223), reader.GetBoolean(224), reader.GetBoolean(225), reader.GetBoolean(226), reader.GetBoolean(227), reader.GetBoolean(228), reader.GetBoolean(229), reader.GetBoolean(230), reader.GetBoolean(231), reader.GetBoolean(232), reader.GetBoolean(233), reader.GetBoolean(234), reader.GetBoolean(235), reader.GetBoolean(236), reader.GetBoolean(237), reader.GetBoolean(238), reader.GetBoolean(239), reader.GetBoolean(240), reader.GetBoolean(241));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132), reader.GetBoolean(133), reader.GetBoolean(134), reader.GetBoolean(135), reader.GetBoolean(136), reader.GetBoolean(137), reader.GetBoolean(138), reader.GetBoolean(139), reader.GetBoolean(140), reader.GetBoolean(141), reader.GetBoolean(142), reader.GetBoolean(143), reader.GetBoolean(144), reader.GetBoolean(145), reader.GetBoolean(146), reader.GetBoolean(147), reader.GetBoolean(148), reader.GetBoolean(149), reader.GetBoolean(150), reader.GetBoolean(151), reader.GetBoolean(152), reader.GetBoolean(153), reader.GetBoolean(154), reader.GetBoolean(155), reader.GetBoolean(156), reader.GetBoolean(157), reader.GetBoolean(158), reader.GetBoolean(159), reader.GetBoolean(160), reader.GetBoolean(161), reader.GetBoolean(162), reader.GetBoolean(163), reader.GetBoolean(164), reader.GetBoolean(165), reader.GetBoolean(166), reader.GetBoolean(167), reader.GetBoolean(168), reader.GetBoolean(169), reader.GetBoolean(170), reader.GetBoolean(171), reader.GetBoolean(172), reader.GetBoolean(173), reader.GetBoolean(174), reader.GetBoolean(175), reader.GetBoolean(176), reader.GetBoolean(177), reader.GetBoolean(178), reader.GetBoolean(179), reader.GetBoolean(180), reader.GetBoolean(181), reader.GetBoolean(182), reader.GetBoolean(183), reader.GetBoolean(184), reader.GetBoolean(185), reader.GetBoolean(186), reader.GetBoolean(187), reader.GetBoolean(188), reader.GetBoolean(189), reader.GetBoolean(190), reader.GetBoolean(191), reader.GetBoolean(192), reader.GetBoolean(193), reader.GetBoolean(194), reader.GetBoolean(195), reader.GetBoolean(196), reader.GetBoolean(197), reader.GetBoolean(198), reader.GetBoolean(199), reader.GetBoolean(200), reader.GetBoolean(201), reader.GetBoolean(202), reader.GetBoolean(203), reader.GetBoolean(204), reader.GetBoolean(205), reader.GetBoolean(206), reader.GetBoolean(207), reader.GetBoolean(208), reader.GetBoolean(209), reader.GetBoolean(210), reader.GetBoolean(211), reader.GetBoolean(212), reader.GetBoolean(213), reader.GetBoolean(214), reader.GetBoolean(215), reader.GetBoolean(216), reader.GetBoolean(217), reader.GetBoolean(218), reader.GetBoolean(219), reader.GetBoolean(220), reader.GetBoolean(221), reader.GetBoolean(222), reader.GetBoolean(223), reader.GetBoolean(224), reader.GetBoolean(225), reader.GetBoolean(226), reader.GetBoolean(227), reader.GetBoolean(228), reader.GetBoolean(229), reader.GetBoolean(230), reader.GetBoolean(231), reader.GetBoolean(232), reader.GetBoolean(233), reader.GetBoolean(234), reader.GetBoolean(235), reader.GetBoolean(236), reader.GetBoolean(237), reader.GetBoolean(238), reader.GetBoolean(239), reader.GetBoolean(240), reader.GetBoolean(241), reader.GetBoolean(242), reader.GetBoolean(243), reader.GetBoolean(244), reader.GetBoolean(245), reader.GetBoolean(246), reader.GetBoolean(247), reader.GetBoolean(248), reader.GetBoolean(249), reader.GetBoolean(250), reader.GetBoolean(251), reader.GetBoolean(252), reader.GetBoolean(253), reader.GetBoolean(254), reader.GetBoolean(255), reader.GetBoolean(256), reader.GetBoolean(257), reader.GetBoolean(258), reader.GetBoolean(259), reader.GetBoolean(260), reader.GetBoolean(261), reader.GetBoolean(262), reader.GetBoolean(263), reader.GetBoolean(264), reader.GetBoolean(265), reader.GetBoolean(266), reader.GetBoolean(267), reader.GetBoolean(268), reader.GetBoolean(269), reader.GetBoolean(270), reader.GetBoolean(271), reader.GetBoolean(272), reader.GetBoolean(273), reader.GetBoolean(274), reader.GetBoolean(275), reader.GetBoolean(276), reader.GetBoolean(277), reader.GetBoolean(278), reader.GetBoolean(279), reader.GetBoolean(280), reader.GetBoolean(281), reader.GetBoolean(282), reader.GetBoolean(283), reader.GetBoolean(284), reader.GetBoolean(285), reader.GetBoolean(286), reader.GetBoolean(287), reader.GetBoolean(288), reader.GetBoolean(289), reader.GetBoolean(290), reader.GetBoolean(291), reader.GetBoolean(292), reader.GetBoolean(293), reader.GetBoolean(294));
             }
 
             return null;
@@ -1598,7 +1736,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false, bool hasInstallId = false, bool hasInstallIdTableOid = false, bool hasCollectorRunAt = false, bool hasQueryStoreTopDaily = false, bool hasSlowReads = false, bool hasStoreStatementHistory = false, bool hasQueryStatsHourLedger = false, bool hasPasswordKey = false, bool hasPagerDutyAutoResolve = false, bool hasLegacyPinCandidates = false, bool hasPlanRegressionDaily = false, bool hasAwsRole = false, bool hasPgIoStatsHourly = false, bool hasQueryStoreIntervalWidePartitioned = false, bool hasQueryStoreIntervalLatestPartitioned = false, bool hasQueryStoreComposeStamp = false, bool hasServiceVersion = false, bool hasPlanRegressionDailyRowcount = false, bool hasProcedureStatsTotals = false, bool hasRunnableQueueSettings = false, bool hasQueryStoreWatermarks = false, bool hasClientTimeoutSettings = false, bool hasExternalAlerts = false, bool hasNotificationRouteScope = false, bool hasReadLatencyCapacityFields = false, bool hasReadCaller = false, bool hasInvestigations = false, bool hasPlanRegressionPartialDays = false, bool hasCollectionLogHourly = false, bool hasAlertResolutionDelivery = false, bool hasInvestigationAlertFacts = false, bool hasComposeStampFailures = false, bool hasStoreMetricsSizeEstimated = false, bool hasAgentLevel2Store = false, bool hasQueryTagsStore = false, bool hasPhaseCStore = false, bool hasQueryTagSightingsDatabaseKey = false, bool hasQueryStoreForcedPlans = false, bool hasServerActionSwitches = false, bool hasForceChecks = false, bool hasPseudonymKey = false, bool hasBlockingHeadEvidence = false, bool hasExcludedVolumes = false, bool hasForcedPlanVariantsAndGuides = false, bool hasAgPrimaryReplica = false, bool hasHypotheticalIndexLogin = false, bool hasCustomViewFolders = false, bool hasCustomAlertRuleExpiry = false, bool hasInheritableCollectorEnabled = false, bool hasChangeWatches = false, bool hasMuteRuleStartsAt = false, bool hasQueryStoreFetchTopN = false, bool hasAgentRouteTagGuard = false, bool hasClientTimeoutsMultiples = false, bool hasServerMachineIdentity = false, bool hasQueryStoreReplica = false, bool hasKnownPatterns = false, bool hasAgentTableIndexes = false, bool hasClientTimeoutsOnByDefault = false, bool hasQueryStoreHints = false, bool hasServerActionRecompile = false, bool hasQueryStoreSelfKeys = false, bool hasJobHistorySuccessIndex = false, bool hasQueryStoreHashHourly = false, bool hasAgentAlerts = false, bool hasDatabaseProtection = false, bool hasIdentityCapacity = false, bool hasServerAwsRds = false, bool hasServerAwsRdsWebOrExpress = false, bool hasThresholdOverrideTagScope = false, bool hasBlockingBands = false, bool hasRouteSeverities = false, bool hasBlockingSnapshotBands = false, bool hasMuteRecurrence = false, bool hasDailyReportSettings = false, bool hasReportNotice = false, bool hasAlertLogKey = false, bool hasBlockingBarsOnWaitTime = false, bool hasMuteRuleAction = false, bool hasPeopleGrants = false, bool hasActionProposals = false, bool hasComposeFleet = false, bool hasQueryStoreTopDailyWsum = false, bool hasBlockingOpenTranCount = false, bool hasStatementTextOwnEntries = false, bool hasWaitingTasksProgramName = false, bool hasServerConnectDownState = false, bool hasProtectionThresholds = false, bool hasQueryStoreHashIndex = false, bool hasXeSessionDatabases = false, bool hasSelfKeysOldStatements = false, bool hasStatementStatsDatabaseName = false, bool hasMemoryPressureNode = false, bool hasComposeStampLateMarkOffsetZero = false, bool hasSlackBotThreads = false, bool hasSlackCards = false, bool hasChatRequests = false, bool hasWaitStatsCadenceBaseline = false, bool hasSchemaTracking = false, bool hasCollectionLogStatusTimeIndex = false, bool hasOversizedPlanBacklogDroppedIndex = false, bool hasWaitStatsDaily = false, bool hasOversizedPlanBacklogMedianIndexes = false, bool hasWebAccessGroups = false, bool hasAdvancedWebAccess = false, bool hasJobHistoryOldestDaily = false, bool hasOversizedPlanBacklogDropCounts = false, bool hasJobHistoryCategoryHourly = false, bool hasQueryTagSightingsFillfactor = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false, bool hasInstallId = false, bool hasInstallIdTableOid = false, bool hasCollectorRunAt = false, bool hasQueryStoreTopDaily = false, bool hasSlowReads = false, bool hasStoreStatementHistory = false, bool hasQueryStatsHourLedger = false, bool hasPasswordKey = false, bool hasPagerDutyAutoResolve = false, bool hasLegacyPinCandidates = false, bool hasPlanRegressionDaily = false, bool hasAwsRole = false, bool hasPgIoStatsHourly = false, bool hasQueryStoreIntervalWidePartitioned = false, bool hasQueryStoreIntervalLatestPartitioned = false, bool hasQueryStoreComposeStamp = false, bool hasServiceVersion = false, bool hasPlanRegressionDailyRowcount = false, bool hasProcedureStatsTotals = false, bool hasRunnableQueueSettings = false, bool hasQueryStoreWatermarks = false, bool hasClientTimeoutSettings = false, bool hasExternalAlerts = false, bool hasNotificationRouteScope = false, bool hasReadLatencyCapacityFields = false, bool hasReadCaller = false, bool hasInvestigations = false, bool hasPlanRegressionPartialDays = false, bool hasCollectionLogHourly = false, bool hasAlertResolutionDelivery = false, bool hasInvestigationAlertFacts = false, bool hasComposeStampFailures = false, bool hasStoreMetricsSizeEstimated = false, bool hasAgentLevel2Store = false, bool hasQueryTagsStore = false, bool hasPhaseCStore = false, bool hasQueryTagSightingsDatabaseKey = false, bool hasQueryStoreForcedPlans = false, bool hasServerActionSwitches = false, bool hasForceChecks = false, bool hasPseudonymKey = false, bool hasBlockingHeadEvidence = false, bool hasExcludedVolumes = false, bool hasForcedPlanVariantsAndGuides = false, bool hasAgPrimaryReplica = false, bool hasHypotheticalIndexLogin = false, bool hasCustomViewFolders = false, bool hasCustomAlertRuleExpiry = false, bool hasInheritableCollectorEnabled = false, bool hasChangeWatches = false, bool hasMuteRuleStartsAt = false, bool hasQueryStoreFetchTopN = false, bool hasAgentRouteTagGuard = false, bool hasClientTimeoutsMultiples = false, bool hasServerMachineIdentity = false, bool hasQueryStoreReplica = false, bool hasKnownPatterns = false, bool hasAgentTableIndexes = false, bool hasClientTimeoutsOnByDefault = false, bool hasQueryStoreHints = false, bool hasServerActionRecompile = false, bool hasQueryStoreSelfKeys = false, bool hasJobHistorySuccessIndex = false, bool hasQueryStoreHashHourly = false, bool hasAgentAlerts = false, bool hasDatabaseProtection = false, bool hasIdentityCapacity = false, bool hasServerAwsRds = false, bool hasServerAwsRdsWebOrExpress = false, bool hasThresholdOverrideTagScope = false, bool hasBlockingBands = false, bool hasRouteSeverities = false, bool hasBlockingSnapshotBands = false, bool hasMuteRecurrence = false, bool hasDailyReportSettings = false, bool hasReportNotice = false, bool hasAlertLogKey = false, bool hasBlockingBarsOnWaitTime = false, bool hasMuteRuleAction = false, bool hasPeopleGrants = false, bool hasActionProposals = false, bool hasComposeFleet = false, bool hasQueryStoreTopDailyWsum = false, bool hasBlockingOpenTranCount = false, bool hasStatementTextOwnEntries = false, bool hasWaitingTasksProgramName = false, bool hasServerConnectDownState = false, bool hasProtectionThresholds = false, bool hasQueryStoreHashIndex = false, bool hasXeSessionDatabases = false, bool hasSelfKeysOldStatements = false, bool hasStatementStatsDatabaseName = false, bool hasMemoryPressureNode = false, bool hasComposeStampLateMarkOffsetZero = false, bool hasSlackBotThreads = false, bool hasSlackCards = false, bool hasChatRequests = false, bool hasWaitStatsCadenceBaseline = false, bool hasSchemaTracking = false, bool hasCollectionLogStatusTimeIndex = false, bool hasOversizedPlanBacklogDroppedIndex = false, bool hasWaitStatsDaily = false, bool hasOversizedPlanBacklogMedianIndexes = false, bool hasWebAccessGroups = false, bool hasAdvancedWebAccess = false, bool hasJobHistoryOldestDaily = false, bool hasOversizedPlanBacklogDropCounts = false, bool hasJobHistoryCategoryHourly = false, bool hasQueryTagSightingsFillfactor = false, bool hasPlanRegressionDailyServerDayIndex = false, bool hasObjectUsage = false, bool hasTempDbLogSpace = false, bool hasDatabaseSizeAutogrowAllFiles = false, bool hasInstanceEventAlertSwitches = false, bool hasColumnStats = false, bool hasWaitStatsHourly = false, bool hasTrigramIndexStoreOptions = false, bool hasPersonalTokens = false, bool hasStoreGrowthAlertSettings = false, bool hasAttentionLegacyCopy = false, bool hasDatabaseProtectionErrorLog = false, bool hasAggregateCompressionOrderHistory = false, bool hasPlanCorrectionServerDbQueryIndex = false, bool hasQueryStoreTextSeen = false, bool hasJobOutcomeDaily = false, bool hasQueryStoreClosedDayRollups = false, bool hasFleetSummaryCoveringIndexes = false, bool hasQueryStoreClutterDaily = false, bool hasQueryStatsCollectionSummary = false, bool hasQueryStatsHostHourly = false, bool hasCollectionLogWatermarkCovering = false, bool hasQueryStoreClutterHourly = false, bool hasQueryStatsCollectionFloor = false, bool hasQueryStoreServerCoveringIndex = false, bool hasQueryStoreCorrectedDailyHashIndex = false, bool hasAttentionCountIndex = false, bool hasAggregateCompressionOrderHistoryIndex = false, bool hasPlanRegressionBlock = false, bool hasQueryStoreTopHourly = false, bool hasObjectReferences = false, bool hasPayloadDimensionSeen = false, bool hasObjectUsageChain = false, bool hasProcedureStatsHourLedger = false, bool hasStoreRelationSizes = false, bool hasJobHistoryFailedIndex = false, bool hasClutterDayBuilt = false, bool hasStatementHistoryWriteCounters = false, bool hasStoreWalFigures = false, bool hasStorePassSteps = false, bool hasServiceStartHistory = false, bool hasStoreTableActivity = false, bool hasStoreCheckpoints = false, bool hasOversizedPlanBacklogPendingIndex = false, bool hasServiceStartRungObjects = false, bool hasUpgradeRuns = false, bool hasStoreSettingChanges = false, bool hasStoreConnectionSamples = false, bool hasReadLatencyProcessStart = false, bool hasStoreLockWaits = false, bool hasReadReplyBytes = false, bool hasInvestigationChangeWindows = false, bool hasWebAccessAdvancedActor = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -1828,8 +1966,356 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V266 (#8716): the query-tag sightings table's fillfactor. Reloptions sentinel, newest-first, and the TOP rung, so a fully-migrated store maps
-           to EXACTLY StorageVersion.SchemaVersion rather than falling through to 265 and showing a spurious upgrade banner on a store that is current. */
+        /* V301 (#9374): the last measured relation sizes and their measured time, created on every store and never dropped. Relation-existence
+           sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
+           through to 300 and showing a spurious upgrade banner on a store that is current. */
+        /* V318 (#9485): the planned change windows table, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 317 and showing a spurious upgrade
+           banner on a store that is current. */
+        /* V319 (#9662): the three argument advanced web access setter, created on every store and never dropped. Function-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 318 and showing a spurious upgrade banner on a
+           store that is current. */
+        if (hasWebAccessAdvancedActor)
+        {
+            return WebAccessAdvancedActor.Version;
+        }
+        if (hasInvestigationChangeWindows)
+        {
+            return InvestigationChangeWindows.Version;
+        }
+        /* V317 (#9433): the reply size on the slow read record and the read latency histogram, columns created on every store and never dropped. Column-existence sentinel,
+           newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 316 and showing a spurious
+           upgrade banner on a store that is current. */
+        if (hasReadReplyBytes)
+        {
+            return ReadReplyBytes.Version;
+        }
+        /* V316 (#9439): collect.store_lock_waits, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 315 and showing a spurious upgrade banner on a
+           store that is current. */
+        if (hasStoreLockWaits)
+        {
+            return StoreLockWaits.Version;
+        }
+        /* V315 (#9434): the unique index that is the read_latency key from this rung on, never dropped. Relation-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 314 and showing a spurious upgrade banner on a store that is current. */
+        if (hasReadLatencyProcessStart)
+        {
+            return ReadLatencyProcessStart.Version;
+        }
+        /* V314 (#9437): the two store connection tables, never dropped. The slot table is the mark that the rung ran. Relation-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 313 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStoreConnectionSamples)
+        {
+            return StoreConnectionSamples.Version;
+        }
+        /* V313 (#9427): the store setting state and the store setting changes, plain tables on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 312 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStoreSettingChanges)
+        {
+            return StoreSettingChanges.Version;
+        }
+        /* V312 (#9432): the upgrade run table, a plain table on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 311 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasUpgradeRuns)
+        {
+            return UpgradeRuns.Version;
+        }
+        /* V311 (#9438): the migration rung object table, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 310 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasServiceStartRungObjects)
+        {
+            return ServiceStartRungObjects.Version;
+        }
+        /* V310 (#9452): the partial index of the oversized-plan backlog's pending rows, never dropped. Index-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 309 and showing a spurious upgrade banner on a store that is
+           current. */
+        if (hasOversizedPlanBacklogPendingIndex)
+        {
+            return OversizedPlanBacklog.PendingIndexVersion;
+        }
+        /* V309 (#9414): the store checkpoint rows, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 308 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStoreCheckpoints)
+        {
+            return 309;
+        }
+        /* V308 (#9413): the per-table activity capture and its baseline, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 307 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStoreTableActivity)
+        {
+            return 308;
+        }
+        /* V307 (#9415): the service start history's two tables, created on every store and never dropped. Relation-existence sentinel, newest-first, and
+           the next-to-top rung. */
+        if (hasServiceStartHistory)
+        {
+            return 307;
+        }
+        /* V306 (#9411): the background pass step history, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 305 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStorePassSteps)
+        {
+            return 306;
+        }
+        /* V305 (#9419): the WAL columns on collect.store_metrics, never dropped. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 304 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasStoreWalFigures)
+        {
+            return 305;
+        }
+        /* V304 (#9410): the statement history's write counters, columns created on every store and never dropped. Column-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 303 and showing a spurious upgrade banner on a
+           store that is current. */
+        if (hasStatementHistoryWriteCounters)
+        {
+            return StoreStatementHistory.WriteCountersVersion;
+        }
+        /* V303 (#9384): the clutter-day stamp, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 302 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasClutterDayBuilt)
+        {
+            return 303;
+        }
+        /* V302 (#8570): the partial index of failed Agent job outcomes on job_history, never dropped. Index-existence sentinel, newest-first, and the
+           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 301 and showing a
+           spurious upgrade banner on a store that is current. */
+        if (hasJobHistoryFailedIndex)
+        {
+            return 302;
+        }
+        if (hasStoreRelationSizes)
+        {
+            return 301;
+        }
+        /* V300 (#9357): the procedure_stats hour ledger and its state table, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 299
+           and showing a spurious upgrade banner on a store that is current. */
+        if (hasProcedureStatsHourLedger)
+        {
+            return 300;
+        }
+        /* V299 (#9349): the object usage chain's three tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 298
+           and showing a spurious upgrade banner on a store that is current. */
+        if (hasObjectUsageChain)
+        {
+            return 299;
+        }
+        /* V298 (#9304): the payload dimension tables' stamp tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 297
+           and showing a spurious upgrade banner on a store that is current. */
+        if (hasPayloadDimensionSeen)
+        {
+            return 298;
+        }
+        /* V297 (#8784 part 2): the dependency list and the per-day referenced-names summary, created on every store and never dropped.
+           Relation-existence sentinel, newest-first, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion
+           rather than falling through to 296 and showing a spurious upgrade banner on a store that is current. */
+        if (hasObjectReferences)
+        {
+            return 297;
+        }
+        /* V296 (#9280): the hourly Query Store summary's (hour, server_id) index. Index-name sentinel, newest-first, so a store without V297's
+           tables maps to 296 rather than falling through to 295. */
+        if (hasQueryStoreTopHourly)
+        {
+            return 296;
+        }
+        /* V295 (#9225): the plan regression block tables, created on every store and never dropped. Relation-existence sentinel, newest-first, so a store without V296's
+           index maps to 295 rather than falling through to 294 and showing a spurious
+           upgrade banner on a store that is current. */
+        if (hasPlanRegressionBlock)
+        {
+            return 295;
+        }
+        /* V294 (#9284): the aggregate compression order history's view-and-time index. Index-name sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 293 and showing a spurious upgrade banner on
+           a store that is current. */
+        if (hasAggregateCompressionOrderHistoryIndex)
+        {
+            return 294;
+        }
+        /* V293 (#9277): the partial counter-row index on collect.attention_events. Index-name sentinel, newest-first, so a store without V294's
+           index maps to 293 rather than falling through to 292. */
+        if (hasAttentionCountIndex)
+        {
+            return 293;
+        }
+        /* V292 (#9223): the covering hash index on the corrected daily Query Store rollup's materialization. Index-name sentinel, newest-first, so a
+           store without V293's index maps to 292 rather than falling through to 291. */
+        if (hasQueryStoreCorrectedDailyHashIndex)
+        {
+            return 292;
+        }
+        /* V291 (#9215): the covering (server_id, bucket) index on the corrected hourly Query Store rollup. Index-shape sentinel, newest-first,
+           so a store without V292's index maps to 291 rather than falling through to 290. */
+        if (hasQueryStoreServerCoveringIndex)
+        {
+            return 291;
+        }
+        /* V290 (#9193): the query_stats summary floor table, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V291's index maps to 290 rather than falling through to 289. */
+        if (hasQueryStatsCollectionFloor)
+        {
+            return 290;
+        }
+        /* V289 (#9173): the hourly Query Store clutter rollups' three tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V290's table maps to 289 rather than falling through to 288. */
+        if (hasQueryStoreClutterHourly)
+        {
+            return 289;
+        }
+        /* V288 (#9151): the covering index on the collector log's watermark index. Index-shape sentinel, newest-first, so a store without V289's
+           tables maps to 288 rather than falling through to 287. */
+        if (hasCollectionLogWatermarkCovering)
+        {
+            return 288;
+        }
+        /* V287 (#9164): the hourly host rollup's two tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V288's index maps to 287 rather than falling through to 286. */
+        if (hasQueryStatsHostHourly)
+        {
+            return 287;
+        }
+        /* V286 (#9147): the query_stats per-collection summary table, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through
+           to 285 and showing a spurious upgrade banner on a store that is current. */
+        if (hasQueryStatsCollectionSummary)
+        {
+            return 286;
+        }
+        /* V285 (#9148): the Query Store clutter rollups' two tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V286's table maps to 285 rather than falling through to 284. */
+        if (hasQueryStoreClutterDaily)
+        {
+            return 285;
+        }
+        /* V284 (#9149): the covering hash index on the interval hourly plan cache rollup's materialization. Index-existence sentinel,
+           newest-first, so a store without V285's tables maps to 284 rather than falling through to 283. */
+        if (hasFleetSummaryCoveringIndexes)
+        {
+            return 284;
+        }
+        /* V283 (#9111): the Query Store closed-day rollups' four tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V284's index maps to 283 rather than falling through to 282. */
+        if (hasQueryStoreClosedDayRollups)
+        {
+            return 283;
+        }
+        /* V282 (#9110): the job outcome daily rollup's three tables, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V283's tables maps to 282 rather than falling through to 281. */
+        if (hasJobOutcomeDaily)
+        {
+            return 282;
+        }
+        /* V281 (#9043): the Query Store text liveness table, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V282's tables maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather
+           than falling through to 280 and showing a spurious upgrade banner on a store that is current. */
+        if (hasQueryStoreTextSeen)
+        {
+            return 281;
+        }
+        /* V280 (#8570): the plan_correction recommendation index. Index-existence sentinel, newest-first, so a store without V281's table
+           maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 279 and showing a spurious
+           upgrade banner on a store that is current. */
+        if (hasPlanCorrectionServerDbQueryIndex)
+        {
+            return 280;
+        }
+        /* V279 (#8570): the aggregate compression order history, created on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V280's index maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than
+           falling through to 278 and showing a spurious upgrade banner on a store that is current. */
+        if (hasAggregateCompressionOrderHistory)
+        {
+            return 279;
+        }
+        /* V278 (#8865): the error-log facts on collect.database_protection. Column-existence sentinel, newest-first, so a store without
+           V279's table maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 277 and showing
+           a spurious upgrade banner on a store that is current. */
+        if (hasDatabaseProtectionErrorLog)
+        {
+            return 278;
+        }
+        /* V277 (#8967): the progress table of the attention_events copy, created empty on every store and never dropped. Relation-existence sentinel,
+           newest-first, so a store without V278's columns maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 276
+           and showing a spurious upgrade banner on a store that is current. */
+        if (hasAttentionLegacyCopy)
+        {
+            return 277;
+        }
+        /* V276 (#9000): the Store Growth alert's switch and floors on the alert settings. Column-existence sentinel, newest-first, so a store
+           without V277's table maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 275 and showing a spurious
+           upgrade banner on a store that is current. */
+        if (hasStoreGrowthAlertSettings)
+        {
+            return 276;
+        }
+        /* V275 (#8737): the personal MCP token table. Table-existence sentinel, newest-first, so a fully-migrated store maps to the version
+           above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 274 and showing a spurious upgrade banner on a
+           store that is current. */
+        if (hasPersonalTokens)
+        {
+            return 275;
+        }
+        /* V274 (#8978): the store's trigram text index options on the service row. Column-existence sentinel, newest-first, so a
+           fully-migrated store maps to the version above it or to EXACTLY StorageVersion.SchemaVersion rather than falling through to 273
+           and showing a spurious upgrade banner on a store that is current. */
+        if (hasTrigramIndexStoreOptions)
+        {
+            return 274;
+        }
+        /* V273 (#8824): the hourly wait totals. Relation-existence sentinel, and the rung below the newest. */
+        if (hasWaitStatsHourly)
+        {
+            return 273;
+        }
+        /* V272 (#8798): the column statistics store. Table-existence sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to
+           EXACTLY StorageVersion.SchemaVersion rather than falling through to 271 and showing a spurious upgrade banner on a store that is current. */
+        if (hasColumnStats)
+        {
+            return 272;
+        }
+        /* V271 (#8884): the Instance Restarted and Memory Dumps switches on the alert settings. Column-existence sentinel, newest-first, and the
+           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 268 and showing a
+           spurious upgrade banner on a store that is current. */
+        if (hasInstanceEventAlertSwitches)
+        {
+            return 271;
+        }
+        /* V270 (#8882): tempdb's autogrow-all-files flag on the database size rows. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 268 and showing a spurious upgrade
+           banner on a store that is current. */
+        if (hasDatabaseSizeAutogrowAllFiles)
+        {
+            return 270;
+        }
+        /* V269 (#8881): the tempdb log columns on the tempdb stats. Column-existence sentinel, and the rung below the newest. */
+        if (hasTempDbLogSpace)
+        {
+            return 269;
+        }
+        /* V268 (#8784): the answering instance on the index and object stats, with the module execution summary. Column- and table-existence
+           sentinel, and the rung below the newest. */
+        if (hasObjectUsage)
+        {
+            return 268;
+        }
+        /* V267 (#8570): the (server_id, day) index on the per-day plan totals. Index-existence sentinel, and the rung below the newest. */
+        if (hasPlanRegressionDailyServerDayIndex)
+        {
+            return 267;
+        }
+        /* V266 (#8716): the query-tag sightings table's fillfactor. Reloptions sentinel. */
         if (hasQueryTagSightingsFillfactor)
         {
             return 266;
@@ -3869,7 +4355,7 @@ SELECT
 
         await using var command = _dataSource.CreateCommand(ServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverName = reader.GetString(1);
@@ -3913,7 +4399,7 @@ LIMIT 1";
         await using var command = _dataSource.CreateCommand(ServerUtcOffsetSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is null or DBNull
             ? null
             : Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
@@ -3948,7 +4434,7 @@ LIMIT 1";
             await using var command = _dataSource.CreateCommand(ServerClockSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (!await reader.ReadAsync(cancellationToken))
             {
                 return null;
@@ -4027,7 +4513,7 @@ LIMIT 1";
     {
         try
         {
-            return await command.ExecuteScalarAsync(cancellationToken);
+            return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {

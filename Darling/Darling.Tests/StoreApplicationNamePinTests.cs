@@ -69,7 +69,7 @@ public sealed class StoreApplicationNamePinTests
             DarlingManagedPostgres.ServiceApplicationName,
             DarlingManagedPostgres.CliApplicationName,
             DarlingManagedPostgres.UpgradeApplicationName,
-            ViewerSettings.ApplicationName,
+            ViewerSettings.BuiltApplicationName,
         };
 
         Assert.Equal(names.Length, new HashSet<string>(names, StringComparer.Ordinal).Count);
@@ -139,14 +139,14 @@ public sealed class StoreApplicationNamePinTests
         {
             await using var postgres = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(scratch.ConnectionString, ViewerSettings.ApplicationName)));
+                    DarlingStoreConnection.WithApplicationName(scratch.ConnectionString, ViewerSettings.BuiltApplicationName)));
 
             await using var connection = await postgres.OpenConnectionAsync(ct);
             await using var check = new NpgsqlCommand(
                 "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()", connection);
             var applicationName = (string)(await check.ExecuteScalarAsync(ct))!;
 
-            Assert.Equal(ViewerSettings.ApplicationName, applicationName);
+            Assert.Equal(ViewerSettings.BuiltApplicationName, applicationName);
 
             bodySucceeded = true;
         }

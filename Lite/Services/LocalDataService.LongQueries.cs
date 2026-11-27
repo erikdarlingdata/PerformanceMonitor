@@ -94,7 +94,7 @@ LIMIT {LongQueryGridCap}";
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         command.CommandText = LongQueryCompletionsSelect + @"
-FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND event_time > $2 AND event_time <= $3" + dbClause) + @" AS ev
 ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
 LIMIT $4";
         if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count);

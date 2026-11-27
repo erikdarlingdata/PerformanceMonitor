@@ -60,6 +60,7 @@
                     <Button Content="_Add person..." Width="110" Height="28" Margin="0,0,8,0" Click="AddPerson_Click"/>
                     <Button Content="_Rename..." Width="90" Height="28" Margin="0,0,8,0" Click="RenamePerson_Click"/>
                     <Button x:Name="ToggleButton" Content="_Disable" Width="90" Height="28" Click="TogglePerson_Click"/>
+                    <Button x:Name="DeleteButton" Content="De_lete" Width="90" Height="28" Margin="8,0,0,0" Visibility="Collapsed" Click="DeletePerson_Click"/>
                 </StackPanel>
             </Grid>
 

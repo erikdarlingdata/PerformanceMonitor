@@ -41,8 +41,20 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// changes shape silently); until it has run, the cost ceiling is one server's day of
 /// <c>query_store_stats</c> hashed on (database, query, plan, collection_time), once per tool call, only
 /// when the result carries force-plan targets.
-/// <c>plan_correction</c> is small (one row per open recommendation per capture) and
-/// <c>idx_plan_correction_time</c> covers the server/time bound.</para>
+/// <c>plan_correction</c> is not small on a large store: it holds one row per open recommendation per capture, which is millions of rows
+/// in the uncompressed day or two. The recommendation half reads it through <c>idx_plan_correction_server_db_query_time</c> (V280, <c>server_id,
+/// database_name, query_id, collection_time DESC</c> where <c>recommendation_name IS NOT NULL</c>), so it seeks each target query's rows
+/// newest first and never reads the server's whole day. The enablement half's per-database probe reads <c>idx_plan_correction_time</c>.</para>
+///
+/// <para><b>The enablement half stops at one row per target database (#8570).</b> It used to number every
+/// <c>plan_correction</c> row of the server's whole lookback by database and keep the first, which hashed and
+/// sorted a day of captures to return one row per database, and then joined only the target databases. Now a
+/// LATERAL probe per distinct target database walks <c>idx_plan_correction_time</c> newest first through the last
+/// hour of the lookback and stops at that database's first row. A database with no row in that hour (a slow
+/// collector schedule, or none at all) goes to ONE numbered pass over the lookback for just those databases, which
+/// is the old cost and not N walks of the whole window, and which does not run when every database was found.
+/// MATERIALIZED so the join to the targets reads the two branches once, not once per target row. The
+/// answer is the same as before. The recommendation half had no index that led on (server, database, query) until V280, and read the server's lookback.</para>
 ///
 /// <para><b>The VALUES rows carry casts.</b> Postgres types a <c>VALUES</c> column from its first row and
 /// an untyped parameter there is <c>unknown</c>, so every row spells <c>$n::text, $n::bigint, $n::bigint</c>;
@@ -117,7 +129,32 @@ apc_latest AS (
       AND p.collection_time > $2
     WHERE p.recommendation_name IS NOT NULL
 ),
-enablement AS (
+enablement_recent AS (
+    SELECT
+        td.database_name,
+        er.force_last_good_plan_actual_state,
+        er.collection_time
+    FROM (SELECT DISTINCT database_name FROM targets) AS td
+    CROSS JOIN LATERAL (
+        SELECT
+            e.force_last_good_plan_actual_state,
+            e.collection_time
+        FROM plan_correction AS e
+        WHERE e.server_id = $1
+        AND   e.database_name = td.database_name
+        AND   e.collection_time > $2 + INTERVAL '23 hours'
+        ORDER BY e.collection_time DESC
+        LIMIT 1
+    ) AS er
+),
+enablement_missing AS (
+    SELECT database_name FROM targets
+    EXCEPT
+    SELECT database_name FROM enablement_recent
+),
+enablement AS MATERIALIZED (
+    SELECT database_name, force_last_good_plan_actual_state, collection_time FROM enablement_recent
+    UNION ALL
     SELECT
         el.database_name,
         el.force_last_good_plan_actual_state,
@@ -131,6 +168,7 @@ enablement AS (
         FROM plan_correction AS e
         WHERE e.server_id = $1
         AND   e.collection_time > $2
+        AND   e.database_name IN (SELECT database_name FROM enablement_missing)
     ) AS el
     WHERE el.rn = 1
 )

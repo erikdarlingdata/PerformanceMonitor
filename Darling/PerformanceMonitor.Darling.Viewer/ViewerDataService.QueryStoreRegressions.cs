@@ -135,11 +135,11 @@ public sealed partial class ViewerDataService
     /// </summary>
     /// <para><paramref name="recentFromDaily"/> (latest only, #5506): the recent window's whole days from the daily totals,
     /// $13 the days (date[]), $14 and $15 the recent arm's live <c>first_execution_time</c> bounds (#6750 put the failure arm's row-filter
-    /// start at $11 and its hours-held start at $12).</para>
+    /// start at $11 and its hours-held start at $12). #9606: $16 is the watermark of their partial last day (timestamp or NULL).</para>
     internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15");
+            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -288,7 +288,7 @@ public sealed partial class ViewerDataService
 
         /* #5506: raw too reads the baseline's closed days from the daily totals, so it runs in the same kind of snapshot
            transaction as the table form: the built days it names and the live rows it reads are one view of the store. */
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
         await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
         {
@@ -304,7 +304,7 @@ public sealed partial class ViewerDataService
 
         await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
     }
 
@@ -328,7 +328,7 @@ public sealed partial class ViewerDataService
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
@@ -375,7 +375,7 @@ public sealed partial class ViewerDataService
 
             await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, spans.RegularStart, baselinePlan, excludedDatabases, spans.FailureStart);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             var rows = await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
             var clamp = DateTime.SpecifyKind(plan.ClampedStart, DateTimeKind.Unspecified);
             return (rows, baselinePlan.HoursHeldStart ?? spans.RegularStart, baselinePlan.FailureHoursHeldStart ?? spans.FailureStart,
@@ -409,10 +409,16 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
-            /* #5506: $13 to $15, only on the recent-days form, the only text that names them. */
+            /* #5506: $13 to $16, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+            /* #9606: the watermark of the recent days' partial last day, NULL when every recent day is a whole build. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = plan.RecentPartialThrough is DateTime through ? DateTime.SpecifyKind(through, DateTimeKind.Unspecified) : DBNull.Value,
+            });
         }
     }
 

@@ -228,8 +228,8 @@ WITH raw AS
     FROM v_cpu_utilization_stats
     WHERE server_id = $1
     AND   (
-              (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
-           OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
+              (sample_time_utc IS NOT NULL AND sample_time_utc > $2 AND sample_time_utc <= $3)
+           OR (sample_time_utc IS NULL AND sample_time > $4 AND sample_time <= $5)
           )
 )
 SELECT
@@ -265,7 +265,7 @@ SELECT
     AVG(CAST(sqlserver_cpu_utilization AS DOUBLE))
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

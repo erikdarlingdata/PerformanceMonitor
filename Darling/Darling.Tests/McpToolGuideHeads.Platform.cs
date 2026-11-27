@@ -25,6 +25,7 @@ public sealed class McpToolGuideHeadsPlatformTests
     [
         "get_store_metrics",
         "get_store_log",
+        "get_store_connections",
         "get_collector_cost",
     ];
 
@@ -40,6 +41,8 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("get_store_log", "not_collected (captures=0) means nobody read the log"),
         ("get_store_log", "NO health band"),
         ("get_store_log", "capture denominator"),
+        ("get_store_connections", "no server_name"),
+        ("get_store_connections", "slots_available"),
         ("get_collector_cost", "no server_name"),
         ("get_collector_cost", "sql_ms is a DURATION"),
         ("get_collector_cost", "On query_store, sql_ms includes the STORE's own probe/write"),
@@ -162,7 +165,7 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("edit_server", "probed first and saved only if the server answers"),
         ("remove_server", "immediately, no confirm step"),
         ("remove_server", "Already-collected historical data is NOT deleted"),
-        ("remove_server", "a partial match is honored only if exactly one definition contains it"),
+        ("remove_server", "A partial match deletes nothing"),
         ("remove_server", "Matches against DEFINITIONS, not the connected registry"),
     ];
 

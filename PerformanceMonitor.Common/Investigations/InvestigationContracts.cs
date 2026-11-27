@@ -100,6 +100,10 @@ public sealed record InvestigationOpenResult(InvestigationOpenOutcome Outcome, G
     /// <summary>#6003: true when the store journaled an event (<c>opened</c>, or a <c>joined</c> that brought a new metric or a
     /// higher severity); a quiet join and a limit journal none.</summary>
     public bool Evented { get; init; }
+
+    /// <summary>#9485: true when the request opened inside a planned change window (or its tail) and was created held: it is listable and
+    /// claimable but not handed to the request runner, so the dispatcher does not wake the long-poll for it.</summary>
+    public bool Held { get; init; }
 }
 
 /// <summary>What a claim answered.</summary>
@@ -280,7 +284,8 @@ public sealed record InvestigationOpenedRow(
 /// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
 /// registry; a store built with no server list to read leaves both null. Lite names them from its server list (ServerManager, #6011). A null is absent from the answer.
 /// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.
-/// <see cref="DetailText"/> (#6551) is a change-watch request's alert detail, read for the list; null for every other request, and then absent from the answer.</summary>
+/// <see cref="DetailText"/> (#6551) is a change-watch request's alert detail, read for the list; null for every other request, and then absent from the answer.
+/// <see cref="HeldBy"/> (#9485) is the planned change window that held the request at open; Darling only, null for a request never held and for every Lite row.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -301,7 +306,18 @@ public sealed record InvestigationRequestRow(
     Guid? PracticeOf = null,
     string? DisplayName = null,
     string? InstanceName = null,
-    string? DetailText = null);
+    string? DetailText = null,
+    InvestigationRequestHold? HeldBy = null);
+
+/// <summary>
+/// #9485: the planned change window that held a request when it opened, as a read shows it. <see cref="ReleasedAtUtc"/> is null while
+/// the request is still held, and the time a late join released the hold otherwise. A request that was never held has no hold (null on the row).
+/// </summary>
+public sealed record InvestigationRequestHold(long WindowId, string Reason, DateTime EndsAtUtc, DateTime? ReleasedAtUtc)
+{
+    /// <summary>True while the hold stands: the request is not handed to a runner and not counted against its route.</summary>
+    public bool IsHeld => ReleasedAtUtc is null;
+}
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
@@ -314,6 +330,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 
     /// <summary>#7109: how many action proposals this pass moved (voided, expired, or approved with no outcome to unknown).</summary>
     public int Proposals { get; init; }
+
+    /// <summary>#9485: how many change windows this pass wrote the one close summary for.</summary>
+    public int ChangeWindowsClosed { get; init; }
 }
 
 /// <summary>

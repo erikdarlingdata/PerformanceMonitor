@@ -38,14 +38,14 @@ public sealed partial class ViewerDataService
     /// <summary>The service-wide flags (id=1): paused + the three viewer-owned toggles. Column order matches
     /// the service's <c>ReadServiceRowAsync</c> prefix.</summary>
     public const string ServiceConfigSelectSql =
-        "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n FROM config_service WHERE id = 1";
+        "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression FROM config_service WHERE id = 1";
 
     /// <summary>Updates ONLY the viewer-owned service flags on the seeded row (never <c>paused</c> — a
     /// command). The self-bump trigger fires <c>config_version</c>. $1 capture_plans, $2 mcp_enabled, $3 mcp_port,
-    /// $4 web_enabled, $5 web_port, $6 query_store_backfill_enabled (#2167).</summary>
+    /// $4 web_enabled, $5 web_port, $6 query_store_backfill_enabled (#2167), $7 query_store_text_budget_mb, $8 max_concurrent_sweeps, $9 query_store_fetch_top_n, $10 plan_content_retention_days, $11 compose_statement_timeout_seconds, $12 plan_xml_compression (#9638).</summary>
     public const string ServiceConfigUpdateFlagsSql = @"
 UPDATE config_service
-SET capture_plans = $1, mcp_enabled = $2, mcp_port = $3, web_enabled = $4, web_port = $5, query_store_backfill_enabled = $6, query_store_text_budget_mb = $7, max_concurrent_sweeps = $8, query_store_fetch_top_n = $9
+SET capture_plans = $1, mcp_enabled = $2, mcp_port = $3, web_enabled = $4, web_port = $5, query_store_backfill_enabled = $6, query_store_text_budget_mb = $7, max_concurrent_sweeps = $8, query_store_fetch_top_n = $9, plan_content_retention_days = $10, compose_statement_timeout_seconds = $11, plan_xml_compression = $12
 WHERE id = 1";
 
     /// <summary>Reads the service-wide flags, or null when the store has not seeded <c>config_service</c> yet
@@ -55,7 +55,7 @@ WHERE id = 1";
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;
@@ -73,6 +73,9 @@ WHERE id = 1";
             QueryStoreTextBudgetMb = reader.GetInt32(7),
             MaxConcurrentSweeps = reader.GetInt32(8),
             QueryStoreFetchTopN = reader.GetInt32(9),
+            PlanContentRetentionDays = reader.GetInt32(10),
+            ComposeStatementTimeoutSeconds = reader.GetInt32(11),
+            PlanXmlCompression = reader.GetString(12),
         };
     }
 
@@ -97,7 +100,8 @@ WHERE id = 1";
     /// <summary>Updates the viewer-owned service flags (Settings window Save — MCP + web dashboard + global plan
     /// capture). A no-op on an unseeded store (zero rows). Read-only seats throw <see cref="ViewerReadOnlyException"/>.</summary>
     public async Task UpdateServiceFlagsAsync(
-        bool capturePlans, bool mcpEnabled, int mcpPort, bool webEnabled, int webPort, bool queryStoreBackfillEnabled, int queryStoreTextBudgetMb, int maxConcurrentSweeps, int queryStoreFetchTopN, CancellationToken cancellationToken = default)
+        bool capturePlans, bool mcpEnabled, int mcpPort, bool webEnabled, int webPort, bool queryStoreBackfillEnabled, int queryStoreTextBudgetMb, int maxConcurrentSweeps, int queryStoreFetchTopN,
+        int planContentRetentionDays, int composeStatementTimeoutSeconds, string planXmlCompression, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigUpdateFlagsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -110,6 +114,9 @@ WHERE id = 1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = queryStoreTextBudgetMb });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = maxConcurrentSweeps });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = queryStoreFetchTopN });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = planContentRetentionDays });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = composeStatementTimeoutSeconds });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = planXmlCompression });
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -174,4 +181,13 @@ public sealed class ServiceConfigRow
 
     /// <summary>The #6211 Query Store fetch top-N (plans per database-hour and metric) - service reads it live; default 100, 0 = every new plan.</summary>
     public int QueryStoreFetchTopN { get; set; } = 100;
+
+    /// <summary>The #9638 plan XML retention in days (0 = off) - service reads it live, clamped to 7-365 when on; default 21.</summary>
+    public int PlanContentRetentionDays { get; set; } = 21;
+
+    /// <summary>The #9638 statement timeout in seconds of the composed reads - the service bakes it into the viewer and mcp roles at its next start; default 60.</summary>
+    public int ComposeStatementTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>The #9638 plan XML storage form, 'gzip' or 'none' - service reads it live; default 'gzip'.</summary>
+    public string PlanXmlCompression { get; set; } = "gzip";
 }

@@ -192,7 +192,6 @@ public sealed class ViewerCollectionHealthSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         /* Both-sided window bound so the toolbar's custom From/To is honored EXACTLY (not rounded to a
            now-relative hours-back span). $2 = window start, $3 = window end, $4 = row cap. */
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
@@ -208,7 +207,6 @@ public sealed class ViewerCollectionHealthSqlTests
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collector_name = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
     }
 

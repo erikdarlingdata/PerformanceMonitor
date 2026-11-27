@@ -85,6 +85,13 @@ public static class AlertFamily
     /// A WEBHOOK AUTOMATION KEY like every metric name, so it must stay stable across releases.</summary>
     public const string InvestigationUnansweredMetric = "Investigation Not Picked Up";
 
+    /// <summary>#9501: the serverless PostgreSQL alert for capacity held at its configured ceiling while instance CPU stays under
+    /// the High CPU bar. A WEBHOOK AUTOMATION KEY like every metric name, so it must stay stable across releases. A mute rule or
+    /// route keyed on "High CPU" does not cover it.</summary>
+    public const string CapacityAtCeilingMetric = "Capacity at ceiling";
+    /// <summary>The title of the resolution row that closes <see cref="CapacityAtCeilingMetric"/>, the generic "&lt;metric&gt; Cleared" shape.</summary>
+    public const string CapacityAtCeilingClearedTitle = CapacityAtCeilingMetric + " Cleared";
+
     /// <summary>
     /// The exact metric NAME → family census. Every entry is a string the engines deliver verbatim — the
     /// <c>AlertEngine</c>/<c>PostgresAlertEvaluator</c>/<c>AgAlertPolicy</c> constants and the self-alert
@@ -96,6 +103,7 @@ public static class AlertFamily
     {
         /* ---- performance: the shared engine's SQL Server alerts ---- */
         ["High CPU"] = Performance,
+        [CapacityAtCeilingMetric] = Performance,
         ["Blocking Detected"] = Performance,
         ["Blocking Wait Time"] = Performance,
         ["Deadlocks Detected"] = Performance,
@@ -104,6 +112,8 @@ public static class AlertFamily
         [ClientTimeoutsMetric] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
+        ["tempdb Log Space"] = Performance,
+        ["tempdb Growth Fit"] = Performance,
         ["Volume Free Space"] = Performance,
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
@@ -113,6 +123,9 @@ public static class AlertFamily
         ["CHECKDB Overdue"] = Performance,
         ["Identity Capacity"] = Performance,
         ["Forced Plan Failing"] = Performance,
+        /* #8884: both are events about the monitored instance itself, so the on-call hears them. */
+        ["Instance Restarted"] = Performance,
+        ["Memory Dumps"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */
         ["PostgreSQL Wraparound Risk"] = Performance,
@@ -144,6 +157,11 @@ public static class AlertFamily
         ["Store Disk Pressure"] = SelfMonitor,
         /* #7368: big tables past 3 times their autoanalyze threshold on two hourly reads in a row. */
         ["Store Autovacuum Behind"] = SelfMonitor,
+        /* #8950: store tables past their autovacuum start point with no vacuum in 24 hours, or with autovacuum cancelled
+           repeatedly, on two hourly reads in a row. */
+        ["Store Vacuum Stalled"] = SelfMonitor,
+        /* #9000: the store or one object growing at least 3 times its own typical day, over a size floor. */
+        ["Store Growth"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,

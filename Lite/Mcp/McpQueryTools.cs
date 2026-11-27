@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -24,7 +25,7 @@ public sealed class McpQueryTools
         ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
         : "Narrow the page with database_name or tag to read the queries left out.";
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Cached queries (sys.dm_exec_query_stats) ranked by CPU in a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before top: filter_applied names the floor; an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted when inputs are missing. window_truncated marks a window floor, not a page cut; effective_start is where it begins. Row cap is top, not limit; truncated if top or the 32 KB budget cut rows, budget_truncated the budget alone. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only. truncated = true says rows were left out, by the top cap or by the budget; budget_truncated = true and budget_note are the budget cut alone, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -98,12 +99,17 @@ public sealed class McpQueryTools
             var droppedDatabases = string.IsNullOrEmpty(database_name)
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
-            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            /* The ranking is read for top + 1 rows, listed databases first and the fill from the dropped ones after: the extra row is the
+               observed signal that the window held more queries than top, and the first top rows are the same rows in the same order. */
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top + 1, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top + 1)
             {
-                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top + 1 - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
                 rows = [.. rows, .. fill];
             }
+
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #7005: every empty answer below also says whether the store holds the window (the notice rides it by WithEmptyWindowNoticeAsync). */
             async Task<string> EmptyAnswerAsync()
@@ -142,7 +148,7 @@ public sealed class McpQueryTools
                 /* #6226 (Darling's twin): the collector looked and nothing ran. query_stats stores only what executed since its
                    watermark, so a window in which it ran successfully and stored no row is a measurement (empty), not a gap
                    (unavailable). After not_collected, which names an engine that never runs the collector. */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_stats", hours_back, asOfUtc: windowEnd),
                         "query_stats", hours_back, "executed statements", database_name)
@@ -257,9 +263,13 @@ public sealed class McpQueryTools
                 DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
             }
 
-            /* #8568: the page ends at the last whole row that fits the response budget, heaviest first, and says so
-               (truncated, budget_note), as Darling's twin does. */
-            return McpResponseBudget.CapPage(payload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(full_text));
+            /* `truncated` is true when the window held more queries than top. #8568: the page also ends at the last whole row that
+               fits the response budget, heaviest first, and says so (budget_truncated, budget_note), and `truncated` is then true for
+               either cut, as Darling's twin does. */
+            payload["truncated"] = moreThanTop;
+            return McpResponseBudget.CapArray(
+                payload, "queries", "heaviest first", "queries", _ => TopQueriesCutRemedy(full_text), McpResponseBudget.DefaultBytes,
+                "budget_truncated", "budget_note", (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
         }
         catch (Exception ex)
         {
@@ -271,11 +281,12 @@ public sealed class McpQueryTools
     /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Twin of
     /// <c>DarlingMcpDataTools.EmptyCollectorRan</c>; the words are shared in <see cref="CollectorRunFacts.RanFoundNothing"/>.</summary>
     internal static string? EmptyCollectorRan(
-        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName)
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName, string? storedRowsExplanation = null)
     {
         var message = facts.RanFoundNothing(collectorName, hoursBack, found,
-            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }));
-        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }), storedRowsExplanation: storedRowsExplanation);
+        /* #9341: when the runs stored rows, the count beside the run count says what the sentence rests on. */
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow, rows_collected_in_window = facts.RowsCollectedInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
@@ -328,15 +339,20 @@ public sealed class McpQueryTools
             var droppedDatabases = string.IsNullOrEmpty(database_name)
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
+            /* Read for top + 1 rows: the extra row is the observed signal that the window held more procedures than top, and the first top
+               rows are the same rows in the same order (Darling's twin reads the same way). */
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top + 1, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
             /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
                ranked the same way and marked database_dropped (Darling twin does the same), so a dropped database rows never push out a
                listed row and the grid is not empty while the work is on record. databases_left_out then names only the databases with no row. */
-            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top + 1)
             {
-                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
+                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top + 1 - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
                 rows = [.. rows, .. fill];
             }
+
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
                it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
@@ -351,7 +367,7 @@ public sealed class McpQueryTools
             {
                 /* #7724: the collector's no-run answers are unavailable, which WithEmptyWindowNoticeAsync leaves alone. For a server that is offline
                    by the SUCCESS-run rule the offline lead goes in front of them (Darling's twin does the same). */
-                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
+                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "procedure_stats")
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
                         hours_back, leftOut?.Count ?? 0);
@@ -441,6 +457,9 @@ public sealed class McpQueryTools
                 {
                     DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
                 }
+
+                /* True when the window held more procedures than top; the page is the heaviest top of them. */
+                node["truncated"] = moreThanTop;
             });
         }
         catch (Exception ex)
@@ -500,7 +519,7 @@ public sealed class McpQueryTools
         return message is null ? null : McpHelpers.Status("unavailable", message);
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept: truncated says rows were cut for that, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. truncated says top or the 32 KB budget cut rows, budget_truncated the budget alone. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept. truncated says rows were left out, by the top cap or by the budget; budget_truncated and budget_note are the budget cut alone, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -517,10 +536,17 @@ public sealed class McpQueryTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* #9195: the call's read lock wait and phases, for the slow-read line the finally block writes. */
+        using var lockWaits = ReadLockWaitTally.Begin();
+        /* #9195: the profile files this call writes when DuckDbReadProfile is on, named on the slow-read line. */
+        using var profiles = DuckDbProfileTrail.Begin();
+        var phases = new ReadPhaseSplit();
+        /* #9423: this read keeps a phase split, so the slow-call row stores its hot against archive figures. */
+        lockWaits.MarkSplitKept();
         try
         {
             /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
-            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            var tagScope = await phases.TimeAsync("tag scope", () => dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag));
             if (tagScope.Unknown)
             {
                 return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
@@ -544,20 +570,24 @@ public sealed class McpQueryTools
 
             var nowUtc = windowEnd;
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(
-                resolved.ServerId, hours_back, top,
+            /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first
+               top are the same rows in the same order. */
+            var rows = await phases.TimeAsync("top read", () => dataService.GetQueryStoreTopQueriesAsync(
+                resolved.ServerId, hours_back, top + 1,
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
                 moduleName: module_name,
-                tags: tagScope);
+                tags: tagScope));
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #4231 (Lite's twin of Darling's #2364): what the window ACTUALLY reached. rows above are the top
                N by COST, so their timestamps say nothing about how far back the read went. query_store_stats
                has no rollup fallback (the only one that keeps query_id/plan_id would approach raw's own size),
                so the honest move is to report what was served rather than echo what was asked for. Deliberately
                unfiltered: the floor is a property of the tier, not narrowed by database/execution_type/module. */
-            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc);
+            var floor = await phases.TimeAsync("window floor", () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc));
             var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
@@ -573,11 +603,14 @@ public sealed class McpQueryTools
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
-                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
+                   the filter has rows. One existence test of the unfiltered window tells the two apart
+                   (QueryStoreWindowHasRowsAsync: the top read at top 1 with a fill that ranks until it finds a
+                   showable group, since a bounded top-1 page is empty under enough WAITFOR groups); it runs only
+                   on this path.
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 if ((execution_type != null || module_name != null)
-                    && (await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, 1, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd)).Count > 0)
+                    && await dataService.QueryStoreWindowHasRowsAsync(resolved.ServerId, hours_back, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd))
                     return module_name is null
                         ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
                         /* The module miss hands back the window it read: "did not run" is a claim about that
@@ -589,7 +622,7 @@ public sealed class McpQueryTools
                             window_truncated = truncated
                         });
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
                        read had no way to find out. The store has known all along — query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
@@ -607,7 +640,7 @@ public sealed class McpQueryTools
                     /* #6226 (Darling's twin): the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. */
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_store", hours_back, asOfUtc: windowEnd),
-                        "query_store", hours_back, "Query Store intervals", database_name)
+                        "query_store", hours_back, "Query Store intervals", database_name, McpHelpers.QueryStoreNoIntervalInWindow)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
@@ -628,12 +661,12 @@ public sealed class McpQueryTools
                 execution_type = r.ExecutionTypeDesc,
                 module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
-                avg_duration_ms = r.AvgDurationMs,
-                avg_cpu_ms = r.AvgCpuTimeMs,
-                avg_logical_reads = r.AvgLogicalReads,
-                avg_logical_writes = r.AvgLogicalWrites,
-                avg_physical_reads = r.AvgPhysicalReads,
-                avg_rowcount = r.AvgRowcount,
+                avg_duration_ms = Math.Round(r.AvgDurationMs, 2), // #8902: two places, as get_top_queries_by_cpu writes it
+                avg_cpu_ms = Math.Round(r.AvgCpuTimeMs, 2),
+                avg_logical_reads = Math.Round(r.AvgLogicalReads, 2),
+                avg_logical_writes = Math.Round(r.AvgLogicalWrites, 2),
+                avg_physical_reads = Math.Round(r.AvgPhysicalReads, 2),
+                avg_rowcount = Math.Round(r.AvgRowcount, 2),
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
                 query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength
@@ -654,24 +687,48 @@ public sealed class McpQueryTools
                 queries = result
             }, tagScope.Named);
 
-            /* #6131: the page is capped under the shared response budget (top 200 measured 177 KB on the Darling twin, which
-               has the same shape), and `truncated` says when it was. It is the budget cut only; the window floor keeps
-               window_truncated and its own note. */
+            /* `truncated` is true when the window held more queries than top. #6131: the page is also capped under the shared
+               response budget (top 200 measured 177 KB on the Darling twin, which has the same shape). The rows are heaviest first,
+               so the cut drops the lightest; budget_truncated and budget_note are that cut alone, and `truncated` is true for either.
+               The window floor keeps window_truncated and its own note. */
             var topPayload = System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject();
 
             /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
-            if (await McpRuntimePrecondition.QueryStoreErrorNoteAsync(
-                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName)) is { } storeErrorNote)
+            if (await phases.TimeAsync("database state", () => McpRuntimePrecondition.QueryStoreErrorNoteAsync(
+                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName))) is { } storeErrorNote)
             {
                 topPayload[McpRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
 
-            return McpResponseBudget.CapPage(topPayload, "queries", "heaviest first", "queries");
+            topPayload["truncated"] = moreThanTop;
+            return McpResponseBudget.CapArray(
+                topPayload, "queries", "heaviest first", "queries", null, McpResponseBudget.DefaultBytes, "budget_truncated", "budget_note",
+                (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
+        finally
+        {
+            ReportSlowQueryStoreTopRead(resolved.DisplayName, resolved.ServerId, phases, lockWaits, profiles);
+        }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when a <c>get_query_store_top</c> call took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
+    /// the way the facts read says it. The line gives the time of each phase in the order it ran, the wait for the store's read
+    /// lock added up over every connection the call opened, and the time the archive span reads took. The lock wait and the
+    /// archive span are inside the phases, not beside them, and "other" is what no phase accounts for (the empty-answer checks).
+    /// </summary>
+    private static void ReportSlowQueryStoreTopRead(string serverName, int serverId, ReadPhaseSplit phases, ReadLockWaitTally lockWaits, DuckDbProfileTrail profiles)
+    {
+        var total = phases.Total;
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        AppLogger.Info("McpQueryTools",
+            $"Query Store top read took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}): " +
+            $"{lockWaits.DescribeLockWait()}, archive span {(long)lockWaits.ArchiveSpan.TotalMilliseconds} ms (both inside the phases), {phases.Describe(total)}{profiles.Describe()}");
     }
 
     /// <summary>
@@ -721,7 +778,9 @@ public sealed class McpQueryTools
             /* #6750: the store's data start, probed once. The window notice below reports it as effective_start, and the read divides
                each per-hour rate by the hours from it, so the two cannot disagree. */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd);
-            var rows = await dataService.GetQueryStoreRegressionsAsync(
+            /* #9362: the read also answers the coverage facts the empty answer needs (for database_name when one is named), so an
+               empty answer makes no second pass over the archive for them. */
+            var (rows, readHasBaseline, readHasRecent) = await dataService.GetQueryStoreRegressionsWithCoverageAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList(),
                 dataStartUtc: EffectiveWindowStart(floor, baselineStart));
 
@@ -739,7 +798,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of)), leftOut)!;
+                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of), readHasBaseline, readHasRecent), leftOut)!;
 
             var truncated = rows.Count > limit;
 
@@ -893,19 +952,24 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay) =>
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent) =>
         /* #7167: the all-clear rungs below are true negatives only while the server is being collected. */
         await OfflineInsteadOfEmptyAsync(
             dataService, serverId, windowEnd,
-            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay), windowEnd.AddHours(-hours_back));
+            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay, readHasBaseline, readHasRecent), windowEnd.AddHours(-hours_back));
 
     private static async Task<string> EmptyRegressionRungsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay)
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
-           exist for this window", and a window it computed for itself would be a different one. */
-        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
+           exist for this window", and a window it computed for itself would be a different one.
+           #9362: with no database named, the read's own facts are the server-wide answer (the read folds them from the rows the
+           probe reads), so there is no probe. With one named they are that database's, and the server-wide question is still
+           asked once. */
+        var (hasBaseline, hasRecent) = databases is null
+            ? (readHasBaseline, readHasRecent)
+            : await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
 
         if (!hasBaseline && !hasRecent)
         {
@@ -960,8 +1024,7 @@ public sealed class McpQueryTools
            it the same. */
         if (databases is not null)
         {
-            var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
-                serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+            var (filteredBaseline, filteredRecent) = (readHasBaseline, readHasRecent);
 
             if (!filteredBaseline && !filteredRecent)
             {
@@ -1278,7 +1341,7 @@ public sealed class McpQueryTools
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
                    probe follows its own read — what the caller sees is one sentence, not two. */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1358,7 +1421,7 @@ public sealed class McpQueryTools
                asked about here, the question Darling's read answers itself. A filtered read already returns no points. */
             if (points.Count == 0 || (database == null && !await dataService.HasProcedureStatInWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd)))
             {
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "procedure_stats"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1414,7 +1477,7 @@ public sealed class McpQueryTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_store"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1598,6 +1661,35 @@ public sealed class McpQueryTools
         WindowNoticeAsync(
             async () => LocalDataService.EarlierCoverageFloor(await probe(), oldestEventShown),
             requestedStart, windowEnd, table, emptyAnswer: emptyAnswer);
+
+    /// <summary>
+    /// <see cref="EventWindowNoticeAsync"/> for every length a page of events can be cut to for the response budget: element <c>n</c> is
+    /// the notice for the page's first <c>n</c> events (element 0 is unused), so a cut page names the floor of the events it kept. The
+    /// whole page reads the coverage probe. Lite's probe also reads the stored event times, so on its own it names the store's oldest
+    /// event in the window, which a cut can have left out: a shorter page of a newest-first list (<paramref name="newestFirst"/>) probes
+    /// with its newest event as the only event side, an event every cut of the page keeps, and the earlier-of with the oldest event kept
+    /// then names that event when nothing proves more. Each probe is read once, however many lengths there are.
+    /// </summary>
+    internal static async Task<McpWindowNotice[]> EventWindowNoticePrefixesAsync(
+        LocalDataService dataService, QueryWindowRelation relation, int serverId, IReadOnlyList<DateTime?> eventTimes,
+        DateTime requestedStart, DateTime windowEnd, string table, bool newestFirst = true)
+    {
+        var coverageProbe = new Lazy<Task<DateTime?>>(() => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd));
+        var newest = eventTimes.Max();
+        var servedProbe = newestFirst && newest != null
+            ? new Lazy<Task<DateTime?>>(() => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd, rowsNotBeforeUtc: newest))
+            : coverageProbe;
+        var notices = new McpWindowNotice[eventTimes.Count + 1];
+        DateTime? oldest = null;
+        for (var shown = 1; shown <= eventTimes.Count; shown++)
+        {
+            oldest = LocalDataService.EarlierCoverageFloor(oldest, eventTimes[shown - 1]);
+            var probe = shown < eventTimes.Count ? servedProbe : coverageProbe;
+            notices[shown] = await EventWindowNoticeAsync(() => probe.Value, oldest, requestedStart, windowEnd, table);
+        }
+
+        return notices;
+    }
 
     /// <summary>
     /// #7005: the window notice of an EMPTY answer over one window-floor relation, including the aged-out case. The probe's floor
@@ -1832,8 +1924,8 @@ public sealed class McpQueryTools
     /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
     internal static async Task<string> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null) =>
-        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart)).Answer;
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null, string? snapshotCollector = null) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart, snapshotCollector)).Answer;
 
     /// <summary>
     /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
@@ -1841,7 +1933,8 @@ public sealed class McpQueryTools
     /// (read again only when the answer changed, which only an <c>empty</c> one does).
     /// </summary>
     private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null)
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null,
+        string? snapshotCollector = null)
     {
         if (!status.IsEmpty)
         {
@@ -1849,7 +1942,22 @@ public sealed class McpQueryTools
         }
 
         var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd, windowStart);
-        return offline is null ? (answer, status) : (offline, ReadStatus(offline));
+        if (offline is not null)
+        {
+            return (offline, ReadStatus(offline));
+        }
+
+        /* #9339: a server that is online now can still have skipped or failed collection inside the window (a THREADPOOL episode starves
+           the collector's own connection). A snapshot read that passes its collector says so, with the count and the span, so an empty
+           answer does not read as "nothing was waiting". Darling's twin is DarlingServerOfflineNote.EmptyAsync. */
+        if (snapshotCollector is not null && windowStart is { } start)
+        {
+            var gaps = await dataService.GetCollectionGapsAsync(serverId, snapshotCollector, start, windowEnd);
+            var noted = CollectionGapNote.Apply(answer, snapshotCollector, gaps);
+            return ReferenceEquals(noted, answer) ? (answer, status) : (noted, ReadStatus(noted));
+        }
+
+        return (answer, status);
     }
 
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
@@ -2324,7 +2432,7 @@ public sealed class McpQueryTools
         return points.OrderBy(p => p.BucketStart).ToList();
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. The answer is held to the 32,768-byte response budget: when points were left off the start (the oldest, so the newest are kept and the points stay oldest first), budget_truncated is true and budget_note says how many fit, which bucket_minutes reads the whole window, and the as_of that reads the points before the first one returned." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -2345,7 +2453,7 @@ public sealed class McpQueryTools
 
             /* #7907: bucketed and capped like the sibling trends. Lite collects query_stats every minute, so a point per
                collection is about 1,440 points over the default day and about 10,000 over a week. */
-            var budget = TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints);
+            var budget = TrendBudget.Mcp(TrendBuckets.QueryTrendMcpAutoPoints, TrendBuckets.QueryTrendMaxPoints);
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
@@ -2360,7 +2468,7 @@ public sealed class McpQueryTools
             {
                 /* #7005: the empty answer says whether the store holds the window. */
                 return await WithEmptyWindowNoticeAsync(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats")
                         ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' with{McpHelpers.InTheLast($"{hours_back} hours")}."),
                     dataService, QueryWindowRelation.QueryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "query_stats");
             }
@@ -2407,7 +2515,14 @@ public sealed class McpQueryTools
             envelope[BaselineDiscontinuities.PayloadKey] = BaselineDiscontinuities.ToPayload(
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
 
-            return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
+
+            /* #8812: an answer over the response budget keeps the NEWEST points that fit it, still oldest first, and says so
+               (budget_truncated, budget_note, with the first point returned, the bucket width that fits the window and the as_of
+               that reads the points before it), as Darling's twin does. */
+            return McpResponseBudget.CapArray(
+                JsonSerializer.SerializeToNode(envelope, McpHelpers.JsonOptions)!.AsObject(), "trend", "newest points kept, oldest first", "points",
+                kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, 1, points[points.Count - kept].BucketStart), McpResponseBudget.DefaultBytes,
+                "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept, keepNewest: true);
         }
         catch (Exception ex)
         {

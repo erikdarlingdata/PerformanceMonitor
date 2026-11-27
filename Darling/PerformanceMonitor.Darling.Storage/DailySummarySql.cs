@@ -217,7 +217,7 @@ public static class DailySummarySql
               AND metric_name NOT LIKE '%Resolved%'
               AND metric_name NOT LIKE '%Restored%'
               AND metric_name NOT LIKE '%Resumed%'
-              AND metric_name NOT LIKE '%Restarted%'
+              AND (metric_name NOT LIKE '%Restarted%' OR metric_name = 'Instance Restarted')
               AND metric_name NOT LIKE '%Recovered%'
               AND metric_name NOT LIKE '%Reconnected%'
             GROUP BY 1
@@ -1209,6 +1209,79 @@ public static class DailySummarySql
         """;
 
     /// <summary>
+    /// <see cref="WaitPerSpellingFromRollup"/> with the hourly wait totals under the days the daily rollup does not hold (#8824). A day the
+    /// daily rollup holds is answered exactly as before. Every other day (the open day, the day or two the daily refresh has not reached, a
+    /// hole) used to read raw <c>wait_stats</c> in one lateral probe, which on a busy store reads tens of thousands of blocks from disk on
+    /// the first visit of the day. Now each hour of such a day that lies WHOLLY inside <c>[$2, $3)</c> and that
+    /// <c>collect.wait_stats_hourly</c> holds for the server is read from it (the same rule the daily tier applies to a day: the rollup holds
+    /// a bucket when it has a row for it), and only the remaining hours read raw: the newest hour or two, a hole, and a partial hour at a
+    /// window edge, one probe each, clipped to the window. A day with no held hour at all keeps its single raw probe. The rows have the
+    /// shape of every other branch (day, stored spelling, summed positive delta), so the <c>rtrim</c> merge downstream is unchanged.
+    /// An hour is bucketed by <c>time_bucket('1 hour')</c> on the naive-UTC column, the same instant <c>date_trunc('hour')</c> gives, so an
+    /// hour the window covers whole has the same rows in both places.
+    /// </summary>
+    private const string WaitPerSpellingFromRollupWithHourly = """
+        WITH wait_covered AS (
+            SELECT bucket AS d
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            GROUP BY bucket
+        ),
+        wait_open_days AS (
+            SELECT g.d
+            FROM generate_series(date_trunc('day', $2::timestamp), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 day') AS g(d)
+            WHERE NOT EXISTS (SELECT 1 FROM wait_covered AS c WHERE c.d = g.d)
+            OFFSET 0
+        ),
+        wait_hourly AS (
+            SELECT h.bucket AS hr, h.wait_type, h.delta_wait_time_ms AS ms
+            FROM collect.wait_stats_hourly AS h
+            WHERE h.server_id = $1 AND h.bucket >= $2 AND h.bucket + INTERVAL '1 hour' <= $3
+            AND   date_trunc('day', h.bucket) IN (SELECT o.d FROM wait_open_days AS o)
+        ),
+        wait_hour_held AS (
+            SELECT DISTINCT hr FROM wait_hourly
+        ),
+        wait_raw_ranges AS (
+            SELECT o.d, o.d AS lo, o.d + INTERVAL '1 day' AS hi
+            FROM wait_open_days AS o
+            WHERE NOT EXISTS (SELECT 1 FROM wait_hour_held AS k WHERE date_trunc('day', k.hr) = o.d)
+            UNION ALL
+            SELECT o.d, s.hr AS lo, s.hr + INTERVAL '1 hour' AS hi
+            FROM wait_open_days AS o
+            CROSS JOIN LATERAL generate_series(o.d, o.d + INTERVAL '23 hours', INTERVAL '1 hour') AS s(hr)
+            WHERE EXISTS (SELECT 1 FROM wait_hour_held AS k WHERE date_trunc('day', k.hr) = o.d)
+            AND   s.hr < $3
+            AND   s.hr + INTERVAL '1 hour' > $2
+            AND   NOT EXISTS (SELECT 1 FROM wait_hour_held AS k WHERE k.hr = s.hr)
+        ),
+        wait_per_spelling AS (
+            SELECT bucket AS d, wait_type, delta_wait_time_ms AS ms
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            UNION ALL
+            SELECT date_trunc('day', hr) AS d, wait_type, ms
+            FROM wait_hourly
+            UNION ALL
+            SELECT x.d, r.wait_type, r.ms
+            FROM (
+                SELECT q.d, q.lo, q.hi
+                FROM wait_raw_ranges AS q
+                OFFSET 0
+            ) AS x
+            CROSS JOIN LATERAL (
+                SELECT w.wait_type, SUM(w.delta_wait_time_ms) AS ms
+                FROM v_wait_stats AS w
+                WHERE w.server_id = $1
+                AND   w.collection_time >= GREATEST(x.lo, $2)
+                AND   w.collection_time < LEAST(x.hi, $3)
+                AND   w.delta_wait_time_ms > 0
+                GROUP BY w.wait_type
+            ) AS r
+        ),
+        """;
+
+    /// <summary>
     /// <see cref="RangeSqlFor(RetentionTier, string)"/>'s coverage-aware form (#3653), with the wait totals read from
     /// <c>collect.wait_stats_daily</c> for the closed days it holds when the store has it (#8549,
     /// <see cref="RollupCoverage.HasWaitStatsDaily"/>), on the hourly and daily tiers. The raw tier is a window of a few days and keeps the
@@ -1223,7 +1296,10 @@ public static class DailySummarySql
             return routed;
         }
 
-        var withRollup = routed.Replace(WaitPerSpellingRaw, WaitPerSpellingFromRollup, StringComparison.Ordinal);
+        var withRollup = routed.Replace(
+            WaitPerSpellingRaw,
+            coverage.HasWaitStatsHourly ? WaitPerSpellingFromRollupWithHourly : WaitPerSpellingFromRollup,
+            StringComparison.Ordinal);
         if (string.Equals(withRollup, routed, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

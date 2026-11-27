@@ -126,6 +126,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// listener's, exactly like the certificate above.</summary>
     private DarlingWebOidcClient? _oidcClient;
 
+    /// <summary>#8737: for <c>/api/me</c>, whether the configured OIDC sign-in has a role mapping; null when OIDC is not configured.</summary>
+    private static bool? OidcRoleMapping(DarlingWebOidcClient? client)
+        => client is null ? null : DarlingWebOidc.HasRoleMapping(client.Options.AdminRoles, client.Options.ViewerRoles);
+
     private int _runningPort;
 
     /// <summary>True while the running app uses the read-only viewer login because the managed web credential had not appeared by the end of
@@ -135,6 +139,23 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>Whether this process has logged <see cref="MissingTokenMessage"/>: a start with no token fails the same
     /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
     private bool _missingTokenReported;
+
+    /// <summary>Whether this process has logged the <see cref="TokenSignInStartProblem"/> line (#8735): the config is held for
+    /// the process lifetime, so the supervisor's 30s retries would only repeat it.</summary>
+    private bool _tokenSignInProblemReported;
+
+    /// <summary>Whether this process has logged the plaintext-token Warning, the OIDC-refused Critical and the trustedProxies Critical
+    /// (#8735 review): each names file-only configuration that only a restart changes, so a supervisor retry would only repeat it.</summary>
+    private bool _plaintextTokenReported;
+    private bool _oidcRefusedReported;
+    private bool _trustedProxiesReported;
+
+    /// <summary>Whether this process has logged the OIDC block's plaintext-clientSecret Warning, its public-client Warning and its
+    /// "OIDC sign-in enabled" Information line (#8735 review, round 2): the block runs before the trustedProxies and TLS degrades, so a
+    /// start those degrades stop under tokenSignIn off would otherwise log all three again on every retry.</summary>
+    private bool _oidcPlaintextSecretReported;
+    private bool _oidcPublicClientReported;
+    private bool _oidcEnabledReported;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -180,9 +201,87 @@ public sealed class DarlingWebHostService : BackgroundService
        DarlingFrontDoorWebProxy). */
     private readonly IServiceProvider? _services;
 
+    /* #8737: the process's personal-token snapshot, the one the MCP host's gate checks. The routes refresh it after each create or revoke. Null in
+       a host built outside the service's DI unless a test sets PersonalSnapshot; with none, the routes answer 404. */
+    private DarlingPersonalTokenSnapshot? _personalSnapshot;
+
+    /// <summary>The personal-token snapshot the <c>/api/mcp-tokens</c> routes refresh after a write (#8737). A test sets it.</summary>
+    internal DarlingPersonalTokenSnapshot? PersonalSnapshot
+    {
+        get => _personalSnapshot;
+        init => _personalSnapshot = value;
+    }
+
+    /* #8737: the host's stopping token, set when the supervisor starts. A sign-in's revoke is not tied to the request's token: once it has
+       committed, the snapshot refresh must run, or a client that disconnects mid-callback would leave a revoked token live for MCP. A host
+       built outside the service (a test) never runs the supervisor and keeps None. */
+    private CancellationToken _hostStopping = CancellationToken.None;
+
+    /* #8737: the revokes a sign-in could not make, drained on the supervisor tick while the web host runs. */
+    private readonly PersonalTokenPendingRevokes _pendingPersonalRevokes;
+
+    /// <summary>The sign-in revokes waiting for the store (#8737). A test reads it.</summary>
+    internal PersonalTokenPendingRevokes PendingPersonalRevokes => _pendingPersonalRevokes;
+
+    /// <summary>
+    /// Drains the sign-in revokes that could not be made (#8737), on every supervisor tick while the web host runs; a no-op when nothing is queued.
+    /// </summary>
+    internal async Task DrainPersonalRevokesAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
+    {
+        _pendingPersonalRevokes.SaveIfDirty();
+        if (_personalSnapshot is null || _ownerSource is null)
+        {
+            return;
+        }
+
+        await DarlingPersonalTokenSignIn.DrainPendingAsync(settings, _ownerSource, _personalSnapshot, _pendingPersonalRevokes, _logger, cancellationToken);
+    }
+
+    /// <summary>
+    /// The personal-token work of one supervisor tick (#8737). The start sweep waits for the web listener; the drain of queued sign-in revokes
+    /// does not, since it needs only the owner connection and the snapshot, so a revoke still drains while the dashboard is off or failed to start.
+    /// </summary>
+    internal async Task RunPersonalTickAsync(PersonalTokenSettings? settings, bool webRunning, CancellationToken cancellationToken)
+    {
+        if (webRunning && !PersonalStartSweepDone)
+        {
+            await RunPersonalStartSweepAsync(settings, cancellationToken);
+        }
+
+        await DrainPersonalRevokesAsync(settings, cancellationToken);
+    }
+
+    /// <summary>True once the start sweep of the personal-token settings has succeeded, or had nothing to do (#8737).</summary>
+    internal bool PersonalStartSweepDone { get; private set; }
+
+    /// <summary>
+    /// The start sweep of the personal-token settings (#8737, R8): on each supervisor tick until it has succeeded once, which is after the
+    /// worker has published the owner connection and the store has the table. Lowered settings (<c>adminRole: reader</c>, a lower
+    /// <c>maxLifetimeDays</c>) then reach tokens that were made under the old ones.
+    /// </summary>
+    internal async Task RunPersonalStartSweepAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
+    {
+        if (PersonalStartSweepDone)
+        {
+            return;
+        }
+
+        if (settings is null || _personalSnapshot is null || _ownerSource is null)
+        {
+            PersonalStartSweepDone = true;
+            return;
+        }
+
+        PersonalStartSweepDone = await DarlingPersonalTokenSignIn.ApplySettingsAtStartAsync(
+            settings, _ownerSource, _personalSnapshot, _logger, cancellationToken);
+    }
+
     public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? services = null)
     {
         _services = services;
+        _personalSnapshot = services?.GetService<DarlingPersonalTokenSnapshot>();
+        /* #9325: the process's one queue, the one the snapshot's token check reads; a host built outside the service's DI keeps its own. */
+        _pendingPersonalRevokes = services?.GetService<PersonalTokenPendingRevokes>() ?? new PersonalTokenPendingRevokes();
         _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
@@ -232,6 +331,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _hostStopping = stoppingToken;
         /* Config load lives INSIDE the supervisor loop, on the failed-start backoff (#2038). It used to be a
            single front-loaded Load() whose failure stood this host down for the process LIFETIME, logged only
            at Debug — so one transient darling.json read failure at boot (an AV pass over the file mid service
@@ -261,8 +361,10 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
                     _readAdmission?.Configure(config.Reads.MaxHeavyReads);
 
-                    /* #7674: file-only, and get_store_metrics (served here) reads it from process start. */
-                    QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                    /* #7674: get_store_metrics (served here) reads it from process start. #8978: the file value, ignored once the worker has set the
+                       value, which the store may override. */
+                    QueryTextTrigramIndexTracker.Shared.ConfigureFromFile(config.QueryTextTrigramIndexEnabled);
+                    QueryStoreTextTrigramIndex.SharedTracker.ConfigureFromFile(config.QueryStoreTextTrigramIndexEnabled);
                 }
                 catch (Exception ex)
                 {
@@ -352,6 +454,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             if (_app is not null && _managedGroups is not null)
                 await _managedGroups.RefreshAsync(stoppingToken);
+
+            await RunPersonalTickAsync(DarlingMcpHostService.PersonalTokensFor(config), _app is not null, stoppingToken);
 
             lastEnabled = toggle.Enabled;
 
@@ -490,16 +594,115 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed, bool? inContainer = null)
     {
         var network = web.Network;
+
+        /* #8735: tokenSignIn "off" with OIDC configured makes the shared token unnecessary, because OIDC is then the
+           only way in. An unknown value does not widen it: the start refuses it (TokenSignInStartProblem). */
+        var oidcOnlySignIn = network?.Oidc is { IsConfigured: true } oidc
+            && DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var signInMode)
+            && signInMode == TokenSignInMode.Off;
         return DarlingHostBinding.ResolveBind(
             network?.Listen,
             network?.AllowFrom,
             tokenPresent: network is not null
-                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
-            networkConfigured: network is { IsConfigured: true },
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token) || oidcOnlySignIn),
+            /* #9571: the tokens are honored in bring-your-own mode, so only the fields that mode ignores count here. */
+            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
             inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
     }
+
+    /// <summary>
+    /// The Critical line a start logs when <c>web.network.oidc.tokenSignIn</c> (#8735) stops it, or null when the start may go on.
+    /// An unknown value is refused (it would otherwise fail closed as <c>off</c> and lock operators out); <c>off</c> needs
+    /// OIDC to be the way in, so it needs the dashboard exposed and an OIDC client that was accepted. PURE; run once, after
+    /// the TLS and trustedProxies degrades have settled <paramref name="networkMode"/>. Never holds a token.
+    /// </summary>
+    internal static string? TokenSignInStartProblem(string? rawMode, bool oidcConfigured, bool networkMode, bool oidcClientPresent)
+    {
+        if (!DarlingTokenSignIn.TryParse(rawMode, out var mode))
+        {
+            return $"web.network.oidc.tokenSignIn is '{rawMode?.Trim()}', which is not a known value. Use 'on', 'loopback' or 'off'. "
+                + "The web dashboard is not started.";
+        }
+
+        if (mode != TokenSignInMode.Off || (networkMode && oidcClientPresent))
+        {
+            return null;
+        }
+
+        var missing = !oidcConfigured
+            ? "OIDC is not configured (web.network.oidc)"
+            : !networkMode
+                ? "the dashboard is not exposed to the network (web.network.listen, allowFrom, TLS or trustedProxies was refused or is missing)"
+                : "OIDC was refused at start (see the OIDC line above)";
+        return $"web.network.oidc.tokenSignIn is 'off', which leaves OIDC as the only way to sign in, but {missing}, so no one could sign in. "
+            + "Fix that, or set web.network.oidc.tokenSignIn to 'loopback' or 'on'. The web dashboard is not started.";
+    }
+
+    /// <summary>
+    /// The lines a start logs for <c>web.network.oidc.tokenSignIn</c> (#8735): nothing under <c>on</c>; under <c>loopback</c> an
+    /// Information line, plus, on an exposed start (<paramref name="networkMode"/>), a Warning that <c>loopback</c> cannot tell a
+    /// client behind a sidecar proxy from a local one, whatever <c>trustedProxies</c> holds: only its wording changes (the trustedProxies advice only holds for a proxy that sends
+    /// <c>X-Forwarded-For</c>); under <c>off</c> an Information line. In loopback-only mode <c>trustedProxies</c> is never parsed, so no
+    /// warning is given there. PURE.
+    /// </summary>
+    internal static IReadOnlyList<(LogLevel Level, string Message)> TokenSignInStartLines(TokenSignInMode mode, bool networkMode, bool hasTrustedProxies, bool oidcClientPresent)
+    {
+        var lines = new List<(LogLevel Level, string Message)>();
+        if (mode == TokenSignInMode.Loopback)
+        {
+            lines.Add((LogLevel.Information,
+                "web.network.oidc.tokenSignIn is 'loopback': the shared token, the web.network.tokens entries and the managed group tokens "
+                + "sign in only from this machine"
+                + (oidcClientPresent ? "; other clients sign in with OIDC." : ".")));
+            if (networkMode)
+            {
+                lines.Add((LogLevel.Warning,
+                    "web.network.oidc.tokenSignIn is 'loopback' and this dashboard is exposed to the network"
+                    + (hasTrustedProxies ? "" : " with web.network.trustedProxies empty")
+                    + ": 'loopback' separates local clients from remote ones only when each remote client reaches this service with its own address. "
+                    + "A service-mesh sidecar such as Envoy or Linkerd connects from loopback and usually sends no X-Forwarded-For, and a request "
+                    + "from inside the mesh never carries one, so behind a sidecar every client would count as local; use 'off' there. "
+                    + "Listing a reverse proxy in web.network.trustedProxies helps only when that proxy sends X-Forwarded-For with the client's address on every request."));
+            }
+        }
+        else if (mode == TokenSignInMode.Off)
+        {
+            lines.Add((LogLevel.Information,
+                "web.network.oidc.tokenSignIn is 'off': the shared token, the web.network.tokens entries and the managed group tokens "
+                + "cannot sign in from any client; OIDC is the only way in. MCP tokens are not affected."));
+        }
+
+        return lines;
+    }
+
+    /// <summary>The tail of the "OIDC sign-in enabled" start line that says what the shared token does beside OIDC under each
+    /// <c>web.network.oidc.tokenSignIn</c> mode (#8735). Under <c>on</c> it is the text the line always had. PURE.</summary>
+    internal static string OidcStartLineTokenNote(TokenSignInMode mode) => mode switch
+    {
+        TokenSignInMode.Loopback => " The shared token signs in from this machine only.",
+        TokenSignInMode.Off => "",
+        _ => " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+    };
+
+    /// <summary>The end of the Critical a start logs when OIDC is refused: what the shared token is left as, by
+    /// <c>web.network.oidc.tokenSignIn</c> mode (#8735). Under <c>on</c> it is the text the line always had. PURE.</summary>
+    internal static string OidcRefusedConsequence(TokenSignInMode mode) => mode switch
+    {
+        TokenSignInMode.Off => "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started.",
+        TokenSignInMode.Loopback => "the shared token remains the only web credential, from this machine.",
+        _ => "the shared token remains the only web credential.",
+    };
+
+    /// <summary>The Warning a start logs for a plaintext <c>web.network.token</c>; its last sentence depends on
+    /// <c>web.network.oidc.tokenSignIn</c> (#8735): under <c>off</c> the token signs nobody in. Never holds the token. PURE.</summary>
+    internal static string PlaintextTokenWarning(TokenSignInMode mode) =>
+        "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken "
+        + "(produced by --encrypt-password). "
+        + (mode == TokenSignInMode.Off
+            ? "web.network.oidc.tokenSignIn is 'off', so this token signs nobody in."
+            : "This token gates web dashboard network access.");
 
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only dashboard's
     /// token-to-cookie gate compares against (empty only when none is configured and <c>web.allowTokenlessLoopback</c>
@@ -604,9 +807,11 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger.LogCritical(ex, 
-                "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
-                ex.Message);
+            logger.LogCritical(ex,
+                "{Message}",
+                DarlingSecretSource.DescribeTokenReadFailure(
+                    "Web dashboard token", "web.network", "The loopback listener is not served without a token, so the web dashboard is not started.",
+                    ex.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken)));
             return new LoopbackTokenResolution(true, "");
         }
     }
@@ -647,6 +852,13 @@ public sealed class DarlingWebHostService : BackgroundService
             /* Why the resolved token is under the length floor, or null. A token under it still gates sign-in, but the
                shared-token seat then serves reads only (ConfigurePipeline's sharedTokenReadsOnlyProblem). */
             string? writeTokenProblem = null;
+
+            /* #8735: parsed once. An unknown value parses as Off, so the token paths below stay quiet for it and the check
+               before ConfigurePipeline stops the start with the line that names the real problem. */
+            var rawTokenSignIn = network?.Oidc?.TokenSignIn;
+            DarlingTokenSignIn.TryParse(rawTokenSignIn, out var tokenSignIn);
+            var tokenConfigured = network is not null
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token));
             if (networkMode)
             {
                 networkListenIp = IPAddress.Parse(network!.Listen!.Trim());
@@ -655,7 +867,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 try
                 {
                     var token = network.ResolveToken(out var usedPlaintext);
-                    if (string.IsNullOrWhiteSpace(token))
+
+                    /* #8735: under tokenSignIn off no token is needed (OIDC is the only way in), so none configured is not an
+                       error and accessToken stays "". A token that is configured resolves as usual. */
+                    if (tokenSignIn == TokenSignInMode.Off && !tokenConfigured)
+                    {
+                        token = "";
+                    }
+                    else if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
                             "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The web dashboard is not started.");
@@ -669,7 +888,7 @@ public sealed class DarlingWebHostService : BackgroundService
                        still resolved so it keeps gating the loopback listener, the way a refused TLS
                        certificate degrades. */
                     var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode);
-                    if (floor.Problem is not null)
+                    if (tokenSignIn != TokenSignInMode.Off && floor.Problem is not null)
                     {
                         _logger.LogCritical(
                             "Web dashboard token {Problem}: refusing to expose; binding loopback-only.",
@@ -682,19 +901,20 @@ public sealed class DarlingWebHostService : BackgroundService
                     else
                     {
                         accessToken = token;
-                        if (usedPlaintext)
+                        if (usedPlaintext && !_plaintextTokenReported)
                         {
-                            _logger.LogWarning(
-                                "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
-                                "(produced by --encrypt-password). This token gates web dashboard network access.");
+                            _plaintextTokenReported = true;
+                            _logger.LogWarning("{Message}", PlaintextTokenWarning(tokenSignIn));
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical(ex, 
-                        "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
-                        ex.Message);
+                    _logger.LogCritical(ex,
+                        "{Message}",
+                        DarlingSecretSource.DescribeTokenReadFailure(
+                            "Web dashboard token", "web.network", "The web dashboard is not started.", ex.Message,
+                            !string.IsNullOrWhiteSpace(network.EncryptedToken)));
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -709,17 +929,26 @@ public sealed class DarlingWebHostService : BackgroundService
                    config is held for the process lifetime, so the 30s retries would only repeat it. A configured token
                    that cannot be used stops this start, because serving the dashboard open would drop the credential
                    the operator asked every client to present. */
-                var loopbackToken = ResolveLoopbackOnlyToken(
-                    network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
-                if (loopbackToken.Refuse)
+                if (tokenSignIn == TokenSignInMode.Off && !tokenConfigured)
                 {
-                    _missingTokenReported |= loopbackToken.MissingToken;
-                    await DisposeFailedStartAsync();
-                    return false;
+                    /* #8735: tokenSignIn off with no token and no network listener cannot start, because no one could sign in.
+                       ResolveLoopbackOnlyToken would stop it with the "no token" line, which names the wrong cause, so it is
+                       skipped and the check before ConfigurePipeline stops the start with the tokenSignIn line. */
                 }
+                else
+                {
+                    var loopbackToken = ResolveLoopbackOnlyToken(
+                        network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
+                    if (loopbackToken.Refuse)
+                    {
+                        _missingTokenReported |= loopbackToken.MissingToken;
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
 
-                accessToken = loopbackToken.Token;
-                writeTokenProblem = loopbackToken.TokenProblem;
+                    accessToken = loopbackToken.Token;
+                    writeTokenProblem = loopbackToken.TokenProblem;
+                }
             }
 
             /* OIDC sign-in (#2550) — resolved once per start, like the token and the certificate. A
@@ -737,8 +966,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     try
                     {
                         clientSecret = oidcConfig.ResolveClientSecret(out var usedPlaintextSecret);
-                        if (usedPlaintextSecret)
+                        if (usedPlaintextSecret && !_oidcPlaintextSecretReported)
                         {
+                            _oidcPlaintextSecretReported = true;
                             _logger.LogWarning(
                                 "web.network.oidc.clientSecret is set in plaintext (dev convenience): prefer encryptedClientSecret (produced by --encrypt-password).");
                         }
@@ -751,9 +981,14 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 if (problem is not null)
                 {
-                    _logger.LogCritical(
-                        "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; the shared token remains the only web credential.",
-                        problem);
+                    if (!_oidcRefusedReported)
+                    {
+                        _oidcRefusedReported = true;
+                        _logger.LogCritical(
+                            "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; "
+                            + OidcRefusedConsequence(tokenSignIn),
+                            problem);
+                    }
                 }
                 else
                 {
@@ -768,23 +1003,29 @@ public sealed class DarlingWebHostService : BackgroundService
                         oidcConfig.ViewerRoles ?? Array.Empty<string>()));
                     _oidcClient = oidcClient;
 
-                    if (clientSecret is null)
+                    if (clientSecret is null && !_oidcPublicClientReported)
                     {
+                        _oidcPublicClientReported = true;
                         _logger.LogWarning(
                             "web.network.oidc has no client secret: the code exchange will run as a PUBLIC client on PKCE alone. Some providers refuse this for web apps; register a confidential client and set encryptedClientSecret if sign-ins fail at the exchange.");
                     }
 
                     /* Name the redirect-URI shape at start, because it is the one thing the operator has to
                        register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
-                    _logger.LogInformation(
-                        "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts}). The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
-                        oidcClient.Options.Authority,
-                        oidcClient.Options.ClientId,
-                        oidcClient.Options.RoleClaim is null
-                            ? "none (every signed-in user gets the edit seat, the shared token's reach)"
-                            : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
-                        effectivePort,
-                        DescribeOidcRedirectHosts(network.Listen));
+                    if (!_oidcEnabledReported)
+                    {
+                        _oidcEnabledReported = true;
+                        _logger.LogInformation(
+                            "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts})."
+                            + OidcStartLineTokenNote(tokenSignIn),
+                            oidcClient.Options.Authority,
+                            oidcClient.Options.ClientId,
+                            oidcClient.Options.RoleClaim is null
+                                ? "none (every signed-in user gets the edit seat, the shared token's reach)"
+                                : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
+                            effectivePort,
+                            DescribeOidcRedirectHosts(network.Listen));
+                    }
                 }
             }
 
@@ -796,9 +1037,14 @@ public sealed class DarlingWebHostService : BackgroundService
             if (networkMode
                 && !DarlingHostBinding.TryParseTrustedProxies(network!.TrustedProxies, out trustedProxies, out var proxyProblem))
             {
-                _logger.LogCritical(
-                    "web.network.trustedProxies is misconfigured ({Problem}): refusing to expose; binding loopback-only.",
-                    proxyProblem);
+                if (!_trustedProxiesReported)
+                {
+                    _trustedProxiesReported = true;
+                    _logger.LogCritical(
+                        "web.network.trustedProxies is misconfigured ({Problem}): refusing to expose; binding loopback-only.",
+                        proxyProblem);
+                }
+
                 networkMode = false;
                 trustedProxies = null;
             }
@@ -850,6 +1096,23 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             }
 
+            /* #8735: stop before the port probe, the credential wait and the build when tokenSignIn cannot be honored. Placed after the TLS and trustedProxies
+               degrades, because those clear networkMode after OIDC resolved. This also keeps ConfigurePipeline's own guard
+               (off, not exposed, no token to require) from ever throwing in production. The line is logged once per process. */
+            var tokenSignInProblem = TokenSignInStartProblem(
+                rawTokenSignIn, network?.Oidc is { IsConfigured: true }, networkMode, oidcClient is not null);
+            if (tokenSignInProblem is not null)
+            {
+                if (!_tokenSignInProblemReported)
+                {
+                    _logger.LogCritical("{Message}", tokenSignInProblem);
+                    _tokenSignInProblemReported = true;
+                }
+
+                await DisposeFailedStartAsync();
+                return false;
+            }
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck and
                the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -889,7 +1152,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     return false;
                 }
 
-                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read);
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read, oidcRoleMapping: OidcRoleMapping(oidcClient));
 
                 /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
                    whichever store it is sent to. */
@@ -989,7 +1252,8 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
 
                 /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
-                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
+                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger,
+                    personalOperatorTokens: DarlingMcpHostService.PersonalTokensFor(config)?.AdminMayMintOperator == true);
             }
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
@@ -1106,7 +1370,7 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
                service still starts, so an upgrade of such a setup keeps running; this says why the token form answers 403. */
             var mcpTokens = DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp);
-            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
+            if (tokenSignIn != TokenSignInMode.Off && DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
             {
                 _logger.LogWarning("{Message}", DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage);
             }
@@ -1127,11 +1391,17 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
+            foreach (var (level, message) in TokenSignInStartLines(tokenSignIn, networkMode, trustedProxies is { Count: > 0 }, oidcClient is not null))
+            {
+                _logger.Log(level, "{Message}", message);
+            }
+
             _managedGroups = frontDoorProxy is null && _ownerSource is not null && postgres is not null
                 ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
-                    accessToken, webTokens, mcpTokens, _logger)
+                    accessToken, webTokens, mcpTokens, _logger,
+                    () => _collectorState.Read()?.Phase == CollectorRuntimeState.CollectorPhase.Collecting)
                 : null;
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn, personalTokens: DarlingMcpHostService.PersonalTokensFor(config));
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1182,6 +1452,13 @@ public sealed class DarlingWebHostService : BackgroundService
             /* StartAsync, not RunAsync: the supervisor loop owns the wait — the app keeps serving until
                StopServerAsync (toggle-off, port change, or shutdown). */
             await _app.StartAsync(stoppingToken);
+            /* #9224: the store table health read for this host's viewer-role data source, taken once the worker has migrated the store, so the
+               Store Health page's first open finds it held. A front door holds no store. */
+            if (postgres is not null)
+            {
+                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken: stoppingToken);
+            }
+
             _runningPort = effectivePort;
             return true;
         }
@@ -1395,11 +1672,21 @@ public sealed class DarlingWebHostService : BackgroundService
         NpgsqlDataSource? composeReadPostgres = null,
         DarlingWebTokenSet? webTokens = null,
         Uri? publicOrigin = null,
-        DarlingWebGroupTokens? managedGroups = null)
+        DarlingWebGroupTokens? managedGroups = null,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On,
+        PersonalTokenSettings? personalTokens = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
         sharedTokenReadsOnlyProblem ??= accessToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(accessToken) : null;
+
+        /* #8735: tokenSignIn off removes every token sign-in, so a loopback-only start with no token requirement would be
+           left serving the tokenless reads-only dashboard to anyone on the box. That is a different exposure the operator
+           did not ask for, so the pipeline refuses to build rather than serve it. */
+        if (tokenSignIn == TokenSignInMode.Off && !networkMode && !requireTokenWhenLoopbackOnly)
+        {
+            throw new InvalidOperationException("tokenSignIn off never serves the tokenless loopback dashboard");
+        }
 
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
@@ -1517,6 +1804,28 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
+        /* #9431: a front door answers GET /version with no sign-in, so a person can check which build is serving with one request. It sits after
+           the Host guard and the network test (an address outside web.network.allowFrom still gets the gate's refusal) and before the
+           sign-in gate, so it works on defaults with no health block. It carries only the build, the commit, the start time and the
+           count of stores that are up (DarlingFrontDoorVersion). */
+        if (frontDoorProxy is not null)
+        {
+            var versionCidr = allowedCidr;
+            app.Use(async (context, next) =>
+            {
+                if (DarlingFrontDoorWebProxy.IsVersionRequest(context.Request)
+                    && DecideWebRequest(
+                        context.Connection.RemoteIpAddress, versionCidr, isAuthFlowRoute: false, hasValidCookie: false,
+                        context.Items.TryGetValue(ConnectionIpItemKey, out var stashed) ? stashed as IPAddress : null) != WebRequestAction.Forbid)
+                {
+                    await frontDoorProxy.WriteVersionAsync(context);
+                    return;
+                }
+
+                await next(context);
+            });
+        }
+
         /* The auth gate installs in network mode and, on a loopback-only server that has a configured token
            (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
            one credential check this host has, and the CIDR test inside it exempts loopback, so on a server that
@@ -1545,7 +1854,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    the network auth decision (session cookie / in-CIDR / the sign-in flow). */
                 var remote = context.Connection.RemoteIpAddress;
                 var hasValidCookie = TryValidateSessionCookie(
-                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
+                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject, out var cookieExpiresAt);
 
                 /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
                    slot encodes a seat we do not recognize is treated as NO cookie: refusing is
@@ -1573,6 +1882,23 @@ public sealed class DarlingWebHostService : BackgroundService
                     }
                 }
 
+                var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+
+                /* #8735: tokenSignIn holds an existing token session to the same rule as the sign-in. A shared, named or group
+                   cookie from a connection the mode refuses is treated as NO cookie, so the holder sees the sign-in page (or the
+                   JSON 401 on /api/*). It sits before the group lookup, so a refused group cookie costs no store trip. An OIDC
+                   seat is not a token seat and is never touched. */
+                if (hasValidCookie && DarlingTokenSignIn.IsTokenSeat(seat) && !DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp))
+                {
+                    hasValidCookie = false;
+                    seat = DarlingWebSeat.SharedToken;
+                    refusals.Report(
+                        _logger, "Web dashboard", DarlingRefusalGate.Token,
+                        IsApiPath(context.Request.Path.Value ?? "/") ? StatusCodes.Status401Unauthorized : StatusCodes.Status200OK, remote,
+                        $"a token session is not accepted from this connection because web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}'",
+                        DateTime.UtcNow);
+                }
+
                 /* The token is accepted from the sign-in form's POST body only (HandleTokenSignInAsync, on
                    LoginPath). One riding the URL is never compared, whatever its value: a token in the URL lands in
                    browser history, bookmarks, proxy logs and the Referer of every asset the page loads, so
@@ -1581,7 +1907,6 @@ public sealed class DarlingWebHostService : BackgroundService
                 var tokenInUrl = context.Request.Query.ContainsKey("token");
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
-                var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
                 // Only a cryptographically valid managed cookie, already inside the network gate, may read current group metadata.
                 // Every request it rides is checked, the page itself included, so a holder the group no longer admits is shown the
                 // sign-in form; only the page's own scripts and stylesheets, which carry no data, cost no store trip. A database
@@ -1620,6 +1945,13 @@ public sealed class DarlingWebHostService : BackgroundService
                         /* #6840: a front door forwarding for a viewer lowers its shared-token session to the reads-only seat for
                            this one request, so every handler below answers the viewer as it answers any reads-only caller. */
                         seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
+
+                        /* The seat is final here, so the cookie's signed expiry is set once, on it. The guard is defensive:
+                           only a request with a valid cookie is admitted here. */
+                        if (hasValidCookie)
+                        {
+                            seat = seat with { SessionExpiresAt = cookieExpiresAt };
+                        }
 
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
                            the updated_by stamps, endpoints added on any parallel branch — resolves the
@@ -1662,6 +1994,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             (frontDoorProxy is not null ||
                              !(context.Request.Path.Equals("/api/fleet", StringComparison.OrdinalIgnoreCase) ||
                                context.Request.Path.Equals("/api/session", StringComparison.OrdinalIgnoreCase) ||
+                               context.Request.Path.Equals("/api/me", StringComparison.OrdinalIgnoreCase) ||
                                DarlingWebEndpoints.SupportsScopedRead(context.Request.Path))))
                         {
                             refusals.Report(
@@ -1690,7 +2023,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null, tokenSignIn: tokenSignIn, personalTokens: personalTokens);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1770,7 +2103,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
                         }
 
-                        await WriteLoginPageAsync(context, oidcClient is not null);
+                        await WriteLoginPageAsync(context, oidcClient is not null, tokenField: DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp));
                         return;
                 }
             });
@@ -1851,14 +2184,22 @@ public sealed class DarlingWebHostService : BackgroundService
 
         if (frontDoorProxy is not null)
         {
-            /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
+            /* #6840: a front door answers the five local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
                does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
             frontDoorProxy.AddRoutes(app);
         }
         else
         {
-            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres);
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient), personalTokenSnapshot: _personalSnapshot, personalTokens: personalTokens);
         }
+
+        /* The registered MCP tool names the page's plain-text rules read (wwwroot/js/plain-text.js imports this module), written from
+           the tool registry, so the page's scripts keep no list of names. A front door serves its own, from the same registry. */
+        app.MapGet(DarlingMcpToolTypes.ToolNamesModulePath, (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache";
+            return Results.Text(DarlingMcpToolTypes.ToolNamesModule, "text/javascript; charset=utf-8");
+        });
 
         app.UseDefaultFiles();
 
@@ -2006,14 +2347,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The longest <paramref name="subject"/> <see cref="BuildSessionCookieValue"/> will mint into a cookie.
     ///
-    /// <para>Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
+    /// <para>600 = the <c>o3</c> seat's longest slot: 5 (prefix) + 43 (owner key) + 1 + 171 + 1 + 171 (the base64url of a 128-byte display name
+    /// and of a 128-byte granting role value, each followed by a separator) + 1 + 207 (<see cref="DarlingWebSeat.MaxSubjectLength"/>).
+    /// A shared-token or token-name subject is far shorter. Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
     /// 40-character strings, or an email — and a hard REFUSAL rather than a truncation, deliberately.
     /// Truncating an identity is the one failure mode that would be worse than not having one: two subjects
     /// sharing a prefix would collapse to the same seat, so the surface would report the wrong person as the
     /// author of a change and every downstream authorization decision would be made about somebody else.
     /// Failing the sign-in loudly is recoverable; silently merging two identities is not.</para>
     /// </summary>
-    internal const int MaxSessionSubjectLength = 256;
+    internal const int MaxSessionSubjectLength = 600;
 
     /// <summary>
     /// Builds a session cookie value. PURE.
@@ -2071,7 +2414,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// The signature compare is constant-time.
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now)
-        => TryValidateSessionCookie(cookieValue, signingKey, now, out _);
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out _, out _);
+
+    /// <summary>PURE verify, additionally reporting WHO holds the cookie (#2550); see the overload that also reports the expiry.</summary>
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out subject, out _);
 
     /// <summary>
     /// PURE verify, additionally reporting WHO the cookie says is holding it (#2550).
@@ -2083,10 +2430,13 @@ public sealed class DarlingWebHostService : BackgroundService
     ///
     /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
     /// cookie ever reaches a caller.</para>
+    ///
+    /// <para><paramref name="expiresAt"/> is the signed expiry at whole-second precision, and <c>default</c> when the method returns false.</para>
     /// </summary>
-    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject, out DateTimeOffset expiresAt)
     {
         subject = null;
+        expiresAt = default;
 
         if (string.IsNullOrEmpty(cookieValue))
         {
@@ -2157,6 +2507,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
         }
 
+        expiresAt = DateTimeOffset.FromUnixTimeSeconds(expiryUnix);
         return true;
     }
 
@@ -2239,14 +2590,16 @@ public sealed class DarlingWebHostService : BackgroundService
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
         DarlingWebTokenSet? webTokens, DarlingWebGroupTokens? managedGroups,
-        bool frontDoor = false)
+        bool frontDoor = false,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On,
+        PersonalTokenSettings? personalTokens = null)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoor);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoor, tokenSignIn: tokenSignIn);
             return;
         }
 
@@ -2459,7 +2812,10 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        var role = DarlingWebOidc.MapRole(
+        /* #8737: the owner key is read before the seat is decided, so a refusal can drop the person's personal tokens too. It is null when
+           the ID token has no sub. The refusals above this point revoke nothing: a token that failed validation proves nothing about the person. */
+        var ownerKey = DarlingWebOidc.ResolveOwnerKey(payload!);
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
             oidcClient.Options.RoleClaim is null
                 ? Array.Empty<string>()
                 : DarlingWebOidc.ExtractClaimValues(payload!, oidcClient.Options.RoleClaim),
@@ -2472,14 +2828,19 @@ public sealed class DarlingWebHostService : BackgroundService
             _logger.LogWarning(
                 "OIDC sign-in refused: {Subject} authenticated at the provider but matches neither adminRoles nor viewerRoles in claim '{RoleClaim}'.",
                 DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength), oidcClient.Options.RoleClaim);
+            await DropPersonalTokensAtSignInAsync(personalTokens, ownerKey, role);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "Your account is not granted a seat on this dashboard. Ask your administrator to add you to a mapped role.");
             return;
         }
 
+        await DropPersonalTokensAtSignInAsync(personalTokens, ownerKey, role);
+
         /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
            identity and not the display name, which can change and can be reissued. */
-        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role, DarlingWebOidc.ResolveOwnerKey(payload!)));
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(
+            subject, role, ownerKey,
+            DarlingWebSeat.CapDisplayField(DarlingWebOidc.DisplayNameClaim(payload!)), DarlingWebSeat.CapDisplayField(grantedBy)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(
@@ -2488,6 +2849,28 @@ public sealed class DarlingWebHostService : BackgroundService
             role == WebOidcRole.Admin ? "admin (edit)" : "viewer (read-only)", remote);
 
         await WriteSignedInLandingAsync(context, transaction.ReturnPath);
+    }
+
+    /// <summary>
+    /// #8737: drops the personal MCP tokens the sign-in's seat no longer allows. Best-effort and never changing the sign-in's outcome: the
+    /// helper logs a store failure as a warning. It runs on the host's stopping token, not the request's, so a client that disconnects
+    /// mid-callback cannot leave a revoked token live for MCP; only a host shutdown cuts it short, and that is not a sign-in failure.
+    /// </summary>
+    private async Task DropPersonalTokensAtSignInAsync(PersonalTokenSettings? personalTokens, string? ownerKey, WebOidcRole role)
+    {
+        if (personalTokens is null || _ownerSource is null || _personalSnapshot is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await DarlingPersonalTokenSignIn.OnOidcSignInAsync(personalTokens, _ownerSource, _personalSnapshot, _pendingPersonalRevokes, ownerKey, role, _logger, _hostStopping);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("MCP personal token revoke at sign-in was cut short by the host stopping.");
+        }
     }
 
     /// <summary>
@@ -2520,10 +2903,13 @@ public sealed class DarlingWebHostService : BackgroundService
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
         DarlingWebTokenSet? webTokens = null, DarlingWebGroupTokens? managedGroups = null,
-        bool frontDoor = false)
+        bool frontDoor = false,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
+        var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+        var tokenSignInAllowed = DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp);
 
         if (!HttpMethods.IsPost(context.Request.Method))
         {
@@ -2535,7 +2921,21 @@ public sealed class DarlingWebHostService : BackgroundService
                     now);
             }
 
-            await WriteLoginPageAsync(context, oidcEnabled);
+            /* A client the setting refuses gets the SSO-only page, or, with no OIDC client to offer, the page that names where token sign-in works. */
+            await WriteLoginPageAsync(context, oidcEnabled, tokenField: tokenSignInAllowed);
+            return;
+        }
+
+        /* #8735: web.network.oidc.tokenSignIn refuses token sign-in from this connection before anything else is read or
+           counted, so the answer cannot tell a valid token from a wrong one. The refusal is not a throttle miss, and it
+           neither sets nor deletes a cookie, so an OIDC session the caller holds is untouched. */
+        if (!tokenSignInAllowed)
+        {
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
+                $"web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}', which refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
+                now);
+            await WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden, oidcEnabled);
             return;
         }
 
@@ -2644,7 +3044,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 now);
             /* The form is served again as the answer to this POST, so its address is /auth/login: the page names
                the target it was covering in the form itself, or the retry would post the form's own address. */
-            await WriteLoginPageAsync(context, oidcEnabled, returnPath);
+            await WriteLoginPageAsync(context, oidcEnabled, returnPath, tokenField: true);
             return;
         }
 
@@ -2993,13 +3393,17 @@ public sealed class DarlingWebHostService : BackgroundService
     /// page the form was covering, carried back in the form's hidden <c>return</c> field when this page answers a
     /// POST to <see cref="LoginPath"/> (a wrong token), where the address bar no longer names that page. A hidden
     /// field's value is not a script or style block, so the page's policy does not change with it.
+    /// <paramref name="tokenField"/> false serves a page for a client the token sign-in is refused to (#8735): no token
+    /// input and no submit button, the hidden <c>return</c> field kept because the SSO link's script reads it. With OIDC
+    /// that is the SSO-only page; with no OIDC client it is a page with neither a token field nor an SSO link, which says
+    /// that token sign-in works only from this machine.
     /// </summary>
-    internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled, string? returnPath = null)
+    internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled, string? returnPath = null, bool tokenField = true)
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        var html = BuildLoginPageHtml(oidcEnabled);
+        var html = BuildLoginPageHtml(oidcEnabled, tokenField);
         if (!string.IsNullOrEmpty(returnPath))
         {
             html = html.Replace(
@@ -3012,7 +3416,7 @@ public sealed class DarlingWebHostService : BackgroundService
            gated stylesheet and scripts are reachable); each is allowed by its hash. The page is constant text
            (the two renderings differ only by the SSO fragment), so each policy is computed once from the
            LF-normalized text and never from a rendering. */
-        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LoginPagePolicy(oidcEnabled);
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LoginPagePolicy(oidcEnabled, tokenField);
         return context.Response.WriteAsync(html);
     }
 
@@ -3020,20 +3424,63 @@ public sealed class DarlingWebHostService : BackgroundService
     private static readonly string s_loginPageHtmlSso = ComposeLoginPage(oidcEnabled: true);
     private static readonly string s_loginPolicyPlain = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlPlain);
     private static readonly string s_loginPolicySso = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSso);
+    private static readonly string s_loginPageHtmlSsoOnly = ComposeLoginPage(oidcEnabled: true, tokenField: false);
+    /* The SSO-only page has no form to submit (#8735), so its policy allows no form-action at all, and a form that someone injects
+       cannot post to /auth/login. The two existing pages keep the default 'self'. */
+    private static readonly string s_loginPolicySsoOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSsoOnly)
+        .Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal);
+    private static readonly string s_loginPageHtmlLocalOnly = ComposeLoginPage(oidcEnabled: false, tokenField: false);
+    private static readonly string s_loginPolicyLocalOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlLocalOnly)
+        .Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal);
 
-    /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not).</summary>
-    internal static string LoginPagePolicy(bool oidcEnabled) => oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
+    /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not, token
+    /// form or not). The two pages without the token form allow no form-action (#8735).</summary>
+    internal static string LoginPagePolicy(bool oidcEnabled, bool tokenField = true)
+        => !tokenField ? (oidcEnabled ? s_loginPolicySsoOnly : s_loginPolicyLocalOnly) : oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
 
-    /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF. */
-    private static string ComposeLoginPage(bool oidcEnabled)
+    /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF.
+       The token fragments are spliced over their placeholder lines (the line break included) so the page with
+       the token form is the same text as before the fragments were split out. */
+    private static string ComposeLoginPage(bool oidcEnabled, bool tokenField = true)
         => DarlingWebSecurityHeaders.NormalizeLineEndings(
-            LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal)
+            DarlingWebSecurityHeaders.NormalizeLineEndings(LoginPageHtml)
+                .Replace("<!--TOKENFIELD-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenFieldHtml) : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--TOKENBUTTON-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenButtonHtml) : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : tokenField ? string.Empty : LocalOnlyFragmentHtml, StringComparison.Ordinal)
                 .Replace("<!--ICON-->", IconLinkHtml, StringComparison.Ordinal));
 
-    /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token
-    /// form is never removed (#2550 keeps the shared token as the scripted-caller/break-glass path).</summary>
-    internal static string BuildLoginPageHtml(bool oidcEnabled)
-        => oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
+    /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled, and the token
+    /// form included unless <paramref name="tokenField"/> is false (#8735: the SSO-only page for a client the
+    /// token sign-in is refused to; #2550 otherwise keeps the shared token as the scripted-caller/break-glass path). With
+    /// no token form and no OIDC, the page names where token sign-in works instead of offering a form that cannot work.</summary>
+    internal static string BuildLoginPageHtml(bool oidcEnabled, bool tokenField = true)
+        => !tokenField ? (oidcEnabled ? s_loginPageHtmlSsoOnly : s_loginPageHtmlLocalOnly) : oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
+
+    /// <summary>The 403 page a refused token sign-in gets (#8735): a fixed text, identical on every call, whose
+    /// head carries <see cref="DarlingTokenSignIn.RefusalMarkerHtml"/> - the element the front door matches, never
+    /// the prose. With an OIDC client it links to the SSO sign-in; without one that link would land on the token form
+    /// again, so the page says token sign-in works only from this machine. One of two fixed texts, never a function of the
+    /// posted token. It sets no cookie.</summary>
+    internal static Task WriteTokenSignInDisabledAsync(HttpContext context, int statusCode, bool oidcEnabled)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
+        return context.Response.WriteAsync(oidcEnabled ? TokenSignInDisabledHtml : TokenSignInDisabledNoSsoHtml);
+    }
+
+    private static readonly string TokenSignInDisabledNoSsoHtml =
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" + DarlingTokenSignIn.RefusalMarkerHtml + "<title>Darling Web</title>" + IconLinkHtml + "</head>"
+        + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+        + "<p>Token sign-in is not available from this address. It works only from the machine that runs this service.</p>"
+        + "</body></html>";
+
+    private static readonly string TokenSignInDisabledHtml =
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" + DarlingTokenSignIn.RefusalMarkerHtml + "<title>Darling Web</title>" + IconLinkHtml + "</head>"
+        + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+        + "<p>Token sign-in is not available from this address.</p>"
+        + "<p><a style='color:#2eaef1' href='/auth/oidc/login'>Sign in with SSO</a></p>"
+        + "</body></html>";
 
     /* A minimal, fully self-contained login form (no external references) — a POST form to LoginPath whose
        fields are the access token and the page to return to, so the token travels in the request body and
@@ -3082,12 +3529,11 @@ public sealed class DarlingWebHostService : BackgroundService
     <h1>Darling Web</h1>
     <div class='sub'>SQL Server and PostgreSQL monitor</div>
   </div>
-  <label for='token'>Access token</label>
-  <input id='token' name='token' type='password' autocomplete='off' autofocus>
+<!--TOKENFIELD-->
   <!-- #4221: the page this form is covering (pathname+search+hash, the fragment included) rides the POST as
        a field, and the sign-in leg 302s back to it, so an alert link survives sign-in. -->
   <input type='hidden' name='return' id='return' value=''>
-  <button type='submit'>Enter</button>
+<!--TOKENBUTTON-->
 <!--SSO-->
   <div class='host' id='host'></div>
 </form>
@@ -3096,12 +3542,26 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 </body>
 </html>";
 
+    /* The token label and input, and the submit button, spliced over their placeholder lines by ComposeLoginPage
+       unless the page is the SSO-only one (#8735). */
+    private const string TokenFieldHtml = @"  <label for='token'>Access token</label>
+  <input id='token' name='token' type='password' autocomplete='off' autofocus>
+";
+
+    private const string TokenButtonHtml = @"  <button type='submit'>Enter</button>
+";
+
     /* Spliced over the <!--SSO--> placeholder when OIDC is enabled (#2550). The link carries the page the
        user was actually trying to reach as ?return=, so sign-in lands them there rather than on the root;
        the server runs it through SanitizeRedirectPath before trusting it. Sits INSIDE the form for layout
        only — it is an anchor, not a submit. */
     private const string SsoFragmentHtml = @"  <div class='sso'><a id='sso' href='/auth/oidc/login'>Sign in with SSO</a></div>
   <script>document.getElementById('sso').href = '/auth/oidc/login?return=' + encodeURIComponent(location.pathname.toLowerCase() === '/auth/login' ? document.getElementById('return').value : location.pathname + location.search + location.hash);</script>";
+
+    /* Spliced over the <!--SSO--> placeholder when there is neither a token form nor OIDC (#8735 review): a client that
+       tokenSignIn refuses and that has no OIDC client to use instead. It names where token sign-in works and offers nothing to post. */
+    private const string LocalOnlyFragmentHtml = @"  <p class='host'>Token sign-in works only from the machine that runs this service.</p>
+";
 
     /* The form's hidden return field exactly as the page carries it: the text WriteLoginPageAsync fills in. */
     private const string ReturnFieldHtml = "<input type='hidden' name='return' id='return' value=''>";
@@ -3162,10 +3622,13 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
                 break;
 
             case DarlingHostBinding.BindReason.ManagedModeRequired:
+                /* #9571: name the fields that are ignored. A token alone never lands here. */
+                var ignored = web.Network?.ByoIgnoredFields ?? [];
                 _logger.Log(level.Value,
-                    "web.network.* is set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token) still gates the loopback dashboard.");
+                    "{Fields} set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token / tokens) still gates the loopback dashboard.",
+                    string.Join(", ", ignored.Select(f => "web.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
                 break;
 
             default:
@@ -3266,6 +3729,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             await StopServerAsync(cancellationToken);
         }
 
+        _pendingPersonalRevokes.SaveIfDirty();
         await base.StopAsync(cancellationToken);
     }
 }

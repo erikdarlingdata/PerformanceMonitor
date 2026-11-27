@@ -128,6 +128,8 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             ["last_user_seek", "last_user_scan", "last_user_lookup", "last_user_update"],
             ClockFrame.ServerLocal, "a DMV shipped verbatim"),
         ("sys.dm_os_sys_info", ["sqlserver_start_time"], ClockFrame.ServerLocal, "a DMV shipped verbatim"),
+        ("sys.objects", ["create_date", "modify_date"], ClockFrame.ServerLocal,
+            "a catalog view shipped verbatim: sys.objects stamps the server's local clock (#8784, object_inventory)"),
         ("sys.dm_exec_query_stats", ["creation_time", "last_execution_time"], ClockFrame.ServerLocal,
             "QueryStatsCollector states it outright: \"creation_time is in the monitored server's local time "
             + "while collection times are UTC\"; #2991/#2992"),
@@ -206,6 +208,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("database_protection", "create_date", ClockFrame.Utc,
             "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
             "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
+        ("database_protection", "errorlog_checkdb_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "line_time_utc",
+            "produced in C# (not in the collector's main SQL) from the supplemental query's line_time_utc, which adds @offset_minutes to the error log's local LogDate before the row is built; #8865"),
         ("database_protection", "last_good_checkdb_time", ClockFrame.Utc,
             "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
             "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
@@ -219,6 +224,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "PerformanceMonitor.Collectors/DmvBlockingSnapshotCollector.cs", "context.CollectionTime",
             "stamped by the host from the collection cycle's own clock, which is naive UTC — so on a "
             + "DMV-fallback row this UTC column sits beside two server-local *_last_tran_started ones"),
+        ("tempdb_stats", "holder_begin_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/TempDbStatsCollector.cs", "DATEDIFF(SECOND, GETDATE(), GETUTCDATE())",
+            "sys.dm_tran_database_transactions stamps the server's local clock; the collector's SQL moves it to UTC with the offset in force before storing, so the store holds one clock; #8881"),
         ("query_store_stats", "first_execution_time", ClockFrame.Utc,
             "PerformanceMonitor.Collectors/QueryStoreCollector.cs", ").UtcDateTime",
             "Query Store returns datetimeoffset; the reader normalises through DateTimeOffset.UtcDateTime "

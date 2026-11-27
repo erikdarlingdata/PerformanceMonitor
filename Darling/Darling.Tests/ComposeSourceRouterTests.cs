@@ -624,15 +624,18 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
-    public void HourlyRawEdges_ProcedureStats_IsNull()
+    public void HourlyRawEdges_ProcedureStats_TakesTheRoute_WithItsOwnSuccessor()
     {
-        /* Coverage for the procedure successor is complete, so only the enabled set can refuse it. */
+        /* #9357: procedure_stats is enabled, so with complete coverage of its own successor it gets a candidate for that source and view. */
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddDays(-3) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
             RollupAvailability.All,
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddMinutes(-20) });
-        Assert.Null(Edge(plan: EdgePlan("proc_worker_us"), coverage: coverage));
+        var candidate = Edge(plan: EdgePlan("proc_worker_us"), coverage: coverage);
+        Assert.NotNull(candidate);
+        Assert.Equal("procedure_stats", candidate!.SourceTable);
+        Assert.Equal(TimescaleSupport.ProcedureStatsIntervalHourlyView, candidate.SuccessorView);
     }
 
     [Fact]
@@ -781,11 +784,11 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
-    public void HourlyRawEdges_EnabledSources_AreExactlyQueryStats()
+    public void HourlyRawEdges_EnabledSources_AreQueryStatsAndProcedureStats()
     {
         Assert.True(
-            ComposeSourceRouter.HourlyRawEdgesEnabledSources.SetEquals(new[] { "query_stats" }),
-            "Only query_stats has been measured against its raw read; procedure_stats stays mapped in ComposeHybridColumns but disabled until it is.");
+            ComposeSourceRouter.HourlyRawEdgesEnabledSources.SetEquals(new[] { "query_stats", "procedure_stats" }),
+            "Each enabled source has an hour ledger the count guard reads (#4605, #9357).");
     }
 
     [Fact]

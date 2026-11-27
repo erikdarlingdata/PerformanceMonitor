@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add Notification Route"
         SizeToContent="Height" Width="620"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
         WindowStartupLocation="CenterOwner"
         Icon="EDD.ico"
         ResizeMode="NoResize"
@@ -18,202 +19,220 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="20">
+    <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
-                   HorizontalAlignment="Left" Margin="0,0,0,5"/>
-        <TextBlock Grid.Row="1"
-                   Text="Alerts that match go to the destinations below. Leave a channel empty to inherit the Notifications section's setting for it; fill it to send this family there instead (or to enable a channel the parent does not have). An exact metric name wins over its family."
-                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="20,20,20,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="2" Text="Applies to" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
-                  ToolTip="All servers, one server, or a tag (the route covers every server with that tag or any sub-tag). A server route beats a tag route, and a tag route beats an all-servers route. A route whose server or tag is deleted later matches nothing."/>
-        <StackPanel Grid.Row="4" Margin="0,0,0,12">
-            <!-- #6928: the severity filter. A route that excludes an alert's severity is skipped and matching goes on to the next route. -->
-            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                <TextBlock Text="Severity" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <ComboBox x:Name="SeveritiesCombo" Width="180"
-                          ToolTip="Which alerts this route takes. Both: Warning and Critical. Critical only, or Warning only: an alert of the other severity skips this route and goes to the next matching route, then to the default channels."/>
-            </StackPanel>
-            <!-- #6979: whether the route posts a Slack or Teams notice when an agent files a report on one of its requests. -->
-            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                <TextBlock Text="Report notice" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <ComboBox x:Name="ReportNoticeCombo" Width="260"
-                          ToolTip="Whether this route posts a notice to its Slack or Teams channel when an agent files a report. Off: no notice (the default). Needs a person or made a change: only a report that says a person is needed, or whose request changed something. All reports: every report. An empty Slack or Teams channel on the route uses the channel from Settings."/>
-            <TextBlock x:Name="ReportNoticeHint" Margin="8,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"
-                           Text="Needs an agent level above Off."/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                <TextBlock Text="Action approval" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <ComboBox x:Name="ActionApprovalCombo" Width="260"
-                          ToolTip="At Act on servers (Level 3): Required makes each server action wait for a person to approve it (the default). Off lets the agent run it without approval."/>
-                <CheckBox x:Name="ApprovalSinglePersonCheck" Margin="12,0,0,0" VerticalAlignment="Center"
-                          Content="The person who asked may approve"
-                          ToolTip="Off (the default): a second person approves an action that a person asked for. On: the person who asked may approve it too."/>
-            </StackPanel>
-            <TextBlock x:Name="ApprovalNobodyText" Visibility="Collapsed" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,4"
-                       Foreground="{DynamicResource ForegroundMutedBrush}" AutomationProperties.Name="Nobody can approve"/>
-            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}"
-                       TextWrapping="Wrap" HorizontalAlignment="Left"
-                       Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
-        </StackPanel>
+                <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
+                           HorizontalAlignment="Left" Margin="0,0,0,5"/>
+                <TextBlock Grid.Row="1"
+                           Text="Alerts that match go to the destinations below. Leave a channel empty to inherit the Notifications section's setting for it; fill it to send this family there instead (or to enable a channel the parent does not have). An exact metric name wins over its family."
+                           Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
 
-        <TextBlock Grid.Row="5" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <Grid Grid.Row="6" Margin="0,0,0,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="220"/>
-                <ColumnDefinition Width="8"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
-                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every analysis finding (Analysis: *)' catches every analysis finding and can be used at any scope; within one scope it comes after a route for the finding's category and before a family. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
-                <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
-            </ComboBox>
-            <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
-                     ToolTip="The exact metric_name, e.g. Deadlocks Detected or Compression Job Stuck. Case-insensitive."/>
-        </Grid>
-        <TextBlock Grid.Row="7" x:Name="FamilyDescriptionText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
-
-        <Border Grid.Row="8" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
-
-        <TextBlock Grid.Row="9" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
-        <Grid Grid.Row="10" Margin="0,0,0,8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="170"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsUrlBox" Margin="0,0,0,6"/>
-
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="Slack webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackUrlBox" Margin="0,0,0,6"/>
-
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
-                     ToolTip="Headers, body template and proxy come from the Notifications section: a route redirects the POST, it does not re-author it."/>
-
-            <!-- #5998: the signing key of this route's own generic URL. Made, rotated and removed here at once, not with OK. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" Text="Signing key" VerticalAlignment="Top" Margin="0,4,8,6"/>
-            <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,0,0,6">
-                <StackPanel Orientation="Horizontal">
-                    <Button x:Name="SigningKeyButton" Content="Generate key" Click="SigningKeyButton_Click"
-                            ToolTip="Makes a key the service signs this route's generic webhook posts with. Rotating keeps the old key signing too for 7 days."/>
-                    <Button x:Name="SigningKeyRemoveButton" Content="Remove key" Margin="6,0,0,0" Click="SigningKeyRemoveButton_Click"/>
-                    <TextBlock x:Name="SigningKeyStatusText" FontSize="11" FontStyle="Italic"
-                               Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                <TextBlock Grid.Row="2" Text="Applies to" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
+                          ToolTip="All servers, one server, or a tag (the route covers every server with that tag or any sub-tag). A server route beats a tag route, and a tag route beats an all-servers route. A route whose server or tag is deleted later matches nothing."/>
+                <StackPanel Grid.Row="4" Margin="0,0,0,12">
+                    <!-- #6928: the severity filter. A route that excludes an alert's severity is skipped and matching goes on to the next route. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                        <TextBlock Text="Severity" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="SeveritiesCombo" Width="180"
+                                  ToolTip="Which alerts this route takes. Both: Warning and Critical. Critical only, or Warning only: an alert of the other severity skips this route and goes to the next matching route, then to the default channels."/>
+                    </StackPanel>
+                    <!-- #6979: whether the route posts a Slack or Teams notice when an agent files a report on one of its requests. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                        <TextBlock Text="Report notice" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="ReportNoticeCombo" Width="260"
+                                  ToolTip="Whether this route posts a notice to its Slack or Teams channel when an agent files a report. Off: no notice (the default). Needs a person or made a change: only a report that says a person is needed, or whose request changed something. All reports: every report. An empty Slack or Teams channel on the route uses the channel from Settings."/>
+                    <TextBlock x:Name="ReportNoticeHint" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Text="Needs an agent level above Off."/>
+                    </StackPanel>
+                    <!-- #8839: a column for the check box that takes the rest of the row, and its text wraps instead of being cut. -->
+                    <Grid Margin="0,4,0,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Action approval" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox Grid.Column="1" x:Name="ActionApprovalCombo" Width="260" VerticalAlignment="Center"
+                                  ToolTip="At Act on servers (Level 3): Required makes each server action wait for a person to approve it (the default). Off lets the agent run it without approval."/>
+                        <CheckBox Grid.Column="2" x:Name="ApprovalSinglePersonCheck" Margin="12,0,0,0" VerticalAlignment="Center"
+                                  ToolTip="Off (the default): a second person approves an action that a person asked for. On: the person who asked may approve it too.">
+                            <TextBlock Text="The person who asked may approve" TextWrapping="Wrap"/>
+                        </CheckBox>
+                    </Grid>
+                    <TextBlock x:Name="ApprovalNobodyText" Visibility="Collapsed" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,4"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" AutomationProperties.Name="Nobody can approve"/>
+                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}"
+                               TextWrapping="Wrap" HorizontalAlignment="Left"
+                               Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
                 </StackPanel>
-                <StackPanel x:Name="SigningKeyShownPanel" Visibility="Collapsed" Margin="0,4,0,0">
-                    <TextBox x:Name="SigningKeyShownBox" IsReadOnly="True" FontFamily="Consolas"/>
-                    <TextBlock x:Name="SigningKeyShownText" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                </StackPanel>
-                <TextBlock x:Name="SigningKeyTestNoteText" FontSize="11" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
+
+                <TextBlock Grid.Row="5" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <Grid Grid.Row="6" Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
+                              ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every analysis finding (Analysis: *)' catches every analysis finding and can be used at any scope; within one scope it comes after a route for the finding's category and before a family. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
+                        <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
+                    </ComboBox>
+                    <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
+                             ToolTip="The exact metric_name, e.g. Deadlocks Detected or Compression Job Stuck. Case-insensitive."/>
+                </Grid>
+                <TextBlock Grid.Row="7" x:Name="FamilyDescriptionText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+                <Border Grid.Row="8" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+
+                <TextBlock Grid.Row="9" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <Grid Grid.Row="10" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="170"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsUrlBox" Margin="0,0,0,6"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Slack webhook URL" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackUrlBox" Margin="0,0,0,6"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
+                             ToolTip="Headers, body template and proxy come from the Notifications section: a route redirects the POST, it does not re-author it."/>
+
+                    <!-- #5998: the signing key of this route's own generic URL. Made, rotated and removed here at once, not with OK. -->
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Signing key" TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,4,8,6"/>
+                    <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,0,0,6">
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="SigningKeyButton" Content="Generate key" Click="SigningKeyButton_Click"
+                                    ToolTip="Makes a key the service signs this route's generic webhook posts with. Rotating keeps the old key signing too for 7 days."/>
+                            <Button x:Name="SigningKeyRemoveButton" Content="Remove key" Margin="6,0,0,0" Click="SigningKeyRemoveButton_Click"/>
+                        </StackPanel>
+                        <!-- #8839: under the buttons, full width and wrapped: beside them it was cut to "A key is tied to the". -->
+                        <TextBlock x:Name="SigningKeyStatusText" FontSize="11" FontStyle="Italic" TextWrapping="Wrap" HorizontalAlignment="Left"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0"/>
+                        <StackPanel x:Name="SigningKeyShownPanel" Visibility="Collapsed" Margin="0,4,0,0">
+                            <TextBox x:Name="SigningKeyShownBox" IsReadOnly="True" FontFamily="Consolas"/>
+                            <TextBlock x:Name="SigningKeyShownText" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <TextBlock x:Name="SigningKeyTestNoteText" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="PagerDuty routing key" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
+                             ToolTip="An Events API v2 integration key: a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
+
+                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Email recipients" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
+                             ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
+
+                    <!-- #7656: the Slack channel id the bot posts this route's investigation request threads into. Not a webhook: the bot token lives in Notifications. -->
+                    <TextBlock Grid.Row="6" Grid.Column="0" Text="Slack bot channel" TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,4,8,6"/>
+                    <StackPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,6">
+                        <TextBox x:Name="SlackBotChannelBox" Margin="0,0,0,4"
+                                 ToolTip="The channel id (C or G, then capital letters and digits, for example C0123ABCDEF), not the channel's name. Blank: this route opens no threads."/>
+                        <TextBlock x:Name="SlackBotSetupText" FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Text="The bot posts one thread per investigation request into this channel, as the bot, not through the alert webhook. Blank opens no threads.&#x0a;Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.&#x0a;Make one Slack app and install it once with every scope it needs. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save both tokens in Notifications.&#x0a;Invite the bot to the channel: it posts only in channels it belongs to, and a post to one it is not in fails with not_in_channel. A private channel works once the bot is invited.&#x0a;Store the channel id, not the name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.&#x0a;Use a channel of its own for the bot: during an alert storm the alert webhook posts in bursts of 40 to 86 messages a minute, and request threads are hard to follow next to them. A shared channel still works.&#x0a;After the app is reinstalled with new scopes, check every alert webhook still posts.&#x0a;The data detail setting decides what a thread shows. Full, the default, posts literals such as names and values into the thread, and every member of the channel can read them.&#x0a;One Slack app per store for buttons and mentions: Socket Mode hands each event to one of the app's open connections, so two stores listening on one app acknowledge and lose each other's events, and Slack never retries an acknowledged event. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions. A store still acts only on events from channels set on its own routes, and warns when events keep arriving for channels it does not own.&#x0a;The app-level token turns the listener on: saved, the service holds two Socket Mode connections and hears presses and mentions in its channels; blank, it does not listen. Generate it on the app's Basic Information page under App-Level Tokens with the connections:write scope, and save it only in Notifications here or on the web Admin page, never through an agent or an MCP call, where it would sit in the agent's transcript. The app manifest and the full setup are in docs/darling/slack-bot.md."/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- #5632: the agent channel. Not a destination: it says whether a matching alert also opens an investigation
+                     request for your own agent, and within which limits. -->
+                <Grid Grid.Row="11" Margin="0,4,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="170"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AgentLevelCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
+                              SelectionChanged="AgentLevelCombo_SelectionChanged"
+                              ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Act (Level 2): the same, and the agent may also mute one metric on that server or change custom alert rules scoped to it while its claim is live; each change is journaled and refused after it reports. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Requests per hour / day" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBox x:Name="AgentMaxPerHourBox" Width="60" ToolTip="New requests this route opens in an hour, 1 to 60. Alerts that join an open request do not count."/>
+                        <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                        <TextBox x:Name="AgentMaxPerDayBox" Width="60" ToolTip="New requests this route opens in a day, 1 to 500."/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Lease / expiry (minutes)" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBox x:Name="AgentLeaseMinutesBox" Width="60" ToolTip="How long an agent's claim lasts before the request opens again, 5 to 120 minutes."/>
+                        <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                        <TextBox x:Name="AgentExpiryMinutesBox" Width="60" ToolTip="How long a request nobody claims stays open, 15 to 1440 minutes."/>
+                    </StackPanel>
+
+                    <!-- #5825: whether this route's destinations get an alert's resolution. -->
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Send resolutions" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <ComboBox Grid.Row="3" Grid.Column="1" x:Name="SendResolutionsCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
+                              ToolTip="Whether this route's destinations also get the message that an alert has cleared. Use channel setting: each channel's Send resolutions box in Notifications decides. Always or Never overrides it for this route."/>
+
+                    <!-- #6036: the route an expired investigation request goes to first (D8 of #5632 Phase C). -->
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Fallback route" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                    <ComboBox Grid.Row="4" Grid.Column="1" x:Name="FallbackRouteCombo" Width="320" HorizontalAlignment="Left" Margin="0,0,0,6"
+                              ToolTip="Where an investigation request goes when it expires with no agent holding it: the fallback route's email, Teams and Slack channels. None: this route's own channels, then the Investigation Not Picked Up alert. Never this route itself."/>
+                </Grid>
+
+                <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
+                          ToolTip="A disabled route is skipped as if it did not exist; the alerts it matched fall to the next level."/>
+
+            </Grid>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="1" Margin="20,0,20,20">
+            <!-- The validation message, inline (#5750): the dialog stays open on a refusal and says why here. It sits with the buttons, outside the scroll. -->
+            <TextBlock x:Name="ValidationText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"
+                       HorizontalAlignment="Left" Margin="0,0,0,8" Visibility="Collapsed"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+                <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise (#1828/#1859). -->
+                <Button Content="Save" Width="90" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
+                <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>
             </StackPanel>
-
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="4" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
-                     ToolTip="An Events API v2 integration key: a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
-
-            <TextBlock Grid.Row="5" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
-                     ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
-
-            <!-- #7656: the Slack channel id the bot posts this route's investigation request threads into. Not a webhook: the bot token lives in Notifications. -->
-            <TextBlock Grid.Row="6" Grid.Column="0" Text="Slack bot channel" VerticalAlignment="Top" Margin="0,4,8,6"/>
-            <StackPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,6">
-                <TextBox x:Name="SlackBotChannelBox" Margin="0,0,0,4"
-                         ToolTip="The channel id (C or G, then capital letters and digits, for example C0123ABCDEF), not the channel's name. Blank: this route opens no threads."/>
-                <TextBlock x:Name="SlackBotSetupText" FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}"
-                           Text="The bot posts one thread per investigation request into this channel, as the bot, not through the alert webhook. Blank opens no threads.&#x0a;Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.&#x0a;Make one Slack app and install it once with every scope it needs. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save both tokens in Notifications.&#x0a;Invite the bot to the channel: it posts only in channels it belongs to, and a post to one it is not in fails with not_in_channel. A private channel works once the bot is invited.&#x0a;Store the channel id, not the name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.&#x0a;Use a channel of its own for the bot: during an alert storm the alert webhook posts in bursts of 40 to 86 messages a minute, and request threads are hard to follow next to them. A shared channel still works.&#x0a;After the app is reinstalled with new scopes, check every alert webhook still posts.&#x0a;The data detail setting decides what a thread shows. Full, the default, posts literals such as names and values into the thread, and every member of the channel can read them.&#x0a;One Slack app per store for buttons and mentions: Socket Mode hands each event to one of the app's open connections, so two stores listening on one app acknowledge and lose each other's events, and Slack never retries an acknowledged event. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions. A store still acts only on events from channels set on its own routes, and warns when events keep arriving for channels it does not own.&#x0a;The app-level token turns the listener on: saved, the service holds two Socket Mode connections and hears presses and mentions in its channels; blank, it does not listen. Generate it on the app's Basic Information page under App-Level Tokens with the connections:write scope, and save it only in Notifications here or on the web Admin page, never through an agent or an MCP call, where it would sit in the agent's transcript. The app manifest and the full setup are in docs/darling/slack-bot.md."/>
-            </StackPanel>
-        </Grid>
-
-        <!-- #5632: the agent channel. Not a destination: it says whether a matching alert also opens an investigation
-             request for your own agent, and within which limits. -->
-        <Grid Grid.Row="11" Margin="0,4,0,8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="170"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AgentLevelCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
-                      SelectionChanged="AgentLevelCombo_SelectionChanged"
-                      ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Act (Level 2): the same, and the agent may also mute one metric on that server or change custom alert rules scoped to it while its claim is live; each change is journaled and refused after it reports. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
-
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="Requests per hour / day" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="AgentMaxPerHourBox" Width="60" ToolTip="New requests this route opens in an hour, 1 to 60. Alerts that join an open request do not count."/>
-                <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
-                <TextBox x:Name="AgentMaxPerDayBox" Width="60" ToolTip="New requests this route opens in a day, 1 to 500."/>
-            </StackPanel>
-
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="Lease / expiry (minutes)" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="AgentLeaseMinutesBox" Width="60" ToolTip="How long an agent's claim lasts before the request opens again, 5 to 120 minutes."/>
-                <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
-                <TextBox x:Name="AgentExpiryMinutesBox" Width="60" ToolTip="How long a request nobody claims stays open, 15 to 1440 minutes."/>
-            </StackPanel>
-
-            <!-- #5825: whether this route's destinations get an alert's resolution. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" Text="Send resolutions" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <ComboBox Grid.Row="3" Grid.Column="1" x:Name="SendResolutionsCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
-                      ToolTip="Whether this route's destinations also get the message that an alert has cleared. Use channel setting: each channel's Send resolutions box in Notifications decides. Always or Never overrides it for this route."/>
-
-            <!-- #6036: the route an expired investigation request goes to first (D8 of #5632 Phase C). -->
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="Fallback route" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <ComboBox Grid.Row="4" Grid.Column="1" x:Name="FallbackRouteCombo" Width="320" HorizontalAlignment="Left" Margin="0,0,0,6"
-                      ToolTip="Where an investigation request goes when it expires with no agent holding it: the fallback route's email, Teams and Slack channels. None: this route's own channels, then the Investigation Not Picked Up alert. Never this route itself."/>
-        </Grid>
-
-        <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
-                  ToolTip="A disabled route is skipped as if it did not exist; the alerts it matched fall to the next level."/>
-
-        <!-- The validation message, inline (#5750): the dialog stays open on a refusal and says why here. -->
-        <TextBlock Grid.Row="13" x:Name="ValidationText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"
-                   HorizontalAlignment="Left" Margin="0,0,0,8" Visibility="Collapsed"/>
-
-        <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
-            <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise (#1828/#1859). -->
-            <Button Content="Save" Width="90" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
-            <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>
         </StackPanel>
     </Grid>
 </Window>

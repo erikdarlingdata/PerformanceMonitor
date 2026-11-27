@@ -4,6 +4,7 @@
         xmlns:n="clr-namespace:PerformanceMonitor.Notifications;assembly=PerformanceMonitor.Notifications"
         Title="Create Mute Rule"
         SizeToContent="Height" Width="520"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
         WindowStartupLocation="CenterOwner"
         Icon="EDD.ico"
         ResizeMode="NoResize"
@@ -19,165 +20,176 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="20">
+    <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
-                   HorizontalAlignment="Left" Margin="0,0,0,5"/>
-        <TextBlock Grid.Row="1" x:Name="IntroText" Text="Alerts matching all specified fields will be suppressed from notifications."
-                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="20,20,20,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="2" Text="Reason (optional)" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="3" x:Name="ReasonBox" Margin="0,0,0,12"/>
+                <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
+                           HorizontalAlignment="Left" Margin="0,0,0,5"/>
+                <TextBlock Grid.Row="1" x:Name="IntroText" Text="Alerts matching all specified fields will be suppressed from notifications."
+                           Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
 
-        <Grid Grid.Row="4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Expires After" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBlock Grid.Column="1" Text="Starts (quiet window set ahead of planned work)" FontWeight="Bold" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="12,0,0,4"/>
-        </Grid>
-        <Grid Grid.Row="5">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <ComboBox Grid.Column="0" x:Name="ExpirationCombo" SelectedIndex="3" Margin="0,0,0,12">
-                <ComboBoxItem Content="1 hour"/>
-                <ComboBoxItem Content="24 hours"/>
-                <ComboBoxItem Content="7 days"/>
-                <ComboBoxItem Content="Never (permanent)"/>
-            </ComboBox>
-            <ComboBox Grid.Column="1" x:Name="StartCombo" SelectedIndex="0" Margin="12,0,0,12">
-                <ComboBoxItem Content="Now"/>
-                <ComboBoxItem Content="In 1 hour"/>
-                <ComboBoxItem Content="In 4 hours"/>
-                <ComboBoxItem Content="In 12 hours"/>
-                <ComboBoxItem Content="In 24 hours"/>
-            </ComboBox>
-        </Grid>
+                <TextBlock Grid.Row="2" Text="Reason (optional)" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox Grid.Row="3" x:Name="ReasonBox" Margin="0,0,0,12"/>
 
-        <Border Grid.Row="6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+                <Grid Grid.Row="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Expires After" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBlock Grid.Column="1" Text="Starts (quiet window set ahead of planned work)" FontWeight="Bold" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="12,0,0,4"/>
+                </Grid>
+                <Grid Grid.Row="5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Grid.Column="0" x:Name="ExpirationCombo" SelectedIndex="3" Margin="0,0,0,12">
+                        <ComboBoxItem Content="1 hour"/>
+                        <ComboBoxItem Content="24 hours"/>
+                        <ComboBoxItem Content="7 days"/>
+                        <ComboBoxItem Content="Never (permanent)"/>
+                    </ComboBox>
+                    <ComboBox Grid.Column="1" x:Name="StartCombo" SelectedIndex="0" Margin="12,0,0,12">
+                        <ComboBoxItem Content="Now"/>
+                        <ComboBoxItem Content="In 1 hour"/>
+                        <ComboBoxItem Content="In 4 hours"/>
+                        <ComboBoxItem Content="In 12 hours"/>
+                        <ComboBoxItem Content="In 24 hours"/>
+                    </ComboBox>
+                </Grid>
 
-        <TextBlock Grid.Row="7" Text="Match Criteria" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="8" Text="Leave fields blank to match any value. All filled fields must match (AND logic)."
-                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+                <Border Grid.Row="6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
 
-        <TextBlock Grid.Row="9" Text="Server Name (exact match)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="10" x:Name="ServerNameBox" Margin="0,0,0,8"/>
+                <TextBlock Grid.Row="7" Text="Match Criteria" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBlock Grid.Row="8" Text="Leave fields blank to match any value. All filled fields must match (AND logic)."
+                           Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
 
-        <TextBlock Grid.Row="11" Text="Metric" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <ComboBox Grid.Row="12" x:Name="MetricCombo" SelectedIndex="0" Margin="0,0,0,8"
-                  SelectionChanged="MetricCombo_SelectionChanged">
-            <ComboBoxItem Content="(any)"/>
-            <ComboBoxItem Content="Blocking Detected"/>
-            <ComboBoxItem Content="Blocking Wait Time"/>
-            <ComboBoxItem Content="Deadlocks Detected"/>
-            <ComboBoxItem Content="High CPU"/>
-            <ComboBoxItem Content="Poison Wait"/>
-            <ComboBoxItem Content="Runnable Queue"/>
-            <ComboBoxItem Content="{x:Static n:AlertFamily.ClientTimeoutsMetric}"/>
-            <ComboBoxItem Content="Long-Running Query"/>
-            <ComboBoxItem Content="tempdb Space"/>
-            <ComboBoxItem Content="Volume Free Space"/>
-            <ComboBoxItem Content="Long-Running Job"/>
-        </ComboBox>
+                <TextBlock Grid.Row="9" Text="Server Name (exact match)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox Grid.Row="10" x:Name="ServerNameBox" Margin="0,0,0,8"/>
 
-        <Grid Grid.Row="13" x:Name="PatternFieldsGrid" Margin="0,0,0,8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="8"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+                <TextBlock Grid.Row="11" Text="Metric" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <ComboBox Grid.Row="12" x:Name="MetricCombo" SelectedIndex="0" Margin="0,0,0,8"
+                          SelectionChanged="MetricCombo_SelectionChanged">
+                    <ComboBoxItem Content="(any)"/>
+                    <ComboBoxItem Content="Blocking Detected"/>
+                    <ComboBoxItem Content="Blocking Wait Time"/>
+                    <ComboBoxItem Content="Deadlocks Detected"/>
+                    <ComboBoxItem Content="High CPU"/>
+                    <ComboBoxItem Content="{x:Static n:AlertFamily.CapacityAtCeilingMetric}"/>
+                    <ComboBoxItem Content="Poison Wait"/>
+                    <ComboBoxItem Content="Runnable Queue"/>
+                    <ComboBoxItem Content="{x:Static n:AlertFamily.ClientTimeoutsMetric}"/>
+                    <ComboBoxItem Content="Long-Running Query"/>
+                    <ComboBoxItem Content="tempdb Space"/>
+                    <ComboBoxItem Content="tempdb Log Space"/>
+                    <ComboBoxItem Content="tempdb Growth Fit"/>
+                    <ComboBoxItem Content="Volume Free Space"/>
+                    <ComboBoxItem Content="Long-Running Job"/>
+                </ComboBox>
 
-            <TextBlock Grid.Row="0" Grid.Column="0" x:Name="DatabaseLabel" Text="Database (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="1" Grid.Column="0" x:Name="DatabasePatternBox" Margin="0,0,0,8"/>
+                <Grid Grid.Row="13" x:Name="PatternFieldsGrid" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
 
-            <TextBlock Grid.Row="0" Grid.Column="2" x:Name="WaitTypeLabel" Text="Wait Type (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="1" Grid.Column="2" x:Name="WaitTypePatternBox" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="0" Grid.Column="0" x:Name="DatabaseLabel" Text="Database (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox Grid.Row="1" Grid.Column="0" x:Name="DatabasePatternBox" Margin="0,0,0,8"/>
 
-            <TextBlock Grid.Row="2" Grid.Column="0" x:Name="QueryTextLabel" Text="Query Text (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"
-                     ToolTip="Alerts whose query text contains this value (case-insensitive) will match this rule. Use a distinctive fragment such as a table name or procedure call."/>
+                    <TextBlock Grid.Row="0" Grid.Column="2" x:Name="WaitTypeLabel" Text="Wait Type (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox Grid.Row="1" Grid.Column="2" x:Name="WaitTypePatternBox" Margin="0,0,0,8"/>
 
-            <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" x:Name="QueryTextLabel" Text="Query Text (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"
+                             ToolTip="Alerts whose query text contains this value (case-insensitive) will match this rule. Use a distinctive fragment such as a table name or procedure call."/>
 
-            <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppLabel" Text="Client Application (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
-                     ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will match this rule, for example Management Studio to match SSMS cancels."/>
-        </Grid>
+                    <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
 
-        <!-- Shown when the alert the dialog opened from has no metric name, so the rule cannot be narrowed to a type -->
-        <TextBlock Grid.Row="14" x:Name="MetricScopeNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
-                   Foreground="{DynamicResource ForegroundDimBrush}"
-                   Text="This alert has no metric name, so the rule cannot be limited to one alert type. With Metric left at (any), it matches every alert type that matches the other fields."/>
+                    <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppLabel" Text="Client Application (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
+                             ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will match this rule, for example Management Studio to match SSMS cancels."/>
+                </Grid>
 
-        <!-- #7040: the optional repeating schedule. Hidden on a store below V231, which has no columns for it. -->
-        <StackPanel Grid.Row="15" x:Name="ScheduleSection" Margin="0,4,0,0">
-            <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
-            <TextBlock Text="Repeats (optional)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBlock x:Name="WindowText" Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
-                       Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,8"/>
-            <WrapPanel x:Name="DaysPanel" Margin="0,0,0,8"/>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="From (HH:mm)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-                <TextBlock Grid.Column="1" Text="To (HH:mm)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
-                <TextBlock Grid.Column="2" Text="Time zone (IANA id)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
+                <!-- Shown when the alert the dialog opened from has no metric name, so the rule cannot be narrowed to a type -->
+                <TextBlock Grid.Row="14" x:Name="MetricScopeNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                           Foreground="{DynamicResource ForegroundDimBrush}"
+                           Text="This alert has no metric name, so the rule cannot be limited to one alert type. With Metric left at (any), it matches every alert type that matches the other fields."/>
+
+                <!-- #7040: the optional repeating schedule. Hidden on a store below V231, which has no columns for it. -->
+                <StackPanel Grid.Row="15" x:Name="ScheduleSection" Margin="0,4,0,0">
+                    <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+                    <TextBlock Text="Repeats (optional)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBlock x:Name="WindowText" Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
+                               Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                    <WrapPanel x:Name="DaysPanel" Margin="0,0,0,8"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="90"/>
+                            <ColumnDefinition Width="90"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="From (HH:mm)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                        <TextBlock Grid.Column="1" Text="To (HH:mm)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
+                        <TextBlock Grid.Column="2" Text="Time zone (IANA id)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="90"/>
+                            <ColumnDefinition Width="90"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0" x:Name="RecurStartBox" ToolTip="The daily time the window opens, for example 22:00."/>
+                        <TextBox Grid.Column="1" x:Name="RecurEndBox" Margin="8,0,0,0" ToolTip="The daily time the window closes, for example 02:00."/>
+                        <TextBox Grid.Column="2" x:Name="RecurZoneBox" Margin="8,0,0,0"
+                                 ToolTip="The zone the times are in, for example America/New_York. It starts as this computer's zone."/>
+                    </Grid>
+                    <!-- #7083: what the rule does with a matching alert. Mute is the default. -->
+                    <TextBlock Text="Action" HorizontalAlignment="Left" Margin="0,12,0,4"/>
+                    <ComboBox x:Name="ActionBox" SelectedIndex="0" HorizontalAlignment="Left" MinWidth="260" SelectionChanged="ActionBox_SelectionChanged"
+                              ToolTip="Mute records a matching alert as muted and sends nothing. The daily digest holds it back from paging and lists it in the daily digest. Pair the digest action with a repeating window.">
+                        <ComboBoxItem Content="Mute" Tag="mute"/>
+                        <ComboBoxItem Content="Send to the daily digest" Tag="digest"/>
+                    </ComboBox>
+                </StackPanel>
             </Grid>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0" x:Name="RecurStartBox" ToolTip="The daily time the window opens, for example 22:00."/>
-                <TextBox Grid.Column="1" x:Name="RecurEndBox" Margin="8,0,0,0" ToolTip="The daily time the window closes, for example 02:00."/>
-                <TextBox Grid.Column="2" x:Name="RecurZoneBox" Margin="8,0,0,0"
-                         ToolTip="The zone the times are in, for example America/New_York. It starts as this computer's zone."/>
-            </Grid>
-            <!-- #7083: what the rule does with a matching alert. Mute is the default. -->
-            <TextBlock Text="Action" HorizontalAlignment="Left" Margin="0,12,0,4"/>
-            <ComboBox x:Name="ActionBox" SelectedIndex="0" HorizontalAlignment="Left" MinWidth="260" SelectionChanged="ActionBox_SelectionChanged"
-                      ToolTip="Mute records a matching alert as muted and sends nothing. The daily digest holds it back from paging and lists it in the daily digest. Pair the digest action with a repeating window.">
-                <ComboBoxItem Content="Mute" Tag="mute"/>
-                <ComboBoxItem Content="Send to the daily digest" Tag="digest"/>
-            </ComboBox>
-        </StackPanel>
+        </ScrollViewer>
 
-        <StackPanel Grid.Row="16" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,12,20,20">
             <!-- No IsDefault: reason, expiration, server, metric and four pattern boxes make this a
                  multi-field entry form, where Enter-to-submit is a surprise (#1828/#1859). Matches the
                  Lite twin, MuteRuleDialog. -->

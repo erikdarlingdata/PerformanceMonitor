@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -84,10 +85,15 @@ internal static class DarlingConfigHistoryReader
     /// and <paramref name="afterParameter"/> are the positional parameters. <paramref name="perColumn"/> makes the baseline per value of that column
     /// (a database): a database that was missing from the newest capture (offline or restoring at that connect) still gets its own baseline capture, so
     /// its first change in the window is not read as a first-ever row. Only the change watch's bounded reads call this; the tools read all history.
+    /// <paramref name="baselineFilter"/> narrows which captures can be the baseline (a predicate over the alias <c>b</c>): the read still returns
+    /// every capture from the baseline on (#9270: the database config baseline is the newest SETTLED capture, and the captures after it come back
+    /// for the diff to step over).
     /// </summary>
-    internal static string BaselineBound(string table, string serverParameter, string afterParameter, string timeColumn = "capture_time", string? perColumn = null) =>
+    internal static string BaselineBound(
+        string table, string serverParameter, string afterParameter, string timeColumn = "capture_time", string? perColumn = null, string? baselineFilter = null) =>
         $"{timeColumn} >= coalesce((SELECT max(b.{timeColumn}) FROM {table} AS b WHERE b.server_id = {serverParameter} AND b.{timeColumn} <= {afterParameter}" +
-        (perColumn is null ? "" : $" AND b.{perColumn} IS NOT DISTINCT FROM {table}.{perColumn}") + "), '-infinity'::timestamp)";
+        (perColumn is null ? "" : $" AND b.{perColumn} IS NOT DISTINCT FROM {table}.{perColumn}") +
+        (baselineFilter is null ? "" : $" AND {baselineFilter}") + "), '-infinity'::timestamp)";
 
     /// <summary>The server-config read of <see cref="ServerConfigSnapshotsSql"/> from the capture at or before $2 on (#6234). $1 server_id, $2 naive UTC.</summary>
     public static readonly string ServerConfigSnapshotsAfterSql = ServerConfigSnapshotsSql.Replace(
@@ -180,7 +186,10 @@ internal static class DarlingConfigHistoryReader
 
     /// <summary><see cref="DatabaseConfigSnapshotsSql"/> from the capture at or before $3 on (#6234). $1 server_id, $2 databases, $3 naive UTC.</summary>
     public static readonly string DatabaseConfigSnapshotsAfterSql = DatabaseConfigSnapshotsSql.Replace(
-        "WHERE server_id = $1", "WHERE server_id = $1\n        AND   " + BaselineBound("v_database_config", "$1", "$3", perColumn: "database_name"), StringComparison.Ordinal);
+        "WHERE server_id = $1", "WHERE server_id = $1\n        AND   " + BaselineBound(
+            "v_database_config", "$1", "$3", perColumn: "database_name",
+            baselineFilter: "coalesce(upper(b.state_desc), '') NOT IN (" + string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'")) + ")"),
+        StringComparison.Ordinal);
 
     internal static async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime? afterUtc, CancellationToken cancellationToken = default)

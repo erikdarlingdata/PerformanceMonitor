@@ -68,7 +68,9 @@ namespace PerformanceMonitor.Common
         /// <summary>
         /// Runs the full analysis over the captured per-index rows. Rows are grouped internally by
         /// (database, object) scope, so a single call may span many databases. Never throws on data content;
-        /// malformed/heap/columnstore/disabled rows are simply excluded from analysis.
+        /// malformed/heap/columnstore/disabled rows are simply excluded from analysis. With
+        /// <see cref="IndexCleanupOptions.IncludeHeaps"/> on, large, busy heaps are listed as Heap REVIEW rows and counted in
+        /// <see cref="IndexCleanupRollup.Heaps"/> only (#8880).
         /// </summary>
         public static IndexCleanupAnalysisResult Analyze(
             IEnumerable<IndexCleanupIndexInput> indexes,
@@ -76,7 +78,8 @@ namespace PerformanceMonitor.Common
         {
             options ??= new IndexCleanupOptions();
 
-            var analyzable = (indexes ?? Array.Empty<IndexCleanupIndexInput>())
+            var inputs = (indexes ?? Array.Empty<IndexCleanupIndexInput>()).Where(src => src != null).ToList();
+            var analyzable = inputs
                 .Where(IsAnalyzable)
                 .Select(src => new WorkIndex(src))
                 .ToList();
@@ -86,17 +89,36 @@ namespace PerformanceMonitor.Common
             bool uptimeWarning = uptimeDays.HasValue && uptimeDays.Value < 14;
             bool dedupeOnly = options.DedupeOnly || (uptimeDays.HasValue && uptimeDays.Value <= 7);
 
+            // #8880: heap findings, per database id. Neither dedupe-only nor the uptime caveat applies to them (see HeapMinReads).
+            var heapsByDatabase = options.IncludeHeaps
+                ? BuildHeapFindings(inputs, analyzable, options)
+                    .GroupBy(h => h.DatabaseId)
+                    .ToDictionary(g => g.Key, g => g.Select(h => h.Recommendation).ToList())
+                : new Dictionary<int, List<IndexCleanupRecommendation>>();
+
             var recommendations = new List<IndexCleanupRecommendation>();
             var databaseRollups = new List<IndexCleanupRollup>();
 
+            // A database with heap findings and no analyzed index still gets its roll-up (#8880), so the databases are the union of both.
+            var databaseNames = new Dictionary<int, string>();
+            foreach (var w in analyzable)
+            {
+                databaseNames.TryAdd(w.Src.DatabaseId, w.Src.DatabaseName);
+            }
+            foreach (var (id, heaps) in heapsByDatabase)
+            {
+                databaseNames.TryAdd(id, heaps[0].DatabaseName);
+            }
+            var analyzableByDatabase = analyzable.GroupBy(w => w.Src.DatabaseId).ToDictionary(g => g.Key, g => g.ToList());
+
             // Rules operate per (database_id, object_id) scope; rollups aggregate per database.
-            foreach (var dbGroup in analyzable
-                .GroupBy(w => w.Src.DatabaseId)
-                .OrderBy(g => g.First().Src.DatabaseName, StringComparer.Ordinal))
+            foreach (var (databaseId, databaseName) in databaseNames.OrderBy(d => d.Value, StringComparer.Ordinal))
             {
                 var perDatabaseAnalyzed = new List<WorkIndex>();
+                var dbIndexes = analyzableByDatabase.TryGetValue(databaseId, out var found) ? found : new List<WorkIndex>();
+                var dbHeaps = heapsByDatabase.TryGetValue(databaseId, out var heapRows) ? heapRows : new List<IndexCleanupRecommendation>();
 
-                foreach (var scope in dbGroup
+                foreach (var scope in dbIndexes
                     .GroupBy(w => w.Src.ObjectId))
                 {
                     var scopeIndexes = scope.ToList();
@@ -124,7 +146,8 @@ namespace PerformanceMonitor.Common
                 }
 
                 recommendations.AddRange(BuildRecommendations(perDatabaseAnalyzed, options));
-                databaseRollups.Add(BuildRollup(dbGroup.First().Src.DatabaseName, dbGroup.Key, perDatabaseAnalyzed, options));
+                recommendations.AddRange(dbHeaps);
+                databaseRollups.Add(BuildRollup(databaseName, databaseId, perDatabaseAnalyzed, options) with { Heaps = dbHeaps.Count });
             }
 
             var ordered = recommendations
@@ -1020,6 +1043,117 @@ namespace PerformanceMonitor.Common
                 AdditionalInfo = additionalInfo,
             };
 
+        // ────────────────────────────────────────────────────────────────────────────────────────────
+        //  Heap finding (#8880, not an sp_IndexCleanup rule)
+        // ────────────────────────────────────────────────────────────────────────────────────────────
+
+        private const string HeapType = "HEAP";
+
+        /// <summary>
+        /// The heaps worth a finding: at least <see cref="IndexCleanupOptions.HeapMinRows"/> rows or <see cref="IndexCleanupOptions.HeapMinSizeGb"/>
+        /// reserved, and at least <see cref="IndexCleanupOptions.HeapMinReads"/> reads. No exclusion is needed for a memory-optimized table
+        /// (no usage rows, so zero reads) or an indexed view (always clustered, so never a heap row).
+        /// </summary>
+        private static IEnumerable<(int DatabaseId, IndexCleanupRecommendation Recommendation)> BuildHeapFindings(
+            List<IndexCleanupIndexInput> inputs, List<WorkIndex> analyzable, IndexCleanupOptions options)
+        {
+            DateTime? since = ResolveCountersSince(inputs, analyzable, options);
+
+            var nonclusteredByObject = inputs
+                .Where(src => !src.IsDisabled
+                    && string.Equals(src.IndexTypeDesc, NonClustered, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(src => (src.DatabaseId, src.ObjectId))
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            foreach (var heap in inputs.Where(src => string.Equals(src.IndexTypeDesc, HeapType, StringComparison.OrdinalIgnoreCase)))
+            {
+                long rows = heap.TotalRows ?? 0;
+                decimal sizeGb = (heap.ReservedMb ?? 0m) / 1024m;
+                long reads = heap.UserScans + heap.UserLookups;
+
+                if (!((rows >= options.HeapMinRows || sizeGb >= options.HeapMinSizeGb) && reads >= options.HeapMinReads))
+                {
+                    continue;
+                }
+
+                int nonclustered = nonclusteredByObject.TryGetValue((heap.DatabaseId, heap.ObjectId), out var n) ? n : 0;
+
+                yield return (heap.DatabaseId, new IndexCleanupRecommendation
+                {
+                    DatabaseName = heap.DatabaseName,
+                    SchemaName = heap.SchemaName,
+                    TableName = heap.TableName,
+                    IndexName = HeapType,
+                    IndexId = heap.IndexId,
+                    ConsolidationRule = IndexCleanupRules.Heap,
+                    Action = IndexCleanupAction.None,
+                    ResultKind = IndexCleanupResultKind.Review,
+                    ScriptType = "REVIEW",
+                    Script = "",   // choosing a clustering key needs a person
+                    AdditionalInfo = HeapNote(heap, rows, reads, nonclustered, since),
+                    OriginalIndexDefinition = "",
+                    IndexSizeGb = sizeGb,
+                    IndexRows = rows,
+                    IndexReads = reads,
+                    IndexWrites = heap.UserUpdates,
+                });
+            }
+        }
+
+        /// <summary>
+        /// The instant the usage counters run from: the start time the caller measured the uptime from, or, when the caller measured
+        /// none, the same newest collected start time <see cref="ResolveUptimeDays"/> falls back to (the heap rows' own when no index
+        /// was analyzed). Null when nothing says.
+        /// </summary>
+        private static DateTime? ResolveCountersSince(List<IndexCleanupIndexInput> inputs, List<WorkIndex> analyzable, IndexCleanupOptions options)
+        {
+            if (options.ServerStartTime.HasValue)
+            {
+                return options.ServerStartTime;
+            }
+
+            if (options.ServerUptimeDays.HasValue)
+            {
+                return null;
+            }
+
+            var fromAnalyzed = analyzable.Select(w => w.Src.SqlServerStartTime).Where(t => t.HasValue).DefaultIfEmpty(null).Max();
+            return fromAnalyzed ?? inputs.Select(src => src.SqlServerStartTime).Where(t => t.HasValue).DefaultIfEmpty(null).Max();
+        }
+
+        /// <summary>The heap finding's note: what was measured, what a busy heap costs, and what to do about it.</summary>
+        private static string HeapNote(IndexCleanupIndexInput heap, long rows, long reads, int nonclustered, DateTime? since)
+        {
+            var c = System.Globalization.CultureInfo.InvariantCulture;
+            decimal reservedMb = heap.ReservedMb ?? 0m;
+            string size = reservedMb >= 1024m
+                ? (reservedMb / 1024m).ToString("#,##0.0", c) + " GB"
+                : reservedMb.ToString("#,##0", c) + " MB";
+            string when = since.HasValue ? "since " + since.Value.ToString("yyyy-MM-dd", c) : "since the server last started";
+
+            string note = "Heap with " + size + " and " + rows.ToString("N0", c) + " rows, read " + Times(reads)
+                + " (" + Count(heap.UserScans, "scan", "scans") + ", " + Count(heap.UserLookups, "RID lookup", "RID lookups") + ")"
+                + " and written " + Times(heap.UserUpdates) + " " + when + ". "
+                + "On a heap, an update that makes a row longer can leave a forwarded record that later reads must follow, and deletes "
+                + "can leave empty pages that scans still read. A clustered index avoids both and lets queries seek on its key. "
+                + "Choose a narrow, unique, ever-increasing key from the queries that use it.";
+
+            if (nonclustered == 1)
+            {
+                note += " It has 1 nonclustered index. Its lookups reach the heap by row locator and follow any forwarded record.";
+            }
+            else if (nonclustered > 1)
+            {
+                note += " It has " + nonclustered.ToString("N0", c) + " nonclustered indexes. Their lookups reach the heap by row locator "
+                    + "and follow any forwarded record.";
+            }
+
+            return note;
+
+            string Times(long n) => n == 1 ? "once" : n.ToString("N0", c) + " times";
+            string Count(long n, string one, string many) => n.ToString("N0", c) + " " + (n == 1 ? one : many);
+        }
+
         private static IndexCleanupRecommendation NewRecommendation(WorkIndex w) => new()
         {
             DatabaseName = w.Src.DatabaseName,
@@ -1201,6 +1335,7 @@ namespace PerformanceMonitor.Common
             CompressionMaxSavingsGb = perDb.Sum(r => r.CompressionMaxSavingsGb),
             TotalMinSavingsGb = perDb.Sum(r => r.TotalMinSavingsGb),
             TotalMaxSavingsGb = perDb.Sum(r => r.TotalMaxSavingsGb),
+            Heaps = perDb.Sum(r => r.Heaps),
             // Workload aggregates roll up too (DATABASE = SUM(TABLE), SUMMARY = SUM(DATABASE)); the rollup-row
             // projection renders them 'N/A' for the overall row, matching sp_IndexCleanup's SUMMARY output.
             UserSeeks = perDb.Sum(r => r.UserSeeks),
@@ -1256,6 +1391,15 @@ namespace PerformanceMonitor.Common
                     + "is already unique: the UNIQUE rebuild is then redundant but harmless, and the constraint is still dropped. "
                     + "A constraint that a foreign key references is never dropped, and an index whose key columns are a superset "
                     + "of the constraint's key columns is not made unique.");
+            }
+
+            if (recommendations.Any(r => r.ConsolidationRule == IndexCleanupRules.Heap))
+            {
+                var c = System.Globalization.CultureInfo.InvariantCulture;
+                notes.Add("Heap rows are REVIEW rows with no script, because choosing a clustered index key needs a person. A heap (a table "
+                    + "with no clustered index) is listed when it has at least " + options.HeapMinRows.ToString("N0", c) + " rows or "
+                    + options.HeapMinSizeGb.ToString("0.##", c) + " GB, and at least " + options.HeapMinReads.ToString("N0", c)
+                    + " reads since the server started. Heaps are counted in the Heaps column only, not in the table, index, size or row totals.");
             }
 
             notes.Add("Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate "

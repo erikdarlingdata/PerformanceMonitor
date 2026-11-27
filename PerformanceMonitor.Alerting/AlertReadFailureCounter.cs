@@ -206,6 +206,47 @@ public sealed class AlertReadFailureCounter
 
     private readonly Func<DateTime> _utcNow;
 
+    /// <summary>
+    /// One recent failed or retried read with the time it was recorded (#9549). The counts above keep one stamp per
+    /// bucket, the newest failure's, and a retry carries none, so they cannot say whether a read suffered inside a given
+    /// minute. Darling's Store Checkpointer Pressure self-alert asks exactly that of every checkpoint sync in the hour.
+    /// </summary>
+    /// <param name="AtUtc">When the failure or the retry was recorded, UTC: the moment the read (or its first attempt) ended.</param>
+    /// <param name="Read">The read's short constant name, as its call site gave it.</param>
+    /// <param name="ElapsedMs">How long the read ran before that moment, in milliseconds. Zero when the call site gave none.</param>
+    /// <param name="Retried">True for a read that crossed its deadline and was re-asked, false for one that failed and was swallowed.</param>
+    public readonly record struct RecentRead(DateTime AtUtc, string Read, long ElapsedMs, bool Retried);
+
+    /// <summary>How many recent reads are kept, the newest: the oldest is dropped when another arrives. In memory like
+    /// the counts, and for their reason.</summary>
+    public const int RecentReadCapacity = 1024;
+
+    private readonly Queue<RecentRead> _recentReads = new Queue<RecentRead>();
+    private readonly object _recentReadsGate = new object();
+
+    private void Remember(RecentRead read)
+    {
+        lock (_recentReadsGate)
+        {
+            if (_recentReads.Count == RecentReadCapacity)
+            {
+                _recentReads.Dequeue();
+            }
+
+            _recentReads.Enqueue(read);
+        }
+    }
+
+    /// <summary>The recent failed and retried reads, oldest first, across every server and the fleet-scoped
+    /// conditions. A copy, so a caller reads it without holding anything.</summary>
+    public IReadOnlyList<RecentRead> RecentReads()
+    {
+        lock (_recentReadsGate)
+        {
+            return _recentReads.ToArray();
+        }
+    }
+
     /// <summary>When this counter first counted. For <see cref="Shared"/> that is the first touch of the
     /// static — early in the host's startup, not the process's first instruction, which is why the
     /// surface reports the value rather than describing it.</summary>
@@ -299,6 +340,8 @@ public sealed class AlertReadFailureCounter
         Interlocked.Exchange(ref bucket.Newest, newest);
         Interlocked.Increment(ref _instanceReadFailures);
         Interlocked.Increment(ref bucket.ReadFailures);
+
+        Remember(new RecentRead(new DateTime(nowTicks, DateTimeKind.Utc), name, elapsed, Retried: false));
     }
 
     /// <summary>
@@ -322,7 +365,8 @@ public sealed class AlertReadFailureCounter
     /// recorded the working ones would understate the cost exactly during the episodes where the band was
     /// worst — the confident-zero shape this whole class exists to remove.</para>
     ///
-    /// <para><b>No stamp, no elapsed, and no newest-retry trio</b>, unlike every count above. Those exist
+    /// <para><b>No stamp, no elapsed, and no newest-retry trio on the reading</b>, unlike every count above (the time
+    /// and the elapsed are kept only in <see cref="RecentReads"/>, which no health surface renders). Those exist
     /// because a count of blind reads with nothing to date it cannot separate a healed episode from a live
     /// one (#3010's lesson). A retried read is not blind: the condition WAS judged on real evidence that
     /// arrived late, so there is no episode to attribute, and a trio here would invite exactly the reading
@@ -338,11 +382,16 @@ public sealed class AlertReadFailureCounter
     /// The same short CONSTANT name the failure call site uses for that read. Not currently rendered on
     /// any surface — the block publishes the retry COUNT and no newest-retry identity, for the reason
     /// above — and taken anyway so the producer cannot record a retry it could not name, which is how a
-    /// future per-read breakdown becomes possible without re-instrumenting fourteen sites.
+    /// future per-read breakdown becomes possible without re-instrumenting fourteen sites. It is kept, with the time,
+    /// in <see cref="RecentReads"/> (#9549).
     /// </param>
-    public void RecordRetriedRead(string? serverKey, string readName)
+    /// <param name="elapsedMilliseconds">
+    /// How long the first attempt ran before it crossed its deadline, in milliseconds (#9549). Kept with the retry in
+    /// <see cref="RecentReads"/>, which is the only place it is read. A negative value is clamped to zero.
+    /// </param>
+    public void RecordRetriedRead(string? serverKey, string readName, long elapsedMilliseconds = 0)
     {
-        _ = readName;
+        var name = string.IsNullOrWhiteSpace(readName) ? "unnamed read" : readName;
 
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
 
@@ -352,6 +401,8 @@ public sealed class AlertReadFailureCounter
            statements rather than four. */
         Interlocked.Increment(ref _instanceRetriedReads);
         Interlocked.Increment(ref bucket.RetriedReads);
+
+        Remember(new RecentRead(_utcNow(), name, elapsedMilliseconds < 0 ? 0 : elapsedMilliseconds, Retried: true));
     }
 
     /// <summary>
@@ -866,7 +917,7 @@ public sealed class AlertReadFailureCounter
         + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's "
         + "managed-conf verdicts read, the daily collection-history audit's rollup read, and the "
         + "external-alert delivery self-alert's count of undelivered rows, and the threshold-override "
-        + "reload, daily report, store autovacuum, and the stale daily rollup self-alert's "
+        + "reload, daily report, store autovacuum, store vacuum stalled, and the stale daily rollup self-alert's "
         + "restart seed and ended-episode close reads of the alert history";
 
     /// <summary>
@@ -878,75 +929,45 @@ public sealed class AlertReadFailureCounter
     /// <c>output_note</c> established the discipline; this is the same claim about a different window.</para>
     /// </summary>
     public const string WindowNote =
-        "alert_read_health is the ONLY block on this response that is not measured over the trailing seven "
-        + "days. It is an in-memory count kept by the running service or app, from counting_since, which is "
-        + "when this process began counting, early in its own startup, to now, and a restart takes it to "
-        + "zero. So a zero here means \"none since counting_since\" and NOT \"none in seven days\": check "
-        + "counting_since before reading "
-        + "the zero as reassurance, because a process that started a minute ago can only report on a minute. "
-        + "It is deliberately not persisted: what it counts is a failure to READ the store, so a counter that "
-        + "had to write the store would be unavailable exactly when it has something to report. It counts "
-        + "alerting-side store reads that failed and were swallowed by design (the alert pass logs and skips "
-        + "rather than firing or resolving on absent evidence), which is why they appear on no other health "
-        + "surface: they are not collector runs and write no collection_log row. last_failure_elapsed_ms is "
-        + "how long that newest failing read ran before it faulted. Where the alert pass sets a command "
-        + "deadline on its store reads it is the term that says WHOSE deadline ended the read - at or about "
-        + "that bound means this process stopped waiting while the statement was still running on the store, "
-        + "and well below it means the store returned a fault - and those need different answers, because "
-        + "the exception text cannot tell them apart: a client-side deadline renders as a torn stream with "
-        + "no SQLSTATE, exactly like a dropped connection. A figure well ABOVE that bound is a third reading: "
-        + "the failure was not a single bounded read. Each site restarts its clock between every pair of "
-        + "consecutive awaits so that is rare, and the one entry where it is expected is the shared engine "
-        + "sweep, whose awaited operation is a whole alert pass rather than one command. One further "
-        + "entry the client-versus-server reading does not apply to at all: the store background-job "
-        + "health reads each swallow their own faults one level down and run on a 30-second budget "
-        + "rather than the alert pass's ten, so that entry's figure is a real duration for whatever "
-        + "faulted and not evidence about who ended it. Read the rest that way on the Darling service, "
-        + "whose "
-        + "alert pass sets an explicit command deadline. On Lite the alerting reads hit the local store with "
-        + "no command deadline of their own, so the figure there is a plain duration - it says a read became "
-        + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "
-        + "so an elapsed never describes an event with no stamp. It does NOT count fired "
-        + "alerts that failed to DELIVER, and it makes no claim about them: that is the alert-history read's "
-        + "question, not this one. retried_reads is the SECOND population, and on the Darling service it is "
-        + "where most of what this block used to count now lands: reads that crossed the 10 s deadline once "
-        + "and succeeded on the single retry two seconds later - the write bands' cost, counted rather than "
-        + "blinding an alert. Every one of those was a swallowed failure before the retry existed, so read the two "
-        + "together: retries rising with failures at zero is a store under write pressure whose alerting is "
-        + "intact, and both rising is a store where a second attempt twelve seconds later still found the "
-        + "band on - which wants the store's write schedule looked at rather than the reader's. A read that "
-        + "failed twice counts in BOTH, because the retry happened. It carries no stamp and no read name, "
-        + "deliberately: a retried read did not go blind, so there is no episode to date or attribute, and a "
-        + "stamp on it would invite reading a retry as a soft failure. counting_since is its currency term "
-        + "like every other count here. instance_retried_reads is the same figure across this whole service; "
-        + "there is no fleet part for it because nothing records a fleet-scoped retry today - the retry seam "
-        + "covers the alert pass's PER-SERVER store reads (the alert-read adapter's, the Darling store's "
-        + "self-alert reads for one server, and the latest-CPU read), and the conditions listed below run "
-        + "their own commands outside it, so a fleet part would be a structural zero. On Lite both figures "
-        + "stay at zero, and "
-        + "that is a property of the SKU rather than a quiet store: Lite's alerting reads hit the local store "
-        + "with no command deadline, so there is no deadline for a read to cross and nothing to retry on. "
-        + "instance_read_failures spans every server on this service plus the "
-        + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "
-        + FleetScopedReads + ". "
-        + "fleet_read_failures is how many of that total belong to no server, and it is what makes a "
-        + "nonzero service count readable from a server whose own count is zero: those two populations "
-        + "take opposite actions, since a blind fleet-scoped read means the store's own self-alerts went "
-        + "quiet and two of them are the reads whose alerts would say the store is in trouble, while one on "
-        + "another server is answered by reading this same block there. Every count here carries its own "
-        + "newest-failure stamp, read name and elapsed, so none of them sits undated: last_failure_* are "
-        + "THIS server's, fleet_last_failure_* are the fleet-scoped conditions' and are attributable by "
-        + "construction, and instance_last_failure_* are the newest failure anywhere in this service "
-        + "whatever its scope - so that last trio may name a read on a server you did not ask about and "
-        + "makes no claim about which. The third population is a subtraction: instance_read_failures minus "
-        + "server_read_failures minus fleet_read_failures is how many failed on OTHER servers. It is "
-        + "deliberately not a field, because nothing here holds a newest failure for it and a count with "
-        + "nothing to date or name it is the gap the three stamps close; read this block on those servers "
-        + "to attribute it. "
-        + "server_alert_passes is a denominator for judging whether the failure count is large, not a rate: a "
-        + "pass issues many reads, and the number of passes per sweep differs by host and by target engine: a "
-        + "Darling sweep of a SQL Server target runs two (the shared engine's conditions and the service's "
-        + "own store-polled self-alerts), a PostgreSQL target runs three (those two plus the PostgreSQL "
-        + "predictor group), and a Lite sweep runs one. So this denominator is comparable between servers "
-        + "on the same host and engine, and NOT across engines or across SKUs.";
+        "alert_read_health is the ONLY block on this response that is not measured over the trailing seven days. "
+        + "It is an in-memory count kept by the running service or app from counting_since, when this process began "
+        + "counting, and a restart takes it to zero. So a zero here means \"none since counting_since\" and NOT \"none "
+        + "in seven days\": check counting_since before reading a zero as reassurance. It is deliberately not "
+        + "persisted, because it counts failures to READ the store and a counter that had to write the store would "
+        + "be unavailable exactly when it has something to report. It counts alerting-side store reads that failed "
+        + "and were swallowed by design (the alert pass logs and skips rather than firing or resolving on absent "
+        + "evidence). They are not collector runs and write no collection_log row. It does NOT count fired alerts "
+        + "that failed to DELIVER: that is the alert-history read's question. last_failure_elapsed_ms is how long "
+        + "the newest failing read ran before it faulted, and it is null exactly when last_failure_at is null. On "
+        + "the Darling service the alert pass sets a command deadline on its store reads. An elapsed at or about "
+        + "that bound means this process stopped waiting while the statement still ran on the store. Well below it "
+        + "means the store returned a fault. The error text cannot tell those two apart, because a client-side "
+        + "deadline renders as a torn stream with no SQLSTATE, exactly like a dropped connection. Well above it "
+        + "means the failure was not one bounded read, which is expected only for the shared engine sweep, whose "
+        + "awaited operation is a whole alert pass. The store background-job health reads swallow their own faults "
+        + "one level down and run on a 30-second budget, so their elapsed is a plain duration. On Lite the reads "
+        + "have no command deadline, so the elapsed is a plain duration there too: a read became slow, and nothing "
+        + "about who ended it. retried_reads is the second population: reads that crossed the 10 s deadline once and "
+        + "succeeded on the single retry two seconds later (the write bands' cost, counted rather than blinding an "
+        + "alert). Retries rising with failures at zero is a store under write pressure whose alerting is intact. "
+        + "Both rising means a second attempt twelve seconds later still found the band on, which wants the store's "
+        + "write schedule looked at. A read that failed twice counts in BOTH. A retry carries no stamp and no read "
+        + "name, because a retried read did not go blind. instance_retried_reads is the same figure across this "
+        + "whole service, with no fleet part, because the retry seam covers only the per-server reads. On Lite both "
+        + "stay at zero, which is a property of the SKU (no deadline to cross) and not of a quiet store. "
+        + "instance_read_failures spans every server on this service plus the fleet-scoped conditions that belong to "
+        + "no server and so appear in no per-server count: the collector-cost regression self-alert and its "
+        + "companions, the mute-rule reload, the daily reports' reads, and the store self-alerts (this tool's "
+        + "description lists them all). fleet_read_failures is how many of that total belong to no server. Read it "
+        + "when the service count is nonzero and this server's own is zero: a blind fleet-scoped read means the "
+        + "store's own self-alerts went quiet, while one on another server is answered by reading this block there. "
+        + "last_failure_* are THIS server's, fleet_last_failure_* are the fleet-scoped conditions', and "
+        + "instance_last_failure_* are the newest failure anywhere in this service, so that trio may name a read on "
+        + "a server you did not ask about. Failures on OTHER servers are instance_read_failures minus "
+        + "server_read_failures minus fleet_read_failures. That is not a field, because nothing holds a newest "
+        + "failure to date it. server_alert_passes is a denominator for judging whether the failure count is large, "
+        + "not a rate: a pass issues many reads. A Darling sweep of a SQL Server target runs two passes (the shared "
+        + "engine's conditions and the service's own store-polled self-alerts), a PostgreSQL target runs three "
+        + "(those two plus the PostgreSQL predictor group), and a Lite sweep runs one. So the denominator compares "
+        + "between servers on the same host and engine, and NOT across engines or across SKUs.";
 }

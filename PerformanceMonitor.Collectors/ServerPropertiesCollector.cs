@@ -322,6 +322,14 @@ SELECT /* PerformanceMonitorLite */
     instant_file_initialization_enabled = @ifi,
     memory_dump_count = @dumps;";
 
+    /// <summary>
+    /// Whole-collector version floor (#9099): the SQL below reads columns or objects that SQL Server 2014 and older do not have
+    /// (socket_count and cores_per_socket), so on a target below the supported floor the collector does not run and reads as not collected, instead of failing
+    /// every cycle. Unknown version (0) assumes newest, and Azure SQL Database and Managed Instance are never version-gated.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
+
     public override string Name => "server_properties";
 
     public override string TargetTable => "server_properties";

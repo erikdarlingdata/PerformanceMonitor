@@ -75,6 +75,7 @@ public sealed class TimingTestCensusTests
         ["StaTestThread.cs"] = "the hang guard's own report (#6216): tick counts say how long ago a stuck body named its step and started its last operation, and are only printed in the timeout message",
         ["StoreCopyPhaseLivePostgresTests.cs"] = "live-postgres member; lower bound only (the start phase must not give up before the sweep deadline less a second); the upper bound moved to the exact fault type and message asserts, which tell the deadline from Npgsql's own timeout (#5602)",
         ["TrendStaleStatsLiveTests.cs"] = Diagnostic + " (the assertions are on the answer status)",
+        ["TrigramCleanIntervalLiveTests.cs"] = "own-store live test; the clocks only record insert and clean milliseconds into the measurement table, and the asserts are on pending-list pages and inline-merge counts, with no time bound",
         ["TuningDropLockRecoveryLiveTests.cs"] = HangGuard + " (60 s against a single blocked drop)",
         ["WebExceptionTextCensusTests.cs"] = "the stopwatch's reading is passed as the elapsed-milliseconds argument of a fake tool's timeout result; no assertion is made on a time",
         ["TuningReaderBudgetLiveTests.cs"] = LiveStore + "; the bound is half of each reader's 15 s or 30 s command deadline",

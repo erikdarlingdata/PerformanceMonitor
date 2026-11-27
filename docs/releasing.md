@@ -32,6 +32,8 @@ then keep the file beside the older ones. `MigrationUpgradeLadderLiveTests` runs
 `migration-ladder-v*.sql` file in that folder as one test case, so no edit to the test is needed.
 Do not retire the old files: an older file replays more rungs, and it finds more defects.
 
+Right after the release is tagged, bump `<Version>` in `Directory.Build.props` to the next minor in a PR to `dev`. Nightlies then sort above the release just shipped, and the fixture test checks for that release's fixture.
+
 ## 2. Cut time: previous release image, same volume (the literal operator path)
 
 Before publishing, run the PREVIOUS release's container against a fresh volume, let it initialize

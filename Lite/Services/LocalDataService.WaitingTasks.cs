@@ -72,7 +72,7 @@ SELECT
     END AS blocking_session_ids
 FROM v_waiting_tasks
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3{dbClause}
 {exclude}{MonitorSnapshotClause("program_name", includeMonitor)}
 GROUP BY collection_time, session_id, rtrim(wait_type), database_name
@@ -129,7 +129,7 @@ ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
 SELECT COUNT(DISTINCT rtrim(wait_type))
 FROM v_waiting_tasks
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   wait_type IS NOT NULL
 {exclude}";
@@ -149,7 +149,7 @@ FROM v_waiting_tasks
 WHERE server_id = $1
 AND   blocking_session_id > 0
 AND   blocking_session_id <> session_id
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3" + dbClause + @"
 AND   database_name IS NOT NULL";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -189,7 +189,7 @@ WITH per_collection AS
         SUM(wait_duration_ms) AS total_wait_ms
     FROM v_waiting_tasks
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   wait_type IS NOT NULL
 {exclude}
@@ -218,7 +218,7 @@ runs AS
     WHERE server_id = $1
     AND   collector_name = 'waiting_tasks'
     AND   status = 'SUCCESS'
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY
         1
@@ -283,7 +283,7 @@ WITH per_collection AS
     WHERE server_id = $1
     AND   blocking_session_id > 0
     AND   blocking_session_id <> session_id
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3" + dbClause + $@"
     AND   database_name IS NOT NULL
     GROUP BY
@@ -311,7 +311,7 @@ runs AS
     WHERE server_id = $1
     AND   collector_name = 'waiting_tasks'
     AND   status = 'SUCCESS'
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY
         1
@@ -406,7 +406,7 @@ SELECT
     COUNT(*) AS collection_count
 FROM v_waiting_tasks
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   wait_type IS NOT NULL
 {exclude}
@@ -486,7 +486,7 @@ WITH per_collection AS
     WHERE server_id = $1
     AND   blocking_session_id > 0
     AND   blocking_session_id <> session_id
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3" + dbClause + $@"
     AND   database_name IS NOT NULL
     GROUP BY

@@ -122,9 +122,11 @@ public sealed class WebAdminArm : IDisposable
     /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the web login's own writes
     /// (<see cref="DarlingWebStoreWrites.EditSeatWrites"/>, adding a server among them), plus the Admin writes while
     /// <paramref name="adminArm"/> exists; on a store you bring it is whatever the web login's own grants allow
-    /// (<c>postgres.webConnectionString</c>), which the service cannot see from here. Logs nothing when there is no OIDC sign-in or a role mapping
-    /// exists (viewer-only included). Returns whether it warned.</summary>
-    internal static bool WarnWhenOidcHasNoRoleMapping(DarlingWebOidcClient? oidc, bool managedStore, WebAdminArm? adminArm, ILogger logger)
+    /// (<c>postgres.webConnectionString</c>), which the service cannot see from here. With <paramref name="personalOperatorTokens"/> (personal MCP
+    /// tokens served with <c>adminRole: operator</c>, #8737) it also says that each of them can mint an MCP operator token. Logs nothing when there
+    /// is no OIDC sign-in or a role mapping exists (viewer-only included). Returns whether it warned.</summary>
+    internal static bool WarnWhenOidcHasNoRoleMapping(DarlingWebOidcClient? oidc, bool managedStore, WebAdminArm? adminArm, ILogger logger,
+        bool personalOperatorTokens = false)
     {
         if (oidc is null || oidc.Options.RoleClaim is not null)
         {
@@ -137,6 +139,12 @@ public sealed class WebAdminArm : IDisposable
                 ? "web.allowAdminWrites is on, so every user who signs in can make the dashboard's Admin writes."
                 : "web.allowAdminWrites is off, and that turns off only the dashboard's Admin writes (" + DarlingWebStoreWrites.AdminArmWrites
                   + "): every user who signs in can still " + DarlingWebStoreWrites.EditSeatWrites + ".";
+        if (personalOperatorTokens)
+        {
+            effect += " mcp.personalTokens.adminRole is operator, so every one of them can also mint an MCP operator token, which gets the write tools"
+                + " whatever mcp.allowWrites and web.allowAdminWrites say.";
+        }
+
         logger.LogWarning("web.network.oidc has no role mapping, so every user who signs in has the edit seat. {Effect} Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.", effect);
         return true;
     }

@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.FrontDoor;
@@ -314,6 +315,17 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
                 && nameElement.ValueKind == JsonValueKind.String
                 && nameElement.GetString() is { Length: > 0 } serverName)
             {
+                /* #9087: list_servers lists a server whose collection is off, with the Disabled status word. A server moved between
+                   split stores is Disabled on the old one and enabled on the new one, so the directory keeps only the servers a store
+                   collects: otherwise the name has two exact hits and every call naming it is refused as ambiguous. An older store
+                   answers no such row. */
+                if (row.TryGetProperty("status", out var rowStatus)
+                    && rowStatus.ValueKind == JsonValueKind.String
+                    && rowStatus.GetString() == ServerHealthClassifier.DisabledServerStatus)
+                {
+                    continue;
+                }
+
                 var display = row.TryGetProperty("display_name", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null;
                 rows.Add(new RegisteredServer(rows.Count + 1, serverName, display));
             }

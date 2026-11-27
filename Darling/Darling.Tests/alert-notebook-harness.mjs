@@ -50,6 +50,7 @@ const context = vm.createContext({
     settleLater(onSettled);
     return card(spec.title, "composed");
   },
+  forgetStoppedCells: () => {},
   renderMarkdown: (text) => { calls.markdown.push(text); return el("div", { class: "md-out", text }); },
   NOTEBOOK_TEMPLATES: [],
   DASHBOARD_TEMPLATES: [],

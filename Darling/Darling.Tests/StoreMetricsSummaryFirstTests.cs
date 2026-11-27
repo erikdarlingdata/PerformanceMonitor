@@ -298,6 +298,67 @@ public sealed class StoreMetricsSummaryFirstTests
     }
 
     /// <summary>
+    /// The summary's lists leave out exactly the objects the inventory names as retired (#9588), by kind AND name, and
+    /// rank what is left. A retired job whose last run ties the live jobs sorts first on the name tie-break, which is the
+    /// shape that put a dead job at the top of the list. A name that exists under another kind stays, and an inventory
+    /// with no verdict (no exact sweep to reconcile against) leaves every row in.
+    /// </summary>
+    [Fact]
+    public void TheSummaryRows_LeaveOutTheObjectsTheInventoryNamesAsRetired_ByKindAndName()
+    {
+        const string job = StoreSelfMetrics.BackgroundJobObjectKind;
+        const string ht = StoreSelfMetrics.HypertableObjectKind;
+        var older = Sweep.AddDays(-1);
+
+        var retiredJob = Job("a_retired_job [9001]", lastRunMs: 1000) with { MetricTime = older };
+        var retiredHypertable = Bytes(ht, "ht_retired", 900) with { MetricTime = older };
+        var latest = new[]
+        {
+            new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.StoreObjectKind, "darling", Sweep, 1000, null, null, null, null, 3),
+            Job("live_job_1 [1001]", lastRunMs: 1000),
+            Job("live_job_2 [1002]", lastRunMs: 1000),
+            Bytes(ht, "ht_live", 100),
+            /* The retired job's name under a live kind is another object. */
+            Bytes(StoreSelfMetrics.TableObjectKind, "a_retired_job [9001]", 5),
+            retiredJob,
+            retiredHypertable,
+        };
+        var existence = new Dictionary<(string ObjectKind, string ObjectName), bool?>
+        {
+            [(job, retiredJob.ObjectName)] = false,
+            [(ht, retiredHypertable.ObjectName)] = false,
+        };
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(latest, existence);
+        Assert.NotNull(inventory);
+        Assert.Equal(
+            new[] { (job, "a_retired_job [9001]"), (ht, "ht_retired") }.Order().ToArray(),
+            inventory!.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName)).Order().ToArray());
+
+        var selection = DarlingStoreMetricsReader.SelectObjects(latest, null, null);
+        var deltas = new Dictionary<(string Kind, string Name), DarlingStoreMetricsReader.WindowDelta>();
+
+        /* Without the screen the retired job leads the jobs: equal cadence and duration, and its name sorts first. */
+        Assert.Equal(
+            "a_retired_job [9001]",
+            DarlingStoreMetricsReader.OrderForList(selection.Matched.Where(r => r.ObjectKind == job), deltas)[0].ObjectName);
+
+        var live = DarlingStoreMetricsReader.WithoutDropped(selection.Matched, inventory).ToList();
+        Assert.Equal(
+            new[] { "live_job_1 [1001]", "live_job_2 [1002]" },
+            DarlingStoreMetricsReader.OrderForList(live.Where(r => r.ObjectKind == job), deltas).Select(r => r.ObjectName).ToArray());
+        Assert.Equal(
+            new[] { "ht_live" },
+            DarlingStoreMetricsReader.OrderForList(live.Where(r => r.ObjectKind == ht), deltas).Select(r => r.ObjectName).ToArray());
+        Assert.Contains(live, r => r.ObjectKind == StoreSelfMetrics.TableObjectKind && r.ObjectName == "a_retired_job [9001]");
+        Assert.Equal(selection.Matched.Count - 2, live.Count);
+
+        Assert.Equal(selection.Matched.Count, DarlingStoreMetricsReader.WithoutDropped(selection.Matched, null).Count());
+        Assert.Equal(
+            selection.Matched.Count,
+            DarlingStoreMetricsReader.WithoutDropped(selection.Matched, DarlingStoreMetricsReader.ComputeInventory(latest, null)).Count());
+    }
+
+    /// <summary>
     /// The description states the summary-first contract and names every parameter that reaches past it,
     /// asserted TOGETHER with the code that makes each sentence true (the sibling pins' reason): the default
     /// limit, the kinds object_kind accepts, and exact-first matching.
@@ -352,7 +413,7 @@ public sealed class StoreMetricsSummaryFirstTests
     public void TheWebCatalog_AdvertisesTheNewParameters()
     {
         var descriptor = DarlingWebEndpoints.CatalogDescriptors["get_store_metrics"];
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, descriptor.Params.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "wal_hours_back", "table_activity", "hours", "rank_by", "as_of" }, descriptor.Params.Select(p => p.Name).ToArray());
         Assert.All(descriptor.Params, p => Assert.False(p.Required));
         Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, descriptor.Params.Single(p => p.Name == "limit").Default);
     }
@@ -634,6 +695,122 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// The summary ranks live objects (#9588). A store holds one retired job and one retired hypertable beside live ones of
+    /// the same kinds, the retired rows being the newest each of those objects ever wrote, from a sweep before the latest. The
+    /// retired job ties the live jobs on cadence and duration and sorts first by name, and the retired hypertable is the
+    /// largest and fastest-growing object, so both lead their lists unless the summary leaves them out. The inventory still
+    /// names both, and an object_kind list or an exact object_name still finds each.
+    /// </summary>
+    [Fact]
+    public async Task TheSummaryLists_LeaveOutRetiredObjects_WhileTheInventoryFiltersAndExactNamesStillFindThem_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_store_metrics retired-object test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await SeedRetiredAsync(scratch.ConnectionString, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        const string retiredJob = "policy_aaa_retired [9001]";
+        const string retiredHypertable = "ht_retired";
+
+        using (var summary = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource)))
+        {
+            var root = summary.RootElement;
+            Assert.Equal("summary", root.GetProperty("view").GetString());
+
+            /* The inventory names both retired objects and counts them. */
+            var inventory = root.GetProperty("inventory");
+            Assert.Equal("observed", inventory.GetProperty("status").GetString());
+            Assert.Equal(2, inventory.GetProperty("dropped_object_rows").GetInt32());
+            Assert.Equal(0, inventory.GetProperty("stale_object_rows").GetInt32());
+            Assert.Equal(
+                new[] { retiredHypertable, retiredJob }.Order(StringComparer.Ordinal).ToArray(),
+                inventory.GetProperty("dropped_objects").EnumerateArray().Select(d => d.GetProperty("object_name").GetString()!).Order(StringComparer.Ordinal).ToArray());
+
+            /* objects: the one live hypertable, not the larger retired one. */
+            Assert.Equal(1, root.GetProperty("objects_matched").GetInt32());
+            Assert.Equal(new[] { "ht_live" }, root.GetProperty("objects").EnumerateArray().Select(o => o.GetProperty("object_name").GetString()!).ToArray());
+
+            /* fastest_growing: the same, though the retired one grew faster across the window. */
+            var growing = root.GetProperty("fastest_growing");
+            Assert.Equal(1, growing.GetProperty("objects_matched").GetInt32());
+            Assert.Equal(new[] { "ht_live" }, growing.GetProperty("objects").EnumerateArray().Select(o => o.GetProperty("object_name").GetString()!).ToArray());
+
+            /* background_jobs: the five live jobs, in name order, and the count is the live count. */
+            var jobs = root.GetProperty("background_jobs");
+            Assert.Equal(5, jobs.GetProperty("jobs_matched").GetInt32());
+            Assert.Equal(5, jobs.GetProperty("jobs_returned").GetInt32());
+            Assert.Equal(
+                Enumerable.Range(1, 5).Select(i => $"policy_job_{i} [{1000 + i}]").ToArray(),
+                jobs.GetProperty("jobs").EnumerateArray().Select(j => j.GetProperty("object_name").GetString()!).ToArray());
+        }
+
+        /* A kind list is a filter: every job, the retired one among them, and every hypertable. */
+        using (var allJobs = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_kind: StoreSelfMetrics.BackgroundJobObjectKind)))
+        {
+            Assert.Equal("list", allJobs.RootElement.GetProperty("view").GetString());
+            Assert.Equal(6, allJobs.RootElement.GetProperty("objects_matched").GetInt32());
+            Assert.Contains(allJobs.RootElement.GetProperty("objects").EnumerateArray(), o => o.GetProperty("object_name").GetString() == retiredJob);
+        }
+
+        using (var hypertables = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_kind: StoreSelfMetrics.HypertableObjectKind)))
+        {
+            Assert.Equal(2, hypertables.RootElement.GetProperty("objects_matched").GetInt32());
+            Assert.Equal(retiredHypertable, hypertables.RootElement.GetProperty("objects")[0].GetProperty("object_name").GetString());
+        }
+
+        /* An exact name answers for the retired object, with its own series. */
+        foreach (var name in new[] { retiredJob, retiredHypertable })
+        {
+            using var one = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_name: name));
+            var root = one.RootElement;
+            Assert.Equal("object", root.GetProperty("view").GetString());
+            Assert.Equal(name, Assert.Single(root.GetProperty("objects").EnumerateArray().ToList()).GetProperty("object_name").GetString());
+            Assert.Equal(29, root.GetProperty("series").GetArrayLength());
+        }
+    }
+
+    /// <summary>
+    /// #9446 made the MCP read refuse as_of without table_activity, and the triage page adds as_of to every section
+    /// of a store alert opened more than a minute after the firing. Both store sections (size and jobs) are
+    /// not table_activity, so both answered invalid. The web read now forwards as_of only with table_activity:
+    /// the page's own query for each section, anchored at a past time, answers with data.
+    /// </summary>
+    [Fact]
+    public async Task TheStoreTriageSections_OpenedLater_AnswerWithData_NotInvalid_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_store_metrics triage as_of test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await SeedAsync(scratch.ConnectionString, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        var pastFiring = DateTime.UtcNow.AddHours(-3).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        var sections = DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.JobCadenceMetric)
+            .Where(s => s.Read == "get_store_metrics")
+            .ToList();
+        Assert.Equal(2, sections.Count);
+
+        foreach (var section in sections)
+        {
+            var query = DarlingTriageEndpoint.BuildSectionQuery(section, DarlingSelfAlertEvaluator.StoreServerLabel, pastFiring);
+            Assert.Contains("as_of=", query, StringComparison.Ordinal);
+
+            using var answer = JsonDocument.Parse(await RunReadAsync(dispatch, query, dataSource));
+            var root = answer.RootElement;
+            Assert.False(McpHelpers.IsRefusalEnvelope(root.GetRawText()), $"section '{section.Title}' answered a refusal: {root.GetRawText()}");
+            Assert.Equal(
+                section.Params.ContainsKey("object_kind") ? "list" : "summary",
+                root.GetProperty("view").GetString());
+        }
+    }
+
     private const long Mib = 1L << 20;
 
     private static string StatusOf(string json)
@@ -649,6 +826,68 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
         var context = new DefaultHttpContext();
         context.Request.QueryString = new QueryString(query);
         return await dispatch["get_store_metrics"](context, dataSource, null!);
+    }
+
+    /// <summary>
+    /// Migrates a scratch store and seeds thirty daily sweeps for <see cref="TheSummaryLists_LeaveOutRetiredObjects_WhileTheInventoryFiltersAndExactNamesStillFindThem_AgainstDevPostgres"/>:
+    /// one live hypertable and five live jobs written on every sweep, and a retired hypertable and a retired job whose
+    /// newest row is the sweep before the latest. The retired hypertable is the larger and the faster growing, and the retired job
+    /// shares the live jobs' duration and cadence and sorts before them by name. The store row's size is the sum of the
+    /// live byte-bearing rows, so the newest sweep is exactly sized and the inventory reconciles against it.
+    /// </summary>
+    private static async Task SeedRetiredAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var seed = new NpgsqlCommand($@"
+CREATE TEMP TABLE seed_objects
+(
+    object_kind text NOT NULL,
+    object_name text NOT NULL,
+    base_bytes bigint,
+    bytes_per_day bigint,
+    last_run_ms bigint,
+    last_day integer NOT NULL
+);
+
+INSERT INTO seed_objects VALUES
+    ('{StoreSelfMetrics.HypertableObjectKind}', 'ht_live', 500 * {Mib}::bigint, {Mib}::bigint, NULL, 29),
+    ('{StoreSelfMetrics.HypertableObjectKind}', 'ht_retired', 900 * {Mib}::bigint, 100 * {Mib}::bigint, NULL, 28),
+    ('{StoreSelfMetrics.BackgroundJobObjectKind}', 'policy_aaa_retired [9001]', NULL, NULL, 1000, 28);
+INSERT INTO seed_objects
+SELECT '{StoreSelfMetrics.BackgroundJobObjectKind}', 'policy_job_' || i || ' [' || (1000 + i) || ']', NULL, NULL, 1000, 29
+FROM generate_series(1, 5) AS i;
+
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, total_bytes, enabled_server_count, last_run_duration_ms, schedule_interval_ms, total_runs, total_failures)
+SELECT
+    t.metric_time,
+    o.object_name,
+    o.object_kind,
+    o.base_bytes + d.d * o.bytes_per_day,
+    NULL,
+    o.last_run_ms,
+    CASE WHEN o.last_run_ms IS NOT NULL THEN 3600000 END,
+    CASE WHEN o.last_run_ms IS NOT NULL THEN 24 * d.d END,
+    CASE WHEN o.last_run_ms IS NOT NULL THEN 0 END
+FROM generate_series(0, 29) AS d(d)
+CROSS JOIN LATERAL (SELECT (now() AT TIME ZONE 'UTC') - interval '5 minutes' - make_interval(days => 29 - d.d) AS metric_time) AS t
+CROSS JOIN seed_objects AS o
+WHERE d.d <= o.last_day;
+
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, enabled_server_count)
+SELECT t.metric_time, 'darling', '{StoreSelfMetrics.StoreObjectKind}', sum(o.base_bytes + d.d * o.bytes_per_day), 3
+FROM generate_series(0, 29) AS d(d)
+CROSS JOIN LATERAL (SELECT (now() AT TIME ZONE 'UTC') - interval '5 minutes' - make_interval(days => 29 - d.d) AS metric_time) AS t
+CROSS JOIN seed_objects AS o
+WHERE o.base_bytes IS NOT NULL AND o.last_day = 29
+GROUP BY t.metric_time;", connection)
+        {
+            CommandTimeout = 120,
+        };
+        await seed.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>

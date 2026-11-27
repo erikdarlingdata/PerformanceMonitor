@@ -230,7 +230,12 @@ public sealed class InvestigationDispatchCore
                     _logger.LogInformation(
                         "Investigation request {RequestId} opened for {Metric} on {Server} (family {Family}, route {RouteId})",
                         result.RequestId, metricName, serverName, family, route.RouteId);
-                    _opened?.Invoke(route.RouteId);
+                    /* #9485: a request opened inside a change window is held, not handed to the request runner. */
+                    if (!result.Held)
+                    {
+                        _opened?.Invoke(route.RouteId);
+                    }
+
                     break;
                 case InvestigationOpenOutcome.LimitReached:
                     _logger.LogWarning(
@@ -373,11 +378,11 @@ public sealed class InvestigationDispatchCore
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(logger);
         var swept = await store.SweepAsync(cancellationToken);
-        if (swept.LeasesLapsed > 0 || swept.Expired > 0 || swept.Resolved > 0 || swept.FollowUps > 0)
+        if (swept.LeasesLapsed > 0 || swept.Expired > 0 || swept.Resolved > 0 || swept.FollowUps > 0 || swept.ChangeWindowsClosed > 0)
         {
             logger.LogInformation(
-                "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired, {Resolved} request(s) resolved, {FollowUps} follow-up(s) opened",
-                swept.LeasesLapsed, swept.Expired, swept.Resolved, swept.FollowUps);
+                "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired, {Resolved} request(s) resolved, {FollowUps} follow-up(s) opened, {Windows} change window(s) closed",
+                swept.LeasesLapsed, swept.Expired, swept.Resolved, swept.FollowUps, swept.ChangeWindowsClosed);
         }
 
         return swept;

@@ -180,6 +180,37 @@ ORDER BY server_name";
     }
 
     /// <summary>
+    /// The registration paired with the one a read already resolved (#8784: a server's ReadOnlyIntent registration, <c>X:RO</c>, or the
+    /// primary it belongs to), by its EXACT storage name, or null when it is not monitored, not enabled or not this reader's to read.
+    ///
+    /// <para><see cref="ResolveOrErrorAsync"/> cannot answer this on the web surface: a scoped read is pinned to the server it asked for,
+    /// so any other name is refused there whatever the reader's grant holds, and the pairing would never happen for a web reader while
+    /// the same request over MCP read both. The grant is the check here instead. A scoped reader gets the partner only when its allowed
+    /// server ids hold it; a read pinned to one server with no grant list in scope stays on that server; an unscoped caller (MCP, or an
+    /// unscoped web reader) gets it. A registry fault reads as "no partner": the asked-for server has already been read from the same
+    /// registry, and the reply says only one registration was read.</para>
+    /// </summary>
+    internal static async Task<(int ServerId, string ServerName, string DisplayName)?> ResolvePairedServerAsync(
+        NpgsqlDataSource postgres, string exactServerName, CancellationToken cancellationToken = default)
+    {
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            return null;
+        }
+
+        var row = servers.FirstOrDefault(s => string.Equals(s.ServerName, exactServerName, StringComparison.OrdinalIgnoreCase));
+        return row is not null && PairedServerAllowed(row.ServerId, WebAllowedServerIds, WebServerId.Value)
+            ? (row.ServerId, row.ServerName, AnswerNameOf(servers, row))
+            : null;
+    }
+
+    /// <summary>Whether a read may also read the paired registration <paramref name="serverId"/>: inside the grant when there is one,
+    /// otherwise only when the read is not pinned to a different server.</summary>
+    internal static bool PairedServerAllowed(int serverId, IReadOnlyList<int>? allowedServerIds, int? pinnedServerId) =>
+        allowedServerIds is not null ? allowedServerIds.Contains(serverId) : pinnedServerId is null || pinnedServerId == serverId;
+
+    /// <summary>
     /// <see cref="ResolveOrErrorAsync"/> that also hands back the server's DISPLAY name (#6130), for a read whose answer names the
     /// server. The storage name (<c>host:database:pg</c> on a PostgreSQL target) is what the collectors stamp on rows and what the
     /// window probes match, so <c>ServerName</c> stays that; the answer's <c>server</c> field and its sentences use

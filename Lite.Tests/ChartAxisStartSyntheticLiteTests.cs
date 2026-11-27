@@ -28,7 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 /// and the baseline band drawn, and the Blocking tab's charts whose zero baselines and padded series reach back to the picked start.
 /// Before the baselines stopped counting, each of these kept the picked day for a server with three hours of history.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ChartAxisStartSyntheticLiteTests
 {
     private static readonly string[] LaneNames = ["CpuChart", "WaitStatsChart", "BlockingChart", "MemoryChart", "FileIoChart"];

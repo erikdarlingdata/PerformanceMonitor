@@ -126,9 +126,9 @@ public sealed class QueryEventsDatabaseFilterLiveTests
             Assert.Equal(new[] { DbA, DbB }, capped.Select(r => r.DatabaseName).ToArray());
 
             /* The newest capture holds A and C only. Filtering to [A, B] keeps A and does NOT fall back to B's older capture. */
-            var tuningAb = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, DatabaseFilter.Of([DbA, DbB]), ct);
+            var tuningAb = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, DatabaseFilter.Of([DbA, DbB]), cancellationToken: ct);
             Assert.Equal(new[] { DbA }, tuningAb.Select(t => t.DatabaseName).ToArray());
-            var tuningAll = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, DatabaseFilter.All, ct);
+            var tuningAll = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, DatabaseFilter.All, cancellationToken: ct);
             Assert.Equal(new[] { DbA, DbC }, tuningAll.Select(t => t.DatabaseName).Order().ToArray());
             Assert.Equal(tuningAll.Single(t => t.DatabaseName == DbA).CollectionTime, tuningAb.Single().CollectionTime);
 

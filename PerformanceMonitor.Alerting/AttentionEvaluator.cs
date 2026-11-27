@@ -29,8 +29,11 @@ public sealed record AttentionCountRow(DateTime CollectionTime, long Count);
 /// <param name="Samples">How many sample rows this group holds.</param>
 /// <param name="ShortSamples">The part of <paramref name="Samples"/> with a recorded duration under <see cref="AttentionWindowSql.MinInterruptDurationUs"/> (#7061).</param>
 /// <param name="AzdataMetadataSamples">The part of <paramref name="Samples"/> that is Azure Data Studio metadata work and not already short (#7061).</param>
+/// <param name="DbatoolsMetadataSamples">The part of <paramref name="Samples"/> that is dbatools SMO metadata work and not already short (#8877).</param>
+/// <param name="MatchedSamples">The part of <paramref name="Samples"/> under the duration floor that matches a captured call that ended aborted, and so is judged (#9507).
+/// Never counted in <paramref name="ShortSamples"/>.</param>
 public sealed record AttentionSampleGroup(
-    DateTime CollectionTime, string? DatabaseName, string? ClientAppName, long Samples, long ShortSamples = 0, long AzdataMetadataSamples = 0);
+    DateTime CollectionTime, string? DatabaseName, string? ClientAppName, long Samples, long ShortSamples = 0, long AzdataMetadataSamples = 0, long DbatoolsMetadataSamples = 0, long MatchedSamples = 0);
 
 /// <summary>One entry of a top-5 list in the read: a statement fingerprint, a database or a client application, ranked by
 /// its sampled event count over the range the read covers (the alert card's covered span, or the whole lookback when the span kept
@@ -65,8 +68,12 @@ public sealed record AttentionWindow(
     IReadOnlyList<AttentionTopItem> TopDatabases,
     IReadOnlyList<AttentionTopItem> TopApplications,
     bool TopsFromLookback = false,
-    IReadOnlyList<AttentionTopItem>? TopHosts = null)
+    IReadOnlyList<AttentionTopItem>? TopHosts = null,
+    IReadOnlyList<ClientTimeoutMatchedCall>? MatchedCallList = null)
 {
+    /// <summary>The captured calls that matched an under-floor sample (#9507), newest first. Only the read surface fills it; empty otherwise.</summary>
+    public IReadOnlyList<ClientTimeoutMatchedCall> MatchedCalls => MatchedCallList ?? Array.Empty<ClientTimeoutMatchedCall>();
+
     /// <summary>The top client hosts (#6553), empty when the window carries none.</summary>
     public IReadOnlyList<AttentionTopItem> Hosts => TopHosts ?? Array.Empty<AttentionTopItem>();
 
@@ -77,7 +84,7 @@ public sealed record AttentionWindow(
 }
 
 /// <summary>Sampled events of one (database, client application) inside the covered span.</summary>
-public sealed record AttentionGroup(string? DatabaseName, string? ClientAppName, long Samples, long ShortSamples = 0, long AzdataMetadataSamples = 0);
+public sealed record AttentionGroup(string? DatabaseName, string? ClientAppName, long Samples, long ShortSamples = 0, long AzdataMetadataSamples = 0, long DbatoolsMetadataSamples = 0, long MatchedSamples = 0);
 
 /// <summary>
 /// What <see cref="AttentionEvaluator.Read"/> took from the window: the covered span, the exact count in it and the
@@ -111,8 +118,15 @@ public sealed record AttentionReading(
     /// recorded duration is never counted here.</summary>
     public long ShortSamples => Groups.Where(g => !AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.ShortSamples);
 
+    /// <summary>Sampled events in the span under the duration floor that match a captured call that ended aborted (#9507). They are judged as client timeouts: the attention event
+    /// timed the cancel, the call is what ran. Counted for applications that are not already left out by name.</summary>
+    public long MatchedSamples => Groups.Where(g => !AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.MatchedSamples);
+
     /// <summary>Sampled events in the span that are Azure Data Studio metadata work (#7061), not already counted in <see cref="ShortSamples"/>.</summary>
     public long AzdataMetadataSamples => Groups.Where(g => !AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.AzdataMetadataSamples);
+
+    /// <summary>Sampled events in the span that are dbatools SMO metadata reads (#8877), not already counted in <see cref="ShortSamples"/>.</summary>
+    public long DbatoolsMetadataSamples => Groups.Where(g => !AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.DbatoolsMetadataSamples);
 
     /// <summary>The distinct <c>client_app_name</c> strings the rule left out of the span, exactly as stored, most sampled events first (#6856).</summary>
     public IReadOnlyList<string> ExcludedApps => Groups
@@ -155,6 +169,12 @@ public sealed record AttentionReading(
 /// fire is recorded Muted. When the proportion changed the count, the detail says it is an estimate from N sampled
 /// events.</para>
 ///
+/// <para><b>Filtered is not muted (#8971).</b> The built-in filters (SSMS IntelliSense, the VS Code mssql metadata connections, events under
+/// 1 s, Azure Data Studio and dbatools metadata) are part of what the rate counts. They are judged first and alone: when they bring the rate
+/// under the Warning bar, the finding is Filtered and no mute rule is asked, and the engine records nothing, as for any reading under the bar.
+/// Only a crossing that survives the filters and is then silenced by a mute rule or a digest window is Muted. The left-out events stay in
+/// <c>attention_events</c>, and <c>get_client_timeouts</c> counts them for any range.</para>
+///
 /// <para><b>The bars (#5736).</b> A field read of two stores found no fixed bar that fits: each server's own normal rate (the p99.9 of
 /// its 3-minute average over a week) ran from 0 to over 900 attentions a minute. So the bars are relative. Warning is
 /// max(WarningFloor, WarningMultiple x baseline) and Critical is max(CriticalFloor, CriticalMultiple x baseline), the baseline being
@@ -183,8 +203,8 @@ public static class AttentionEvaluator
     /// list and the history keep seeing them. SSMS matches "Microsoft SQL Server Management Studio" followed by anything and ending in
     /// "IntelliSense", so a renamed SSMS build still matches. VS Code matches a closed list, see <see cref="IsVsCodeMssqlMetadata"/>.
     /// Two more cuts are NOT by application name, because they are made on the sampled events inside the shared read (<see cref="AttentionWindowSql.SampleGroups"/>) and
-    /// reach the evaluator as counts on the group (#7061): events under the 1 ms duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), and Azure Data Studio's
-    /// metadata statements (<see cref="AttentionWindowSql.AzdataMetadataPredicate"/>). Azure Data Studio's query editor connects as plain <c>azdata</c> too, so <c>azdata</c> is not excluded by name.
+    /// reach the evaluator as counts on the group (#7061): events under the 1 s duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), and Azure Data Studio's
+    /// metadata statements (<see cref="AttentionWindowSql.AzdataMetadataPredicate"/>). Azure Data Studio's query editor connects as plain <c>azdata</c> too, so <c>azdata</c> is not excluded by name. The dbatools SMO catalog reads (<see cref="AttentionWindowSql.DbatoolsSmoMetadataPredicate"/>, #8877) are cut the same way, by name and statement shape together.
     /// </summary>
     public static bool IsExcludedApp(string? clientAppName) =>
         IsSsmsIntelliSense(clientAppName) || IsVsCodeMssqlMetadata(clientAppName);
@@ -432,7 +452,7 @@ public static class AttentionEvaluator
         var groups = window.SampleGroups
             .Where(g => g.CollectionTime > boundary && g.CollectionTime <= ceiling)
             .GroupBy(g => (g.DatabaseName, g.ClientAppName))
-            .Select(g => new AttentionGroup(g.Key.DatabaseName, g.Key.ClientAppName, g.Sum(x => x.Samples), g.Sum(x => x.ShortSamples), g.Sum(x => x.AzdataMetadataSamples)))
+            .Select(g => new AttentionGroup(g.Key.DatabaseName, g.Key.ClientAppName, g.Sum(x => x.Samples), g.Sum(x => x.ShortSamples), g.Sum(x => x.AzdataMetadataSamples), g.Sum(x => x.DbatoolsMetadataSamples), g.Sum(x => x.MatchedSamples)))
             .ToList();
 
         return new AttentionReading(total, covered, oldestTaken + 1, newest, groups);
@@ -440,9 +460,10 @@ public static class AttentionEvaluator
 
     /// <summary>
     /// Grades the reading against the two bars. Null when no reading, or when the EXACT count's rate is under the Warning
-    /// bar. A rate is compared at two decimals, so a rate sitting exactly at a bar is not lost to floating point.
-    /// <paramref name="isGroupMuted"/> is asked once per sampled (database, application) group, and only when the exact
-    /// rate crossed a bar.
+    /// bar. A <see cref="Finding.Filtered"/> finding when the exact rate crossed and the built-in filters alone take the rate
+    /// under the Warning bar (#8971). A rate is compared at two decimals, so a rate sitting exactly at a bar is not lost to
+    /// floating point. <paramref name="isGroupMuted"/> is asked once per sampled (database, application) group, and only when
+    /// the rate after the built-in filters crossed a bar (or, for a span with no samples, once with no database and app).
     /// </summary>
     public static Finding? Evaluate(
         AttentionReading? reading, int warningPerMinute, int criticalPerMinute, Func<string?, string?, bool>? isGroupMuted = null,
@@ -472,6 +493,8 @@ public static class AttentionEvaluator
         var excludedVsCode = reading.ExcludedVsCodeSamples;
         var shortSamples = reading.ShortSamples;
         var azdataMetadata = reading.AzdataMetadataSamples;
+        var dbatoolsMetadata = reading.DbatoolsMetadataSamples;
+        var matchedCalls = reading.MatchedSamples;
         var judgedCount = (double)reading.TotalCount;
         var estimated = false;
         if (sampleTotal == 0 && isGroupMuted is not null && isGroupMuted(null, null))
@@ -480,17 +503,34 @@ public static class AttentionEvaluator
                applies. A rule with a database or app pattern never matches a null database and app, so only a rule on the
                server and metric alone is asked here and can mute. The finding is Muted at the full count's grade. */
             return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata);
+                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata, dbatoolsMetadata, MatchedCalls: matchedCalls);
         }
 
-        if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0 || shortSamples > 0 || azdataMetadata > 0))
+        if (sampleTotal > 0 && (excludedSamples > 0 || shortSamples > 0 || azdataMetadata > 0 || dbatoolsMetadata > 0))
+        {
+            /* #8971: the built-in filters are judged first and alone. They are part of what the rate counts, not a suppression, so when
+               they alone bring the rate under the Warning bar the exact count's crossing was noise the alert never judges. The finding
+               says Filtered, never Muted, and no mute rule is asked: a rule cannot have suppressed a fire that the filters had already
+               taken under the bar. */
+            var passing = reading.Groups.Where(g => !IsExcludedApp(g.ClientAppName)).Sum(PassingSamples);
+            var filteredCount = passing < sampleTotal ? reading.TotalCount * (double)passing / sampleTotal : judgedCount;
+            var filteredRate = Math.Round(filteredCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero);
+            if (!Grade(filteredRate, warning, critical, out _, out _))
+            {
+                return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, filteredCount, reading.CoveredMinutes,
+                    reading.RunCount, sampleTotal, Estimated: passing < sampleTotal, Muted: false, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata, dbatoolsMetadata,
+                    Filtered: true, MatchedCalls: matchedCalls);
+            }
+        }
+
+        if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0 || shortSamples > 0 || azdataMetadata > 0 || dbatoolsMetadata > 0))
         {
             /* #6552, #6856: the own cancels of SSMS IntelliSense and the VS Code mssql metadata connections are left out the way a muted group is, by the same proportion of the sampled events.
-               #7061: so are the sampled events under the duration floor and Azure Data Studio's metadata statements. The exact count cannot be filtered by duration, so it
+               #7061: so are the sampled events under the duration floor and Azure Data Studio's metadata statements. #8877: and dbatools' SMO metadata reads. The exact count cannot be filtered by duration, so it
                scales by the share of sampled events that pass. A sample with no recorded duration passes. */
             var unmuted = reading.Groups
                 .Where(g => !IsExcludedApp(g.ClientAppName) && (isGroupMuted is null || !isGroupMuted(g.DatabaseName, g.ClientAppName)))
-                .Sum(g => g.Samples - g.ShortSamples - g.AzdataMetadataSamples);
+                .Sum(PassingSamples);
             if (unmuted < sampleTotal)
             {
                 judgedCount = reading.TotalCount * (double)unmuted / sampleTotal;
@@ -502,13 +542,18 @@ public static class AttentionEvaluator
         if (Grade(judgedRate, warning, critical, out var judgedSeverity, out var judgedBar))
         {
             return new Finding(judgedSeverity, judgedRate, judgedBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata);
+                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata, dbatoolsMetadata, MatchedCalls: matchedCalls);
         }
 
-        /* The exact count crossed a bar, the unmuted share did not: the fire is recorded Muted at the exact count's grade. */
+        /* The rate after the built-in filters crossed a bar (else the Filtered return above), and the share no mute rule or digest
+           window silenced did not: the fire is recorded Muted at the exact count's grade. */
         return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata);
+            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode, shortSamples, azdataMetadata, dbatoolsMetadata, MatchedCalls: matchedCalls);
     }
+
+    /// <summary>The sampled events of one group that pass the duration, Azure Data Studio and dbatools filters (#7061, #8877).</summary>
+    private static long PassingSamples(AttentionGroup group) =>
+        group.Samples - group.ShortSamples - group.AzdataMetadataSamples - group.DbatoolsMetadataSamples;
 
     private static bool Grade(double rate, int warning, int critical, out AlertSeverityLevel severity, out int bar)
     {
@@ -555,13 +600,25 @@ public static class AttentionEvaluator
         if (finding.ShortSamples > 0)
         {
             text += string.Create(CultureInfo.InvariantCulture,
-                $" {finding.ShortSamples:N0} of the {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationUs / 1000} ms (a cancel on a command that had already finished) and are left out of the rate judged.");
+                $" {finding.ShortSamples:N0} of the {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} (too short to be a client timeout) and are left out of the rate judged.");
+        }
+
+        if (finding.MatchedCalls > 0)
+        {
+            text += string.Create(CultureInfo.InvariantCulture,
+                $" {finding.MatchedCalls:N0} of the {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} but each matched a call the client cancelled while it ran, so they count as client timeouts.");
         }
 
         if (finding.AzdataMetadataSamples > 0)
         {
             text += string.Create(CultureInfo.InvariantCulture,
                 $" {finding.AzdataMetadataSamples:N0} of the {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries and are left out of the rate judged.");
+        }
+
+        if (finding.DbatoolsMetadataSamples > 0)
+        {
+            text += string.Create(CultureInfo.InvariantCulture,
+                $" {finding.DbatoolsMetadataSamples:N0} of the {finding.SampledEvents:N0} sampled events were dbatools SMO metadata reads and are left out of the rate judged.");
         }
 
         if (finding.Bars is not null)
@@ -626,14 +683,21 @@ public static class AttentionEvaluator
     /// <param name="RunCount">Successful runs the span takes.</param>
     /// <param name="SampledEvents">Sampled events in the span.</param>
     /// <param name="Estimated">True when the mute proportion changed the count: the judged count is an estimate from the samples.</param>
-    /// <param name="Muted">True when the exact count crossed a bar and the judged count did not: record the fire as Muted.</param>
+    /// <param name="Muted">True when the rate after the built-in filters crossed a bar and a mute rule or digest window brought the judged count
+    /// under it: record the fire as Muted. Never true with <paramref name="Filtered"/>.</param>
     /// <param name="NewestRunTime">The newest run's time (naive UTC).</param>
     /// <param name="Bars">Where the bars came from (#5736), null when the grading used fixed bars only.</param>
     /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense and the VS Code mssql metadata connections (<see cref="IsExcludedApp"/>), left out of the judged count (#6552, #6856).</param>
     /// <param name="ExcludedSsmsSamples">The part of <paramref name="ExcludedSamples"/> from SSMS IntelliSense (#6856).</param>
     /// <param name="ExcludedVsCodeSamples">The part of <paramref name="ExcludedSamples"/> from the VS Code mssql extension's metadata connections (#6856).</param>
-    /// <param name="ShortSamples">Sampled events in the span under the 1 ms duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), left out of the judged count (#7061).</param>
+    /// <param name="ShortSamples">Sampled events in the span under the 1 s duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), left out of the judged count (#7061).</param>
     /// <param name="AzdataMetadataSamples">Sampled events in the span that are Azure Data Studio metadata queries (see <see cref="AttentionWindowSql.AzdataMetadataPredicate"/>), left out of the judged count (#7061).</param>
+    /// <param name="DbatoolsMetadataSamples">Sampled events in the span that are dbatools SMO metadata reads (see <see cref="AttentionWindowSql.DbatoolsSmoMetadataPredicate"/>), left out of the judged count (#8877).</param>
+    /// <param name="MatchedCalls">Sampled events in the span under the duration floor that match a captured call that ended aborted (#9507). They are judged, not left out, so they are in no other part.</param>
+    /// <param name="Filtered">True when the exact count crossed a bar and the built-in filters alone (SSMS IntelliSense, VS Code mssql metadata, events under
+    /// 1 s, Azure Data Studio and dbatools metadata) bring the rate under the Warning bar (#8971). No mute rule was asked. The alert did not cross, so the engine
+    /// records nothing for it, as for a reading under the bar: no row, no standing alert and no resolution. <paramref name="JudgedCount"/> is the count after the
+    /// filters, and <paramref name="Severity"/>, <paramref name="RatePerMinute"/> and <paramref name="BarCrossed"/> are the exact count's grade.</param>
     public sealed record Finding(
         AlertSeverityLevel Severity,
         double RatePerMinute,
@@ -651,7 +715,10 @@ public static class AttentionEvaluator
         long ExcludedSsmsSamples = 0,
         long ExcludedVsCodeSamples = 0,
         long ShortSamples = 0,
-        long AzdataMetadataSamples = 0)
+        long AzdataMetadataSamples = 0,
+        long DbatoolsMetadataSamples = 0,
+        bool Filtered = false,
+        long MatchedCalls = 0)
     {
         /// <summary>The summary sentence for the alert.</summary>
         public string Summary => AttentionEvaluator.Summary(this);

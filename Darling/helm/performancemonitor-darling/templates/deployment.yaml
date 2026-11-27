@@ -91,6 +91,41 @@ spec:
             - name: config-template
               mountPath: /scripts
               readOnly: true
+      {{- if include "performancemonitor-darling.wireStoreLogins" . }}
+        # store-logins writes the web and MCP connection strings (store.provisionRoles.wireConnectionStrings). The two role
+        # passwords reach only this init container, as files; the darling container reads the finished strings from a memory
+        # volume and never sees a password.
+        - name: store-logins
+          image: {{ include "performancemonitor-darling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - /scripts/write-store-logins.sh
+            - {{ include "performancemonitor-darling.storeLoginsBase" . | quote }}
+            - /run/secrets/darling-roles
+            - /run/darling-store-logins
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: store-logins
+              mountPath: /run/darling-store-logins
+            - name: config-template
+              mountPath: /scripts
+              readOnly: true
+            - name: role-passwords
+              mountPath: /run/secrets/darling-roles
+              readOnly: true
+      {{- end }}
       containers:
         - name: darling
           image: {{ include "performancemonitor-darling.image" . | quote }}
@@ -113,6 +148,11 @@ spec:
             {{- if .Values.mcp.enabled }}
             - name: mcp
               containerPort: {{ int .Values.mcp.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ int .Values.metrics.port }}
               protocol: TCP
             {{- end }}
             - name: health
@@ -201,6 +241,11 @@ spec:
               mountPath: /etc/darling/store-ca
               readOnly: true
             {{- end }}
+            {{- if include "performancemonitor-darling.wireStoreLogins" . }}
+            - name: store-logins
+              mountPath: /run/darling-store-logins
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -271,6 +316,22 @@ spec:
             items:
               - key: {{ .Values.store.external.caSecret.key | quote }}
                 path: ca.crt
+        {{- end }}
+        {{- if include "performancemonitor-darling.wireStoreLogins" . }}
+        - name: store-logins
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # Only the web and mcp keys: the admin and viewer passwords have no use in the Deployment.
+        - name: role-passwords
+          secret:
+            secretName: {{ .Values.store.provisionRoles.rolePasswordsSecret | quote }}
+            defaultMode: 288
+            items:
+              - key: web
+                path: web
+              - key: mcp
+                path: mcp
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

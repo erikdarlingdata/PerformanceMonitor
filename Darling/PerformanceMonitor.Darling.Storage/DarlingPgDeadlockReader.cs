@@ -100,7 +100,7 @@ public static class DarlingPgDeadlockReader
             MIN(d.graph_text) AS graph_text
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
-        AND   COALESCE(d.occurred_at, d.collection_time) >= $2
+        AND   COALESCE(d.occurred_at, d.collection_time) > $2
         AND   COALESCE(d.occurred_at, d.collection_time) <= $3
         AND   d.collection_time >= $5
         AND   d.deadlock_hash IS NOT NULL

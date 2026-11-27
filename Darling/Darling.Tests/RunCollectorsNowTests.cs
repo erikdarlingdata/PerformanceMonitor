@@ -529,4 +529,60 @@ public sealed class RunCollectorsNowTests
         Assert.Equal(3, done.GetProperty("result").GetProperty("rows").GetInt32());
         Assert.Equal("mcp", Assert.Single(store.Enqueued).By);
     }
+
+    // ------------------------------------------------------------------ a store without the queue function (#8781)
+
+    private static FakeStore StoreThatCannotQueue(string sqlState) => new()
+    {
+        EnqueueFails = new Npgsql.PostgresException(
+            "function config.request_snapshot_now(integer, text, text) does not exist", "ERROR", "ERROR", sqlState),
+    };
+
+    [Theory]
+    [InlineData("42883")]
+    [InlineData("42501")]
+    public async Task AStoreWithoutTheQueueFunction_IsARefusedOutcome_ThatNamesTheScript_NotAnException(string sqlState)
+    {
+        var outcome = await new SnapshotNowRequests(StoreThatCannotQueue(sqlState), new ManualTime())
+            .RequestAsync(7, null, "t", TestContext.Current.CancellationToken);
+
+        Assert.False(outcome.Accepted);
+        Assert.Equal(SnapshotRequestOutcome.StoreRefusedCode, outcome.Code);
+        Assert.Contains("provision-roles.sql", outcome.Text, StringComparison.Ordinal);
+        Assert.Contains("Nothing was queued.", outcome.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("42883", outcome.Text, StringComparison.Ordinal);
+        Assert.Null(outcome.CommandId);
+    }
+
+    [Fact]
+    public async Task TheWebRoute_Gives403WithTheScriptSentence_WhenTheStoreCannotQueue()
+    {
+        var store = StoreThatCannotQueue("42883");
+        await using var app = await StartAsync(store, canEdit: true, new ManualTime());
+        using var client = app.GetTestClient();
+
+        var refused = await PostAsync(client, "{\"server\":\"known\"}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, refused.Status);
+        var root = JsonDocument.Parse(refused.Body).RootElement;
+        Assert.Equal(SnapshotRequestOutcome.StoreRefusedCode, root.GetProperty("code").GetString());
+        Assert.Contains("provision-roles.sql", root.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Empty(store.Enqueued);
+    }
+
+    [Fact]
+    public async Task TheMcpTool_ReturnsPrecondition_ThatNamesTheScript_WhenTheStoreCannotQueue()
+    {
+        var store = StoreThatCannotQueue("42883");
+
+        var root = JsonDocument.Parse(await DarlingMcpCollectorRunTools.RunCollectorsNowCore(
+            new SnapshotNowRequests(store, new ManualTime()), 7, "srv", null, "mcp", TimeSpan.Zero, TimeSpan.Zero,
+            TestContext.Current.CancellationToken)).RootElement;
+
+        Assert.Equal("precondition", root.GetProperty("status").GetString());
+        Assert.Equal(SnapshotRequestOutcome.StoreRefusedCode, root.GetProperty("reason").GetString());
+        Assert.Contains("provision-roles.sql", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("srv", root.GetProperty("server").GetString());
+        Assert.Empty(store.Enqueued);
+    }
 }

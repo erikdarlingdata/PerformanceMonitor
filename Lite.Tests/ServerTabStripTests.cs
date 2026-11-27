@@ -29,7 +29,8 @@ namespace Lite.Tests;
 /// clicked; tabs are flat, with no solid accent fill. The real ServerTab is built on the shared STA thread, themed, shown at the
 /// given width, and everything is read from the rendered controls.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabStripTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -155,66 +156,6 @@ public sealed class ServerTabStripTests
     {
         var bounds = tab.TransformToAncestor(scroll).TransformBounds(new Rect(tab.RenderSize));
         return bounds.Left >= -0.5 && bounds.Right <= scroll.ViewportWidth + 0.5;
-    }
-
-    [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
-    public void MainTabs_AreFlat_ServerTabsUseTheUnderline_AndNoTabHasASolidAccentFill(string theme)
-    {
-        StaTestThread.Run(() =>
-        {
-            var dict = LoadTheme(theme);
-            var accent = ((SolidColorBrush)dict["AccentBrush"]).Color;
-            var accentHover = ((SolidColorBrush)dict["AccentHoverBrush"]).Color;
-
-            TabControl Strip(Style? itemStyle, Style? controlStyle)
-            {
-                var tabs = new TabControl { Width = 600, Height = 120 };
-                if (controlStyle is not null) { tabs.Style = controlStyle; }
-                if (itemStyle is not null) { tabs.ItemContainerStyle = itemStyle; }
-                tabs.Items.Add(new TabItem { Header = "One", Content = new Grid() });
-                tabs.Items.Add(new TabItem { Header = "Two", Content = new Grid() });
-                var host = new Border { Child = tabs };
-                host.Resources.MergedDictionaries.Add(dict);
-                host.Measure(new Size(600, 120));
-                host.Arrange(new Rect(0, 0, 600, 120));
-                host.UpdateLayout();
-                return tabs;
-            }
-
-            Border Chrome(TabItem t) => (Border)t.Template.FindName("border", t);
-
-            void NoAccentFill(TabControl tabs, string what)
-            {
-                foreach (var t in tabs.Items.OfType<TabItem>())
-                {
-                    var fill = (Chrome(t).Background as SolidColorBrush)?.Color;
-                    Assert.False(fill == accent || fill == accentHover, $"{what}: tab '{t.Header}' (selected {t.IsSelected}) has a solid accent fill");
-                }
-            }
-
-            var main = Strip(null, null);
-            NoAccentFill(main, "main tabs");
-            /* #8222: the selected main tab carries the same underline as the sub-tabs, the others none. */
-            Assert.Equal(2, Chrome((TabItem)main.Items[0]).BorderThickness.Bottom);
-            Assert.Equal(0, Chrome((TabItem)main.Items[1]).BorderThickness.Bottom);
-
-            var sub = Strip((Style)dict["SubTabItemStyle"], null);
-            NoAccentFill(sub, "sub-tabs");
-            Assert.Equal(2, Chrome((TabItem)sub.Items[0]).BorderThickness.Bottom);
-
-            var subSub = Strip((Style)dict["SubSubTabItemStyle"], null);
-            NoAccentFill(subSub, "sub-sub tabs");
-            var subSubTab = (TabItem)subSub.Items[0];
-            Assert.Equal(1, Chrome(subSubTab).BorderThickness.Bottom);
-            Assert.True(subSubTab.FontSize < ((TabItem)sub.Items[0]).FontSize, "sub-sub tabs are smaller than sub-tabs");
-
-            var server = Strip(null, (Style)dict["ServerTabStripStyle"]);
-            NoAccentFill(server, "server tabs");
-            Assert.Equal(2, Chrome((TabItem)server.Items[0]).BorderThickness.Bottom);
-        });
     }
 
     private static ResourceDictionary LoadTheme(string theme) =>

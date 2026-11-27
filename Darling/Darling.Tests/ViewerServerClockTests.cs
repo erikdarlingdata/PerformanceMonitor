@@ -382,14 +382,14 @@ public sealed class ViewerJobHistoryServerClockTests
         var rows = new List<ViewerJobHistoryRow>
         {
             RowAtUtc(1, since.AddMinutes(-30)), /* in the pre-filter's extra hour, but before the window */
-            RowAtUtc(2, since),                 /* exactly at the start: kept */
+            RowAtUtc(2, since),                 /* exactly at the start: left out */
             RowAtUtc(3, since.AddHours(1)),
             RowAtUtc(4, since.AddHours(1)),     /* same time, higher instance id: first */
             RowAtUtc(5, null),
         };
 
         var all = ViewerDataService.ApplyJobHistoryWindow(rows, since, limit: 100);
-        Assert.Equal(new long[] { 4, 3, 2 }, all.ConvertAll(r => r.InstanceId));
+        Assert.Equal(new long[] { 4, 3 }, all.ConvertAll(r => r.InstanceId));
 
         var trimmed = ViewerDataService.ApplyJobHistoryWindow(rows, since, limit: 2);
         Assert.Equal(new long[] { 4, 3 }, trimmed.ConvertAll(r => r.InstanceId));

@@ -24,6 +24,7 @@
       <header id="topbar">
         <button id="nav-toggle" class="nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open the menu" title="Open the menu">&#9776;</button>
         <span class="topbar-title">Darling Web</span>
+        <div id="topbar-account" class="account-menu" hidden></div>
       </header>
       <div id="nav-backdrop" aria-hidden="true"></div>
       <aside id="sidebar">
@@ -34,6 +35,8 @@
                js/app.js sets the label/aria-label/title and the pressed state; see initAutoRefreshToggle(). -->
           <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true" title="Hide the sidebar"></button>
           <button id="auto-refresh-toggle" class="auto-refresh-toggle" type="button" aria-pressed="false"></button>
+          <!-- #8737: who this session is; js/account-menu.js fills and shows it once /api/me answers. -->
+          <div id="account-menu" class="account-menu" hidden></div>
           <!-- Front door only (#6840): js/store-picker.js fills and shows this when /api/session says front_door. The top bar below is
                hidden at desktop widths, so the picker lives here, where the menu is on every width. -->
           <div id="store-picker" class="store-picker" hidden></div>
@@ -57,6 +60,7 @@
           <a data-route="proposals" href="#/proposals">Proposals</a>
           <a data-route="alert-rules" href="#/alert-rules">Alert Rules</a>
           <a data-route="admin" href="#/admin">Admin</a>
+          <a data-route="store-health" href="#/store-health">Store Health</a>
           <a data-route="views" href="#/views">Custom Views</a>
           <a data-route="mute-rules" href="#/mute-rules">Mute Rules</a>
           <a data-route="known-patterns" href="#/known-patterns">Known Patterns</a>

@@ -13,7 +13,7 @@ If you pay for a monitoring tool now, read the comparison for yours.
 
 [Redgate SQL Monitor](https://erikdarling.com/redgate-sql-monitor-renewal-free-alternative/) · [SQL Sentry](https://erikdarling.com/solarwinds-sql-sentry-renewal-free-alternative/) · [SolarWinds DPA](https://erikdarling.com/solarwinds-dpa-renewal-free-alternative/) · [Idera SQL Diagnostic Manager](https://erikdarling.com/idera-sql-diagnostic-manager-renewal-free-alternative/) · [Quest Spotlight](https://erikdarling.com/your-quest-spotlight-on-sql-server-enterprise-renewal-is-coming-up-heres-what-free-looks-like-in-2026/) · [Datadog Database Monitoring](https://erikdarling.com/datadog-database-monitoring-cost-free-alternative/) · [Database Health Monitor](https://erikdarling.com/database-health-monitor-renewal-free-alternative/)
 
-It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It also supports Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling). Darling also monitors PostgreSQL. It supports PostgreSQL 14 to 18, plus Amazon RDS, Aurora and Azure Database for PostgreSQL, and makes a best effort on PostgreSQL 10 to 13. See [Supported PostgreSQL versions](docs/darling/postgresql-targets.md#supported-postgresql-versions).
+It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It also supports Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling). Darling also monitors PostgreSQL. It supports PostgreSQL 14 to 19, plus Amazon RDS, Aurora and Azure Database for PostgreSQL, and makes a best effort on PostgreSQL 10 to 13. See [Supported PostgreSQL versions](docs/darling/postgresql-targets.md#supported-postgresql-versions).
 
 ![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 
@@ -85,6 +85,7 @@ To remove the service, run `uninstall-darling.ps1` from the install folder. The 
 | [Performance impact](docs/performance-impact.md) | Load on monitored servers, and local resources for Lite |
 | [Troubleshooting](docs/troubleshooting.md) | Common problems for Lite and Darling |
 | [Building from source](docs/building-from-source.md) | Folder structure and build commands |
+| [Code map](docs/CODEMAP.md) | Where each part of the code lives and which files to open first, for new contributors |
 | [Support and sponsorship](docs/support.md) | Commercial support tiers and sponsorship |
 | [Third-party components](docs/third-party-components.md) | Third-party components and their licenses |
 | [Changelog](CHANGELOG.md) | Changes in each release |
@@ -117,4 +118,4 @@ Copyright (c) 2026 Darling Data, LLC. Licensed under the MIT License. See [LICEN
 
 Erik Darling: [erikdarling.com](https://erikdarling.com) and [Darling Data, LLC](https://darlingdata.com)
 
-Erik teaches database teams to work with AI agents on their own databases, in a [one-day workshop](https://erikdarling.com/ai-for-database-teams-workshop/) and a [video course](https://training.erikdarling.com/work-with-your-databases-the-way-i-do). He also does [SQL Server performance consulting](https://erikdarling.com/sql-server-performance-consulting/).
+Erik teaches database teams to work with AI agents on their own databases, in a [one-day workshop](https://erikdarling.com/ai-for-database-teams-workshop/), a [video course](https://training.erikdarling.com/work-with-your-databases-the-way-i-do), and [one-on-one for a day](https://erikdarling.com/work-with-me-for-a-day/). He also does [SQL Server performance consulting](https://erikdarling.com/sql-server-performance-consulting/).

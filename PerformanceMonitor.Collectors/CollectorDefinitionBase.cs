@@ -23,6 +23,20 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 {
+    /* WritesQueryTagSightings is read from the definition's own override: a delegate over the virtual method binds to the most
+       derived override, so its Method names the class that declares the body. The base's own body returns null, so any other
+       declaring class means the definition describes sightings. Computed once per definition, here, rather
+       than declared per definition, so a new writer joins the set by overriding the method and a definition cannot claim the flag
+       without describing anything (#9705). */
+    protected CollectorDefinitionBase()
+    {
+        Func<TRow, IReadOnlyList<QueryTagSighting>?> describe = DescribeQueryTagSightings;
+        WritesQueryTagSightings = describe.Method.DeclaringType != typeof(CollectorDefinitionBase<TRow>);
+    }
+
+    /// <summary><see cref="ICollectorSchemaInfo.WritesQueryTagSightings"/>: true when the definition overrides <see cref="DescribeQueryTagSightings"/>.</summary>
+    public bool WritesQueryTagSightings { get; }
+
     public abstract string Name { get; }
 
     public abstract string TargetTable { get; }
@@ -65,11 +79,17 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
        definition cannot override the interface's default through the class type. See ICollectorSchemaInfo.StaysPlainTable. */
     public virtual bool StaysPlainTable => false;
 
+    /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.CompressionOffGrid. */
+    public virtual bool CompressionOffGrid => false;
+
     /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.IsDarlingOnly. */
     public virtual bool IsDarlingOnly => false;
 
     /* Declared here as well as on the interface, the IsDarlingOnly pair and for the same reason. See ICollectorSchemaInfo.ReadsAuroraFunctions. */
     public virtual bool ReadsAuroraFunctions => false;
+
+    /* Declared here as well as on the interface, the ReadsAuroraFunctions pair and for the same reason. See ICollectorSchemaInfo.ReadWorkMemBytesPerEntry. */
+    public virtual int? ReadWorkMemBytesPerEntry => null;
 
     /* Declared here as well as on the interface, the ReadsAuroraFunctions pair and for the same reason. See ICollectorSchemaInfo.ReadsPgExtension. */
     public virtual bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context) => true;

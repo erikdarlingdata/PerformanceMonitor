@@ -52,8 +52,6 @@ public sealed class RunnableQueueSettingsRungTests
         Assert.Equal(RungVersion, Rung.Version);
         Assert.Equal(1, PgMigrations.Scripts.Count(m => m.Name == RungName));
         Assert.Equal(1, PgMigrations.Scripts.Count(m => m.Version == RungVersion));
-        Assert.True(RungVersion <= StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]

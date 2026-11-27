@@ -76,6 +76,12 @@ public sealed class CollectorTargetInfo
     public int SqlMajorVersion { get; init; }
 
     /// <summary>
+    /// The oldest SQL Server major version this product supports (13 = 2016; README: SQL Server 2016 SP2 to 2025). A collector whose
+    /// SQL needs a newer engine than SQL Server 2014 gates on it through <see cref="MeetsMinimumVersion"/> (#9099).
+    /// </summary>
+    public const int SupportedFloorMajorVersion = 13;
+
+    /// <summary>
     /// The version gate most collectors share (#7222): true when this target runs SQL Server
     /// <paramref name="major"/> or later, or is an Azure SQL Database or Managed Instance (which report a
     /// low major yet carry the feature, so they are never version-gated). An unknown version (0) passes

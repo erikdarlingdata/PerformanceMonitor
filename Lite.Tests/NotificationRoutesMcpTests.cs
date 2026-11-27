@@ -268,7 +268,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         Assert.True(same.RootElement.GetProperty("previous").GetProperty("enabled").GetBoolean());
     }
 
-    /// <summary>#6403: a delete answers with the route as it was. Lite has no tool that creates a route, so undo is null and the note says where a route is authored.</summary>
+    /// <summary>#6403: a delete answers with the route as it was. its destinations cannot be read back, so undo is null and the note says how to make it again.</summary>
     [Fact]
     public async Task Delete_AnswersWithTheRouteAsItWas_AndNoUndoCall()
     {

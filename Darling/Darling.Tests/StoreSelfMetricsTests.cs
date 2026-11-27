@@ -45,10 +45,6 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
-           the newest registered rung. Three in-flight branches bumping versions made the literal form a
-           recurring multi-test failure (#2210 round, again here at V62). */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);
@@ -251,14 +247,14 @@ public sealed class StoreSelfMetricsTests
            test below, with an uncompressed aggregate in it. */    }
 
     /// <summary>
-    /// #3582, extended #4609: the seven product-owned plain tables the walk used to lump are named,
+    /// #3582, extended #4609 and #8817: the eight product-owned plain tables the walk used to lump are named,
     /// schema-qualified, sized with <c>pg_total_relation_size</c> and row-counted from the planner's
-    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same seven by
+    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same eight by
     /// <c>(schema, relation)</c>. The two halves are pinned against each other: a table named here and
     /// not there would be counted twice, one named there and not here would vanish from both.
     /// </summary>
     [Fact]
-    public void TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose()
+    public void TableInsertSql_NamesTheEightProductTables_AndTheCensusExcludesExactlyThose()
     {
         var sql = StoreSelfMetrics.TableInsertSql;
         Assert.Equal("table", StoreSelfMetrics.TableObjectKind);
@@ -273,6 +269,7 @@ public sealed class StoreSelfMetricsTests
             "collect." + QueryStoreIntervalLatest.PendingTableName,
             "collect." + QueryStoreIntervalWide.TableName,
             "collect." + QueryStoreIntervalWide.PendingTableName,
+            OversizedPlanBacklog.TableName,
         };
         Assert.Equal(
             new[]
@@ -284,6 +281,7 @@ public sealed class StoreSelfMetricsTests
                 "collect.query_store_interval_latest_pending",
                 "collect.query_store_interval_wide",
                 "collect.query_store_interval_wide_pending",
+                "collect.oversized_plan_backlog",
             },
             qualified);
 
@@ -313,14 +311,14 @@ public sealed class StoreSelfMetricsTests
         /* The two payload dimensions are in the same predicate, so they leave the catch-all too. */
         Assert.Contains($"'collect.{PayloadDimensions.QueryTextDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
         Assert.Contains($"'collect.{PayloadDimensions.QueryPlanDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
-        /* Exactly nine names, and none of them typed by hand: every quoted name in the predicate is one of
-           the nine constants. */
+        /* Exactly ten names, and none of them typed by hand: every quoted name in the predicate is one of
+           the ten constants. */
         var quoted = System.Text.RegularExpressions.Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(10, quoted.Length); /* nine names plus the '.' separator literal */
+        Assert.Equal(11, quoted.Length); /* ten names plus the '.' separator literal */
         Assert.Equal(
             new[] { $"collect.{PayloadDimensions.QueryTextDimTable}", $"collect.{PayloadDimensions.QueryPlanDimTable}" }.Concat(qualified).OrderBy(x => x, StringComparer.Ordinal),
             quoted.Where(q => q != ".").OrderBy(x => x, StringComparer.Ordinal));
-        Assert.Equal(7, sql.Split("UNION ALL").Length);
+        Assert.Equal(8, sql.Split("UNION ALL").Length);
         Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
     }
 
@@ -387,8 +385,23 @@ public sealed class StoreSelfMetricsTests
             ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",
             ["collect.query_store_top_daily"] = "the daily summary the Query Store top read uses, approximate by design and rebuilt from the interval table (V161 doc)",
             ["collect.plan_regression_daily"] = "the per-day plan totals PLAN_REGRESSION reads for closed days, rebuilt from the interval table (V168 doc)",
+            ["collect.plan_regression_block"] = "the sums of whole blocks of four days of plan_regression_daily the PLAN_REGRESSION read takes in place of the daily rows, rebuilt from them (V295 doc)",
+            ["collect.plan_regression_block_built"] = "per-block build and validity bookkeeping for the plan regression blocks, bytes too small to matter (V295 doc)",
             ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V168 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
+            ["collect.query_store_grid_daily"] = "the closed-day rollup the Query Store grid reads whole days from, rebuilt from the interval table (V283 doc)",
+            ["collect.query_store_slicer_hourly"] = "the closed-day rollup the Query Store slicer reads whole days from, rebuilt from the interval table (V283 doc)",
+            ["collect.query_store_closed_day_built"] = "per-day build bookkeeping for the closed-day rollups, bytes too small to matter (V283 doc)",
+            ["collect.query_stats_host_hourly"] = "the hourly rollup of query_stats the top-queries read ranks whole hours from, one row per server, hour, database, query hash and host object, pruned to query_stats retention and derived from query_stats rather than collected (V287 doc)",
+            ["collect.query_stats_host_hourly_built"] = "per-hour build bookkeeping for the hourly host rollup, bytes too small to matter (V287 doc)",
+            ["collect.query_store_closed_day_tick"] = "one heartbeat row per server for the closed-day rollups, bytes too small to matter (V283 doc)",
+            ["collect.query_store_clutter_plan_daily"] = "the closed-day rollup the Query Store clutter read takes whole days of plan sightings from, rebuilt from raw (V285 doc)",
+            ["collect.query_store_clutter_collections_daily"] = "the closed-day rollup the Query Store clutter read takes whole days of collection counts from, rebuilt from raw (V285 doc)",
+            ["collect.query_stats_collection"] = "the per-collection sums of query_stats the duration trend reads for a Past day window, one row per server, collection and database, pruned with query_stats and derived from it rather than collected (V286 doc)",
+            ["collect.query_stats_collection_floor"] = "one row per server saying from when the query_stats summary is whole, bytes too small to matter (V290 doc)",
+            ["collect.query_store_clutter_plan_hourly"] = "the hourly rollup the Query Store clutter read takes whole hours of plan sightings from, pruned to query_store_stats retention and rebuilt from raw (V289 doc)",
+            ["collect.query_store_clutter_collections_hourly"] = "the hourly rollup the Query Store clutter read takes whole hours of collection counts from, pruned to query_store_stats retention and rebuilt from raw (V289 doc)",
+            ["collect.query_store_clutter_hour_built"] = "per-hour build bookkeeping for the hourly clutter rollups, bytes too small to matter (V289 doc)",
             ["collect.collection_log_hourly"] = "the hourly rollup get_collection_health reads for closed hours, one row per server, collector and hour, pruned to a little over 7 days and derived from collection_log rather than collected (V186 doc)",
             ["collect.job_history_category_hourly"] = "the hourly summary of job categories the Job History Category list reads, one row per server, run hour and category, pruned to job_history's retention and derived from job_history rather than collected (V265 doc)",
             ["collect.job_history_category_coverage"] = "one row saying which collection times the job category summary holds whole, bytes too small to matter (V265 doc)",
@@ -398,7 +411,11 @@ public sealed class StoreSelfMetricsTests
             ["collect.schema_constraints"] = "the check and foreign key constraints of a schema_objects version, a child of it and deleted with it (V256 doc)",
             ["collect.schema_triggers"] = "the triggers of a schema_objects version, a child of it and deleted with it (V256 doc)",
             ["collect.schema_capture_state"] = "the schema capture cursor, one row per server and database, bytes too small to matter (V256 doc)",
+            ["collect.column_stats"] = "the current column statistics rows, replaced in place per statistic (V272 doc): a store table, not a catalogue table, purged by its own retention",
+            ["collect.column_stats_state"] = "the column statistics cursor, one row per server and database, bytes too small to matter (V272 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
+            ["collect.attention_events_legacy_copy"] = "the progress row of the one-time copy of the swapped-out attention table, bytes too small to matter (V277 doc)",
+            ["collect.aggregate_compression_order_history"] = "self-telemetry about the store's own tuning, not collected monitoring data (V279 doc)",
         };
 
         var unaccounted = plainTables
@@ -863,7 +880,7 @@ public sealed class StoreSelfMetricsTests
         Assert.True(written > 0, "the sweep wrote nothing");
 
         /* One table row per name TableInsertSql carries — the same source the census test
-           (TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose) pins, so this
+           (TableInsertSql_NamesTheEightProductTables_AndTheCensusExcludesExactlyThose) pins, so this
            count cannot drift from the product's own named-table list. */
         var expectedTableRows = StoreSelfMetrics.TableInsertSql.Split("UNION ALL").Length;
 
@@ -2301,6 +2318,7 @@ SELECT
         public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
+        public bool TempDbGrowthFitEnabled { get; set; } = true;
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }

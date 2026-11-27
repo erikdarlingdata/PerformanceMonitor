@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -29,6 +31,39 @@ public sealed record QueryTagMapRow(
 
 /// <summary>A key whose sightings changed, with the newest <c>last_seen</c> among its sighting rows.</summary>
 public sealed record QueryTagChangedKey(string KeyKind, string Key, DateTime LastSeen);
+
+/// <summary>
+/// #9308: one server's extend cursor as stored, with the <c>rules_version</c> the map was built at. <see cref="Since"/> is
+/// a UTC time that came from the store's own clock or a sighting's <c>last_seen</c>, so it round-trips exactly.
+/// <see cref="RebuiltAt"/> is the store clock at this server's last rebuild (the weekly staggered rebuild reads it). A cursor
+/// stored before that field existed has none and decodes as <see cref="DateTime.MinValue"/>, "rebuilt long ago", so it is due.
+/// </summary>
+public sealed record QueryTagMapStoredCursor(long RulesVersion, DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt = default)
+{
+    private sealed record Wire(long V, long T, string K, string Key, long? R = null);
+
+    public string Encode() =>
+        JsonSerializer.Serialize(new Wire(
+            RulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey,
+            DateTime.SpecifyKind(RebuiltAt, DateTimeKind.Utc).Ticks));
+
+    public static QueryTagMapStoredCursor? TryDecode(string text)
+    {
+        try
+        {
+            var wire = JsonSerializer.Deserialize<Wire>(text);
+            return wire is { K: not null, Key: not null }
+                ? new QueryTagMapStoredCursor(
+                    wire.V, new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key,
+                    new DateTime(wire.R ?? 0, DateTimeKind.Utc))
+                : null;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+}
 
 /// <summary>Everything the resolver needs, read in one repeatable-read snapshot so the version matches the rules.</summary>
 public sealed record QueryTagMapSnapshot(
@@ -61,12 +96,12 @@ public static class QueryTagMapStore
     /// The keys of one server whose sightings changed after the cursor, oldest first, at most $5. $1 server_id,
     /// $2 the cursor's time, $3 and $4 the cursor's kind and key (the tie-break among keys with the same time: one
     /// batch stamps every key it touches with one <c>now()</c>, so a time alone could not step past a full page).
-    /// <para>A re-sighting of a stored row moves <c>last_seen</c> at most once an hour (#8716), while an insert always takes
-    /// <c>now()</c>. That is enough: a key's resolution reads only the key, the caller fields, the database and the first
-    /// text sample, and the only way those change between rule versions is a NEW sighting row (a new database, application,
-    /// login or host), which is an insert, or a conflict that fills an object name or sample the row lacked, which the
-    /// writer stamps too. A plain re-sighting changes nothing the resolver reads, so missing it costs nothing, and the
-    /// hourly bump brings each active key up about once an hour, where the map write skips a row that already says the same.</para>
+    /// <para>A re-sighting of a stored row moves <c>last_seen</c> at most once every six hours (#8716, #9456), to a stamp behind the extend
+    /// window (<see cref="QueryTagSightingWriter.ReSightingBackdate"/>), while an insert always takes <c>now()</c>. That is
+    /// enough: a key's resolution reads only the key, the caller fields, the database and the first text sample, and the
+    /// only way those change between rule versions is a NEW sighting row (a new database, application, login or host),
+    /// which is an insert, or a conflict that fills an object name or sample the row lacked, which the writer stamps with
+    /// <c>now()</c> too. A plain re-sighting changes nothing the resolver reads, so this read leaves it out.</para>
     /// </summary>
     internal const string ChangedKeysSql = """
 SELECT key_kind, key, last_seen
@@ -133,6 +168,32 @@ WHERE (config.query_tag_map.tag_id, config.query_tag_map.source, config.query_ta
     /// <summary>Stamps the version a rebuild read at its start. Never moves it backwards. $1 version.</summary>
     internal const string StampBuiltVersionSql =
         "UPDATE config.query_tag_state SET built_version = $1, updated_at = now() WHERE id = 1 AND built_version < $1";
+
+    /// <summary>
+    /// #9308: where a server's extend cursor lives across a service start, in <c>collect.collector_state</c> (no migration: the
+    /// table is the store's small per-server state). One row per server, <c>(server_id, 'query_tag_map', 'cursor')</c>, whose value
+    /// is the JSON of <see cref="QueryTagMapStoredCursor"/>.
+    /// </summary>
+    public const string CursorStateOwner = "query_tag_map";
+
+    public const string CursorStateKey = "cursor";
+
+    /// <summary>Writes one server's cursor. $1 server_id, $2 the cursor's text. The cursor commits in the transaction of the map write it describes.</summary>
+    internal const string SaveCursorSql = """
+INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, 'query_tag_map', 'cursor', $2, now() AT TIME ZONE 'UTC')
+ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
+    state_value = EXCLUDED.state_value,
+    updated_at = EXCLUDED.updated_at
+""";
+
+    /// <summary>Reads one server's stored cursor. $1 server_id.</summary>
+    internal const string ReadCursorSql =
+        "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = 'query_tag_map' AND state_key = 'cursor'";
+
+    /// <summary>Drops the stored cursor of every server not in the list. $1 the listed server ids.</summary>
+    internal const string DropCursorsOutsideSql =
+        "DELETE FROM collect.collector_state WHERE collector_name = 'query_tag_map' AND state_key = 'cursor' AND server_id <> ALL($1::int[])";
 
     /// <summary>The database's own clock, so a cursor and a sighting's <c>last_seen</c> are on one clock.</summary>
     public static async Task<DateTime> ClockAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
@@ -331,13 +392,15 @@ WHERE (config.query_tag_map.tag_id, config.query_tag_map.source, config.query_ta
 
     /// <summary>
     /// Replaces one server's map rows with <paramref name="rows"/> in one transaction: a reader sees the old map or
-    /// the new one, and a failure part way rolls back to the old one.
+    /// the new one, and a failure part way rolls back to the old one. A <paramref name="cursor"/> is stored in the same
+    /// transaction (#9308), so a stored cursor is never ahead of the map it describes.
     /// </summary>
     public static async Task ReplaceMapAsync(
         NpgsqlConnection connection,
         int serverId,
         IReadOnlyList<QueryTagMapRow> rows,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        QueryTagMapStoredCursor? cursor = null)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = new NpgsqlCommand(DeleteServerMapSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
@@ -352,28 +415,76 @@ WHERE (config.query_tag_map.tag_id, config.query_tag_map.source, config.query_ta
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (cursor is not null)
+        {
+            await SaveCursorAsync(connection, transaction, serverId, cursor, cancellationToken).ConfigureAwait(false);
+        }
+
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The extend path's write: adds and changes rows, never deletes one.</summary>
+    /// <summary>
+    /// The extend path's write: adds and changes rows, never deletes one. A <paramref name="cursor"/> is stored in the same
+    /// transaction as the rows (#9308), and with no rows it is stored alone.
+    /// </summary>
     public static async Task UpsertMapAsync(
         NpgsqlConnection connection,
         int serverId,
         IReadOnlyList<QueryTagMapRow> rows,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        QueryTagMapStoredCursor? cursor = null)
     {
-        if (rows.Count == 0)
+        if (cursor is null)
         {
+            if (rows.Count > 0)
+            {
+                await using var command = MapCommand(UpsertMapSql, connection, null, serverId, rows);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
-        await using var command = MapCommand(UpsertMapSql, connection, null, serverId, rows);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        if (rows.Count > 0)
+        {
+            await using var command = MapCommand(UpsertMapSql, connection, transaction, serverId, rows);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await SaveCursorAsync(connection, transaction, serverId, cursor, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task SaveCursorAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, QueryTagMapStoredCursor cursor, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(SaveCursorSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = cursor.Encode() });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public static async Task StampBuiltVersionAsync(NpgsqlConnection connection, long version, CancellationToken cancellationToken)
+    /// <summary>The cursor stored for one server, or null when there is none or its text does not read back.</summary>
+    public static async Task<QueryTagMapStoredCursor?> ReadCursorAsync(NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(StampBuiltVersionSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(ReadCursorSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string text ? QueryTagMapStoredCursor.TryDecode(text) : null;
+    }
+
+    /// <summary>Drops the stored cursor of every server that is not in <paramref name="serverIds"/>.</summary>
+    public static async Task DropCursorsOutsideAsync(
+        NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken, NpgsqlTransaction? transaction = null)
+    {
+        await using var command = new NpgsqlCommand(DropCursorsOutsideSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds.ToArray() });
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task StampBuiltVersionAsync(NpgsqlConnection connection, long version, CancellationToken cancellationToken, NpgsqlTransaction? transaction = null)
+    {
+        await using var command = new NpgsqlCommand(StampBuiltVersionSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = version });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }

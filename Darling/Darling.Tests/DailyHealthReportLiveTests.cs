@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -94,6 +95,47 @@ public sealed class DailyHealthReportLiveTests
             Assert.Contains("Blocking x3 (2 held)", rendered.Html, StringComparison.Ordinal);
             Assert.Contains("Nightly load", rendered.Html, StringComparison.Ordinal);
             Assert.StartsWith(data.Title + ": " + data.Servers.Count, rendered.Subject, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, CleanupAsync);
+        }
+    }
+
+    /// <summary>
+    /// #8570: the failed-jobs read starts from an id read taken before the fleet read, so a server enabled between the two has a card
+    /// the jobs read did not ask for. The id read here returns no servers, standing for every server enabled after it: the server's card
+    /// still lists its failed job, read for the card itself.
+    /// </summary>
+    [Fact]
+    public async Task Build_ReadsTheJobsOfACardTheIdReadMissed()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the Daily Health Report live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await InsertJobAsync(connection, ct, 1, "Nightly load", 0, 0, now.AddHours(-2));
+
+            var builder = new DailyHealthReportBuilder(dataSource, enabledServerIds: _ => Task.FromResult(new List<int>()));
+            var data = await builder.BuildDataAsync(now, ct);
+
+            var server = Assert.Single(data.Servers, s => s.ServerId == ServerId);
+            var job = Assert.Single(server.FailedJobs);
+            Assert.Equal(("Nightly load", 1), (job.JobName, job.Failures));
 
             bodySucceeded = true;
         }

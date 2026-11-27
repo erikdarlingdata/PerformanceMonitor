@@ -35,19 +35,29 @@ public sealed class DarlingMcpPgIoTools
     /// </summary>
     internal static string ContextMeaning(string? context) => DarlingPgIoReader.ContextMeaning(context);
 
-    /// <summary>#6206: the first PostgreSQL major with <c>pg_stat_io</c>.</summary>
-    internal const int PgStatIoFirstMajor = 16;
+    /// <summary>#6206: the first PostgreSQL major with <c>pg_stat_io</c>. Delegates to the one copy in the store project.</summary>
+    internal const int PgStatIoFirstMajor = DarlingPgIoReader.PgStatIoFirstMajor;
+
+    /// <summary>#6206: why <c>pg_io_stats</c> is not collected below <see cref="PgStatIoFirstMajor"/>, or null. Delegates to the one copy the Viewer also asks.</summary>
+    internal static string? NotCollectedForVersionMessage(string serverName, int? postgresMajorVersion) =>
+        DarlingPgIoReader.NotCollectedForVersionMessage(serverName, postgresMajorVersion);
 
     /// <summary>
-    /// #6206: why <c>pg_io_stats</c> is not collected on this target when its probed major is below
-    /// <see cref="PgStatIoFirstMajor"/>, or null when the major is unknown (no claim is made) or new enough.
+    /// #8918: the <c>not_collected</c> answer for a PostgreSQL 15 or older target, or null. Read only on an empty answer, so a server with
+    /// rows pays nothing. Both I/O reads that can come back empty ask it before saying a window was idle.
     /// </summary>
-    internal static string? NotCollectedForVersionMessage(string serverName, int? postgresMajorVersion) =>
-        postgresMajorVersion is > 0 and < PgStatIoFirstMajor
-            ? $"{serverName} runs PostgreSQL {postgresMajorVersion}, which has no pg_stat_io (it arrived in PostgreSQL {PgStatIoFirstMajor}), "
-              + "so I/O by backend type, object and context is not collected for this server. There is no setup step "
-              + "that changes this on the monitored server short of upgrading it."
-            : null;
+    internal static async Task<string?> VersionGapStatusAsync(NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+    {
+        var versionGap = await VersionGapMessageAsync(postgres, serverId, displayName, cancellationToken);
+        return versionGap is null ? null : McpHelpers.Status("not_collected", versionGap);
+    }
+
+    /// <summary>#8918: the sentence behind <see cref="VersionGapStatusAsync"/>, or null when the major is unknown or 16 and newer.</summary>
+    internal static async Task<string?> VersionGapMessageAsync(NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+    {
+        var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, serverId, cancellationToken);
+        return NotCollectedForVersionMessage(displayName, postgresMajor);
+    }
 
     /// <summary>
     /// #7459: the status and finding for a window with no pg_stat_io activity. The collector stores cumulative counters and the read differences
@@ -67,6 +77,7 @@ public sealed class DarlingMcpPgIoTools
             $"The pg_io_stats collector ran successfully {CountText.Plural(runs, "time")} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, and activity is the difference between two of its snapshots, so this window was not measured. This is a collection gap, not an all-clear: check collection health."));
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO, WHAT and WHY - backend_type/object/context from pg_stat_io, differenced across the window. track_io_timing is OFF by default: when untracked every *_time_ms and avg_read_ms are null, never a false 0.000; busiest_basis names the fallback ranking. Write counters are always null on Aurora, never a true zero. THE PAGE IS BOUNDED BY limit: combinations_returned/truncated. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads/pct_of_total_read_time divide by total_reads/total_read_time_ms; returned_reads states the page's own share. <<GUIDE>> Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all (write_counters_tracked per row, write_counters_tracked_anywhere once), because on Amazon Aurora they are not measured - backends there do not write data files, the storage layer does, and the engine reports the write side as NULL on some majors and as 0 on others - so the flag is false there and the write fields are null, where a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby. THE PAGE IS BOUNDED BY limit: combinations_returned is how many combinations you got, truncated says the window held more, and the rows are the busiest so the ones past the cap did less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads' denominator is total_reads and pct_of_total_read_time's is total_read_time_ms, each the WHOLE window's figure across every combination that moved, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_reads / returned_read_time_ms (what the page adds up to) and the totals is the I/O the cap left out; returned_pct_of_total_reads and returned_pct_of_total_read_time are those ratios stated once.")]
     public static async Task<string> GetPgIoStats(
         NpgsqlDataSource postgres,
@@ -108,8 +119,7 @@ public sealed class DarlingMcpPgIoTools
 
                 /* #6206: pg_stat_io does not exist before PostgreSQL 16, so the collector never runs on an older target and
                    there is nothing to wait for. Said as not_collected with the version, not as an empty window. */
-                var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
-                var versionGap = NotCollectedForVersionMessage(resolved.DisplayName, postgresMajor);
+                var versionGap = await VersionGapMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 if (versionGap != null)
                 {
                     return McpHelpers.Status("not_collected", versionGap);

@@ -509,9 +509,15 @@ public sealed class NotificationRoutingTests
             AlertEngine.PvsWatermarkMetric, AlertEngine.FileGrowthWatermarkMetric,
             AlertEngine.AnomalousJobWatermarkMetric, AlertEngine.FailedJobWatermarkMetric,
             AlertEngine.CpuPersistenceMetric,
+            AlertEngine.PgCapacityCeilingMetric,
+            /* #8881: the TempDB Log Space alert fires through the constant, which the AlertOutcome literal scan below cannot see. */
+            AlertEngine.TempDbLogSpacePersistenceMetric,
+            /* #8882: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            AlertEngine.TempDbGrowthFitPersistenceMetric,
             PostgresAlertEvaluator.WraparoundMetric, PostgresAlertEvaluator.XminHorizonMetric,
             PostgresAlertEvaluator.SlotRetentionMetric, PostgresAlertEvaluator.PoisonWaitMetric,
             ForcePlanTokens.MetricName, DatabaseStateTokens.MetricName,
+            AlertEngine.InstanceRestartedMetric, AlertEngine.MemoryDumpsMetric,
             AgAlertPolicy.FailoverMetric, AgAlertPolicy.ReplicaDisconnectedMetric, AgAlertPolicy.ReplicaReconnectedMetric,
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
@@ -526,6 +532,10 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
             /* #7368: fired through the constant, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.AutovacuumBehindMetric,
+            /* #8950: fired through the constant too. */
+            DarlingSelfAlertEvaluator.VacuumStalledMetric,
+            /* #9000: fired through the constant too. */
+            DarlingSelfAlertEvaluator.StoreGrowthMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */

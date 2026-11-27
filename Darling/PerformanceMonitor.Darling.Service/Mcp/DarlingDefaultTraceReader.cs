@@ -178,7 +178,7 @@ internal static class DarlingDefaultTraceReader
         while (await reader.ReadAsync(cancellationToken))
         {
             var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
-            if (eventTimeUtc is not { } utc || utc < startUtc || utc > endUtc)
+            if (eventTimeUtc is not { } utc || utc <= startUtc || utc > endUtc)
             {
                 continue;
             }

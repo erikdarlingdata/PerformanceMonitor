@@ -47,9 +47,19 @@ namespace PerformanceMonitor.Darling.Storage;
 /// for the same server/range on a later call (a rollup materializes, coverage moves), the old block is not
 /// reused.</para>
 ///
-/// <para><b>No band or rank lives here (#4232 ruling item 7, checked).</b> Every column
-/// <c>DailySummarySql.RangeSqlFor</c> returns is grouped strictly within its own day's rows -- nothing in the
-/// statement compares one day to another, so there is no cross-range column to protect. <typeparamref
+/// <para><b>No band or rank lives here (#4232 ruling item 7), and the blocking columns span days.</b> Every column
+/// <c>DailySummarySql.RangeSqlFor</c> returns is grouped within its own day's rows except the blocking counts and
+/// peaks: the blocking waits chain groups the reports of one wait across the whole window and counts the wait once,
+/// on the day of its longest report. A window that STARTS later leaves the days it keeps unchanged, because a wait
+/// that crosses the start still lands on the day of its longest report. Three shapes the collector does not write are the
+/// exception: a row collected more than a day before its own event time, which the later window's floor drops; a
+/// later report of a wait with a shorter wait time than an earlier one; and derived starts within one wait that
+/// drift more than 2 s in total, when the cut removes a middle report. A window that ENDS earlier does not: the
+/// reports before the end become a wait of their own on the window's last day. So a sub-range that stops short of
+/// the range's end (a part of a split miss, see <see cref="DailySummaryRangeCache.MissSubRanges"/>, and the
+/// sub-horizon re-read) is read one day past its own end and only its own days are kept: the extra day holds the
+/// rest of a wait that crosses midnight, which keeps that wait on its own day. The extra day does not cover a wait
+/// that is still running a whole UTC day later with no report of it stored for that day. <typeparamref
 /// name="TRow"/> should still be the RAW per-day row: callers must cache rows from BEFORE any later
 /// banding/threshold/horizon judgment is stamped onto them, and re-apply that judgment to every row (cached or
 /// fresh) after <see cref="GetRangeAsync"/> returns. A purge horizon or a deadlock-rate-threshold setting can
@@ -113,6 +123,11 @@ public sealed class DailySummaryRangeCache<TRow>
     /// Returns the rows for the half-open <paramref name="fromDate"/>/<paramref name="toDate"/> UTC-day range,
     /// using the closed-day cache when <paramref name="asOfNow"/> is true (#4232 ruling item 5 -- an explicit
     /// end time is not "as of now" and always runs <paramref name="runRange"/> over the whole range, unmemoized).
+    /// #8824: the longer overload's <c>refreshSubHorizon</c> re-reads a block's sub-horizon segment on this call instead of when its
+    /// hour is up. The warmer passes true on every pass, so the hour never lapses under a visitor (the first visit to a server an hour
+    /// after its block was built otherwise paid the read of those days). A visitor's read leaves it false.
+    /// #9039: <c>skipOpenDayTail</c> is for a caller that throws the rows away. On a block that already holds every closed day it
+    /// skips the open days' read, and the rows it returns leave those days out.
     /// </summary>
     /// <param name="storeKey">Distinguishes stores sharing one cache instance (the service keeps ONE cache for every
     /// store it serves). Compared by value: the service passes <see cref="DailySummaryRangeCache.StoreKeyFor"/>, which
@@ -134,6 +149,13 @@ public sealed class DailySummaryRangeCache<TRow>
     /// <param name="runRange">Runs the statement for an arbitrary half-open [start, end) sub-range and returns its
     /// rows, oldest day first. Called with the WHOLE [<paramref name="fromDate"/>, <paramref name="toDate"/>) on a
     /// cache miss, and with only the open sub-range on a hit.</param>
+    /// <param name="missParts">#8549: the most sub-ranges a cache miss is cut into. It takes effect only with
+    /// <paramref name="runMissRanges"/>; the default reads a miss as one statement.</param>
+    /// <param name="runMissRanges">#8549: runs the statement for each [start, end) it is handed, side by side, and
+    /// returns one row list per range in the order given. With it, a miss whose closed days are enough for
+    /// <see cref="DailySummaryRangeCache.MissSubRanges"/> to cut is read as those sub-ranges instead of one statement
+    /// over the whole range, and returns and stores the same rows. The caller owns the concurrency (its pool, its
+    /// deadlines), which is why this is a delegate and not a flag. Null (the default) reads a miss as one statement.</param>
     public Task<List<TRow>> GetRangeAsync(
         object storeKey,
         int serverId,
@@ -158,7 +180,11 @@ public sealed class DailySummaryRangeCache<TRow>
         Func<DateTime, DateTime, CancellationToken, Task<List<TRow>>> runRange,
         string scopeKey,
         CancellationToken cancellationToken,
-        DateTime? trustFromUtc = null)
+        DateTime? trustFromUtc = null,
+        bool refreshSubHorizon = false,
+        int missParts = 1,
+        Func<IReadOnlyList<(DateTime Start, DateTime End)>, CancellationToken, Task<IReadOnlyList<List<TRow>>>>? runMissRanges = null,
+        bool skipOpenDayTail = false)
     {
         ArgumentNullException.ThrowIfNull(day);
         ArgumentNullException.ThrowIfNull(runRange);
@@ -196,11 +222,15 @@ public sealed class DailySummaryRangeCache<TRow>
                nothing: the block holds every closed day. */
             var trustUtc = floorUtc > block.TrustFromUtc ? floorUtc : block.TrustFromUtc;
             var subEndUtc = trustUtc < block.ClosedEndUtc ? trustUtc : block.ClosedEndUtc;
-            if (subEndUtc > fromDate && (nowUtc >= block.SubHorizonExpiresAtUtc || trustUtc > block.TrustFromUtc))
+            if (subEndUtc > fromDate && (refreshSubHorizon || nowUtc >= block.SubHorizonExpiresAtUtc || trustUtc > block.TrustFromUtc))
             {
-                var subRows = await runRange(fromDate, subEndUtc, cancellationToken).ConfigureAwait(false);
+                /* The segment ends before the range does, so it is read one day past its end and that day's row is
+                   dropped: a blocking wait that crosses the segment's last midnight stays on its own day (see the
+                   type's remarks). The horizon day is the segment's last day and it is banded like any other day. */
+                var subReadEndUtc = subEndUtc.AddDays(1) < toDate ? subEndUtc.AddDays(1) : toDate;
+                var subRows = await runRange(fromDate, subReadEndUtc, cancellationToken).ConfigureAwait(false);
                 var refreshed = new List<TRow>(subRows.Count + block.ClosedRows.Count);
-                refreshed.AddRange(subRows);
+                refreshed.AddRange(subRows.Where(row => day(row) < subEndUtc));
                 refreshed.AddRange(block.ClosedRows.Where(row => day(row) >= subEndUtc));
                 block = block with { ClosedRows = refreshed, TrustFromUtc = trustUtc, SubHorizonExpiresAtUtc = nowUtc + SubHorizonTtl };
                 _blocks[key] = block;
@@ -209,7 +239,11 @@ public sealed class DailySummaryRangeCache<TRow>
             var joined = new List<TRow>(block.ClosedRows.Count + 8);
             joined.AddRange(block.ClosedRows);
 
-            if (block.ClosedEndUtc < toDate)
+            /* #9039: a caller that discards the rows (the warmer) and finds a block that already holds every day closed so far has
+               nothing to build from the open days, and their statement is the dearest one of the read (a count of the day's distinct
+               queries over every raw row since midnight), so it is not run. The rows returned then leave out the open days. When the
+               block has yet to close a day (the grace after midnight), the tail still runs because it grows the block. */
+            if (block.ClosedEndUtc < toDate && !(skipOpenDayTail && block.ClosedEndUtc >= closedEndUtc))
             {
                 var tailRows = await runRange(block.ClosedEndUtc, toDate, cancellationToken).ConfigureAwait(false);
                 joined.AddRange(tailRows);
@@ -229,9 +263,10 @@ public sealed class DailySummaryRangeCache<TRow>
            an MCP call with only server_name asks for 30 days, a different key over the same days, so it read the whole
            month again (11.4 s on a busy store, 3 h 45 min after the service started). When another live block of the
            SAME store, server, statement, scope and end day begins on or before this call's start and has closed at
-           least as far, its closed days are this call's closed days (every row is grouped within its own day, see the
-           type's remarks), so this call starts from a copy of them cut to its own start and takes the usual short
-           path (the open days, and the sub-horizon days when they are due). */
+           least as far, its closed days are this call's closed days (a window that starts earlier and ends on the
+           same day counts each of those days the same way, see the type's remarks), so this call starts from a copy
+           of them cut to its own start and takes the usual short path (the open days, and the sub-horizon days when
+           they are due). */
         if (!_blocks.ContainsKey(key))
         {
             var donor = _blocks
@@ -246,12 +281,38 @@ public sealed class DailySummaryRangeCache<TRow>
                 var sliced = found.Value with { ClosedRows = found.Value.ClosedRows.Where(row => day(row) >= fromDate).ToList() };
                 if (_blocks.TryAdd(key, sliced))
                 {
-                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc).ConfigureAwait(false);
+                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc, refreshSubHorizon, missParts, runMissRanges, skipOpenDayTail).ConfigureAwait(false);
                 }
             }
         }
 
-        var full = await runRange(fromDate, toDate, cancellationToken).ConfigureAwait(false);
+        /* #8549: a cold range is one long statement over every closed day. A caller that passes runMissRanges reads
+           it as a few day-aligned sub-ranges side by side instead. Each sub-range but the newest is read one day past
+           its own end and that day's row is dropped here, so the joined rows are the one statement's rows (see the
+           type's remarks) and the block below holds each closed day once, from the sub-range that owns it. */
+        var plan = DailySummaryRangeCache.MissSubRanges(fromDate, toDate, closedEndUtc, runMissRanges is null ? 1 : missParts);
+        List<TRow> full;
+        if (plan.Count == 0)
+        {
+            full = await runRange(fromDate, toDate, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            var parts = await runMissRanges!(plan.Select(part => (part.Start, part.ReadEnd)).ToList(), cancellationToken).ConfigureAwait(false);
+            if (parts.Count != plan.Count)
+            {
+                throw new InvalidOperationException(
+                    $"A split daily-summary read asked for {plan.Count} sub-ranges and was handed {parts.Count} row lists.");
+            }
+
+            full = [];
+            for (var i = plan.Count - 1; i >= 0; i--)
+            {
+                var ownEndUtc = plan[i].End;
+                full.AddRange(parts[i].Where(row => day(row) < ownEndUtc));
+            }
+        }
+
         var closedRows = full.Where(row => day(row) < closedEndUtc).ToList();
 
         /* #4232 follow-up: the key carries the range, so nothing ever replaces a block for a range nobody asks
@@ -289,6 +350,51 @@ public static class DailySummaryRangeCache
     /// day itself can be half-deleted on the DELETE purge path, so it is read live too. One definition for the
     /// service and the Viewer.</summary>
     public static DateTime TrustFloorFor(DateTime retentionHorizon) => retentionHorizon.Date.AddDays(1);
+
+    /// <summary>The fewest closed days one sub-range of a split miss owns. Every sub-range but the newest reads one
+    /// day more than it owns, so a shorter one spends too much of its read on a day it does not keep.</summary>
+    internal const int MinSubRangeDays = 3;
+
+    /// <summary>#8549: how a cache miss on [<paramref name="fromDate"/>, <paramref name="toDate"/>) is cut into at
+    /// most <paramref name="parts"/> sub-ranges to read side by side, newest first, or an empty list when the range
+    /// is read as one statement (fewer than two parts, fewer than <see cref="MinSubRangeDays"/> closed days per part,
+    /// or a bound that is not a whole UTC day). The closed days [<paramref name="fromDate"/>,
+    /// <paramref name="closedEndUtc"/>) are cut into balanced runs of whole days, the older runs taking the
+    /// remainder. A sub-range owns the days in [Start, End) and is read over [Start, ReadEnd). The newest owns the
+    /// open days as well and is read to the range's end. Every other one is read one day past its own end, capped at
+    /// the range's end: the blocking waits chain counts a wait on the day of its longest report, so the day after a
+    /// sub-range's end is what tells a wait that crosses that midnight from one that ended before it.</summary>
+    internal static IReadOnlyList<(DateTime Start, DateTime End, DateTime ReadEnd)> MissSubRanges(
+        DateTime fromDate, DateTime toDate, DateTime closedEndUtc, int parts)
+    {
+        if (fromDate != fromDate.Date || toDate != toDate.Date || closedEndUtc != closedEndUtc.Date)
+        {
+            return [];
+        }
+
+        var closedDays = (int)(closedEndUtc - fromDate).TotalDays;
+        var count = Math.Min(parts, closedDays / MinSubRangeDays);
+        if (count < 2)
+        {
+            return [];
+        }
+
+        var ranges = new List<(DateTime Start, DateTime End, DateTime ReadEnd)>(count);
+        var baseDays = closedDays / count;
+        var olderWithOneMore = closedDays % count;
+        var ownEnd = closedEndUtc;
+        for (var i = 0; i < count; i++)
+        {
+            var start = i == count - 1 ? fromDate : ownEnd.AddDays(-(baseDays + (i >= count - olderWithOneMore ? 1 : 0)));
+            var dayPastEnd = ownEnd.AddDays(1);
+            ranges.Add(i == 0
+                ? (start, toDate, toDate)
+                : (start, ownEnd, dayPastEnd < toDate ? dayPastEnd : toDate));
+            ownEnd = start;
+        }
+
+        return ranges;
+    }
 
     /// <summary>#8451: the <c>storeKey</c> the service passes for a read through <paramref name="postgres"/>: the store it
     /// reaches (host, port and database), so two data sources over one store share its blocks. The service holds three

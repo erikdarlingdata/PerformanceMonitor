@@ -33,7 +33,6 @@ public static class SchemaEventQuery
         }
 
         var sessions = databaseScoped ? "sys.dm_xe_database_sessions" : "sys.dm_xe_sessions";
-        var targets = databaseScoped ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets";
         var login = databaseScoped ? "username" : "server_principal_name";
 
         /* The object's own database: the event's database_id. The database_name action is the session's current database, which is
@@ -49,14 +48,14 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 {RingBufferXml.DeclareSql}
 
+/* #9517: the session is found by name once and the target is read by its address, so the read does not build every other
+   running session's target rows. */
+{RingBufferXml.ResolveAddressSql(databaseScoped, sessionName)}
+
 SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
-    @ring_session = xes.name
-FROM {targets} AS xet
-JOIN {sessions} AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'{sessionName}'
-AND   xet.target_name = N'ring_buffer'
+    @ring_session = @xe_name
+{RingBufferXml.TargetFromSql(databaseScoped, "ring_buffer")}
 OPTION(RECOMPILE);
 
 {RingBufferXml.ParseSql}

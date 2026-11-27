@@ -99,6 +99,11 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
 
     private static string Done(string database) => QueryStoreBackfillState.DoneKeyPrefix + database;
     private static string Hole(string database) => QueryStoreBackfillState.HoleKeyPrefix + database;
+    private static string Landed(string database) => QueryStoreBackfillState.LandedKeyPrefix + database;
+
+    private static string EncodedLanded() => QueryStoreBackfillState.EncodeLanded(
+        new DateTime(2026, 8, 10, 0, 0, 0, DateTimeKind.Utc),
+        new DateTime(2026, 8, 11, 8, 0, 0, DateTimeKind.Utc));
 
     private static string EncodedHole() => QueryStoreBackfillState.EncodeHole(
         new DateTime(2026, 8, 10, 0, 0, 0, DateTimeKind.Utc),
@@ -117,6 +122,10 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
         await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Live"), EncodedHole());
         await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Dropped"), "2026-08-11T09:00:00Z");
         await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Dropped"), EncodedHole());
+
+        /* #9359: the stored clamp entry is per database too, so a dropped database must not leave one behind. */
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Landed("Live"), EncodedLanded());
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Landed("Dropped"), EncodedLanded());
 
         /* The name-shape trap: writing the anti-join with a prefix match instead of an equality would spare
            AppArchive forever, because "done:App" is a prefix of "done:AppArchive". For an issue whose whole
@@ -137,10 +146,12 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
 
         Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Dropped")));
         Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Dropped")));
+        Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Landed("Dropped")));
         Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("AppArchive")));
 
         Assert.Equal("2026-08-11T09:00:00Z", await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Live")));
         Assert.Equal(EncodedHole(), await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Live")));
+        Assert.Equal(EncodedLanded(), await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Landed("Live")));
         Assert.Equal("keep me", await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, "unrelated-bookkeeping"));
         Assert.Equal(@"S:\MSSQL\Log\log_766.trc", await ValueAsync(ServerId, DefaultTraceEventsCollector.Instance.Name,
             DefaultTraceEventsCollector.LastTraceFilePathStateKey));
@@ -148,7 +159,7 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
 
         /* Idempotent — it runs on every query_store cycle, so a second pass must touch nothing. */
         await _pruner.PruneAsync(ServerId);
-        Assert.Equal(4L, await CountAsync(ServerId));
+        Assert.Equal(5L, await CountAsync(ServerId));
     }
 
     [Fact]

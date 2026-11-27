@@ -658,7 +658,7 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres);",
+            "DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient), personalTokenSnapshot: _personalSnapshot, personalTokens: personalTokens);",
             host, StringComparison.Ordinal);
     }
 

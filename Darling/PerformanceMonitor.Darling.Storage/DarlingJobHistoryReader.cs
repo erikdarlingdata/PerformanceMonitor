@@ -62,18 +62,18 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
     /// rest, so a fleet that fits under the cap comes back whole and one busy server cannot fill the page alone. Without it the cut is
     /// the newest runs of the whole fleet, and the statement text is unchanged.
     /// </summary>
-    internal string BaseCutSql(string limitParam) => ShareCapPerServer
+    internal string BaseCutSql(string limitParam, string source = "top_by_server") => ShareCapPerServer
         ? $@"    SELECT ranked.*
     FROM (
         SELECT
             t.*,
             row_number() OVER (PARTITION BY t.server_id ORDER BY t.run_datetime_local DESC, t.instance_id DESC) AS server_rank
-        FROM top_by_server AS t
+        FROM {source} AS t
     ) AS ranked
-    ORDER BY ranked.server_rank > CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM top_by_server)), ranked.approx_run_utc DESC, ranked.instance_id DESC
+    ORDER BY ranked.server_rank > CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM {source})), ranked.approx_run_utc DESC, ranked.instance_id DESC
     LIMIT {limitParam}"
         : $@"    SELECT *
-    FROM top_by_server
+    FROM {source}
     ORDER BY approx_run_utc DESC, instance_id DESC
     LIMIT {limitParam}";
 
@@ -117,6 +117,9 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
     /// </summary>
     internal string StatsClause(int firstParam) =>
         UntilUtc is null ? string.Empty : $"\n        AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)";
+
+    /// <summary>The parameter number of the end instant (#9110), or null when there is none.</summary>
+    internal int? StatsUntilParam(int firstParam) => UntilUtc is null ? null : UntilParam(firstParam);
 
     internal IEnumerable<NpgsqlParameter> Parameters()
     {
@@ -177,7 +180,7 @@ public static class DarlingJobHistoryReader
         filter?.UntilUtc is null && DateTime.UtcNow - sinceUtc >= NarrowReadMinWindow;
 
     /// <summary>
-    /// Reads the newest <paramref name="limit"/> runs at or after <paramref name="sinceUtc"/> (naive UTC), for one
+    /// Reads the newest <paramref name="limit"/> runs after <paramref name="sinceUtc"/> (naive UTC), for one
     /// server or, with no <paramref name="serverId"/>, all of them, newest first. The window is exact after the
     /// server-local to UTC conversion; the SQL pre-filters widened by an hour.
     /// </summary>
@@ -185,12 +188,57 @@ public static class DarlingJobHistoryReader
         NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
         JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
-        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter));
+        var rollup = UsesSummary(sinceUtc) && await RollupTablesExistAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        return await ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup, cancellationToken);
+    }
+
+    /// <summary>
+    /// The shortest window, measured back from now, whose <c>job_stats</c> reads the daily summary (#9110). A shorter window starts in
+    /// <c>job_history</c>'s uncompressed chunks, where the plain read is cheap and an edge day read from a chunk that has just been compressed
+    /// costs more than it saves (on a seeded store, 7 days read about 4,000 buffers plain and about 14,700 with the summary, and 9 days about
+    /// 14,900 and 14,000); from 10 days the summary reads fewer buffers and runs faster (10 days about 9,000 against 6,700, 30 days about 44,700
+    /// against 13,200).
+    /// </summary>
+    public static readonly TimeSpan SummaryMinWindow = TimeSpan.FromDays(10);
+
+    /// <summary>Whether a window that starts at <paramref name="sinceUtc"/> (naive UTC) reads <c>job_stats</c> from the daily summary (#9110), where the store has it.</summary>
+    public static bool UsesSummary(DateTime sinceUtc) => DateTime.UtcNow - sinceUtc >= SummaryMinWindow;
+
+    /// <summary>The read of <see cref="GetAsync"/> that always reads the daily summary (#9110), for a test to compare with the plain read.</summary>
+    internal static Task<List<DarlingJobHistoryRow>> GetWithSummaryAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter = null, CancellationToken cancellationToken = default) =>
+        ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup: true, cancellationToken);
+
+    /// <summary>The read of <see cref="GetAsync"/> with the daily summary left out (#9110): the statement that reads <c>job_history</c> alone, so a test can compare the two.</summary>
+    internal static Task<List<DarlingJobHistoryRow>> GetWithoutSummaryAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter = null, CancellationToken cancellationToken = default) =>
+        ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup: false, cancellationToken);
+
+    private static async Task<List<DarlingJobHistoryRow>> ReadAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter, bool rollup, CancellationToken cancellationToken)
+    {
+        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter), rollup: rollup);
         var clocks = await DarlingServerClocksReader.GetAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
 
         var rows = new List<DarlingJobHistoryRow>();
 
-        await using var command = dataSource.CreateCommand(sql);
+        await using var command = CreateReadCommand(dataSource, sql, sinceUtc, serverId, limit, commandTimeoutSeconds, filter);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadRow(reader, clocks));
+        }
+
+        return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);
+    }
+
+    private static NpgsqlCommand CreateReadCommand(
+        NpgsqlDataSource dataSource, string sql, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds, JobHistoryFilter? filter)
+    {
+        var command = dataSource.CreateCommand(sql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
         if (serverId.HasValue)
@@ -212,13 +260,26 @@ public static class DarlingJobHistoryReader
             }
         }
 
+        return command;
+    }
+
+    /// <summary>The <c>job_stats</c> output of the read (#9110), per server and job: the average successful duration as the text Postgres prints and the
+    /// last success in the server's clock. With <paramref name="rollup"/> it is the summary's statement, without it the statement over <c>job_history</c>
+    /// alone, so a test can compare the two digit for digit; the row type of the read carries neither value.</summary>
+    internal static async Task<List<(int ServerId, string JobId, string? AvgSuccessDuration, DateTime? LastSuccessRunLocal)>> GetJobStatsAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        bool rollup, JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
+    {
+        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter), rollup: rollup, jobStatsOnly: true);
+        var stats = new List<(int, string, string?, DateTime?)>();
+        await using var command = CreateReadCommand(dataSource, sql, sinceUtc, serverId, limit, commandTimeoutSeconds, filter);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, clocks));
+            stats.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetDateTime(3)));
         }
 
-        return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);
+        return stats;
     }
 
     /// <summary>
@@ -383,7 +444,7 @@ ORDER BY jh.category_name";
         var kept = new List<DarlingJobHistoryRow>(rows.Count);
         foreach (var row in rows)
         {
-            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since && (until is null || runUtc <= until))
+            if (row.RunDateTimeUtc is { } runUtc && runUtc > since && (until is null || runUtc <= until))
             {
                 kept.Add(row);
             }
@@ -479,7 +540,7 @@ ORDER BY jh.category_name";
     /// the window's length (<see cref="UsesNarrowFirstRead"/>), and the default shape's text is unchanged.
     /// </para>
     /// </summary>
-    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false)
+    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false, bool rollup = false, bool jobStatsOnly = false)
     {
         var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
@@ -495,9 +556,20 @@ ORDER BY jh.category_name";
         var filterSql = filter?.Clauses(firstFilterParam) ?? string.Empty;
         var statsUntilSql = filter?.StatsClause(firstFilterParam) ?? string.Empty;
         var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
+        /* #9110: where the narrow read is proven to hold the whole window's cut, that cut IS the answer, so base takes it as it stands
+           and the cut over top_by_server (a second sort of the same rows) is never run. */
+        if (narrowFirst)
+        {
+            baseCutSql = $@"    SELECT * FROM narrow_cut WHERE (SELECT ok FROM narrow_proof)
+    UNION ALL
+    SELECT * FROM (
+{baseCutSql}
+    ) AS full_cut WHERE NOT (SELECT ok FROM narrow_proof)";
+        }
+
         var latestOffsetSql = LatestOffsetSql("a.server_id");
         var offsetKnownSql = narrowFirst ? ", svr.utc_offset_minutes IS NOT NULL AS offset_known" : string.Empty;
-        var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql) : $@"top_by_server AS (
+        var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql, filter ?? new JobHistoryFilter()) : $@"top_by_server AS (
     SELECT
         so.server_id,
         COALESCE(so.display_name, top.server_name) AS server_name,
@@ -542,7 +614,35 @@ ORDER BY jh.category_name";
 ),";
 
 
-        return $@"
+        /* #9110: with the summary, job_stats reads whole days from it and only the rest from job_history. */
+        var jobStatsSql = rollup
+            ? BuildRollupJobStatsSql(floorParam, statsUntilSql, filter?.StatsUntilParam(firstFilterParam))
+            : $@"job_stats AS (
+    SELECT
+        so.server_id,
+        js.job_id,
+        js.avg_success_duration,
+        js.last_success_run_local
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
+    JOIN server_offsets AS so ON so.server_id = b.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            jh.job_id,
+            AVG(jh.run_duration_seconds) AS avg_success_duration,
+            MAX(jh.run_datetime) AS last_success_run_local
+        FROM job_history AS jh
+        WHERE jh.server_id = b.server_id
+        AND   jh.job_id = ANY (b.job_ids)
+        AND   jh.step_id = 0
+        AND   jh.run_status = 1
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.run_datetime > $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
+        GROUP BY jh.job_id
+    ) AS js
+)";
+
+
+        var withSql = $@"
 WITH active_servers AS (
     SELECT DISTINCT jh.server_id
     FROM job_history AS jh
@@ -563,30 +663,17 @@ server_offsets AS (
 base AS (
 {baseCutSql}
 ),
-job_stats AS (
-    SELECT
-        so.server_id,
-        js.job_id,
-        js.avg_success_duration,
-        js.last_success_run_local
-    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
-    JOIN server_offsets AS so ON so.server_id = b.server_id
-    CROSS JOIN LATERAL (
-        SELECT
-            jh.job_id,
-            AVG(jh.run_duration_seconds) AS avg_success_duration,
-            MAX(jh.run_datetime) AS last_success_run_local
-        FROM job_history AS jh
-        WHERE jh.server_id = b.server_id
-        AND   jh.job_id = ANY (b.job_ids)
-        AND   jh.step_id = 0
-        AND   jh.run_status = 1
-        AND   jh.collection_time >= {floorParam}
-        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
-        GROUP BY jh.job_id
-    ) AS js
-)
-SELECT
+{jobStatsSql}
+";
+
+        /* #9110: a test reads the CTE's own output, to compare the average and the last success of the two statements digit for digit
+           (the row type carries no average). Same statement and parameters; only the final SELECT differs. */
+        if (jobStatsOnly)
+        {
+            return withSql + "SELECT server_id, job_id, avg_success_duration::text, last_success_run_local FROM job_stats ORDER BY server_id, job_id";
+        }
+
+        return withSql + @"SELECT
     base.server_id,
     base.server_name,
     base.instance_id,
@@ -619,6 +706,193 @@ LEFT JOIN job_stats
 ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     }
 
+    /// <summary>The daily summary tables (#9110): per day and job, the days' newest collection, and each server's watermark.</summary>
+    internal const string RollupDailyTable = JobOutcomeDaily.Table;
+    internal const string RollupDaysTable = JobOutcomeDaily.DaysTable;
+    internal const string RollupWatermarkTable = JobOutcomeDaily.WatermarkTable;
+
+    /// <summary>The widest a server's real clock can run from UTC (840 minutes) plus the hour a daylight-saving change adds (#9110): how far before a
+    /// server-local time its rows can have been collected, whatever offset is stored for the server (none, or one that has since changed). The
+    /// summary read bounds its raw ranges and its full days by this, never by the stored offset.</summary>
+    internal const string RollupWidestOffsetMargin = "interval '900 minutes'";
+
+    /// <summary>How far before the store's retention horizon a window may start and still read the summary (#9110): the gap between the app's
+    /// clock, when it made the window start, and the store's now. Under the slack, a row the purge could have dropped but the rollup still
+    /// counts has to be collected inside the minute before the horizon and the purge has to have run in the minute before the read.</summary>
+    internal const string RollupRetentionSlack = "interval '1 minute'";
+
+    /// <summary>
+    /// The watermark the summary read of one server uses (#9110), NULL when that server reads <c>job_history</c> alone (the <c>bd.w IS NULL</c>
+    /// arm). The summary answers only when all three hold:
+    /// <list type="bullet">
+    /// <item>the server has a watermark row;</item>
+    /// <item><c>gc_before</c> is NULL or not past the window's first server-local day: retention deletes the rollup's days by run day, and a day
+    /// before <c>gc_before</c> may be gone (retention was raised after it ran, say);</item>
+    /// <item>the window starts no earlier than the oldest <c>collection_time</c> that <c>job_history</c>'s retention is sure to keep: the
+    /// store's clock minus the retention days, the fleet row's override or the default (the one rule the purge applies, whether it drops a
+    /// chunk or deletes by time; the purge never reads a per-server row). A row collected before that may be gone from <c>job_history</c>
+    /// while the rollup still counts it, or the other way round. <see cref="RollupRetentionSlack"/> covers the few milliseconds between the
+    /// app's clock and the store's, so Past 30 days at the default retention stays on the summary.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="sinceParam">The window start parameter, naive UTC.</param>
+    internal static string RollupWatermarkSql(string sinceParam) => $@"CASE
+                WHEN wm.collected_through IS NOT NULL
+                 AND (wm.gc_before IS NULL OR ({sinceParam} + make_interval(mins => so.offset_minutes))::date >= wm.gc_before)
+                 AND {sinceParam} + {RollupRetentionSlack} >= (now() AT TIME ZONE 'UTC') - make_interval(days => {DarlingRetentionHorizons.FleetRetentionDaysSql("job_history")})
+                THEN wm.collected_through AT TIME ZONE 'UTC'
+            END";
+
+    /// <summary>
+    /// #9110: <c>job_stats</c> from the daily summary (the daily summary tables). Per listed server, with <c>W</c> the server's
+    /// <c>collected_through</c>: the summary counts every qualifying row with <c>collection_time &lt;= W</c> exactly once and no row above it,
+    /// so the average successful duration and the last success of each listed job are the sum of four parts that never overlap:
+    /// <list type="bullet">
+    /// <item>the summary rows of the full days (wholly inside the window on that server's clock, and wholly at or after the
+    /// <c>collection_time</c> floor);</item>
+    /// <item>the raw rows of those full days with <c>collection_time &gt; W</c>, a range on <c>collection_time</c> that reaches only recent
+    /// chunks once the summary has caught up;</item>
+    /// <item>the raw rows of each edge day (the window's partial first day, the partial last day when the window has an end, and the days
+    /// the floor cuts) collected up to the newest <c>collection_time</c> the summary holds for that day, from the day's UTC start (less an
+    /// hour for a daylight-saving change). That range is bounded on <c>collection_time</c> too, so it reads about a day of chunks, plus
+    /// up to the day's newest late row;</item>
+    /// <item>the raw rows of each edge day with <c>collection_time &gt; W</c>.</item>
+    /// </list>
+    /// A server with no watermark row, or one whose retention does not match the window (<see cref="RollupWatermarkSql"/>), reads <c>job_history</c> for the whole window, as the statement without the summary does. The average is
+    /// the summed durations over the summed counts as a numeric, so it matches <c>AVG(bigint)</c> digit for digit, and a job with only NULL
+    /// durations has a NULL average and still has its last success. The summary counts only non-NULL durations, so the raw count does the same.
+    /// </summary>
+    internal static string BuildRollupJobStatsSql(string floorParam, string statsUntilSql, int? untilParam)
+    {
+        var untilLocalSql = untilParam is { } n ? $"${n} + make_interval(mins => so.offset_minutes)" : "NULL::timestamp";
+        var fullHiSql = untilParam is null ? "'infinity'::date" : "date_trunc('day', s.until_local)::date";
+
+        return $@"job_stats AS (
+    SELECT
+        so.server_id,
+        js.job_id,
+        js.avg_success_duration,
+        js.last_success_run_local
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
+    JOIN server_offsets AS so ON so.server_id = b.server_id
+    LEFT JOIN {RollupWatermarkTable} AS wm ON wm.server_id = b.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            s.since_local,
+            s.until_local,
+            s.w,
+            (date_trunc('day', GREATEST(s.since_local, GREATEST({floorParam}, (now() AT TIME ZONE 'UTC') - make_interval(days => {DarlingRetentionHorizons.FleetRetentionDaysSql("job_history")})) + {RollupWidestOffsetMargin}) - interval '1 microsecond') + interval '1 day')::date AS full_lo,
+            {fullHiSql} AS full_hi
+        FROM (SELECT $1 + make_interval(mins => so.offset_minutes) AS since_local, {untilLocalSql} AS until_local, {RollupWatermarkSql("$1")} AS w) AS s
+    ) AS bd
+    CROSS JOIN LATERAL (
+        SELECT
+            p.job_id,
+            SUM(p.duration_sum)::numeric / NULLIF(SUM(p.duration_count), 0) AS avg_success_duration,
+            MAX(p.last_run) AS last_success_run_local
+        FROM (
+            SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+            FROM job_history AS jh
+            WHERE bd.w IS NULL
+            AND   jh.server_id = b.server_id
+            AND   jh.job_id = ANY (b.job_ids)
+            AND   jh.step_id = 0
+            AND   jh.run_status = 1
+            AND   jh.collection_time >= {floorParam}
+            AND   jh.run_datetime > bd.since_local{statsUntilSql}
+            GROUP BY jh.job_id
+            UNION ALL
+            SELECT d.job_id, d.success_duration_sum, d.success_count, d.last_success_run_local
+            FROM {RollupDailyTable} AS d
+            WHERE bd.w IS NOT NULL
+            AND   d.server_id = b.server_id
+            AND   d.job_id = ANY (b.job_ids)
+            AND   d.run_day >= bd.full_lo
+            AND   d.run_day < bd.full_hi
+            UNION ALL
+            SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0), COUNT(jh.run_duration_seconds), MAX(jh.run_datetime)
+            FROM job_history AS jh
+            WHERE bd.w IS NOT NULL
+            AND   jh.server_id = b.server_id
+            AND   jh.job_id = ANY (b.job_ids)
+            AND   jh.step_id = 0
+            AND   jh.run_status = 1
+            AND   jh.collection_time > bd.w
+            AND   jh.collection_time >= {floorParam}
+            AND   jh.run_datetime >= bd.full_lo
+            AND   jh.run_datetime < bd.full_hi
+            GROUP BY jh.job_id
+            UNION ALL
+            SELECT ed.job_id, ed.duration_sum, ed.duration_count, ed.last_run
+            FROM generate_series(bd.since_local::date::timestamp, COALESCE(bd.until_local::date, bd.full_lo - 1)::timestamp, interval '1 day') AS e(day)
+            LEFT JOIN {RollupDaysTable} AS dd ON dd.server_id = b.server_id AND dd.run_day = e.day::date
+            CROSS JOIN LATERAL (
+                SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+                FROM job_history AS jh
+                WHERE jh.server_id = b.server_id
+                AND   jh.job_id = ANY (b.job_ids)
+                AND   jh.step_id = 0
+                AND   jh.run_status = 1
+                AND   jh.collection_time >= e.day - {RollupWidestOffsetMargin}
+                AND   jh.collection_time <= dd.max_collection_time AT TIME ZONE 'UTC'
+                AND   jh.collection_time >= {floorParam}
+                AND   jh.run_datetime >= e.day
+                AND   jh.run_datetime < e.day + interval '1 day'
+                AND   jh.run_datetime > bd.since_local{statsUntilSql}
+                GROUP BY jh.job_id
+            ) AS ed
+            WHERE bd.w IS NOT NULL
+            AND   NOT (e.day::date >= bd.full_lo AND e.day::date < bd.full_hi)
+            UNION ALL
+            SELECT ed.job_id, ed.duration_sum, ed.duration_count, ed.last_run
+            FROM generate_series(bd.since_local::date::timestamp, COALESCE(bd.until_local::date, bd.full_lo - 1)::timestamp, interval '1 day') AS e(day)
+            CROSS JOIN LATERAL (
+                SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+                FROM job_history AS jh
+                WHERE jh.server_id = b.server_id
+                AND   jh.job_id = ANY (b.job_ids)
+                AND   jh.step_id = 0
+                AND   jh.run_status = 1
+                AND   jh.collection_time > bd.w
+                AND   jh.collection_time >= {floorParam}
+                AND   jh.run_datetime >= e.day
+                AND   jh.run_datetime < e.day + interval '1 day'
+                AND   jh.run_datetime > bd.since_local{statsUntilSql}
+                GROUP BY jh.job_id
+            ) AS ed
+            WHERE bd.w IS NOT NULL
+            AND   NOT (e.day::date >= bd.full_lo AND e.day::date < bd.full_hi)
+        ) AS p
+        GROUP BY p.job_id
+    ) AS js
+)";
+    }
+
+    /// <summary>
+    /// #9110: whether the store holds the daily summary tables (the daily summary tables), so the read can use
+    /// <see cref="BuildRollupJobStatsSql"/>. A store below the rung that adds them has none, and the read keeps the statement that reads
+    /// <c>job_history</c> alone.
+    /// </summary>
+    internal static async Task<bool> RollupTablesExistAsync(NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(
+            $"SELECT to_regclass('{RollupDailyTable}') IS NOT NULL AND to_regclass('{RollupDaysTable}') IS NOT NULL AND to_regclass('{RollupWatermarkTable}') IS NOT NULL");
+        command.CommandTimeout = commandTimeoutSeconds;
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #9110: the narrow-first statement cut short to one value, <c>ok</c>: whether the narrow read is proven to hold the whole window's cut,
+    /// so the statement reads nothing older than <see cref="NarrowReadSpan"/> for the page. The same parameters as
+    /// <see cref="BuildJobHistorySql"/>. For the live tests, which assert both the case where the proof holds and where it does not.
+    /// </summary>
+    internal static string BuildNarrowProofSql(bool scopedToServer, JobHistoryFilter? filter = null)
+    {
+        var sql = BuildJobHistorySql(scopedToServer, filter, narrowFirst: true);
+        var statsStart = sql.IndexOf("\njob_stats AS (", StringComparison.Ordinal);
+        return sql[..statsStart].TrimEnd().TrimEnd(',') + "\nSELECT ok FROM narrow_proof";
+    }
+
     /// <summary>
     /// The <c>bounds</c>, <c>narrow</c>, <c>narrow_state</c> and <c>top_by_server</c> CTEs of <see cref="BuildJobHistorySql"/>'s
     /// narrow-first shape (#8549). It returns the same <c>top_by_server</c> rows as the single read, so the rest of the statement is
@@ -640,8 +914,18 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     /// full read instead. The full read is driven from the servers that need it, so a server that filled its limit costs nothing there.
     /// The bound is strict, so the tie-break never has to be compared across the two reads.
     /// </para>
+    /// <para>
+    /// <b>The fleet-wide proof (#9110).</b> A fleet whose newest <c>limit</c> runs all sit in the narrow window needs no server to fill a
+    /// limit of its own. <c>narrow_cut</c> is the fleet's cut (<see cref="JobHistoryFilter.BaseCutSql"/>) over the narrow rows alone, and
+    /// <c>narrow_proof</c> holds when that cut has <c>limit</c> rows and its oldest row is later than anything a server can have collected
+    /// before the narrow window (the narrow start plus the hour of daylight-saving slack, or plus the 14 hours of a server with no stored
+    /// offset). Any run outside the narrow read ran earlier than that, so it cannot be in the cut. With the per-server share the proof
+    /// also needs every server with rows in the window to have its share-th newest run in the narrow read, past the same bound, because the
+    /// share guarantees each server its newest runs ahead of the fleet's. Where it holds, <c>base</c> is <c>narrow_cut</c> and no server
+    /// takes the full read; where it does not, each server is judged as before.
+    /// </para>
     /// </summary>
-    internal static string BuildNarrowFirstTopByServerSql(string floorParam, string limitParam, string filterSql)
+    internal static string BuildNarrowFirstTopByServerSql(string floorParam, string limitParam, string filterSql, JobHistoryFilter cutFilter)
     {
         const string columns = @"
             jh.server_name,
@@ -659,6 +943,28 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
             jh.retries_attempted,
             jh.message";
         var narrowStartSql = $"now() AT TIME ZONE 'UTC' - interval '{(int)NarrowReadSpan.TotalHours} hours'";
+
+        /* #9110: with the per-server share the fleet cut also guarantees every server its first share of rows (CEIL(limit / servers)), so the
+           proof adds: every server with rows in the window has a row in the narrow read (the server count, and so the share, is the
+           same), and each server's share-th newest narrow row is later than anything it collected before the narrow window. */
+        var shareProofSql = cutFilter.ShareCapPerServer
+            ? $@"
+        AND (SELECT count(*) FROM server_offsets) = (SELECT count(DISTINCT server_id) FROM narrow_top)
+        AND NOT EXISTS (
+            SELECT 1
+            FROM server_offsets AS so2
+            LEFT JOIN (
+                SELECT r.server_id, r.approx_run_utc
+                FROM (
+                    SELECT t.server_id, t.approx_run_utc, row_number() OVER (PARTITION BY t.server_id ORDER BY t.run_datetime_local DESC, t.instance_id DESC) AS rk
+                    FROM narrow_top AS t
+                ) AS r
+                WHERE r.rk = CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM narrow_top))
+            ) AS sth ON sth.server_id = so2.server_id
+            WHERE sth.approx_run_utc IS NULL
+            OR    sth.approx_run_utc < b.narrow_start + make_interval(mins => CASE WHEN so2.offset_known THEN 60 ELSE 840 + 60 END)
+        )"
+            : string.Empty;
 
         return $@"bounds AS (
     SELECT GREATEST({floorParam}::timestamp, {narrowStartSql}) AS narrow_start
@@ -681,13 +987,49 @@ narrow AS MATERIALIZED (
         LIMIT {limitParam}
     ) AS top
 ),
+narrow_top AS (
+    SELECT
+        n.server_id,
+        COALESCE(n.display_name, n.server_name) AS server_name,
+        n.instance_id,
+        n.job_id,
+        n.job_name,
+        n.job_enabled,
+        n.category_name,
+        n.step_id,
+        n.step_name,
+        n.run_status,
+        n.run_status_desc,
+        n.run_datetime AS run_datetime_local,
+        n.run_datetime - make_interval(mins => n.offset_minutes) AS approx_run_utc,
+        n.run_duration_seconds,
+        n.retries_attempted,
+        n.message
+    FROM narrow AS n
+),
+narrow_cut AS (
+{cutFilter.BaseCutSql(limitParam, "narrow_top")}
+),
+narrow_proof AS (
+    SELECT COALESCE(
+        b.narrow_start > {floorParam}::timestamp
+        AND (SELECT count(*) FROM narrow_cut) = {limitParam}
+        AND (SELECT min(approx_run_utc) FROM narrow_cut) >= b.narrow_start + make_interval(mins => sl.max_slack){shareProofSql},
+        false) AS ok
+    FROM bounds AS b
+    CROSS JOIN (
+        SELECT COALESCE(max(CASE WHEN offset_known THEN 60 ELSE 840 + 60 END), 0) AS max_slack
+        FROM server_offsets
+    ) AS sl
+),
 narrow_state AS (
     SELECT
         so.server_id,
         so.display_name,
         so.offset_minutes,
         (
-            b.narrow_start > {floorParam}::timestamp
+            NOT (SELECT ok FROM narrow_proof)
+            AND b.narrow_start > {floorParam}::timestamp
             AND NOT COALESCE(
                 c.row_count >= {limitParam}
                 AND c.oldest_run >= b.narrow_start + make_interval(mins => CASE WHEN so.offset_known THEN so.offset_minutes ELSE 840 END + 60),

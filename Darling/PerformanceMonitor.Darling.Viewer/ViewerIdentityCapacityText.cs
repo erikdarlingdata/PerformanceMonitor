@@ -46,7 +46,7 @@ public static class ViewerIdentityCapacityText
     public const string ScannedClean = "Scanned, clean";
 
     /// <summary>Which bars this tab bands with: the shipped ones, which the alert's configured bars and overrides may differ from.</summary>
-    public const string BandsNote = "Bands: warning from 70% used, critical from 90% used (the shipped bars, the alert's own bars may differ)";
+    public const string BandsNote = "Bands: warning from 70% used or under 30 days left, critical from 90% used or under 7 days left, the worse of the two (the shipped bars, the alert's own percent bars may differ)";
 
     /// <summary>#6907: the grid note when the read holds no scan. The status line already gives the reason, so the grids do not repeat it.</summary>
     public const string NoData = "No data for this server.";
@@ -135,7 +135,7 @@ public static class ViewerIdentityCapacityText
         Digits(c.ValuesRemaining),
         c.Exhaustion is { } e ? e.StepsPerDay.ToString("N1", CultureInfo.InvariantCulture) : Dash,
         c.Exhaustion is { } x ? x.DaysLeft.ToString("N1", CultureInfo.InvariantCulture) : Dash,
-        BandWord(c.Band));
+        BandWord(c.Band) + (c.BandReason == IdentityCapacityMath.ReasonDays ? " (days)" : ""));
 
     /// <summary>#7679: the band as a word, as the web grid and Fleet Overview print it: <c>Critical</c>, <c>Warning</c>, <c>OK</c>. The read's own band stays lower case.</summary>
     private static string BandWord(string? band) =>

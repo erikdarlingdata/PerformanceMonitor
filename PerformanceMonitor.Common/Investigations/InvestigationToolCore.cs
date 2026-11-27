@@ -160,7 +160,7 @@ internal static class InvestigationToolCore
     /// Every problem with a report, as <c>field: sentence</c>, in parameter order: an empty list is a valid report. Lists
     /// them all at once, so an agent fixes the report in one round. Any action proposal is refused at Level 1.
     /// <paramref name="requireBasis"/> (#6004) makes each evidence item carry a <c>basis</c> of verified or inferred: Darling's
-    /// submit passes true; Lite's, advise-only, keeps the older shape until its own slice (#6011). <paramref name="serverActionTools"/>
+    /// submit and Lite's both pass true. <paramref name="serverActionTools"/>
     /// (#7109, Darling) makes the <c>action_proposals</c> refusal name the action tools: a server action is proposed through its own tool,
     /// so it passes the gate and a dry run, never through the report.
     /// </summary>
@@ -323,7 +323,7 @@ internal static class InvestigationToolCore
         }
         catch (JsonException ex)
         {
-            return "not valid JSON: " + ex.Message;
+            return JsonParseError.Bare(ex);
         }
 
         if (root is not JsonArray items || items.Count == 0)
@@ -370,7 +370,47 @@ internal static class InvestigationToolCore
     /// a weaker level is re-masked at <paramref name="mode"/>. Reports are stored as submitted, so the level that applies
     /// is the one the host serves now.
     /// </summary>
-    internal static string ReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode, PseudonymKey? key = null)
+    internal static string ReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode, PseudonymKey? key = null,
+        int? responseByteBudget = null)
+    {
+        if (responseByteBudget is not int budget)
+            return BuildReportsAnswer(read, hoursBack, mode, key, null);
+
+        /* #8983: a request is the unit. The newest requests that fit the budget are kept, each with all its journal rows, its
+           report and its feedback, and the rest are left off whole. A reply that fits is the same bytes as without a budget. */
+        var total = read.Requests.Count;
+        string Reply(int kept) => kept >= total
+            ? BuildReportsAnswer(read, hoursBack, mode, key, null)
+            : BuildReportsAnswer(FirstRequests(read, kept), hoursBack, mode, key, new BudgetCut(total, kept, false, budget));
+        var fit = McpResponseBudget.FitPrefix(total, Reply, budget);
+        if (System.Text.Encoding.UTF8.GetByteCount(fit.Json) <= budget)
+            return fit.Json;
+
+        /* One request alone is over the budget: it is kept, so the reply is never empty, and the note says so. */
+        return BuildReportsAnswer(fit.Count >= total ? read : FirstRequests(read, fit.Count), hoursBack, mode, key,
+            new BudgetCut(total, fit.Count, true, budget));
+    }
+
+    /// <summary>What a budget cut left out (#8983): the requests the read held, the requests kept, and whether the newest request alone
+    /// is over the budget.</summary>
+    private sealed record BudgetCut(int Total, int Kept, bool NewestAloneOverBudget, int BudgetBytes);
+
+    /// <summary><paramref name="read"/> with its first <paramref name="kept"/> requests (newest first), and only their reports, feedback
+    /// and journal rows. Family counts and the brief describe the window and stay.</summary>
+    private static InvestigationReportsRead FirstRequests(InvestigationReportsRead read, int kept)
+    {
+        var requests = read.Requests.Take(kept).ToList();
+        var ids = requests.Select(r => r.RequestId).ToHashSet();
+        return read with
+        {
+            Requests = requests,
+            Reports = read.Reports.Where(r => ids.Contains(r.RequestId)).ToList(),
+            Feedback = read.Feedback?.Where(f => ids.Contains(f.RequestId)).ToList(),
+            Journal = read.Journal.Where(j => j.RequestId is { } id && ids.Contains(id)).ToList(),
+        };
+    }
+
+    private static string BuildReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode, PseudonymKey? key, BudgetCut? cut)
     {
         var masker = McpDataDetailMasker.ForAnswer(mode, key);
         var reports = new JsonArray();
@@ -458,22 +498,43 @@ internal static class InvestigationToolCore
             journal.Add(node);
         }
 
+        var left = cut is null ? 0 : cut.Total - cut.Kept;
         var answer = new JsonObject
         {
             ["status"] = "ok",
             ["hours_back"] = hoursBack,
             ["requests_returned"] = read.Requests.Count,
-            ["truncated"] = read.RequestsTruncated,
+            ["truncated"] = read.RequestsTruncated || left > 0,
             ["journal_truncated"] = read.JournalTruncated,
-            ["requests"] = JsonSerializer.SerializeToNode(read.Requests.Select(RequestPayload), McpHelpers.JsonOptions),
-            ["reports"] = reports,
-            ["journal"] = journal,
-            ["brief"] = read.Brief is null ? null : InvestigationFieldMasking.StoredBrief(read.Brief, mode, masker),
         };
+        if (cut is not null)
+        {
+            answer["budget_truncated"] = left > 0;
+            answer["budget_note"] = BudgetNote(cut);
+        }
+
+        answer["requests"] = JsonSerializer.SerializeToNode(read.Requests.Select(RequestPayload), McpHelpers.JsonOptions);
+        answer["reports"] = reports;
+        answer["journal"] = journal;
+        answer["brief"] = read.Brief is null ? null : InvestigationFieldMasking.StoredBrief(read.Brief, mode, masker);
         /* #5913: only a store that keeps feedback (Darling's) sends the counts; Lite's answer keeps its shape. */
         if (read.FamilyCounts is not null)
             answer["family_counts"] = FamilyCountsPayload(read.FamilyCounts);
         return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>The note a budget cut prints (#8983): how many requests were left out, in which order, and the narrower calls that get them.
+    /// A request that is alone over the budget is kept whole, and the note says so.</summary>
+    private static string BudgetNote(BudgetCut cut)
+    {
+        const string remedy = "Read the rest with a narrower call: pass server_name or request_id, or a smaller hours_back.";
+        if (cut.Total == cut.Kept)
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"This one request is over the {cut.BudgetBytes:#,0}-byte response budget on its own. It is kept whole: its journal rows, report and feedback are never split from it.");
+        var note = McpResponseBudget.PageCutNote(cut.Total, cut.Kept, "newest first", "requests", remedy);
+        return cut.NewestAloneOverBudget
+            ? note + " The newest request is over the budget on its own, so it is kept whole, with its journal rows, report and feedback."
+            : note;
     }
 
     /// <summary>The evidence as <c>evidence_verified</c> and <c>evidence_inferred</c> (always present, possibly empty), plus
@@ -563,6 +624,19 @@ internal static class InvestigationToolCore
            measure moved) rides the answer under the key an alert's brief row uses; the mcp.dataDetail filter masks detail_text by key. */
         if (r.DetailText is { } detailText)
             payload["detail_text"] = detailText;
+        /* #9485: the planned change window that held the request at open. Absent for a request never held (and for every Lite row);
+           list_investigation_requests adds the key as null so a reader can tell "never held" from "not asked". */
+        if (r.HeldBy is { } held)
+        {
+            payload["held_by"] = new JsonObject
+            {
+                ["window_id"] = held.WindowId,
+                ["reason"] = held.Reason,
+                ["ends_at"] = held.EndsAtUtc,
+                ["released_at"] = held.ReleasedAtUtc,
+            };
+        }
+
         return payload;
     }
 

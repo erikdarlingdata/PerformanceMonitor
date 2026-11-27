@@ -560,7 +560,7 @@ public sealed class DefaultTraceEventSequenceWatermarkTests
         Assert.Equal(2, CountOf(text, "AND  @trace_continues = 1\n"));
 
         /* The trailing result set carries the identity next to the path. */
-        Assert.Contains("current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start;", text, StringComparison.Ordinal);
+        Assert.Contains("current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start,\n    default_trace_enabled = @default_trace_enabled;", text, StringComparison.Ordinal);
 
         /* Unchanged by this fix: the Commit-only DDL rule, the curated list and the 1 s stall filter. */
         Assert.Contains("AND ISNULL(ft.EventSubClass, 1) = 1", text, StringComparison.Ordinal);

@@ -73,16 +73,63 @@ public static class StoreConnectionFactory
         builder.Options = $"-c default_transaction_read_only=on -c statement_timeout={statementTimeoutMs} -c lock_timeout=5000";
         builder.Timeout = 30;
         builder.CommandTimeout = options.StatementTimeoutSeconds;
+        // The exporter never uses GSS encryption. With the default (prefer) Npgsql loads libgssapi_krb5 on every connect,
+        // and a host without it prints a load error that reads like a failure.
+        builder.GssEncryptionMode = GssEncryptionMode.Disable;
         return builder;
     }
 
-    /// <summary>Opens a new connection to the store using the given connection string, then applies the session guards.</summary>
+    /// <summary>
+    /// Opens a new connection to the store using the given connection string, then applies the session guards.
+    /// A connect timeout on a new connection (NpgsqlException wrapping TimeoutException) is retried once, because a
+    /// one-off stall of the local TCP connect has failed a run on a store whose next run was fine. A stall longer
+    /// than two timeouts still fails the run, and the next run recovers. Nothing else is retried.
+    /// </summary>
     public static async Task<NpgsqlConnection> OpenAsync(NpgsqlConnectionStringBuilder builder, CancellationToken ct)
     {
-        var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync(ct).ConfigureAwait(false);
+        var connection = await OpenWithConnectRetryAsync(builder, (c, t) => c.OpenAsync(t), ct).ConfigureAwait(false);
         await ApplySessionGuardsAsync(connection, ct).ConfigureAwait(false);
         return connection;
+    }
+
+    /// <summary>
+    /// The connect step of <see cref="OpenAsync"/>, with the open call as a seam so a test can fail it without a
+    /// server. Retries once, with the same builder, only when the open throws an NpgsqlException whose inner
+    /// exception is a TimeoutException and <paramref name="ct"/> is not cancelled. The second failure propagates.
+    /// </summary>
+    internal static async Task<NpgsqlConnection> OpenWithConnectRetryAsync(
+        NpgsqlConnectionStringBuilder builder,
+        Func<NpgsqlConnection, CancellationToken, Task> open,
+        CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(builder.ConnectionString);
+        try
+        {
+            await open(connection, ct).ConfigureAwait(false);
+            return connection;
+        }
+        catch (NpgsqlException ex) when (ex.InnerException is TimeoutException && !ct.IsCancellationRequested)
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            Console.Error.WriteLine($"Warning: store connect timed out after {builder.Timeout} s; retrying once");
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        var retry = new NpgsqlConnection(builder.ConnectionString);
+        try
+        {
+            await open(retry, ct).ConfigureAwait(false);
+            return retry;
+        }
+        catch
+        {
+            await retry.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -151,19 +198,21 @@ public static class StoreConnectionFactory
             {
                 // insufficient_privilege: temp_file_limit is superuser-only. The role may not be a superuser; the run
                 // continues without this guard rather than refusing the connection and breaking the whole export.
-                Console.Error.WriteLine(
+                // Every connection hits this, so the warning is written once per process.
+                ExporterLog.WarnOnce(
+                    "temp_file_limit",
                     "Warning: could not SET temp_file_limit (insufficient privilege). Ask Darling to run " +
                     "ALTER ROLE <exporter role> SET temp_file_limit = '256MB'. Continuing without this guard.");
             }
         }
 
-        // DEBUG-level log line: lists the session guards actually applied this
+        // DEBUG-level log line (only with --verbose): lists the session guards actually applied this
         // connection vs. inherited (already strict enough at the role/session level) so a test can prove
         // ApplySessionGuardsAsync ran without needing a second session to read pg_settings mid-export (not
         // possible across sessions). A guard neither applied nor inherited (temp_file_limit denied by 42501)
         // is simply absent from both lists.
-        Console.Error.WriteLine(
-            $"DEBUG: session_guard applied: {(appliedGuards.Count > 0 ? string.Join(", ", appliedGuards) : "(none)")}; " +
+        ExporterLog.Debug(
+            $"session_guard applied: {(appliedGuards.Count > 0 ? string.Join(", ", appliedGuards) : "(none)")}; " +
             $"inherited: {(inheritedGuards.Count > 0 ? string.Join(", ", inheritedGuards) : "(none)")}");
     }
 

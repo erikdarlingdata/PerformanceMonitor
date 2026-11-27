@@ -269,6 +269,28 @@ public sealed class DarlingMcpQueryTagRuleToolsLiveTests
     }
 
     [Fact]
+    public async Task AWindowUnderTheStampWidth_IsWidenedAndSaysSo_AndStillFindsAKeyWhoseStampIsFiveHoursOld()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Billing", null, ct);
+            /* A key still being seen holds a stamp up to the refresh width plus the backdate old (#9456): 5 hours here, and a dead key 8 hours old. */
+            await SightAsync(source, ServerA, "0xA1", "billing", null, ct, lastSeen: "now() - interval '5 hours'");
+            await SightAsync(source, ServerA, "0xA2", "billing", null, ct, lastSeen: "now() - interval '8 hours'");
+
+            var narrow = Parse(await DarlingMcpQueryTagRuleTools.TestQueryTagRule(source, field: "application", pattern: "billing", tag_id: tag, window_hours: 2, cancellationToken: ct));
+            var enough = Parse(await DarlingMcpQueryTagRuleTools.TestQueryTagRule(source, field: "application", pattern: "billing", tag_id: tag, window_hours: 24, cancellationToken: ct));
+
+            Assert.Equal(QueryTagSightingWriter.MinTestWindowHours, (int)narrow["window_hours"]!);
+            Assert.Equal(1, (int)narrow["keys_matched"]!);
+            Assert.Contains("Window widened to 7 hours", (string)narrow["message"]!, StringComparison.Ordinal);
+            Assert.Equal(24, (int)enough["window_hours"]!);
+            Assert.Equal(2, (int)enough["keys_matched"]!);
+            Assert.DoesNotContain("widened", (string)enough["message"]!, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task ATagCommentRule_TagsByName_AndAnAmbiguousNameMatchesNoTagAndDoesNotThrow()
     {
         await WithStoreAsync(async (source, ct) =>

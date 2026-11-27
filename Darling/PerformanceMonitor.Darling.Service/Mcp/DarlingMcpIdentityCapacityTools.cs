@@ -45,10 +45,11 @@ public sealed class DarlingMcpIdentityCapacityTools
     private static string? Format(DateTime? t) =>
         t is { } v ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture) : null;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_identity_capacity"), Description(
         "How full each identity column is, and how long until it runs out. <<GUIDE>> " +
         "An identity column that reaches the end of its type stops every insert into its table. The identity_capacity collector (every 6 hours, per user database) keeps the 20 fullest columns above 10 percent used per database, plus one marker per database it scanned. " +
-        "columns[] lists them fullest first: percent_used, band (ok under 70, warning from 70, critical from 90), values_remaining (inserts left, as text because bigint and decimal values exceed what a JSON number holds exactly), last_value, seed_value, increment_value, data_type. " +
+        "columns[] lists them fullest first: percent_used, band (the worse of two grades: percent used, ok under 70, warning from 70, critical from 90, and days_to_exhaustion, warning under 30 days, critical under 7; band_reason says which one set it, percent or days, null when ok), values_remaining (inserts left, as text because bigint and decimal values exceed what a JSON number holds exactly), last_value, seed_value, increment_value, data_type. " +
         "Percent is of the values from the seed to the end the increment moves to (the type's maximum for a positive increment, its minimum for a negative one), not of the whole type range. " +
         "rate_per_day is identity values issued per day and days_to_exhaustion the days until values_remaining is issued at that rate. Both come from the column's newest stored value and its oldest stored value in the window (hours_back, default 168), and are null when the window holds one sample of the column, when the value did not move, or when it moved backwards (the column was reseeded). " +
         "columns[] holds at most limit columns (default and most 200), fullest first: truncated is true when more exist, and summary counts them all. databases[] lists each database scanned in the window and when. A scanned database with no column in columns[] has nothing above 10 percent: that is clean, not missing. An online database of the server (from its newest database config capture) with no scan in the window is listed in databases[] with scanned false and last_scanned_at (its last scan before the window, null when none): it is NOT clean, it is not yet scanned (the pass budget has not reached it yet) when skip_reason is null, and skipped on purpose when skip_reason is secondary, snapshot or no_access (scan_note says why). A database that is offline, restoring, system, vendor, left out by the server's database filter or left out of the identity_capacity collector's own database scope is in neither list. " +
@@ -138,7 +139,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                 columns_above_10_percent = read.Columns.Count,
                 critical = read.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical),
                 warning = read.Columns.Count(c => c.Band == IdentityCapacityMath.BandWarning),
-                worst_band = worst?.Band ?? IdentityCapacityMath.BandOk,
+                worst_band = read.Columns.Select(c => c.Band).OrderByDescending(IdentityCapacityMath.Rank).FirstOrDefault() ?? IdentityCapacityMath.BandOk,
                 worst_percent_used = worstPercent,
                 soonest_exhaustion_days = soonestDays,
                 columns_without_projection = withoutProjection,
@@ -215,6 +216,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                     type_precision = c.TypePrecision,
                     percent_used = c.PercentUsed is double cp ? Math.Round(cp, 4) : (double?)null,
                     band = c.Band,
+                    band_reason = c.BandReason,
                     values_remaining = c.ValuesRemaining?.ToString(CultureInfo.InvariantCulture),
                     last_value = c.LastValue?.ToString(CultureInfo.InvariantCulture),
                     seed_value = c.SeedValue?.ToString(CultureInfo.InvariantCulture),
@@ -227,7 +229,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                 }),
                 note = "Times are UTC. values_remaining, last_value, seed_value and increment_value are text. rate_per_day is identity values issued per day (one step is one increment). " +
                        "days_to_exhaustion assumes the rate between the two samples holds, and is null with one sample, a value that did not move, or one that moved backwards (reseeded). " +
-                       "A database in databases[] with columns_above_10_percent 0 was scanned and is clean. The band uses 70 and 90 percent. truncated is true when more columns exist than limit allowed: the summary counts them all, and database_name narrows the read.",
+                       "A database in databases[] with columns_above_10_percent 0 was scanned and is clean. The band is the worse of the percent grade (70 and 90 percent) and the days grade (under 30 and under 7 days, from days_to_exhaustion, skipped when it is null). truncated is true when more columns exist than limit allowed: the summary counts them all, and database_name narrows the read.",
             }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

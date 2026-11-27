@@ -41,6 +41,12 @@ public class ServerManager
     /* #6254: the Query Store replica each server had when it was last loaded or saved, as _savedHosts does for the host: an edit that
        keeps its replica is not held to the replica rule, so a server saved before the rule stays editable. */
     private readonly Dictionary<string, string> _savedReplicas = new();
+
+    /* #9787: the display name and database each server had when it was last loaded or saved, as _savedHosts does for the host. The
+       edit dialog and edit_server change the live list object before they call UpdateServer, so only a copy says what was saved: a
+       field that keeps its saved text is not held to the control-character rule, and a row saved before the rule stays editable. */
+    private readonly Dictionary<string, string> _savedDisplayNames = new();
+    private readonly Dictionary<string, string> _savedDatabases = new();
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
@@ -60,7 +66,7 @@ public class ServerManager
     internal const string DetectionQueryText = @"
         SELECT /* PerformanceMonitorLite */
             @@VERSION AS sql_version,
-            CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
+            COALESCE(CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')), CONVERT(integer, PARSENAME(CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), 4))) AS major_version,
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
             CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
             CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
@@ -405,6 +411,12 @@ public class ServerManager
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
     {
+        /* #9787: a new row holds no control character in its display name, host, database or login. */
+        if (ServerFieldText.FirstRefusal(server.DisplayName, server.ServerName, server.DatabaseName, username) is { } fieldRefusal)
+        {
+            throw new InvalidOperationException(fieldRefusal);
+        }
+
         if (HostRefusal(server.ServerName, null) is { } hostRefusal)
         {
             throw new InvalidOperationException(hostRefusal);
@@ -433,6 +445,7 @@ public class ServerManager
             _servers.Add(server);
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            RememberSavedText(server);
             _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
@@ -478,6 +491,38 @@ public class ServerManager
         _logger?.LogInformation("Added server '{DisplayName}' ({ServerName})", server.DisplayName, server.ServerName);
     }
 
+    /* Caller holds _serversLock. */
+    private void RememberSavedText(ServerConnection server)
+    {
+        _savedDisplayNames[server.Id] = server.DisplayName ?? "";
+        _savedDatabases[server.Id] = server.DatabaseName ?? "";
+    }
+
+    /// <summary>
+    /// The sentence to refuse an edit with when a text field the edit CHANGES holds a character the save rule refuses (#9787), or null.
+    /// A field that keeps its saved text is not checked, so a row saved before the rule stays editable on its other fields. The
+    /// user name is judged against the one in the credential store, and only when it holds a refused character, so the store is
+    /// not read for an ordinary edit. Caller holds <c>_serversLock</c>.
+    /// </summary>
+    private string? ChangedFieldRefusal(ServerConnection server, string? username)
+    {
+        if (!_savedDisplayNames.TryGetValue(server.Id, out var savedDisplayName)) savedDisplayName = null;
+        if (!_savedDatabases.TryGetValue(server.Id, out var savedDatabase)) savedDatabase = null;
+        _savedHosts.TryGetValue(server.Id, out var savedHost);
+
+        string? Changed(string field, string? now, string? saved) =>
+            string.Equals(now ?? "", saved ?? "", StringComparison.Ordinal) ? null : ServerFieldText.Refusal(field, now);
+
+        var storedUsername = ServerFieldText.HasRefusedCharacter(username)
+            ? _credentialService.GetCredential(server.Id)?.Username
+            : null;
+
+        return Changed("host", server.ServerName, savedHost)
+            ?? Changed("display_name", server.DisplayName, savedDisplayName)
+            ?? Changed("database", server.DatabaseName, savedDatabase)
+            ?? Changed("username", username, storedUsername);
+    }
+
     /// <summary>
     /// Updates an existing server.
     /// </summary>
@@ -491,6 +536,12 @@ public class ServerManager
             if (existing == null)
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} not found");
+            }
+
+            /* #9787: a changed display name, host, database or login holds no control character; a kept one is not checked. */
+            if (ChangedFieldRefusal(server, username) is { } fieldRefusal)
+            {
+                throw new InvalidOperationException(fieldRefusal);
             }
 
             /* #6352: a changed host is held to the add rule; an unchanged one is not (existing rows keep working). */
@@ -518,6 +569,7 @@ public class ServerManager
             _servers[index] = server;
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            RememberSavedText(server);
             _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
@@ -610,6 +662,8 @@ public class ServerManager
             {
                 _servers.Remove(server);
                 _savedHosts.Remove(id);
+                _savedDisplayNames.Remove(id);
+                _savedDatabases.Remove(id);
                 _savedReplicas.Remove(id);
                 SaveServers();
                 NotificationRouteCache.Invalidate();
@@ -890,7 +944,7 @@ public class ServerManager
         catch (SqlException ex)
         {
             status.IsOnline = false;
-            status.ErrorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+            status.ErrorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ServerEntryRules.UsesStrict(server.EncryptMode));
 
             // Detect MFA cancellation (error code 0 with specific message patterns)
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
@@ -915,7 +969,7 @@ public class ServerManager
                ("The type initializer for 'TdsParser' threw an exception"), which does not say why. The shared
                explanation replaces it in the status the connection test and the UI show. */
             var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
-            status.ErrorMessage = nativeLoadFailure ?? ex.Message;
+            status.ErrorMessage = nativeLoadFailure ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ServerEntryRules.UsesStrict(server.EncryptMode));
 
             // Detect MFA cancellation from generic exceptions
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
@@ -966,14 +1020,32 @@ public class ServerManager
     }
 
     /// <summary>
-    /// Checks the connection status of all servers.
+    /// Checks the connection status of every server whose data collection is on.
     /// Background operation - will skip servers requiring interactive authentication (e.g., MFA).
+    ///
+    /// <para>#9084: a server whose collection is off gets no query from this check, the same as it gets none from the collectors.
+    /// Turning collection off is how a person tells Lite to leave a server alone, so the check also forgets the answer it last had
+    /// for it: nothing shows a live status for a server Lite is no longer looking at. A person's own Connect (or the Edit dialog's
+    /// Test) calls <see cref="CheckConnectionAsync"/> directly and can still check it. Turning collection back on puts the server
+    /// back in the next cycle's check, with no restart.</para>
     /// </summary>
-    public async Task CheckAllConnectionsAsync()
+    public Task CheckAllConnectionsAsync() =>
+        CheckAllConnectionsAsync(id => CheckConnectionAsync(id, allowInteractiveAuth: false));
+
+    /// <summary>
+    /// <see cref="CheckAllConnectionsAsync()"/> with the per-server check passed in, so a test sees which servers the sweep
+    /// checks without opening a connection.
+    /// </summary>
+    internal async Task CheckAllConnectionsAsync(Func<string, Task> checkServer)
     {
         var servers = GetAllServers();
+        foreach (var disabled in servers.Where(s => !s.IsEnabled))
+        {
+            _connectionStatuses.TryRemove(disabled.Id, out _);
+        }
+
         // Explicitly pass allowInteractiveAuth: false to prevent MFA popups during background checks
-        var tasks = servers.Select(s => CheckConnectionAsync(s.Id, allowInteractiveAuth: false));
+        var tasks = servers.Where(s => s.IsEnabled).Select(s => checkServer(s.Id));
         await Task.WhenAll(tasks);
     }
 
@@ -1004,6 +1076,7 @@ public class ServerManager
             {
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 _savedHosts[server.Id] = server.ServerName;
+                RememberSavedText(server);
                 _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             }
 
@@ -1011,9 +1084,14 @@ public class ServerManager
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to load servers.json, attempting backup restore");
+            /* #9761: the file exists and could not be read as a server list. The user's copy is kept before anything can
+               write servers.json: the next save writes the list Lite is running on over it, and a fresh start with no
+               usable backup runs on no servers. servers.json itself is never written here, so a file the user can still fix
+               by hand is not replaced by an empty list. */
+            var keptCopy = RejectedConfigCopy.Keep(_configFilePath);
 
-            /* Try to restore from backup */
+            _servers = new List<ServerConnection>();
+            var runningOn = "no servers (there is no servers.json.bak)";
             var bakPath = _configFilePath + ".bak";
             if (File.Exists(bakPath))
             {
@@ -1022,21 +1100,27 @@ public class ServerManager
                     string bakJson = File.ReadAllText(bakPath);
                     var bakConfig = JsonSerializer.Deserialize<ServersConfig>(bakJson);
                     _servers = bakConfig?.Servers ?? new List<ServerConnection>();
-                    
+
                     foreach (var server in _servers)
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                         _savedHosts[server.Id] = server.ServerName;
+                        RememberSavedText(server);
                         _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                     }
-                    _logger?.LogInformation("Restored {Count} servers from backup file", _servers.Count);
-                    return;
+
+                    runningOn = $"the {_servers.Count} servers in servers.json.bak";
                 }
-                catch { /* backup also corrupt, fall through to empty list */ }
+                catch (Exception bakEx)
+                {
+                    _servers = new List<ServerConnection>();
+                    runningOn = $"no servers (servers.json.bak could not be read either: {bakEx.GetType().Name})";
+                }
             }
 
-            _servers = new List<ServerConnection>();
-            SaveServers();
+            _logger?.LogWarning(
+                "Lite could not read {File}: {Error} (JSON path {JsonPath}). Lite is running on {RunningOn}. The rejected file is kept as {KeptCopy}, and servers.json is left as it is until the next save.",
+                _configFilePath, $"{ex.GetType().Name}: {ex.Message}", (ex as JsonException)?.Path ?? "none", runningOn, keptCopy);
         }
     }
 
@@ -1077,6 +1161,16 @@ public class ServerManager
                    intent), in any letter case. The database is part of the identity. Several monitored
                    databases on one Azure SQL Database server share an address, and each of them is its own
                    server, so comparing the address alone dropped every sibling after the first. */
+                /* #9787: an imported entry is a new registration, so a display name, host or database holding a control character is not
+                   imported, as AddServer refuses it. It counts as skipped, and the name is written escaped so it cannot start a second
+                   log entry. servers.json carries no login. */
+                if (ServerFieldText.FirstRefusal(server.DisplayName, server.ServerName, server.DatabaseName, null) is { } fieldRefusal)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", ServerFieldText.Escape(NameForMessage(server)), fieldRefusal);
+                    continue;
+                }
+
                 /* #6352: an imported entry is a new registration here, so a host SqlClient would read as a named pipe or
                    an admin connection is not imported. It counts as skipped, and the log says which. */
                 if (HostRefusal(server.ServerName, null) is { } hostRefusal)
@@ -1136,6 +1230,7 @@ public class ServerManager
                 /* Import Settings is this user's own choice of file, so its hosts are confirmed for them. */
                 _hostBindings.Confirm(server);
                 _savedHosts[server.Id] = server.ServerName;
+                RememberSavedText(server);
                 _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 imported++;

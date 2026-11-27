@@ -142,7 +142,7 @@ WHERE (vfs.database_id > 4 OR vfs.database_id = 2)
 AND   vfs.database_id < 32761
 AND   vfs.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
 /*EXCLUSION_FILTER*/
-OPTION(RECOMPILE);";
+/*OPTION_CLAUSE*/;";
 
     public override string Name => "file_io_stats";
 
@@ -150,7 +150,9 @@ OPTION(RECOMPILE);";
 
     public override string? WatermarkColumn => null;
 
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    /// <summary>Whole-collector version floor (#9099): io_stall_queued_read_ms and io_stall_queued_write_ms do not exist before SQL Server 2016, so a target below the supported floor reads as not collected instead of failing every cycle. Unknown (0) assumes newest and Azure is never version-gated.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB scopes dm_io_virtual_file_stats to the connected database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
@@ -164,8 +166,20 @@ OPTION(RECOMPILE);";
         }
 
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+
+        /* #9539: the text with no excluded databases has no parameters and carries no OPTION(RECOMPILE), the one
+           exception the rule in CONTRIBUTING.md allows. Its row count follows the server's file layout, which does
+           not swing between runs the way a catch-up window does. Measured on SQL Server 2022 and 2025 against the
+           hinted text: 73 to 82% less CPU per run with 11 files and with 55 databases. A fresh compile with 55
+           databases adds a Row Count Spool. The plan compiled with 11 files, forced with USE PLAN at 55 databases,
+           used 9.3 ms CPU per run on 2022 and 9.5 ms on 2025, against 46.9 and 42.4 ms for the hinted text there,
+           about 80% less. The text with excluded databases is parameterized and keeps the hint, as does the Azure
+           SQL Database text, which was not measured. */
+        var optionClause = exclusionParameters.Count > 0 ? "OPTION(RECOMPILE)" : "";
         return new CollectorQuery(
-            OnPremQueryText.Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal),
+            OnPremQueryText
+                .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal)
+                .Replace("/*OPTION_CLAUSE*/", optionClause, StringComparison.Ordinal),
             exclusionParameters);
     }
 

@@ -420,6 +420,69 @@ public sealed class RemediationLiveSqlTests
     }
 
     /// <summary>
+    /// #9786: a remediation login that holds <c>ALTER ANY CONNECTION</c> and none of the server view grants is refused <c>kill_view_permission_denied</c>, dry run
+    /// and write alike, naming the grant this server's version needs, and the session lives. Granting that one grant lets the dry run answer and the kill go through.
+    /// </summary>
+    [Fact]
+    public async Task AKillByALoginWithoutTheServerViewGrant_IsRefusedByName_AndTheNamedGrantFixesIt()
+    {
+        NeedServer();
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = new Scratch();
+        SqlConnection? victim = null;
+        try
+        {
+            await scratch.CreateAsync(ct);
+            int sessionId;
+            DateTime loginTime;
+            (victim, sessionId, loginTime) = await OpenVictimAsync(scratch, ct);
+            string grant;
+            await using (var admin = await OpenAsync(Admin(), ct))
+            {
+                var major = Convert.ToInt32(await ScalarAsync(admin, "SELECT ISNULL(CONVERT(int, SERVERPROPERTY('ProductMajorVersion')), 0);", ct), CultureInfo.InvariantCulture);
+                grant = major >= 16 ? "VIEW SERVER PERFORMANCE STATE" : "VIEW SERVER STATE";
+                /* ALTER SERVER STATE covers the view grants, so the login keeps only the kill grant. */
+                await ExecAsync(admin, $"REVOKE VIEW SERVER STATE, ALTER SERVER STATE FROM [{scratch.Login}];", ct);
+            }
+
+            var logger = new CapturingLogger();
+            var executor = scratch.Executor(logger);
+            var permit = Permit(ServerActionNames.KillSession, sessionId.ToString(CultureInfo.InvariantCulture), null);
+            var refused = new List<RemediationResult>();
+            foreach (var dry in new[] { true, false })
+            {
+                var result = await executor.KillSessionAsync(permit, sessionId, loginTime, dry, ct);
+                refused.Add(result);
+                Assert.Equal(RemediationOutcome.Refused, result.Outcome);
+                Assert.Equal(RemediationResult.Reasons.KillViewPermissionDenied, result.Reason);
+                /* Only the grant the batch names gives this sentence: the text without it names both grants inside one parenthesis. */
+                Assert.Contains("does not hold " + grant + " on this server", result.Message, StringComparison.Ordinal);
+                Assert.Contains("GRANT " + grant + " TO", result.Message, StringComparison.Ordinal);
+                Assert.False(result.Wrote);
+                Assert.Null(result.Session);
+            }
+
+            Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
+
+            await using (var admin = await OpenAsync(Admin(), ct))
+                await ExecAsync(admin, $"GRANT {grant} TO [{scratch.Login}];", ct);
+            var dryOk = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: true, ct);
+            Assert.True(dryOk is { Outcome: RemediationOutcome.Done, Wrote: false }, dryOk.Message);
+            Assert.NotNull(dryOk.Session);
+            Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
+            var killed = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
+            Assert.True(killed is { Outcome: RemediationOutcome.Done, Wrote: true }, killed.Message);
+
+            AssertNoSecret(scratch, logger, refused[0], refused[1], dryOk, killed);
+        }
+        finally
+        {
+            victim?.Dispose();
+            await scratch.DropAsync();
+        }
+    }
+
+    /// <summary>
     /// #7109: a kill that carries the session's <c>last_request_end_time</c> from the dry run is refused <c>session_changed</c> when the session has
     /// finished another batch since, and the session stays alive, dry run and write alike. With the current value the same kill goes through.
     /// </summary>

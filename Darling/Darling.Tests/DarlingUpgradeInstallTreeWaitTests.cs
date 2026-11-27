@@ -182,21 +182,19 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
 
     /// <summary>The name the process under test reports through <c>Get-Process</c> - the sleeper's file
     /// name without its extension, whether that file is a compiled C program on macOS/Linux or a copy of
-    /// <c>PING.EXE</c> on Windows.</summary>
+    /// the built <c>Darling.Tests.Standin</c> program on Windows.</summary>
     private const string SleeperImageName = "sleeper";
 
     /// <summary>Builds (or copies) a child process under <paramref name="root"/> that this test can hold
     /// open for a controlled duration: a tiny compiled <c>sleep()</c> wrapper on macOS/Linux (a copied,
-    /// unsigned binary would refuse to run there), and a copy of the stock <c>PING.EXE</c> console
-    /// executable on Windows - the same stand-in <c>DarlingStoreUpgradeRevertTests</c> uses for a fake
-    /// long-lived process, since Windows has nothing installed everywhere that just sleeps.</summary>
+    /// unsigned binary would refuse to run there), and a copy of the built <c>Darling.Tests.Standin</c> program
+    /// on Windows - the same stand-in <c>DarlingStoreUpgradeRevertTests</c> uses for a fake long-lived process. A copied
+    /// system tool is not an option there: Defender can refuse to run it (#8847).</summary>
     private static string BuildSleeper(string root)
     {
         if (OperatingSystem.IsWindows())
         {
-            var pingCopy = Path.Combine(root, SleeperImageName + ".exe");
-            File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), pingCopy, overwrite: true);
-            return pingCopy;
+            return StandinProcess.CopyTo(root, SleeperImageName + ".exe");
         }
 
         var sleeperSource = Path.Combine(root, SleeperImageName + ".c");
@@ -210,10 +208,9 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
 
     /// <summary>Arguments that make the process built by <see cref="BuildSleeper"/> run for roughly
     /// <paramref name="seconds"/> before exiting on its own: the sleep count directly on macOS/Linux, and
-    /// on Windows a ping count one higher than the target - <c>ping</c> sends its first echo immediately
-    /// and then one per second, so <c>N</c> requests span <c>N-1</c> seconds.</summary>
+    /// on Windows the stand-in's <c>sleep</c> command with the same count.</summary>
     private static string SleepArguments(int seconds) =>
-        OperatingSystem.IsWindows() ? $"-n {seconds + 1} 127.0.0.1" : seconds.ToString();
+        OperatingSystem.IsWindows() ? StandinProcess.SleepArguments(seconds) : seconds.ToString();
 
     /// <summary>Resolves every symlink in <paramref name="path"/>'s ancestry, so this test's temp root
     /// matches what a started process's own <c>.Path</c> reports on macOS - see the comment where this is

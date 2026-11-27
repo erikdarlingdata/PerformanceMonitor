@@ -177,7 +177,13 @@ public sealed class PlanForceNoWritePathTests
         Assert.Equal(new[]
         {
             /* #6394: a new webhook signing key is sealed for the destination's stored sealed generic URL, which the mcp role cannot read, so the tool reads that URL as the store owner. */
+            /* #9641: the three alert source writes create, change and drop a database login, which the mcp role cannot do, so they run on the owner source, behind mcp.allowWrites and mcp.allowServerAdmin. */
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.AddAlertSource),
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RemoveAlertSource),
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RotateAlertSource),
             nameof(DarlingMcpAlertTools) + "." + nameof(DarlingMcpAlertTools.GenerateWebhookSigningKey),
+            /* #9644: a password key reset marks the key row replaced and counts sealed values, which only the store owner can do, and it asks for the key's fingerprint first. */
+            nameof(DarlingMcpPasswordKeyTools) + "." + nameof(DarlingMcpPasswordKeyTools.ResetPasswordKey),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.DropPlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
@@ -191,6 +197,13 @@ public sealed class PlanForceNoWritePathTests
         nameof(DarlingMcpServerActionTools) + "." + nameof(DarlingMcpServerActionTools.SetServerAction),
         /* #6569: set_alert_threshold_override is a Level 2 agent action, so it takes the owner source and the service, not the mcp login, writes its action rows. */
         nameof(DarlingMcpThresholdOverrideTools) + "." + nameof(DarlingMcpThresholdOverrideTools.SetAlertThresholdOverride),
+        /* #9642: the web access tools write config.web_access_groups and config.web_access_advanced, which only the store owner can execute (the mcp login holds no grant). */
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.CreateWebAccessGroup),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.DeleteWebAccessGroup),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.GetWebAccessGroups),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.RotateWebAccessGroupToken),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.SetAdvancedWebAccess),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.UpdateWebAccessGroup),
         }, takers);
     }
 
@@ -269,6 +282,7 @@ public sealed class PlanForceNoWritePathTests
                     || code.Contains("Darling.Remediation", StringComparison.Ordinal);
             })
             .Select(Path.GetFileName)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         /* #7109: ActionProposalPress.cs is the approval path, which runs the plan tool class's prepare and write steps. */
         Assert.Equal(new[] { "ActionProposalPress.cs", "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.Kill.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.Proposal.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);

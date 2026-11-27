@@ -139,6 +139,55 @@ internal static class SweepInFlightWording
 }
 
 /// <summary>
+/// What a server that has not connected yet is waiting for (#9696), said once per server so the log is not silent for the
+/// minutes before its first "Connected" line. Two things hold a first connect back: the cold-start spread
+/// (<see cref="DarlingWorker.ColdStartSpreadSeconds"/>) that defers a server's first collection body by a per-server
+/// offset, and a full set of fleet collection slots once the connect attempt has run. The decisions are pure so a test
+/// pins when a line is due. Neither changes scheduling.
+/// </summary>
+internal static class FirstConnectHold
+{
+    /// <summary>The Info line for a server whose first launch is held by the cold-start spread. The holes are Server, Remaining (seconds until its first body launches) and Spread (the window the offsets fall in).</summary>
+    internal const string ColdStartHoldTemplate =
+        "[{Server}] first connect in about {Remaining:F0}s: each server's first collection starts at its own offset inside a {Spread}s cold-start spread, so a restart does not start the whole fleet at once";
+
+    /// <summary>The Info line for a server whose connect attempt has run and whose body waits for a collection slot. The holes are Server, InUse and Width.</summary>
+    internal const string SlotWaitTemplate =
+        "[{Server}] waiting for a collection slot before its connect is recorded, {InUse} of {Width} in use";
+
+    /// <summary>
+    /// The seconds the line should name for a held first launch, or null when the line was already logged for this server
+    /// or the server is not held (its due time is not ahead of <paramref name="nowUtc"/>).
+    /// </summary>
+    internal static double? ColdStartRemainingToAnnounce(bool alreadyAnnounced, DateTime firstSweepDueUtc, DateTime nowUtc)
+    {
+        if (alreadyAnnounced || firstSweepDueUtc <= nowUtc)
+        {
+            return null;
+        }
+
+        return (firstSweepDueUtc - nowUtc).TotalSeconds;
+    }
+
+    /// <summary>
+    /// The slots in use and the gate's width to name when a body about to wait for a slot has not connected yet, or null when
+    /// the line was already logged for this server, the server is already connected or has made no attempt, or a slot is free.
+    /// The width is read only when the line is logged: the worker reads it under the gate's lock, which a body that logs
+    /// nothing has no reason to take.
+    /// </summary>
+    internal static (int InUse, int Width)? SlotsInUseToAnnounce(bool alreadyAnnounced, bool notConnectedAfterAttempt, int freeSlots, Func<int> width)
+    {
+        if (alreadyAnnounced || !notConnectedAfterAttempt || freeSlots > 0)
+        {
+            return null;
+        }
+
+        var slots = width();
+        return (Math.Max(0, slots - freeSlots), slots);
+    }
+}
+
+/// <summary>
 /// Decides whether a collector fault means the server's runtime should be dropped and reconnected (#4710).
 /// A command timeout (SqlException number -2, class 11) does NOT mean the connection is dead: the
 /// connection stays open and runs SELECT 1. Dropping on every timeout made a stressed server lose the

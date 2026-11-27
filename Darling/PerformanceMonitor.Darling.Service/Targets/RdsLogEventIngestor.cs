@@ -77,13 +77,19 @@ public sealed class RdsLogEventIngestor
     /// </summary>
     internal Func<IReadOnlyList<PgLogEvent>, CancellationToken, Task<int>>? RowWriter { get; init; }
 
+    /// <summary>
+    /// The tick source for the store time this ingestor reports on <see cref="RdsIngestOutcome.StoreMs"/> (#9523): null
+    /// is the process stopwatch. A test sets it so a duration is a stated number. Nothing in the service sets it.
+    /// </summary>
+    internal Func<long>? StoreClock { get; init; }
+
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null, RdsLookupCache? lookups = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
-        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles, lookups: lookups);
         _logger = logger;
         _resume = resume;
     }
@@ -112,15 +118,21 @@ public sealed class RdsLogEventIngestor
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
            restart resumes from the saved file and marker instead of the newest file's last lines. */
+        var store = new RdsStorePhase(StoreClock);
+
         if (_resume is not null)
         {
-            await _resume.RestoreAsync(_logs, serverId, cancellationToken);
+            await store.TimeAsync(() => _resume.RestoreAsync(_logs, serverId, cancellationToken));
         }
 
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
-        return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, cancellationToken));
+        var outcome = await RdsLogSource.RunPassesAsync(
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, store, cancellationToken));
+
+        /* #9523: the store time of the whole cycle (the restore above, each pass's COPY and position save) goes out
+           with the outcome, so the runner books it as storage time and the AWS calls and the parse as the fetch. */
+        return outcome with { StoreMs = store.ElapsedMs };
     }
 
     /// <summary>
@@ -137,6 +149,7 @@ public sealed class RdsLogEventIngestor
         string? loginConnectionString,
         AwsRoleKey? role,
         PgLogZoneCheck? zoneCheck,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -213,7 +226,7 @@ public sealed class RdsLogEventIngestor
 
         var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, heldEntry, abandonedEntry, zoneCheck, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldEntry, abandonedEntry, zoneCheck, store, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
            same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
@@ -243,7 +256,7 @@ public sealed class RdsLogEventIngestor
            resuming past one. */
         if (_resume is not null)
         {
-            await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
+            await store.TimeAsync(() => _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken));
         }
 
         return (RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded,
@@ -261,6 +274,7 @@ public sealed class RdsLogEventIngestor
         string heldEntry,
         string abandonedEntry,
         PgLogZoneCheck? zoneCheck,
+        RdsStorePhase store,
         CancellationToken cancellationToken)
     {
         List<PgLogEvent> events;
@@ -335,7 +349,7 @@ public sealed class RdsLogEventIngestor
             return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry);
         }
 
-        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry);
+        return (await store.TimeAsync(() => WriteAsync(serverId, storageName, events, cancellationToken)), foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry);
     }
 
     /// <summary>

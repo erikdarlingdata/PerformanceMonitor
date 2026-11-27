@@ -246,15 +246,29 @@ public class QueryStorePlanFetchTests
     [Fact]
     public void TextTouchAndProbe_MirrorsThePlanShape_SingleTable()
     {
-        var sql = QueryStoreTextStore.TouchAndProbeSql;
+        /* Three statements in one batch (#9043): the text row's restamp and hash adoption, the liveness stamp on the
+           seen table, and the verdict. The text table is written by the first one only. */
+        var refresh = QueryStoreTextStore.RefreshTextRowSql;
+        Assert.Contains("UPDATE collect.query_store_text AS t", refresh, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreTextSeen.TextRowRefreshInterval, refresh, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreLivenessTouchGuard.GuardInterval, refresh, StringComparison.Ordinal);
+        Assert.Contains("query_hash = COALESCE(t.query_hash, x.live_hash)", refresh, StringComparison.Ordinal);
+        Assert.Contains("$5::timestamp", refresh, StringComparison.Ordinal);
 
-        Assert.Contains("UPDATE collect.query_store_text", sql, StringComparison.Ordinal);
-        Assert.Contains(QueryStoreLivenessTouchGuard.GuardInterval, sql, StringComparison.Ordinal);
-        Assert.Contains("query_hash = COALESCE(t.query_hash, x.live_hash)", sql, StringComparison.Ordinal);
+        var seen = QueryStoreTextStore.TouchSeenSql;
+        Assert.StartsWith("INSERT INTO collect.query_store_text_seen AS s", seen, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreLivenessTouchGuard.GuardInterval, seen, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT (server_id, database_name, query_id) DO UPDATE", seen, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE collect.query_store_text", seen, StringComparison.Ordinal);
+        Assert.Contains("$5::timestamp", seen, StringComparison.Ordinal);
+
+        var sql = QueryStoreTextStore.ProbeSql;
+        Assert.StartsWith("SELECT", sql, StringComparison.Ordinal);
         Assert.Contains("(t.query_id IS NOT NULL) AS resolved", sql, StringComparison.Ordinal);
         Assert.Contains("t.query_hash IS NOT NULL AND batch.query_hash IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("t.query_hash <> batch.query_hash", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::timestamp", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT", sql, StringComparison.Ordinal);
     }
 
     /* ---------- the upserts never replace knowledge with absence ---------- */

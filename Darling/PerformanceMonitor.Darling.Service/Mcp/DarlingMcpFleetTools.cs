@@ -19,6 +19,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -39,6 +40,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpFleetTools
 {
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_fleet_overview"), Description(
         "One pre-banded card per server (CPU, memory, blocking, deadlocks, threads, collector health) plus a " +
         "fleet rollup (band counts, cross-server totals, worst-first ranking). Blocking/deadlock counts window " +

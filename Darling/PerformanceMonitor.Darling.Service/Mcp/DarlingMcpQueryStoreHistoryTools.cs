@@ -86,7 +86,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                                          ORDER BY collection_time DESC, execution_count DESC) AS rn
             FROM query_store_stats
             WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-            AND collection_time >= $4 AND collection_time <= $5)
+            AND collection_time > $4 AND collection_time <= $5)
         """;
 
     internal const string HistorySql = HistoryDedupeCte + "\n" + """
@@ -104,7 +104,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     internal static readonly string HistoryTableFromWhere = $$"""
         FROM query_store_interval_wide
         WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-        AND collection_time >= $4 AND collection_time <= $5
+        AND collection_time > $4 AND collection_time <= $5
         AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         """;
@@ -184,6 +184,13 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             }).ToList();
 
     /// <summary>
+    /// A millisecond figure as the answer writes it: three places, which is the whole microseconds Query Store stores. A stored
+    /// row's average passes through unchanged, and an execution-weighted average or a total, which is a quotient or a sum of
+    /// doubles, loses the digits past the microsecond that binary floating point adds.
+    /// </summary>
+    internal static double? WholeMicroseconds(double? milliseconds) => milliseconds is double value ? Math.Round(value, 3) : null;
+
+    /// <summary>
     /// The series for the plans the answer lists (#5300): rows of any other plan are dropped BEFORE the points are built,
     /// so a plan the answer cuts never uses up the point cap, and the points come out in one fixed order.
     /// </summary>
@@ -191,7 +198,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     {
         var kept = keptPlanIds.ToHashSet();
         return FoldPoints(rows.Where(r => kept.Contains(r.PlanId)))
-            .Select(r => new HistoryPoint(r.CollectionTime.ToString("o", CultureInfo.InvariantCulture), r.PlanId, r.ExecutionCount, r.AvgDurationMs, r.AvgCpuMs))
+            .Select(r => new HistoryPoint(r.CollectionTime.ToString("o", CultureInfo.InvariantCulture), r.PlanId, r.ExecutionCount, WholeMicroseconds(r.AvgDurationMs), WholeMicroseconds(r.AvgCpuMs)))
             .ToList();
     }
 
@@ -211,11 +218,12 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     }
 
     /// <summary>
-    /// The grid's tier choice (#5300), mirroring <c>DarlingDataReader.TryGetQueryStoreTopFromTableAsync</c>: the same
-    /// pre-check (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>), the same gate
-    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, with <see cref="DarlingDataReader.QueryStoreTopMinWindow"/> and
-    /// the window's end as the literal end), on one connection in one read-only REPEATABLE READ transaction so the gate's
-    /// decision and the read it authorizes see one snapshot. Null (never an empty list) when the gate says raw or anything
+    /// The grid's tier choice (#5300), mirroring <c>DarlingDataReader.TryGetQueryStoreTopFromTableAsync</c> for a read over
+    /// every database: the same pre-check (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>) and the same gate
+    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, with <see cref="DarlingDataReader.QueryStoreTopMinWindow"/>), on one
+    /// connection in one read-only REPEATABLE READ transaction so the gate's decision and the read it authorizes see one
+    /// snapshot. The window's end is the gate's literal end: this read places its rows by collection time, so for an end before
+    /// <c>applied_through</c> the table's newest snapshot of an interval can sit past the end where raw holds an earlier one. Null (never an empty list) when the gate says raw or anything
     /// before the table read fails; a fault falls back to raw, as the grid's does. Cancellation propagates.
     /// </summary>
     private static Task<(List<HistoryRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryReadFromTableAsync(
@@ -319,6 +327,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             .OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenBy(f => f.PlanId)
             .Take(MaxPlans).ToList();
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_query_history"), Description(
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
@@ -424,10 +433,10 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                 {
                     plan_id = p.PlanId,
                     execution_count = p.ExecutionCount,
-                    avg_duration_ms = p.AvgDurationMs,
-                    total_duration_ms = p.TotalDurationMs,
-                    avg_cpu_ms = p.AvgCpuMs,
-                    total_cpu_ms = p.TotalCpuMs,
+                    avg_duration_ms = WholeMicroseconds(p.AvgDurationMs),
+                    total_duration_ms = WholeMicroseconds(p.TotalDurationMs),
+                    avg_cpu_ms = WholeMicroseconds(p.AvgCpuMs),
+                    total_cpu_ms = WholeMicroseconds(p.TotalCpuMs),
                     first_execution_time = p.FirstExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     last_execution_time = p.LastExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     is_forced_plan = IsForced(p.IsForcedPlan, forcedById.GetValueOrDefault(p.PlanId)),

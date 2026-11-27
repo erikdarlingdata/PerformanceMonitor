@@ -59,12 +59,13 @@ public sealed class QueryTagRollupHashRouteLiveTests
     }
 
     /// <summary>
-    /// The shared seed anchored at <see cref="LiveClock.AnchoredEnd"/> (#5608), measures added, tags mapped, hours built, and a table-floor row
-    /// 72 hours back per server (a plain store's gate wants the table's own floor a purge margin below the window).
+    /// The shared seed anchored at <see cref="LiveClock.AnchoredEndNotAfterNow"/> (#5608), measures added, tags mapped, hours built, and a table-floor row
+    /// 72 hours back per server (a plain store's gate wants the table's own floor a purge margin below the window). The anchor is behind the real
+    /// clock as well as the test clock: the store marks a late write by its own clock, and the tool refuses an <c>as_of</c> after the real clock.
     /// </summary>
     private static async Task<Arranged> ArrangeAsync(CancellationToken ct, bool collectionTimeOrder = false, Func<DateTime, string>? preBuildSql = null, bool tailOfNewestTwoHours = false)
     {
-        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false, at: LiveClock.AnchoredEnd());
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false, at: LiveClock.AnchoredEndNotAfterNow());
         await ExecAsync(connection, @"
 UPDATE collect.query_store_interval_wide
 SET avg_logical_io_reads = CASE WHEN query_id % 4 = 0 THEN NULL ELSE ((query_id * 7 + plan_id) % 1000) + 1 END,
@@ -669,7 +670,7 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
     /// The plan of the routed statement, found by what its nodes do: the table arm reaches <c>query_store_hash_hourly</c> only through an
     /// index scan on <c>(hour, server_id)</c>, never a sequential scan of the table. Sequential scans are turned off for the read (the seed
     /// is a few thousand rows, where any plan scans), so the plan shows the paths the statement allows. The seed and the read end at
-    /// <see cref="LiveClock.AnchoredEnd"/>. The wide arm's plan is not asserted: on a small seed the planner's choice between the
+    /// <see cref="LiveClock.AnchoredEndNotAfterNow"/>. The wide arm's plan is not asserted: on a small seed the planner's choice between the
     /// <c>(server_id, first_execution_time)</c> index and the <c>collection_time</c> index varies from run to run (PR notes).
     /// </summary>
     [Fact]

@@ -43,7 +43,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgLoggingAuditTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_pg_logging_audit"), Description("Audits a PostgreSQL target's logging settings against the STORED configuration snapshot pg_server_config already collects hourly, never the live server. LATEST IS A TIME: captured_at is when that snapshot was taken. Verdicts: instrumented, partial, off or unknown - unknown means the setting is missing from the snapshot, not the same as off, and nothing is inferred. partial means a THRESHOLD is filtering; for log_min_duration_statement that threshold IS the recommended posture, not a shortfall. PostgreSQL-only. <<GUIDE>> Audits a PostgreSQL target's LOGGING settings - log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections - and says, per setting, whether it is producing the lines it could, what telemetry those lines unlock, the recommended value WITH its cost, and the remedy in the syntax this server's hosting needs (ALTER SYSTEM plus a reload where the server is yours to administer; a parameter group on RDS/Aurora, decided from rds.* parameters in the stored snapshot rather than guessed). It reads the STORED configuration snapshot pg_server_config already collects hourly, never the live server. LATEST IS A TIME: captured_at is the instant that snapshot was taken, the collector runs hourly, so every value here is 'as of' that stamp and a change made since is not reflected until the next collection. Read it at onboarding and whenever a target-side log read comes back empty: a target with every one of these off looks identical to a fully instrumented one from every counter-based read, and the difference shows up at incident time when the log somebody reaches for holds nothing. Verdicts are instrumented, partial, off or unknown - partial means a THRESHOLD is filtering (statements faster than N ms, temp files under N kB) and the row says what falls below it; for log_min_duration_statement the threshold IS the recommended posture, and its cost_note says so, because 0 logs every statement the server runs. unknown means the setting is not in the snapshot and nothing is inferred. Every facet names the Darling family that would consume its lines and says PLANNED where that consumer does not ship yet - the counter reads that exist today are named beside it with what they cannot see. Plan capture's own settings (auto_explain, log_line_prefix %Q, lc_messages) are LISTED as observed for completeness but judged by get_pg_plan_capture_readiness, which owns their traps; lc_messages decides whether any of these lines are written in the English the parsers match. PostgreSQL-only.")]
+    [DarlingToolAccess(ToolAccess.Read)]
+    [McpServerTool(Name = "get_pg_logging_audit"), Description("Audits a PostgreSQL target's logging settings against the STORED configuration snapshot pg_server_config already collects hourly, never the live server. LATEST IS A TIME: captured_at is when that snapshot was taken. Verdicts: instrumented, partial, off or unknown - unknown means the setting is missing from the snapshot, not the same as off, and nothing is inferred. partial means a THRESHOLD is filtering; for log_min_duration_statement that threshold IS the recommended posture, not a shortfall. PostgreSQL-only. <<GUIDE>> Audits a PostgreSQL target's LOGGING settings - log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections (on PostgreSQL 19 and later the log_autovacuum_min_duration row also judges log_autoanalyze_min_duration, which holds automatic analyze runs there, and carries it as companion) - and says, per setting, whether it is producing the lines it could, what telemetry those lines unlock, the recommended value WITH its cost, and the remedy in the syntax this server's hosting needs (ALTER SYSTEM plus a reload where the server is yours to administer; a parameter group on RDS/Aurora, decided from rds.* parameters in the stored snapshot rather than guessed). It reads the STORED configuration snapshot pg_server_config already collects hourly, never the live server. LATEST IS A TIME: captured_at is the instant that snapshot was taken, the collector runs hourly, so every value here is 'as of' that stamp and a change made since is not reflected until the next collection. Read it at onboarding and whenever a target-side log read comes back empty: a target with every one of these off looks identical to a fully instrumented one from every counter-based read, and the difference shows up at incident time when the log somebody reaches for holds nothing. Verdicts are instrumented, partial, off or unknown - partial means a THRESHOLD is filtering (statements faster than N ms, temp files under N kB) and the row says what falls below it; for log_min_duration_statement the threshold IS the recommended posture, and its cost_note says so, because 0 logs every statement the server runs. unknown means the setting is not in the snapshot and nothing is inferred. Every facet names the Darling family that would consume its lines and says PLANNED where that consumer does not ship yet - the counter reads that exist today are named beside it with what they cannot see. Plan capture's own settings (auto_explain, log_line_prefix %Q, lc_messages) are LISTED as observed for completeness but judged by get_pg_plan_capture_readiness, which owns their traps; lc_messages decides whether any of these lines are written in the English the parsers match. PostgreSQL-only.")]
     public static async Task<string> GetPgLoggingAudit(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -152,7 +153,10 @@ public sealed class DarlingMcpPgLoggingAuditTools
                  + "recommended posture for log_min_duration_statement and can be for log_temp_files - read "
                  + "cost_note before changing a partial row. A row with pending_restart true is judged on the "
                  + "RUNNING value while the file already holds another - read restart_note before acting on its "
-                 + "remedy. consumer names the Darling family that reads the "
+                 + "remedy. On PostgreSQL 19 and later the log_autovacuum_min_duration row rests on two settings, "
+                 + "that one for automatic vacuum runs and log_autoanalyze_min_duration for automatic analyze runs: "
+                 + "its verdict combines them and its companion object shows the second; below 19 the one setting "
+                 + "covers both. consumer names the Darling family that reads the "
                  + "lines and says PLANNED where it does not ship yet; the setting is still worth turning on "
                  + "first, because the log it fills is the one somebody opens at incident time. remedy is "
                  + "worded for this server's hosting (see hosting_evidence). judged_by_readiness lists plan "
@@ -179,6 +183,20 @@ public sealed class DarlingMcpPgLoggingAuditTools
                    remedy is written against it. restart_note says what that means and where to look. */
                 pending_restart = f.PendingRestart,
                 restart_note = f.RestartNote,
+                /* PostgreSQL 19 and later: the autovacuum facet's second setting (log_autoanalyze_min_duration),
+                   as the snapshot holds it, with its own verdict beside the facet's combined one. Null on every
+                   other facet and on 18 and below, where the facet's setting alone covers analyze runs. */
+                companion = f.Companion is null
+                    ? null
+                    : new
+                    {
+                        setting = f.Companion.Setting,
+                        value = f.Companion.Value,
+                        unit = f.Companion.Unit,
+                        default_value = f.Companion.DefaultValue,
+                        source = f.Companion.Source,
+                        verdict = f.Companion.Verdict,
+                    },
             }),
             judged_by_readiness = new
             {

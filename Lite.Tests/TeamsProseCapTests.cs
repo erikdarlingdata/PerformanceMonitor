@@ -17,20 +17,14 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #7202: a flat alert detail that names hundreds of databases must not push a Teams card past the connector's
-/// ~28 KB ceiling, where the post is rejected again on every repeat.
+/// #7202: a flat alert detail that names hundreds of databases must not push a Teams card past the
+/// ~28 KB message ceiling, where the post is rejected again on every repeat.
 /// </summary>
 public class TeamsProseCapTests
 {
     private static readonly AlertBranding Branding = new("Performance Monitor Lite", null);
 
-    private static string DetailsText(string payload)
-    {
-        using var doc = JsonDocument.Parse(payload);
-        return doc.RootElement.GetProperty("sections").EnumerateArray()
-            .Single(s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Details")
-            .GetProperty("text").GetString()!;
-    }
+    private static string DetailsText(string payload) => Assert.Single(TeamsCard.Parse(payload).Section("Details").Texts);
 
     private static string Build(string detail) =>
         WebhookAlertService.BuildTeamsPayload("Log Backup Overdue", "SQL01", "900 overdue", "older than 2 hours", Branding, detailText: detail);
@@ -41,7 +35,7 @@ public class TeamsProseCapTests
         var names = string.Join(", ", Enumerable.Range(0, 3000).Select(i => $"Tenant_{i:D4} (12 days old)"));
         var payload = Build("The last log backup is older than 2 hours on 3000 database(s): " + names + ".");
 
-        Assert.True(Encoding.UTF8.GetByteCount(payload) < 28_000, "the whole card stays under the connector ceiling");
+        Assert.True(Encoding.UTF8.GetByteCount(payload) < 28_000, "the whole card stays under the Teams message ceiling");
         var text = DetailsText(payload);
         Assert.True(Encoding.UTF8.GetByteCount(text) <= WebhookAlertService.TeamsProseMaxBytes);
         Assert.Contains("cut to fit the Teams size limit", text, StringComparison.Ordinal);
@@ -64,7 +58,7 @@ public class TeamsProseCapTests
         var names = string.Join(", ", Enumerable.Range(0, 3000).Select(i => string.Format(CultureInfo.InvariantCulture, nameFormat, i) + " (12 days old)"));
         var payload = Build("The last log backup is older than 2 hours on 3000 database(s): " + names + ".");
 
-        Assert.True(Encoding.UTF8.GetByteCount(payload) < 28_000, "the whole card stays under the connector ceiling");
+        Assert.True(Encoding.UTF8.GetByteCount(payload) < 28_000, "the whole card stays under the Teams message ceiling");
         var text = DetailsText(payload);
         Assert.True(JsonEncodedText.Encode(text).EncodedUtf8Bytes.Length <= WebhookAlertService.TeamsProseMaxBytes);
         Assert.Contains("cut to fit the Teams size limit", text, StringComparison.Ordinal);

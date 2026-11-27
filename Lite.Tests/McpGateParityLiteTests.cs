@@ -94,6 +94,7 @@ public sealed class McpGateParityLiteTests(McpGateParityLiteTests.Hosts hosts) :
                     McpGateParityMatrix.StoredTokenValue(config),
                     config.TokenlessLoopback,
                     allowWrites: config.Writes,
+                    allowServerAdmin: config.ServerAdmin,
                     allowInvestigations: config.Investigations);
             }
             catch (ArgumentException)

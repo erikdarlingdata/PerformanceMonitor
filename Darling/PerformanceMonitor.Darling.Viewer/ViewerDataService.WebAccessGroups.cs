@@ -9,8 +9,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -83,62 +81,40 @@ public sealed partial class ViewerDataService
         int[] tags, ViewerPasswordSealer sealer, CancellationToken ct = default)
     {
         await RequireWebGroupAdminAsync(ct);
-        var token = NewWebToken(Guid.NewGuid());
-        var sealedToken = sealer.SealWebAccessToken(token.Plain, token.GroupId, token.Generation);
-        await WebGroupWriteAsync(() => WebGroups.CreateAsync(token.GroupId, name.Trim(), scope, tags.Distinct().ToArray(),
-            token.Generation, sealedToken, true, "viewer", ct));
-        return token;
+        return ToViewerToken(await WebGroupAdmin(sealer).CreateAsync(name, scope, tags, ct));
     }
+
+    /// <summary>The write itself is <see cref="WebAccessGroupAdmin"/>, the code the MCP web access tools run too (#9642).</summary>
+    private WebAccessGroupAdmin WebGroupAdmin(ViewerPasswordSealer sealer) => new(WebGroups, sealer.SealWebAccessToken, "viewer");
+
+    private static ViewerWebToken ToViewerToken(WebAccessGroupToken t) => new(t.GroupId, t.Generation, t.Plain);
 
     public async Task<ViewerWebToken> RotateWebAccessGroupTokenAsync(WebAccessGroup group,
         ViewerPasswordSealer sealer, CancellationToken ct = default)
     {
         await RequireWebGroupAdminAsync(ct);
-        var token = NewWebToken(group.GroupId);
-        var sealedToken = sealer.SealWebAccessToken(token.Plain, token.GroupId, token.Generation);
-        await WebGroupWriteAsync(() => WebGroups.RotateAsync(group.GroupId, group.Revision, token.Generation, sealedToken, "viewer", ct));
-        return token;
+        return ToViewerToken(await WebGroupAdmin(sealer).RotateAsync(group, ct));
     }
 
     public async Task UpdateWebAccessGroupAsync(WebAccessGroup group, WebAccessGroupScope scope,
         int[] tags, bool enabled, CancellationToken ct = default)
     {
         await RequireWebGroupAdminAsync(ct);
-        await WebGroupWriteAsync(() => WebGroups.UpdateAsync(group.GroupId, group.Revision,
-            scope, tags.Distinct().ToArray(), enabled, "viewer", ct));
+        await new WebAccessGroupAdmin(WebGroups, NoSeal, "viewer").UpdateAsync(group, scope, tags, enabled, ct);
     }
+
+    private static string NoSeal(string token, Guid groupId, Guid generation) =>
+        throw new InvalidOperationException("Only a create or a rotate seals a token.");
 
     public async Task DeleteWebAccessGroupAsync(WebAccessGroup group, CancellationToken ct = default)
     {
         await RequireWebGroupAdminAsync(ct);
-        await WebGroupWriteAsync(() => WebGroups.DeleteAsync(group.GroupId, group.Revision, "viewer", ct));
+        await new WebAccessGroupAdmin(WebGroups, NoSeal, "viewer").DeleteAsync(group, ct);
     }
 
     private async Task RequireWebGroupAdminAsync(CancellationToken ct)
     {
         if (!await CanManageWebAccessGroupsAsync(ct))
             throw new InvalidOperationException("Web access groups can only be managed by a Viewer administrator.");
-    }
-
-    private static ViewerWebToken NewWebToken(Guid id) =>
-        new(id, Guid.NewGuid(), Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_'));
-
-    private static async Task WebGroupWriteAsync(Func<Task<long>> write)
-    {
-        try { await write(); }
-        catch (PostgresException ex)
-        {
-            // Do not display database detail: a failed write may carry the sealed credential.
-            throw new InvalidOperationException(ex.SqlState switch
-            {
-                "WG409" => "This group changed in another window or in the service. Refresh and retry.",
-                "WG404" => "This group was deleted. Refresh the group list.",
-                "WG429" => "A store holds at most 256 web access groups.",
-                "23505" => "A group with this name already exists.",
-                "WG400" => "Check the group name and selected tags. A selected tag may have been deleted.",
-                "42501" => "This connection is not permitted to manage web access groups.",
-                _ => "The group change could not be saved. Refresh before retrying."
-            });
-        }
     }
 }

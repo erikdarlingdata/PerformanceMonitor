@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -141,6 +142,23 @@ public sealed class WebAdminArmTests
         Assert.Contains("no role mapping", line, StringComparison.Ordinal);
         Assert.Contains(effect!, line, StringComparison.Ordinal);
         Assert.Contains("web.network.oidc.roleClaim", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>I4: with <c>adminRole: operator</c> and no role mapping every person who can sign in is an admin, so each can mint an MCP
+    /// operator token; the one warning says so. With a role mapping, or with reader tokens, nothing more is said.</summary>
+    [Theory]
+    [InlineData(null, true, true)]
+    [InlineData(null, false, false)]
+    [InlineData("groups", true, false)]
+    public void TheOidcWarning_NamesPersonalOperatorTokens_WhenAdminsMayMintThem(string? roleClaim, bool personalOperatorTokens, bool named)
+    {
+        using var oidc = OidcClient(roleClaim);
+        var log = new ListLogger();
+
+        WebAdminArm.WarnWhenOidcHasNoRoleMapping(oidc, managedStore: true, adminArm: null, log, personalOperatorTokens);
+
+        Assert.Equal(named, log.Lines.Any(l => l.Contains("MCP operator token", StringComparison.Ordinal)));
+        Assert.True(log.Lines.Count <= 1);
     }
 
     [Fact]

@@ -71,13 +71,13 @@ internal interface IGateHost
 /// <para>
 /// The rule, in the order a request meets it. A configuration with no token and the tokenless setting off does not start.
 /// A token in force refuses every request that does not carry it with 401. Then the tool decides: a read is served; a write
-/// is served under the writes arm (the writes setting and a usable token); an investigation state tool is served under the
+/// is served under the writes arm (the writes setting and a usable token), and a server admin tool under the server-admin arm (that and the server-admin setting); an investigation state tool is served under the
 /// investigations arm (its setting, a usable token and the writes setting off); anything else is an unknown tool.
 /// </para>
 /// <para>
 /// The apps differ by intent in two places, each written once below: <see cref="TokenInForce"/> (Lite's tokenless setting
 /// ignores a stored token, Darling's applies only when no token is stored) and <see cref="Registers"/> (the investigations
-/// arm serves 2 tools in Lite and 19 in Darling).
+/// arm serves 2 tools in Lite and 21 in Darling, the 4 mute rule writes among them in Darling only).
 /// </para>
 /// </summary>
 internal static class McpGateParityMatrix
@@ -97,9 +97,9 @@ internal static class McpGateParityMatrix
     internal static readonly string[] SharedReads =
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan", "analyze_server",
-        "audit_config", "compare_analysis", "find_database", "get_active_queries", "get_alert_history", "get_alert_settings",
+        "audit_config", "compare_analysis", "find_database", "find_tools", "get_active_queries", "get_alert_history", "get_alert_settings",
         "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
-        "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_by_database", "get_cpu_scheduler_pressure",
+        "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collector_schedules", "get_cpu_by_database", "get_cpu_scheduler_pressure",
         "get_cpu_utilization", "get_current_waits_trend", "get_daily_summary", "get_daily_summary_range", "get_database_config",
         "get_database_config_changes", "get_database_scoped_config", "get_database_sizes", "get_deadlock_detail", "get_deadlock_trend",
         "get_deadlocks", "get_default_trace_events", "get_file_io_stats", "get_file_io_trend", "get_health_parser_cpu_tasks",
@@ -107,7 +107,7 @@ internal static class McpGateParityMatrix
         "get_health_parser_scheduler_issues", "get_health_parser_severe_errors", "get_health_parser_significant_waits",
         "get_health_parser_system_health", "get_index_usage", "get_investigation_reports", "get_latch_stats", "get_load_by_caller",
         "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events",
-        "get_memory_stats", "get_memory_trend", "get_mute_rules", "get_notification_routes", "get_object_locking", "get_perfmon_stats",
+        "get_memory_stats", "get_memory_trend", "get_mute_rules", "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats",
         "get_perfmon_trend", "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_pileups", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_resource_semaphore",
@@ -121,10 +121,24 @@ internal static class McpGateParityMatrix
     /// <summary>The writes both apps register: served only under the writes arm.</summary>
     internal static readonly string[] SharedWrites =
     {
-        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
+        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route", "create_notification_route", "update_notification_route",
         "create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag",
-        "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule",
+        "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule", "update_alert_settings",
+        "reset_collector_schedules", "set_server_excluded_databases",
     };
+
+    /// <summary>The four mute rule writes (#9639). Both apps register them and both serve them under the writes arm. Darling
+    /// serves them under the investigations arm as well, while <c>mcp.allowAgentMuteRules</c> is on (the gate suite leaves it
+    /// on): Lite has no investigations arm that serves a write. That difference is written once, in <see cref="Expected"/>.</summary>
+    internal static readonly string[] SharedMuteRuleWrites =
+    {
+        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled",
+    };
+
+    /// <summary>The server admin tools both apps register (#9640): writes served only under the server-admin arm, which needs the
+    /// writes arm as well. Darling's <c>DarlingMcpWritePolicy.IsServerAdmin</c> answers before its <c>IsWrite</c>, and Lite's
+    /// <c>McpWritePolicy.IsServed</c> does the same. Darling also has <c>set_server_action</c> in this set: Lite has no such tool, so it is not a matrix name.</summary>
+    internal static readonly string[] SharedServerAdminTools = { "add_servers", "remove_server", "edit_server" };
 
     /// <summary>The investigation state tools both apps register: served only under the investigations arm.</summary>
     internal static readonly string[] SharedInvestigationTools =
@@ -136,27 +150,34 @@ internal static class McpGateParityMatrix
     internal const string DarlingInvestigationMessageTool = "post_investigation_message";
 
     /// <summary>Darling's agent action tools: writes that Darling also serves under the investigations arm, where each call
-    /// is decided inside the tool.</summary>
+    /// is decided inside the tool. The four mute rule tools are Darling agent action tools too, but Lite has them, so they are in
+    /// <see cref="SharedMuteRuleWrites"/>.</summary>
     internal static readonly string[] DarlingAgentActionTools =
     {
-        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled",
         "create_custom_alert_rule", "update_custom_alert_rule", "delete_custom_alert_rule",
         "set_alert_threshold_override", "merge_deadlock_signatures",
         "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session",
         "recompile_module", "create_plan_guide", "drop_plan_guide",
     };
 
-    /// <summary>The 17 tools Darling's investigations arm serves beyond the 2 shared ones. Lite has no tool of these names
-    /// (<see cref="Registers"/>).</summary>
+    /// <summary>Darling's change window tools (#9485): writes that the investigations arm serves as well, behind the per-call
+    /// agent switch. Not Level 2 action tools, so not in <see cref="DarlingAgentActionTools"/>. Spelled here because Lite.Tests compiles
+    /// this file and cannot reference the Darling service. The tools/list comparison fails when the product serves a name this table lacks.</summary>
+    internal static readonly string[] DarlingChangeWindowTools = { "declare_change_window", "clear_change_window" };
+
+    /// <summary>The 15 tools Darling's investigations arm serves beyond the 2 shared ones and the 4 shared mute rule writes. Lite
+    /// has no tool of these names (<see cref="Registers"/>).</summary>
     internal static readonly string[] DarlingInvestigationArmTools =
-        DarlingAgentActionTools.Append(DarlingInvestigationMessageTool).ToArray();
+        DarlingAgentActionTools.Concat(DarlingChangeWindowTools).Append(DarlingInvestigationMessageTool).ToArray();
 
-    /// <summary>Lite's one tool with no Darling tool of the same name (Darling's is <c>get_blocking</c>): a read.</summary>
-    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports" };
+    /// <summary>Lite's tools with no Darling tool of the same name: a read each. Darling's twin of get_blocked_process_reports is <c>get_blocking</c>; get_store_health (#8788) has none, Darling's store page being #8787.</summary>
+    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health", "get_slow_mcp_calls" };
 
-    /// <summary>Every tool name a row calls, in both apps: the 112 shared names and the names one app alone answers.</summary>
+    /// <summary>Every tool name a row calls, in both apps: the shared names and the names one app alone answers.</summary>
     internal static readonly string[] Tools = SharedReads
         .Concat(SharedWrites)
+        .Concat(SharedServerAdminTools)
+        .Concat(SharedMuteRuleWrites)
         .Concat(SharedInvestigationTools)
         .Concat(DarlingInvestigationArmTools)
         .Concat(LiteOnlyReads)
@@ -271,7 +292,7 @@ internal static class McpGateParityMatrix
 
     /// <summary>INTENDED DIFFERENCE: whether the app has a tool of this name at all. Lite has none of
     /// <see cref="DarlingInvestigationArmTools"/>, so its investigations arm serves the 2 shared investigation tools where
-    /// Darling's serves 19. Darling has no tool named as Lite's <see cref="LiteOnlyReads"/>.</summary>
+    /// Darling's serves 21. Darling has no tool named as Lite's <see cref="LiteOnlyReads"/>.</summary>
     internal static bool Registers(GateApp app, string tool) => app == GateApp.Lite
         ? !DarlingInvestigationArmTools.Contains(tool)
         : !LiteOnlyReads.Contains(tool);
@@ -295,24 +316,25 @@ internal static class McpGateParityMatrix
     /// <summary>The two arms an admitted caller is served under. The stored token follows the switches and needs to clear the
     /// floor; a named token follows its role whatever the switches say: an operator has the writes, an agent the
     /// investigations arm, a reader neither.</summary>
-    internal static (bool Writes, bool Investigations) Arms(GateApp app, GateConfig config, GateCaller caller)
+    internal static (bool Writes, bool ServerAdmin, bool Investigations) Arms(GateApp app, GateConfig config, GateCaller caller)
     {
         switch (caller)
         {
             case GateCaller.OperatorToken:
-                return (true, false);
+                return (true, config.ServerAdmin, false);
             case GateCaller.AgentToken:
-                return (false, true);
+                return (false, false, true);
             case GateCaller.ReaderToken:
-                return (false, false);
+                return (false, false, false);
         }
 
         var usable = TokenInForce(app, config) && config.Token == GateToken.Usable && caller == GateCaller.StoredToken;
-        return (config.Writes && usable, config.Investigations && usable && !config.Writes);
+        return (config.Writes && usable, config.Writes && config.ServerAdmin && usable, config.Investigations && usable && !config.Writes);
     }
 
-    /// <summary>THE rule: what one call answers. The server-admin switch moves no name here, because it serves only tools
-    /// Lite does not have.</summary>
+    /// <summary>THE rule: what one call answers. A server admin tool (#9640) is served under the server-admin arm only: the
+    /// writes setting and the server-admin setting both on, with a usable token. An operator token holds the writes arm whatever
+    /// the writes setting says, and the server admin tools follow the server-admin setting.</summary>
     internal static GateOutcome Expected(GateApp app, GateConfig config, GateCaller caller, string tool)
     {
         if (!Admitted(app, config, caller))
@@ -325,7 +347,7 @@ internal static class McpGateParityMatrix
             return GateOutcome.UnknownTool;
         }
 
-        var (writes, investigations) = Arms(app, config, caller);
+        var (writes, serverAdmin, investigations) = Arms(app, config, caller);
         bool served;
         if (SharedReads.Contains(tool) || LiteOnlyReads.Contains(tool))
         {
@@ -335,11 +357,20 @@ internal static class McpGateParityMatrix
         {
             served = writes;
         }
+        else if (SharedServerAdminTools.Contains(tool))
+        {
+            served = serverAdmin;
+        }
+        else if (SharedMuteRuleWrites.Contains(tool))
+        {
+            /* INTENDED DIFFERENCE: Darling's investigations arm serves the mute rule tools too (agent mute rules on). */
+            served = writes || (app == GateApp.Darling && investigations);
+        }
         else if (SharedInvestigationTools.Contains(tool) || tool == DarlingInvestigationMessageTool)
         {
             served = investigations;
         }
-        else if (DarlingAgentActionTools.Contains(tool))
+        else if (DarlingAgentActionTools.Contains(tool) || DarlingChangeWindowTools.Contains(tool))
         {
             served = investigations || writes;
         }
@@ -425,7 +456,7 @@ internal static class McpGateParityMatrix
 
     /// <summary>
     /// The investigations arm, by the whole of <c>tools/list</c>: turning the switch on adds exactly the names the rule
-    /// serves under the arm, 2 in Lite and 19 in Darling, and takes none away. The two full lists are compared, so a tool
+    /// serves under the arm, 2 in Lite and 21 in Darling, and takes none away. The two full lists are compared, so a tool
     /// outside the matrix that the arm serves fails here.
     /// </summary>
     internal static async Task AssertInvestigationsArmAddsWhatTheRuleNamesAsync(GateApp app, IGateHost readsOnly, IGateHost investigationsArm)
@@ -439,7 +470,7 @@ internal static class McpGateParityMatrix
             Tools.Where(tool => Expected(app, InvestigationsArm, GateCaller.StoredToken, tool) == GateOutcome.Served
                 && Expected(app, ReadsOnly, GateCaller.StoredToken, tool) != GateOutcome.Served),
             StringComparer.Ordinal);
-        Assert.Equal(app == GateApp.Lite ? 2 : 19, expected.Count);
+        Assert.Equal(app == GateApp.Lite ? 2 : 21, expected.Count);
         Assert.Equal(expected, new SortedSet<string>(armOn.Names!.Except(armOff.Names!), StringComparer.Ordinal));
         Assert.Empty(armOff.Names!.Except(armOn.Names!));
     }

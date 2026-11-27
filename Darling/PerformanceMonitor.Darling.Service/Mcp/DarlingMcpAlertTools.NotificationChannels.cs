@@ -47,6 +47,7 @@ public sealed partial class DarlingMcpAlertTools
         string SmtpHost, int SmtpPort, bool SmtpSsl, string SmtpFrom, string SmtpRecipients, string TeamsProxy, string SlackProxy,
         string GenericBody, string GenericProxy, bool PagerDutyEu, string PagerDutyProxy, bool PagerDutyAutoResolve);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_notification_channels"), Description(
         "Sets the default notification channels (the Viewer's Settings > Notifications) that routes fall back to: SMTP, Teams, Slack, the generic webhook and PagerDuty. Only the fields you pass change; - clears a text field. Changes shared alert configuration. Returns updated with each setting before and after (a secret as set or not set, never its value) and an undo for the non-secret settings, or invalid or refused." +
         "<<GUIDE>>" +

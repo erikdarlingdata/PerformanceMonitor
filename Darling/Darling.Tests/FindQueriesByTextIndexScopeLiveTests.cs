@@ -26,8 +26,10 @@ namespace Darling.Tests;
    QueryTextTrigramIndexTracker.Shared through the tools and QueryTextTrigramIndexTrackerTests starts the real worker, which sets it. */
 [Collection("darling-config-env")]
 /// <summary>
-/// #7674 part B on a real store: the one-server scope keeps the plain path when the trigram index exists (the planner cannot use the index for
-/// it), and a search that names no server is refused unless the index is ready, in a sentence that names the option.
+/// #7674 part B on a real store: the one-server span read (<c>PlanCacheSql</c>) is not served by the trigram index when it exists (the planner
+/// cannot use the index for it; with the index ready the one-server search reads the matched digests through it first, which
+/// <see cref="FindQueriesByTextOneServerProbeLiveTests"/> covers), and a search that names no server is refused unless the index is ready, in a
+/// sentence that names the option.
 /// </summary>
 public sealed class FindQueriesByTextIndexScopeLiveTests
 {
@@ -99,7 +101,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
 
     /// <summary>The planner's plan for one of the tool's statements with sequential scans turned off, so that any index that can serve the
     /// predicate is the cheaper way in and shows up in the plan. Returns the plan as JSON text.</summary>
-    internal static async Task<string> ExplainAsync(NpgsqlDataSource data, string sql, string? database, string pattern, bool withServer, CancellationToken ct)
+    internal static async Task<string> ExplainAsync(NpgsqlDataSource data, string sql, string? database, string pattern, bool withServer, CancellationToken ct, bool span = false)
     {
         await using var c = await data.OpenConnectionAsync(ct);
         await using (var set = new NpgsqlCommand("SET enable_seqscan = off", c))
@@ -125,6 +127,15 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DarlingMcpFindQueriesByTextTools.EscapeLike(pattern) });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+        if (span)
+        {
+            /* #9150: the span statement's ceiling, then the server ids, query_hashes and databases earlier spans found. */
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = LiveClock.Now().AddDays(1) });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = Array.Empty<int>() });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
+        }
+
         if (withServer)
         {
             /* The one-server statement is one span of the raw window: its ceiling, the keys of the rows earlier spans found and the digests they

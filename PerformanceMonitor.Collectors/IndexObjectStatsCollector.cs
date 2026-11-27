@@ -24,7 +24,8 @@ namespace PerformanceMonitor.Collectors;
 /// (RunsPerDatabase). Within each database the three DMVs stage into #temps with single scans
 /// then join — the sp_IndexCleanup technique that fixed the #1135 monolithic-join timeouts —
 /// under a dedicated 300 s per-database budget (CommandTimeoutSecondsOverride; the enumeration
-/// keeps the default). sqlserver_start_time flags restart-class counter resets for the read layer.
+/// keeps the default). sqlserver_start_time flags restart-class counter resets for the read layer, and
+/// answering_server_name (#8784, the answering instance's @@SERVERNAME) flags a change of node behind a listener.
 ///
 /// <para>Also captures the per-index DEFINITION metadata that monitor-side UNUSED/DUPLICATE index
 /// analysis needs (FinOps Index Analysis, Stage 1): the ordered KEY column list (with sort
@@ -107,6 +108,20 @@ public sealed class IndexObjectStatsCollector : CollectorDefinitionBase<IndexObj
         public bool? AllowPageLocks { get; set; }
         public bool? AllowRowLocks { get; set; }
         public bool? IsIndexedView { get; set; }
+
+        /// <summary>
+        /// The <c>@@SERVERNAME</c> of the instance that answered (#8784). Through an availability group listener with read-only routing the
+        /// node behind one registration can change between collections, and usage counters are per instance, so a reader that subtracts one
+        /// snapshot from the next has to know when the two came from different instances. NULL on a row stored before this column existed.
+        /// </summary>
+        public string? AnsweringServerName { get; set; }
+
+        /// <summary>
+        /// A memory-optimized table (#8784). <c>sys.dm_db_index_usage_stats</c> holds no rows for one, so its usage counters here are always
+        /// zero and say nothing about whether it is used: a reader has to know not to call it unused. NULL on a row stored before this
+        /// column existed, on an indexed view, and on a version that has no In-Memory OLTP.
+        /// </summary>
+        public bool? IsMemoryOptimized { get; set; }
     }
 
     /// <summary>
@@ -116,18 +131,32 @@ public sealed class IndexObjectStatsCollector : CollectorDefinitionBase<IndexObj
     /// column does not exist and referencing it would fail the whole batch (mirrors
     /// sp_IndexCleanup's @supports_optimize_for_sequential_key gate). Everything else is
     /// engine-version-invariant.
+    ///
+    /// <para><paramref name="supportsMemoryOptimizedColumn"/> gates <c>sys.tables.is_memory_optimized</c> the same way (SQL Server 2014+, Azure
+    /// SQL DB, Managed Instance): below it the flag is a typed 0 (#9526). The body sets a 5 s <c>LOCK_TIMEOUT</c> so a DDL holding a
+    /// schema modification lock on one user object makes the database yield (error 1222, a <see cref="YieldsOnLockTimeout"/> yield) instead
+    /// of waiting for the DDL to commit.</para>
     /// </summary>
-    internal static string BuildPerDatabaseStatsBody(bool supportsOptimizeForSequentialKey)
+    internal static string BuildPerDatabaseStatsBody(bool supportsOptimizeForSequentialKey, bool supportsMemoryOptimizedColumn = true)
     {
         string optimizeForSequentialKey =
             supportsOptimizeForSequentialKey
                 ? "i.optimize_for_sequential_key"
                 : "CONVERT(bit, NULL)";
+        string memoryOptimized =
+            supportsMemoryOptimizedColumn
+                ? "CONVERT(bit, ISNULL(t.is_memory_optimized, 0))"
+                : "CONVERT(bit, 0)";
 
         return @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT " + LockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture) + @";
 
+/* #9526: the two DMV stagings below wait behind a schema modification lock (a DDL open on any user object). A lock timeout there is
+   rethrown as it is, so the host sees error 1222 and records a yield. Without the TRY the failed SELECT INTO is only a statement error:
+   the batch carries on and ends on a missing temp table instead. */
+BEGIN TRY
 /* Size + row counts (one scan of dm_db_partition_stats) */
 SELECT /* PerformanceMonitorLite */
     PerformanceMonitorLite.object_id,
@@ -190,6 +219,10 @@ GROUP BY
     PerformanceMonitorLite.object_id,
     PerformanceMonitorLite.index_id
 OPTION(RECOMPILE);
+END TRY
+BEGIN CATCH
+    THROW;
+END CATCH;
 
 /* Stage the per-index DEFINITION catalog ONCE, then build the metadata set-based - the
    sp_IndexCleanup technique (#3508). The stats DMVs above already stage this way; the
@@ -419,10 +452,22 @@ SELECT /* PerformanceMonitorLite */
                 THEN 1
                 ELSE 0
             END
-        )
+        ),
+    /* #8784: the instance that answered. Usage counters are per instance, and through a listener with read-only routing the node behind
+       one registration can change between collections, so the window read treats a change of node as a counter reset. Last, so every
+       ordinal above stays where ParseRowsAsync reads it. */
+    answering_server_name = @@SERVERNAME,
+    /* #8784: a memory-optimized table has no rows in sys.dm_db_index_usage_stats, so the counters above are zero for it whatever its use.
+       Read from sys.tables, not OBJECTPROPERTY: OBJECTPROPERTY takes a schema stability lock per row, so a DDL open on one table stalled the
+       whole run behind it (#9526), where the catalog column does not wait. A version below SQL Server 2014 has no such column and no such
+       tables, so the flag is a typed 0 there. A NULL (an indexed view) is stored as 0, so a collected row always says: NULL in the store
+       is left to mean a row from before this column was collected, which the usage read treats as not known. */
+    is_memory_optimized = " + memoryOptimized + @"
 FROM sys.indexes AS i
 JOIN sys.objects AS o
   ON o.object_id = i.object_id
+LEFT JOIN sys.tables AS t
+  ON t.object_id = o.object_id
 JOIN sys.schemas AS s
   ON s.schema_id = o.schema_id
 LEFT JOIN #sizes AS ps
@@ -463,6 +508,22 @@ OPTION(RECOMPILE);";
         || target.IsAzureManagedInstance
         || target.SqlMajorVersion >= 15;
 
+    /// <summary>
+    /// <c>sys.tables.is_memory_optimized</c> and <c>sys.sql_modules.uses_native_compilation</c> exist from SQL Server 2014 (major 12), and on
+    /// Azure SQL DB and Managed Instance (#9526). Unknown version (0) fails safe to unsupported: a typed 0 is emitted rather than a column
+    /// that may not bind. Shared with <see cref="ObjectInventoryCollector"/>.
+    /// </summary>
+    internal static bool SupportsInMemoryOltpColumns(CollectorTargetInfo target) =>
+        target.IsAzureSqlDb
+        || target.IsAzureManagedInstance
+        || target.SqlMajorVersion >= 12;
+
+    /// <summary>The lock wait, in milliseconds, before a blocked read yields. The same 5 s identity_capacity and database_protection use.</summary>
+    public const int LockTimeoutMilliseconds = 5000;
+
+    /// <summary>The body sets a 5 s lock timeout, so a 1222 behind a DDL's schema lock is a yield, not a failure (#9526).</summary>
+    public override bool YieldsOnLockTimeout => true;
+
     public override string Name => "index_object_stats";
 
     public override string TargetTable => "index_object_stats";
@@ -475,7 +536,7 @@ OPTION(RECOMPILE);";
 
     /// <summary>Azure per-database connections run the staged body directly.</summary>
     public override CollectorQuery BuildQuery(CollectorContext context) =>
-        new(BuildPerDatabaseStatsBody(SupportsOptimizeForSequentialKey(context.Target)));
+        new(BuildPerDatabaseStatsBody(SupportsOptimizeForSequentialKey(context.Target), SupportsInMemoryOltpColumns(context.Target)));
 
     /// <summary>On-prem: enumerate accessible online databases (with the #3477 scope and the
     /// exclusions — the composed predicate, so the scope narrows the fan-out and the exclusion
@@ -506,7 +567,7 @@ ORDER BY
     public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
     {
         /* Double single quotes so the body survives nesting inside [db].sys.sp_executesql N'...' */
-        var escapedBody = BuildPerDatabaseStatsBody(SupportsOptimizeForSequentialKey(context.Target))
+        var escapedBody = BuildPerDatabaseStatsBody(SupportsOptimizeForSequentialKey(context.Target), SupportsInMemoryOltpColumns(context.Target))
             .Replace("'", "''", StringComparison.Ordinal);
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
         return new CollectorQuery($"EXECUTE [{escapedDbName}].sys.sp_executesql N'{escapedBody}';");
@@ -594,6 +655,8 @@ ORDER BY
                 AllowPageLocks = B(55),
                 AllowRowLocks = B(56),
                 IsIndexedView = B(57),
+                AnsweringServerName = S(58),
+                IsMemoryOptimized = B(59),
             });
         }
     }
@@ -658,6 +721,10 @@ ORDER BY
         new CollectorColumn("allow_page_locks", CollectorColumnType.Boolean),
         new CollectorColumn("allow_row_locks", CollectorColumnType.Boolean),
         new CollectorColumn("is_indexed_view", CollectorColumnType.Boolean),
+        /* #8784: LAST, so a store that predates it comes up to shape with one ADD COLUMN (Darling's V268, Lite's v82). */
+        new CollectorColumn("answering_server_name", CollectorColumnType.Varchar),
+        /* #8784: after it, in the same rungs. */
+        new CollectorColumn("is_memory_optimized", CollectorColumnType.Boolean),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -720,6 +787,8 @@ ORDER BY
             .Value(row.IsPadded)
             .Value(row.AllowPageLocks)
             .Value(row.AllowRowLocks)
-            .Value(row.IsIndexedView);
+            .Value(row.IsIndexedView)
+            .Value(row.AnsweringServerName)
+            .Value(row.IsMemoryOptimized);
     }
 }

@@ -48,6 +48,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// names the <c>off</c> and <c>unknown</c> settings as the actionable ones, and a <c>partial</c> row's
 /// <c>cost_note</c> says whether its threshold is the recommendation or a compromise.</para>
 ///
+/// <para><b>One facet can rest on two settings.</b> PostgreSQL 19 made <c>log_autovacuum_min_duration</c> cover
+/// automatic vacuum runs only and added <c>log_autoanalyze_min_duration</c> for automatic analyze runs. On a
+/// snapshot whose <c>server_version_num</c> is 19 or later the autovacuum facet judges both and combines
+/// them: <c>instrumented</c> only when both write every run, <c>unknown</c> when one is instrumented and the
+/// other is not in the snapshot, otherwise <c>partial</c>, with the remedy naming each setting still short of 0
+/// and <see cref="Facet.Companion"/> carrying the second setting. On 18 and below the facet is the one setting,
+/// as it always was.</para>
+///
 /// <para><b>Consumers are named honestly, "planned" and "shipped" alike.</b> The issue's own sequencing note
 /// says this audit earns its keep once the log pipeline (#3601) and its first parser families (#3602 temp
 /// files, #3603 autovacuum) consume the lines. The two parser families have landed and their facets say
@@ -104,6 +112,9 @@ public static class DarlingPgLoggingAudit
     /// judged here is the RUNNING one and changes at the next restart.</param>
     /// <param name="RestartNote">The consequence of <paramref name="PendingRestart"/>, spelled out on the row;
     /// null when the two agree.</param>
+    /// <param name="Companion">The second setting a facet's verdict rests on, as the snapshot holds it, or null
+    /// when the facet is one setting. On PostgreSQL 19 and later the autovacuum facet carries
+    /// <c>log_autoanalyze_min_duration</c> here.</param>
     public sealed record Facet(
         string Setting,
         string? Value,
@@ -119,7 +130,23 @@ public static class DarlingPgLoggingAudit
         string Remedy,
         string? ScopeNote,
         bool PendingRestart,
-        string? RestartNote);
+        string? RestartNote,
+        CompanionSetting? Companion = null);
+
+    /// <summary>A facet's second setting, shown as the snapshot holds it with its own verdict.</summary>
+    /// <param name="Setting">The GUC.</param>
+    /// <param name="Value">What the snapshot holds, verbatim, or null when the setting is not in it.</param>
+    /// <param name="Unit">The unit <c>pg_settings</c> reports.</param>
+    /// <param name="DefaultValue">The compiled-in default, from the same snapshot.</param>
+    /// <param name="Source">Where the value came from.</param>
+    /// <param name="Verdict">This setting's own verdict, judged by the same threshold rule as the facet's first.</param>
+    public sealed record CompanionSetting(
+        string Setting,
+        string? Value,
+        string? Unit,
+        string? DefaultValue,
+        string? Source,
+        string Verdict);
 
     /// <summary>A plan-capture setting shown as observed, with the readiness facet that judges it.</summary>
     public sealed record ReadinessSetting(string Setting, string? Value, string? Source, string ReadinessFacet);
@@ -372,6 +399,59 @@ public static class DarlingPgLoggingAudit
             RestartNote: RestartNote(row));
     }
 
+    /// <summary>The setting PostgreSQL 19 added for automatic analyze runs.</summary>
+    private const string AutoanalyzeSetting = "log_autoanalyze_min_duration";
+
+    /// <summary>The first <c>server_version_num</c> whose <c>log_autovacuum_min_duration</c> covers vacuum runs only.</summary>
+    private const int SplitAutovacuumLoggingVersionNum = 190000;
+
+    /// <summary>
+    /// Whether the snapshot is from a PostgreSQL that logs automatic analyze runs under their own setting
+    /// (19 and later). <c>server_version_num</c> is a <c>pg_settings</c> row, so the stored snapshot carries
+    /// it and decides; a snapshot without a readable one falls back to the analyze setting's own presence,
+    /// which no earlier major has.
+    /// </summary>
+    private static bool LogsAnalyzeSeparately(
+        IReadOnlyDictionary<string, DarlingPgLoggingAuditReader.PgLoggingSettingRow> byName)
+    {
+        var version = Threshold(Find(byName, "server_version_num"));
+        return version is long num
+            ? num >= SplitAutovacuumLoggingVersionNum
+            : byName.ContainsKey(AutoanalyzeSetting);
+    }
+
+    private static string ThresholdVerdict(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row, long? threshold) =>
+        row is null ? Unknown
+            : threshold is null ? Unknown
+            : threshold < 0 ? Off
+            : threshold == 0 ? Instrumented
+            : Partial;
+
+    /// <summary>
+    /// One verdict for the two settings: both agreeing is that verdict; an instrumented half beside one that
+    /// is not in the snapshot is <c>unknown</c>, because the missing half is not inferred; every other mix
+    /// is <c>partial</c>, because some automatic runs write a line and some do not.
+    /// </summary>
+    private static string CombineVerdicts(string vacuum, string analyze) =>
+        vacuum == analyze ? vacuum
+            : (vacuum == Instrumented && analyze == Unknown) || (vacuum == Unknown && analyze == Instrumented) ? Unknown
+            : Partial;
+
+    /// <summary>What one of the two settings means for the cost note, in a sentence about its own runs.</summary>
+    private static string SplitHalfNote(
+        string setting, string kind, string verdict, long? threshold, bool atDefault,
+        DarlingPgLoggingAuditReader.PgLoggingSettingRow? row) => verdict switch
+    {
+        Instrumented => $"{setting} is 0, so every automatic {kind} run writes a line.",
+        Partial => $"{setting} is {threshold} ms, so automatic {kind} runs shorter than that write nothing"
+                   + (atDefault ? " (PostgreSQL's own ten-minute default, which on most tables is every run)." : "."),
+        Off => $"{setting} is -1, so no automatic {kind} run writes a line.",
+        _ => row is null
+            ? $"{setting} is not in the stored snapshot, so nothing is claimed about automatic {kind} runs."
+            : $"{setting} is in the stored snapshot with the value '{row.Setting}', which this audit cannot read as an integer, "
+              + $"so nothing is claimed about automatic {kind} runs.",
+    };
+
     private static Facet AutovacuumMinDuration(
         IReadOnlyDictionary<string, DarlingPgLoggingAuditReader.PgLoggingSettingRow> byName, bool managed)
     {
@@ -379,11 +459,17 @@ public static class DarlingPgLoggingAudit
         var row = Find(byName, Setting);
         var threshold = Threshold(row);
 
-        var verdict = row is null ? Unknown
-            : threshold is null ? Unknown
-            : threshold < 0 ? Off
-            : threshold == 0 ? Instrumented
-            : Partial;
+        var vacuumVerdict = ThresholdVerdict(row, threshold);
+
+        /* PostgreSQL 19 split the logging: log_autovacuum_min_duration covers automatic VACUUM runs only and
+           log_autoanalyze_min_duration (ten minutes by default) covers automatic ANALYZE runs. On 18 and
+           below the first setting covers both and the facet is judged on it alone, exactly as it always was. */
+        var split = LogsAnalyzeSeparately(byName);
+        var analyzeRow = split ? Find(byName, AutoanalyzeSetting) : null;
+        var analyzeThreshold = Threshold(analyzeRow);
+        var analyzeVerdict = split ? ThresholdVerdict(analyzeRow, analyzeThreshold) : vacuumVerdict;
+
+        var verdict = split ? CombineVerdicts(vacuumVerdict, analyzeVerdict) : vacuumVerdict;
 
         /* PostgreSQL 15 moved the default from -1 to 600000 (ten minutes). A server sitting on that default
            at a positive threshold is the shape worth naming: it sees only the outlier runs. The judgment is
@@ -418,24 +504,57 @@ public static class DarlingPgLoggingAudit
             _ => UnknownNote(row),
         };
 
+        if (split && verdict != Instrumented)
+        {
+            var analyzeAtDefault = analyzeRow is not null && analyzeThreshold > 0
+                && string.Equals(analyzeRow.Source, "default", StringComparison.Ordinal);
+
+            cost = "PostgreSQL 19 logs automatic vacuum runs and automatic analyze runs under separate settings, "
+                   + $"and both have to be 0 for every run to write a line. "
+                   + SplitHalfNote(Setting, "vacuum", vacuumVerdict, threshold, atDefault, row) + " "
+                   + SplitHalfNote(AutoanalyzeSetting, "analyze", analyzeVerdict, analyzeThreshold, analyzeAtDefault, analyzeRow)
+                   + " 0 is cheap for both: the run rate is bounded by the worker count, so the volume is small "
+                   + "on all but a server with thousands of tiny tables.";
+        }
+
+        /* The settings the remedy sets: each half that is readable and not already at 0. A half that is not in
+           the snapshot is not inferred, so no statement is offered for it. */
+        var halves = split
+            ? new[] { (Name: Setting, Row: row, Verdict: vacuumVerdict), (Name: AutoanalyzeSetting, Row: analyzeRow, Verdict: analyzeVerdict) }
+            : new[] { (Name: Setting, Row: row, Verdict: vacuumVerdict) };
+        var toSet = halves.Where(h => h.Verdict is Off or Partial).Select(h => (h.Name, h.Row)).ToList();
+        var unreadableRow = halves.Where(h => h.Verdict == Unknown).Select(h => h.Row).FirstOrDefault();
+
         return new Facet(
             Setting,
             row?.Setting, row?.Unit, row?.BootValue, row?.Source, ChangeNeeds(row),
             verdict,
-            Unlocks: "One LOG line per autovacuum or autoanalyze run that took longer than the threshold: "
-                     + "pages and tuples removed, buffer hits and misses, read and write rates, WAL usage and "
+            Unlocks: (split
+                         ? "One LOG line per automatic vacuum run (log_autovacuum_min_duration) or automatic analyze "
+                           + "run (log_autoanalyze_min_duration) that took longer than its threshold"
+                         : "One LOG line per autovacuum or autoanalyze run that took longer than the threshold")
+                     + ": pages and tuples removed, buffer hits and misses, read and write rates, WAL usage and "
                      + "elapsed time - what the run COST. What this product has instead is pg_stat_user_tables "
                      + "through get_pg_autovacuum_health: whether autovacuum ran and when, never what it cost, "
                      + "so a run that takes 40 minutes of I/O in the business peak reads as healthy there.",
             Consumer: "SHIPPED - get_pg_log_events with family autovacuum stores one event per completed "
                       + "run with its duration, pages, tuples, buffers and WAL lifted, and get_pg_autovacuum_health "
                       + "shows them per table as recent_runs beside the whether-it-ran catalog half.",
-            Recommended: "0 (every run).",
+            Recommended: split
+                ? "0 for both log_autovacuum_min_duration and log_autoanalyze_min_duration (every run)."
+                : "0 (every run).",
             CostNote: cost,
-            Remedy: Remedy(Setting, "0", row, managed, verdict, alreadyRight: verdict == Instrumented),
+            Remedy: verdict == Unknown
+                ? Remedy(Setting, "0", unreadableRow, managed, verdict, alreadyRight: false)
+                : Remedy(toSet, "0", managed, alreadyRight: verdict == Instrumented),
             ScopeNote: ScopeNote(row),
             PendingRestart: row?.PendingRestart ?? false,
-            RestartNote: RestartNote(row));
+            RestartNote: RestartNote(row),
+            Companion: split
+                ? new CompanionSetting(
+                    AutoanalyzeSetting, analyzeRow?.Setting, analyzeRow?.Unit, analyzeRow?.BootValue, analyzeRow?.Source,
+                    analyzeVerdict)
+                : null);
     }
 
     private static Facet Checkpoints(
@@ -706,18 +825,31 @@ public static class DarlingPgLoggingAudit
                   + "raw row, and the remedy depends on what it actually says.";
         }
 
+        return Remedy(new[] { (setting, row) }, recommendedLiteral, managed, alreadyRight);
+    }
+
+    /// <summary>
+    /// The change for one or more settings that take the same value, in one statement list: a facet that rests
+    /// on two settings names both when both fall short, so one reload reaches every run. The wording around
+    /// the statements is the single-setting wording, and the restart and per-backend notes apply when any of
+    /// the settings needs them.
+    /// </summary>
+    private static string Remedy(
+        IReadOnlyList<(string Setting, DarlingPgLoggingAuditReader.PgLoggingSettingRow? Row)> settings,
+        string recommendedLiteral, bool managed, bool alreadyRight)
+    {
         if (alreadyRight)
         {
             return "No change needed - the current value is the recommended posture. cost_note says what "
                    + "it does and does not write.";
         }
 
-        var restart = string.Equals(row?.Context, "postmaster", StringComparison.Ordinal);
-        var perBackend = row?.Context is "superuser-backend" or "backend";
+        var restart = settings.Any(s => string.Equals(s.Row?.Context, "postmaster", StringComparison.Ordinal));
+        var perBackend = settings.Any(s => s.Row?.Context is "superuser-backend" or "backend");
 
         if (managed)
         {
-            return $"Set {setting} = {recommendedLiteral} in the DB parameter group and apply it - on Aurora the "
+            return $"Set {string.Join(" and ", settings.Select(s => $"{s.Setting} = {recommendedLiteral}"))} in the DB parameter group and apply it - on Aurora the "
                    + "CLUSTER parameter group covers every instance and an instance-level group overrides it "
                    + "per instance. ALTER SYSTEM is refused on RDS and Aurora. "
                    + (restart
@@ -726,7 +858,8 @@ public static class DarlingPgLoggingAudit
                          + (perBackend ? ", to connections opened after it." : "."));
         }
 
-        return $"ALTER SYSTEM SET {setting} = {recommendedLiteral}; SELECT pg_reload_conf(); - "
+        return string.Concat(settings.Select(s => $"ALTER SYSTEM SET {s.Setting} = {recommendedLiteral}; "))
+               + "SELECT pg_reload_conf(); - "
                + (restart
                    ? "then RESTART: this parameter's context is postmaster and a reload does not apply it."
                    : "a reload, not a restart"

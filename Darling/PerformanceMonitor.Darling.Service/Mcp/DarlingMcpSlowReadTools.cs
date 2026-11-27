@@ -39,6 +39,7 @@ public sealed class DarlingMcpSlowReadTools
 
     private static readonly string[] s_surfaces = { "web", "compose", "mcp" };
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_slow_reads"), Description(
         "Gets the monitoring tool's OWN slow or failed reads: each with the arguments it was asked with, the source "
         + "that answered, and its slowest statements. Not a monitored SQL Server or PostgreSQL target. Newest first. "
@@ -67,7 +68,9 @@ public sealed class DarlingMcpSlowReadTools
         + "refused busy is never offered here); both are null on older rows. caller is who made the read: an MCP "
         + "client's own name and version (ua: and its User-Agent product token when it sent none, unknown when neither), or web: "
         + "and 12 hex characters of a hash of the web session key under a salt that lives only in the service's memory, so it holds "
-        + "no personal data and cannot be turned back into the key; null on rows stored before this column existed. A statement label is the product's own SQL "
+        + "no personal data and cannot be turned back into the key; null on rows stored before this column existed. reply_bytes is the size in bytes of the reply the caller "
+        + "received: an MCP read's text and a web read's answer text, counted as UTF-8 once the read finished, not measured by serializing again. It is null on rows stored "
+        + "before this column existed, on a composed-panel read, and on a web read the service answered with its fixed failure body or wrapped in an error object. A statement label is the product's own SQL "
         + "text with a short hash; parameter values are never stored. summary counts reads per (surface, route, outcome) "
         + "over the window and the filters, so it covers more than the page. reads is newest first, then newest id; the "
         + "page is capped at limit rows or the ~32 KB response budget, whichever cuts first, and truncated says either "
@@ -199,6 +202,7 @@ public sealed class DarlingMcpSlowReadTools
             in_flight = r.InFlight,
             wait_ms = r.WaitMs,
             caller = r.Caller,
+            reply_bytes = r.ReplyBytes,
             statement_count = r.StatementCount,
             statements_truncated = r.StatementsTruncated,
             statements_omitted = omitted,

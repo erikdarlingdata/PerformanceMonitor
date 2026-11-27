@@ -99,7 +99,7 @@ public sealed partial class ViewerDataService
         {
             await using var command = _dataSource.CreateCommand(CustomViewsPrivilegeProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 return new CustomViewWriteAccess(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2));

@@ -105,12 +105,8 @@ public partial class AddServerDialog : Window
         EnabledCheckBox.IsChecked = existing.IsEnabled;
         TrustCertCheckBox.IsChecked = existing.TrustServerCertificate;
 
-        EncryptModeComboBox.SelectedIndex = existing.EncryptMode switch
-        {
-            "Mandatory" => 1,
-            "Strict" => 2,
-            _ => 0
-        };
+        /* A blank or unknown stored mode connects as Mandatory (#9237), so the box shows Mandatory, not Optional. */
+        EncryptModeComboBox.SelectedIndex = ServerEntryRules.EncryptBoxIndexFor(existing.EncryptMode);
 
         FavoriteCheckBox.IsChecked = existing.IsFavorite;
         DescriptionTextBox.Text = existing.Description ?? "";
@@ -317,42 +313,16 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private static SqlConnectionEncryptOption ParseEncryptOption(string mode)
-    {
-        return mode switch
-        {
-            "Mandatory" => SqlConnectionEncryptOption.Mandatory,
-            "Strict" => SqlConnectionEncryptOption.Strict,
-            _ => SqlConnectionEncryptOption.Optional
-        };
-    }
-
-    /// <summary>
-    /// The Test Connection builder before authentication is applied. The Data Source goes through
-    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
-    /// to a named pipe over SMB with this process's Windows credentials (#6352).
-    /// </summary>
+    /// <summary>The Test Connection builder before authentication is applied. The rule lives in <see cref="ServerEntryRules"/> (#9237) so
+    /// <c>--add-server</c> builds the same one.</summary>
     internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
         string serverName,
         string databaseName,
         bool trustServerCertificate,
         SqlConnectionEncryptOption encrypt,
         bool readOnlyIntent,
-        bool multiSubnetFailover)
-    {
-        var dbName = databaseName.Trim();
-        return new SqlConnectionStringBuilder
-        {
-            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
-            InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
-            ApplicationName = "PerformanceMonitorLite",
-            ConnectTimeout = 10,
-            TrustServerCertificate = trustServerCertificate,
-            Encrypt = encrypt,
-            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = multiSubnetFailover
-        };
-    }
+        bool multiSubnetFailover) =>
+        ServerEntryRules.BuildBaseConnectionBuilder(serverName, databaseName, trustServerCertificate, encrypt, readOnlyIntent, multiSubnetFailover);
 
     private SqlConnectionStringBuilder BuildConnectionBuilder()
     {
@@ -360,7 +330,7 @@ public partial class AddServerDialog : Window
             ServerNameBox.Text,
             DatabaseNameBox.Text,
             TrustCertCheckBox.IsChecked == true,
-            ParseEncryptOption(GetSelectedEncryptMode()),
+            ServerEntryRules.EncryptOptionFor(GetSelectedEncryptMode()),
             ReadOnlyIntentCheckBox.IsChecked == true,
             MultiSubnetFailoverCheckBox.IsChecked == true);
 
@@ -448,6 +418,9 @@ public partial class AddServerDialog : Window
     /// <summary>#6459: SERVERPROPERTY('EngineEdition') the last connection test read, or 0 before one succeeded.</summary>
     private int _testedEngineEdition;
 
+    /// <summary>#9099: the SQL Server major version the last connection test read (0 before one succeeded), for <see cref="SupportedVersionConnectionNote"/>.</summary>
+    private int _testedMajorVersion;
+
     private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
@@ -505,6 +478,7 @@ public partial class AddServerDialog : Window
             using var cmd = new SqlCommand(ServerManager.DetectionQueryText, connection);
             string? version = null;
             _testedEngineEdition = 0;
+            _testedMajorVersion = 0;
             using (var reader = await cmd.ExecuteReaderAsync())
             {
                 if (await reader.ReadAsync())
@@ -513,6 +487,8 @@ public partial class AddServerDialog : Window
                     var editionOrdinal = reader.GetOrdinal("engine_edition");
                     version = reader.IsDBNull(versionOrdinal) ? null : reader.GetString(versionOrdinal);
                     _testedEngineEdition = reader.IsDBNull(editionOrdinal) ? 0 : reader.GetInt32(editionOrdinal);
+                    var majorOrdinal = reader.GetOrdinal("major_version");
+                    _testedMajorVersion = reader.IsDBNull(majorOrdinal) ? 0 : Convert.ToInt32(reader.GetValue(majorOrdinal));
                 }
             }
 
@@ -523,7 +499,7 @@ public partial class AddServerDialog : Window
         {
             /* #6183: SqlClient's native library not loading says "type initializer ... TdsParser threw an exception"
                and nothing about why. The shared explanation names the cause, and the long install path. */
-            errorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+            errorMessage = ServerEntryRules.FailureText(ex, GetSelectedEncryptMode());
             if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
                 signInCancelled = true;
@@ -765,6 +741,12 @@ public partial class AddServerDialog : Window
                 ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
 
+            /* #9099: a server older than the supported versions connects fine and then has collectors that never run; say so now. */
+            if (SupportedVersionConnectionNote.For(_testedMajorVersion, _testedEngineEdition) is { } versionNote)
+            {
+                message += "\n\n" + versionNote;
+            }
+
             /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
                replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
             var replicaTest = !string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) && ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
@@ -851,6 +833,13 @@ public partial class AddServerDialog : Window
             return;
         }
 
+        /* #9787: refused before any connect or save: a display name, host, database or login holding a control character. */
+        if (ServerFieldText.FirstRefusal(DisplayNameBox.Text, serverName, DatabaseNameBox.Text, UseProfileRadio.IsChecked == true ? null : UsernameBox.Text) is { } fieldRefusal)
+        {
+            StatusText.Text = fieldRefusal;
+            return;
+        }
+
         /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
            connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
         if (HostBoxRefusal() is { } hostRefusal)
@@ -929,14 +918,9 @@ public partial class AddServerDialog : Window
             username = AzureClientIdBox.Text.Trim();
             password = AzureClientSecretBox.Password;
 
-            if (string.IsNullOrEmpty(username))
+            if (ServerEntryRules.CredentialRefusal(authenticationType, username, password) is { } credentialRefusal)
             {
-                StatusText.Text = "Client (Application) ID is required for service principal authentication.";
-                return;
-            }
-            if (string.IsNullOrEmpty(password))
-            {
-                StatusText.Text = "Client secret is required for service principal authentication.";
+                StatusText.Text = credentialRefusal;
                 return;
             }
         }
@@ -951,9 +935,9 @@ public partial class AddServerDialog : Window
             username = UsernameBox.Text.Trim();
             password = PasswordBox.Password;
 
-            if (string.IsNullOrEmpty(username))
+            if (ServerEntryRules.CredentialRefusal(authenticationType, username, password) is { } credentialRefusal)
             {
-                StatusText.Text = "Username is required for SQL Server authentication.";
+                StatusText.Text = credentialRefusal;
                 return;
             }
 
@@ -1074,28 +1058,8 @@ public partial class AddServerDialog : Window
 
                 AddedServer.CredentialProfileId = useProfile ? selectedProfile!.Id : null;
 
-                if (useProfile)
-                {
-                    // M-3: assigning a profile unconditionally scrubs the per-server identity REGARDLESS
-                    // of AuthenticationType — delete the per-server secret and null the per-server Azure/MI
-                    // fields, so a later "switch back to inline" can't silently resurrect a stale secret.
-                    AddedServer.AzureClientId = null;
-                    AddedServer.AzureTenantId = null;
-                    AddedServer.ManagedIdentityClientId = null;
-                    _serverManager.UpdateServer(AddedServer, null, null);
-                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
-                    {
-                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
-                    }
-                }
-                else
-                {
-                    _serverManager.UpdateServer(AddedServer, username, password);
-                }
-
-                /* Saving the dialog (with the password entered again where the server has one) confirms the host it
-                   names now, for this user. */
-                _serverManager.ConfirmHost(AddedServer);
+                /* #9640: the write Save makes is shared with the edit_server MCP tool, so the two store an edit the same way. */
+                ServerEditSave.Persist(_serverManager, AddedServer, useProfile, username, password);
             }
             else
             {

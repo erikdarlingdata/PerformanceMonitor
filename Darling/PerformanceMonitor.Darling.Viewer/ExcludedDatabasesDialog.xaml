@@ -24,7 +24,7 @@
              service collected — so the list below is the collected user databases (not a free-text editor).
              A not-yet-collected database can still be added by hand at the bottom. -->
         <TextBlock Grid.Row="1" x:Name="DescriptionText" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
-                   Text="User databases to skip in per-database collectors. Checked databases are excluded. The list is the databases the Darling service has collected for this server; system databases (master/model/msdb/tempdb) are always excluded. Add a not-yet-collected database by name below."/>
+                   Text="User databases to skip in per-database collectors. Checked databases are excluded. The list is the databases the Darling service has collected for this server; system databases (master/model/msdb/tempdb) are always excluded. Add a not-yet-collected database by name below. An entry may hold * as a wildcard: * matches any run of characters, so archive_* skips every database whose name starts with archive_, including ones created later."/>
 
         <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
             <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8">

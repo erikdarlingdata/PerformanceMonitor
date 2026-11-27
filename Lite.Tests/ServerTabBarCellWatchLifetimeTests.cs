@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// set while the tab is switched away from inside a <c>TabControl</c> are counted when it is selected again, and rows set after that
 /// are counted as they arrive.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabBarCellWatchLifetimeTests
 {
     [Fact]

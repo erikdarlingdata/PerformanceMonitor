@@ -8,7 +8,9 @@
 
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -48,6 +50,40 @@ public sealed class ReadOutcomeClassifierTests
     {
         var ex = new InvalidOperationException("boom");
         Assert.Equal(ReadOutcome.Error, ReadOutcomeClassifier.Classify(ex, CancellationToken.None));
+    }
+
+    /// <summary>#8570: only the driver's own timeout shapes are a store timeout: a bare TimeoutException, or an NpgsqlException wrapping one.</summary>
+    [Fact]
+    public void Classify_DriverClientTimeoutShapes_AreTimeout()
+    {
+        Assert.Equal(ReadOutcome.Timeout, ReadOutcomeClassifier.Classify(new TimeoutException(), CancellationToken.None));
+        Assert.Equal(ReadOutcome.Timeout, ReadOutcomeClassifier.Classify(
+            new NpgsqlException("Exception while reading from stream", new TimeoutException()), CancellationToken.None));
+    }
+
+    /// <summary>#8570: an HttpClient request that timed out is a TaskCanceledException over a TimeoutException. It is no store timeout, so it is
+    /// an error in the live classifier, in the sentence classifier, and in the sentence a tool builds from it.</summary>
+    [Fact]
+    public void HttpClientTimeoutShape_IsAnError_InBothClassifiersAndTheSentence()
+    {
+        var http = new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.", new TimeoutException());
+
+        Assert.Equal(ReadOutcome.Error, ReadOutcomeClassifier.Classify(http, CancellationToken.None));
+
+        var sentence = McpHelpers.ErrorSentence("get_thing", http);
+        Assert.DoesNotContain(McpHelpers.CommandTimeoutToken, sentence, StringComparison.Ordinal);
+        Assert.Equal(ReadOutcome.Error, ReadOutcomeClassifier.ClassifySentence(sentence, CancellationToken.None));
+    }
+
+    /// <summary>#8570: the sentence a tool builds from the driver's timeout shapes carries the timeout token, and classifies as a timeout.</summary>
+    [Fact]
+    public void DriverClientTimeoutShapes_BuildATimeoutSentence()
+    {
+        foreach (var ex in new Exception[] { new TimeoutException("t"), new NpgsqlException("t", new TimeoutException()) })
+        {
+            var sentence = McpHelpers.ErrorSentence("get_thing", ex);
+            Assert.Equal(ReadOutcome.Timeout, ReadOutcomeClassifier.ClassifySentence(sentence, CancellationToken.None));
+        }
     }
 
     [Fact]

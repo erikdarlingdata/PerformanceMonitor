@@ -256,7 +256,7 @@ HAVING COUNT(p.one) > 0";
         NpgsqlDataSource postgres, Rollup rollup, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
         var sql = BuildSql(rollup);
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectionAudit, cancellationToken);
 
         await using (var exists = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection)
         { CommandTimeout = CommandTimeoutSeconds })

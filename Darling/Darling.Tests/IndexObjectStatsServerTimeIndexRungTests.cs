@@ -46,15 +46,9 @@ public sealed class IndexObjectStatsServerTimeIndexRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("index-object-stats-server-time", V142.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>

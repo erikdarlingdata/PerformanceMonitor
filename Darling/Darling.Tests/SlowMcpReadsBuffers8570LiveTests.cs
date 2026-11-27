@@ -34,16 +34,24 @@ namespace Darling.Tests;
 /// capture row of the window, materializing and sorting all of them to keep a few hundred. It now reads the rows from each database's newest
 /// marker on. The pages are the same either way (the window is read once), so the test asserts the statement's shape: no sort and no CTE
 /// scan over thousands of rows.</para>
+/// <para><c>get_forced_plans</c>, the stats of the forces: each force's rows are bounded below by its own read_from, a join qual, which
+/// leaves every chunk up to the window's end in the plan, compressed ones included. The statement also carries the earliest read_from as
+/// one constant. The test compresses the chunks before the window and asserts the plan runs none of them, and that each force still
+/// counts from its own read_from.</para>
 /// </summary>
 public sealed class SlowMcpReadsBuffers8570LiveTests
 {
     private const string Skip = "Set DARLING_TEST_PG to a Postgres connection string to run the live #8570 buffer tests (they mint their own scratch databases).";
     private const int ServerId = 8570;
 
+    /// <summary>The scratch store with the store's search path. An open connection's own string drops the password, so a data source the
+    /// reader opens is built from this one.</summary>
+    private static string StoreConnectionString(ScratchPostgres scratch) =>
+        new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+
     private static async Task<NpgsqlConnection> OpenStoreAsync(ScratchPostgres scratch, CancellationToken ct)
     {
-        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
-        var connection = new NpgsqlConnection(connectionString);
+        var connection = new NpgsqlConnection(StoreConnectionString(scratch));
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, null, ct);
         if (scratch.TimescaleEnabled)
@@ -95,7 +103,7 @@ CROSS JOIN generate_series(0, 399) AS r", ct);
         await ExecuteAsync(connection, "VACUUM (ANALYZE) query_stats", ct);
 
         /* The answer. A row of the NULL-hash group, and each of the two host objects of the shared hash, is summed once. */
-        await using var postgres = NpgsqlDataSource.Create(connection.ConnectionString);
+        await using var postgres = NpgsqlDataSource.Create(StoreConnectionString(scratch));
         var top = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, ServerId, start, end, 5, DatabaseFilter.All, cancellationToken: ct);
         Assert.Equal(new[] { collections * 9_000_000, collections * 8_000_000, collections * 7_000_000 }, top.Take(3).Select(r => r.TotalCpuUs).ToArray());
         Assert.Equal(new long?[] { 5 * collections, 5 * collections, 5 * collections }, top.Take(3).Select(r => (long?)r.TotalExecutions).ToArray());
@@ -184,6 +192,109 @@ CROSS JOIN LATERAL (SELECT f FROM generate_series(1, 20) AS f UNION ALL SELECT N
         /* Measured on this seed (15,000 rows) and on 440,000 rows: the old statement's CTE scan and sort carried every capture row of
            the window (15,000 here, 432,000 there, 1,000 ms), the new one's largest sort or CTE scan is a few rows. */
         Assert.True(widest < 1000, $"the statement sorted or scanned a CTE of {widest} rows");
+    }
+
+    [Fact]
+    public async Task ForcedPlanStats_RunNoChunkBeforeTheEarliestReadFrom_AndCountEachForceFromItsOwn()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+
+        var end = LiveClock.AnchoredEnd();
+        var start = end.AddHours(-24);
+        var recent = end.AddHours(-6);
+        var at = end.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+        /* Two forces of db1, query 1 plan 10 and query 2 plan 20, captured with the database's marker every 30 minutes through the window. */
+        await ExecuteAsync(connection, @"
+INSERT INTO query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, query_plan_hash, plan_forcing_type, force_failure_count)
+SELECT 660000000 + row_number() OVER (), c.ts, " + ServerId + @", 'stats-8570', 'db1', x.plan_id, x.query_id, '0x' || md5('p' || x.plan_id), 'MANUAL', 0
+FROM generate_series('" + at + @"'::timestamp - interval '24 hours', '" + at + @"'::timestamp - interval '1 minute', interval '30 minutes') AS c(ts)
+CROSS JOIN (VALUES (10::bigint, 1::bigint), (20, 2), (NULL, NULL)) AS x(plan_id, query_id)", ct);
+
+        /* 96 hours of stats, a snapshot every 15 minutes, each its own interval: 40 queries with plan q * 10 (one execution a snapshot), and
+           an earlier plan of each forced query (plan 9 and plan 19, two executions a snapshot). Three days of it are before the window. */
+        await ExecuteAsync(connection, @"
+INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+  runtime_stats_interval_id, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, max_duration_us, replica_role)
+SELECT 661000000 + row_number() OVER (), c.ts, " + ServerId + @", 'stats-8570', 'db1', p.query_id, p.plan_id, 'Regular',
+  c.n, c.ts - interval '14 minutes', c.ts - interval '30 seconds', p.executions, 100, 200, 300, 'PRIMARY'
+FROM (SELECT n, '" + at + @"'::timestamp - interval '1 minute' - n * interval '15 minutes' AS ts FROM generate_series(0, 383) AS n) AS c
+CROSS JOIN (SELECT q, q * 10, 1 FROM generate_series(1, 40) AS q UNION ALL SELECT q, q * 10 - 1, 2 FROM generate_series(1, 2) AS q) AS p(query_id, plan_id, executions)", ct);
+
+        var oldChunks = new System.Collections.Generic.List<(string Schema, string Name)>();
+        if (scratch.TimescaleEnabled)
+        {
+            await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
+            await using var old = new NpgsqlCommand(
+                "SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats' AND range_end <= $1",
+                connection);
+            old.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+            await using (var reader = await old.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                    oldChunks.Add((reader.GetString(0), reader.GetString(1)));
+            }
+
+            Assert.NotEmpty(oldChunks);
+            foreach (var (schema, name) in oldChunks)
+                await ExecuteAsync(connection, $"SELECT compress_chunk('{schema}.{name}', if_not_compressed => true)", ct);
+        }
+
+        await ExecuteAsync(connection, "VACUUM (ANALYZE) query_store_stats", ct);
+        await ExecuteAsync(connection, "VACUUM (ANALYZE) query_store_forced_plans", ct);
+
+        /* The answer. Query 1 was forced before the window, so it counts from the window's start: 96 snapshots. Query 2 was forced six hours
+           before the end and counts from there, 24 snapshots, though the statement's constant bound is the window's start. */
+        await using var postgres = NpgsqlDataSource.Create(StoreConnectionString(scratch));
+        var forcedAt = new System.Collections.Generic.Dictionary<(string Database, long PlanId), DateTime>
+        {
+            [("db1", 10)] = end.AddDays(-4),
+            [("db1", 20)] = recent,
+        };
+        var read = await DarlingForcedPlanStateReader.ReadAsync(postgres, ServerId, DatabaseFilter.All, null, start, end, forcedAt, cancellationToken: ct);
+        var byPlan = read.Plans.ToDictionary(p => p.PlanId);
+        Assert.Equal(96L, byPlan[10].ForcedExecutions);
+        Assert.Equal(new[] { (9L, 192L) }, byPlan[10].OtherPlans.Select(o => (o.PlanId, o.Executions)).ToArray());
+        Assert.Equal(24L, byPlan[20].ForcedExecutions);
+        Assert.Equal(new[] { (19L, 48L) }, byPlan[20].OtherPlans.Select(o => (o.PlanId, o.Executions)).ToArray());
+
+        if (!scratch.TimescaleEnabled)
+            return;
+
+        /* The plan, with the reader's parameters: no chunk that ends before the earliest read_from runs. Measured on this seed and on a
+           921,600-row store with three compressed days: the statement without the constant bound decompressed every one of them. */
+        static DateTime Naive(DateTime t) => DateTime.SpecifyKind(t, DateTimeKind.Unspecified);
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingForcedPlanStateReader.StatsSql, connection);
+        explain.Parameters.AddWithValue(ServerId);
+        explain.Parameters.AddWithValue(NpgsqlDbType.Timestamp, Naive(end));
+        explain.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Text, new[] { "db1", "db1" });
+        explain.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Bigint, new[] { 1L, 2L });
+        explain.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Bigint, new[] { 10L, 20L });
+        explain.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, new[] { Naive(end.AddDays(-4)), Naive(recent) });
+        explain.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, new[] { Naive(start), Naive(recent) });
+        explain.Parameters.AddWithValue(NpgsqlDbType.Timestamp, Naive(start));
+        using var document = JsonDocument.Parse(Convert.ToString(await explain.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture)!);
+        var ran = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        RelationsRun(document.RootElement[0].GetProperty("Plan"), ran);
+
+        Assert.DoesNotContain(oldChunks, chunk => ran.Contains(chunk.Name));
+    }
+
+    private static void RelationsRun(JsonElement plan, System.Collections.Generic.HashSet<string> ran)
+    {
+        if (plan.TryGetProperty("Relation Name", out var relation) && plan.TryGetProperty("Actual Loops", out var loops) && loops.GetDouble() > 0)
+            ran.Add(relation.GetString()!);
+
+        if (plan.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+                RelationsRun(child, ran);
+        }
     }
 
     private static long WidestSortOrCteScan(JsonElement plan)

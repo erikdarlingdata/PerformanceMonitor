@@ -42,6 +42,9 @@ internal sealed class CommandCountingLoggerProvider : ILoggerProvider
 
     public void Reset() => _messages.Clear();
 
+    /// <summary>Every command text counted so far, for a test that asks what ran and not only how often.</summary>
+    public string[] Commands() => _messages.ToArray();
+
     public ILogger CreateLogger(string categoryName) => new CommandCountingLogger(_messages);
 
     public void Dispose() { }

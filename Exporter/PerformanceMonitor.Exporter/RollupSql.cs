@@ -287,7 +287,7 @@ public static class RollupSql
                 [
                     new(RollupRuleKind.Gauge, ["log_send_queue_size", "redo_queue_size", "secondary_lag_seconds", "log_send_rate", "redo_rate"]),
                     new(RollupRuleKind.Max, ["est_redo_completion_time_min", "est_send_drain_time_min"]),
-                    new(RollupRuleKind.Last, ["last_commit_time", "last_hardened_time", "last_redone_time", "last_received_time", "synchronization_state_desc"]),
+                    new(RollupRuleKind.Last, ["last_commit_time", "last_hardened_time", "last_redone_time", "last_received_time", "synchronization_state_desc", "is_local", "is_suspended", "suspend_reason_desc", "availability_mode_desc", "last_hardened_lsn", "last_commit_lsn"]),
                 ]),
 
             new(
@@ -299,7 +299,9 @@ public static class RollupSql
                     new(RollupRuleKind.Counter, ["calls", "total_exec_time_ms", "rows_returned", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "shared_blks_written", "temp_blks_read", "temp_blks_written", "blk_read_time_ms", "blk_write_time_ms", "storage_blks_read", "orcache_blks_hit", "storage_blk_read_time_ms", "orcache_blk_read_time_ms", "wal_records", "wal_fpi", "wal_bytes", "total_exec_peakmem_bytes"]),
                     new(RollupRuleKind.Max, ["max_exec_time_ms", "max_exec_peakmem_bytes"]),
                     new(RollupRuleKind.Min, ["min_exec_time_ms"]),
-                    // mean_exec_time_ms is dropped: it's derivable from the counter columns.
+                    // database_id -> database_name is 1:1, so this is an attribute of the key, not a key part.
+                    new(RollupRuleKind.Last, ["database_name"]),
+                    // mean_exec_time_ms is dropped: it's derivable from the counter columns (listed in StoreColumnCoverageTests.DroppedStoreColumns).
                 ],
                 HasSampleInterval: true),
 
@@ -320,6 +322,9 @@ public static class RollupSql
                 [
                     new(RollupRuleKind.DeltaSum, ["delta_waits", "delta_wait_time_us"]),
                     new(RollupRuleKind.Last, ["waits", "wait_time_us"]),
+                    // The ids are the stable key (the names differ in case between Aurora majors, and an event Aurora does not name has
+                    // no name at all). The grain stays the name pair, so a group that merges several unnamed events reports one of their ids.
+                    new(RollupRuleKind.Last, ["wait_type_id", "wait_event_id"]),
                 ],
                 HasSampleInterval: true),
 
@@ -340,6 +345,8 @@ public static class RollupSql
                     new(RollupRuleKind.Gauge, ["cpu_percent", "acu_utilization_percent", "serverless_capacity_acu", "memory_active_bytes", "memory_cached_bytes", "memory_buffers_bytes"]),
                     new(RollupRuleKind.GaugeMin, ["memory_free_bytes"]),
                     new(RollupRuleKind.Last, ["max_configured_acu", "memory_total_bytes", "configured_memory_bytes"]),
+                    // The metric source's own timestamp of the sample; collection_time is when the store collected it, minutes later.
+                    new(RollupRuleKind.Last, ["sample_time"]),
                 ]),
 
             new(
@@ -367,7 +374,7 @@ public static class RollupSql
                 [
                     new(RollupRuleKind.Max, ["retained_wal_bytes", "xmin_age", "catalog_xmin_age"]),
                     new(RollupRuleKind.GaugeMin, ["safe_wal_size_bytes"]),
-                    new(RollupRuleKind.Last, ["retained_wal_bytes", "xmin_age", "catalog_xmin_age", "slot_type", "plugin", "database_name", "is_active", "wal_status", "invalidation_reason", "conflicting", "inactive_since"]),
+                    new(RollupRuleKind.Last, ["retained_wal_bytes", "xmin_age", "catalog_xmin_age", "slot_type", "plugin", "database_name", "is_active", "wal_status", "invalidation_reason", "conflicting", "inactive_since", "active_pid", "is_temporary", "two_phase"]),
                     new(RollupRuleKind.CountFalse, ["is_active=inactive_samples"]),
                 ]),
 

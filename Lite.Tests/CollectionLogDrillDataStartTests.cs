@@ -227,12 +227,13 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     }
 
     /// <summary>
-    /// The read takes the window the probe takes: runs from the week's start to its end, both ends inclusive, newest first,
-    /// and a run after the end is in neither the rows nor the note. The collector runs every 12 hours from a day before the
-    /// week to a day after it; the other collector's log reaches back a month, so the week is covered.
+    /// The read takes the window the probe takes: runs after the week's start through its end, newest first. The run stamped
+    /// exactly on the start belongs to the week before, and a run after the end is in neither the rows nor the note. The
+    /// collector runs every 12 hours from a day before the week to a day after it; the other collector's log reaches back a
+    /// month, so the week is covered.
     /// </summary>
     [Fact]
-    public async Task TheRows_AreTheCollectorsRunsInsideTheWindow_BothEndsInclusive()
+    public async Task TheRows_AreTheCollectorsRunsInsideTheWindow_OpenAtItsStartAndClosedAtItsEnd()
     {
         await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(OtherCollector, AsOf.AddDays(-30), AsOf.AddDays(1), 720);
@@ -240,9 +241,9 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
         var load = await LoadAsync();
 
-        Assert.Equal(15, load.Rows.Count);
+        Assert.Equal(14, load.Rows.Count);
         Assert.Equal(Naive(AsOf), load.Rows[0].CollectionTime);
-        Assert.Equal(Naive(WeekStart), load.Rows[^1].CollectionTime);
+        Assert.Equal(Naive(WeekStart.AddHours(12)), load.Rows[^1].CollectionTime);
         Assert.Equal(load.Rows.OrderByDescending(r => r.CollectionTime).Select(r => r.CollectionTime), load.Rows.Select(r => r.CollectionTime));
         Assert.Equal(WeekStart, load.Floor);
         Assert.False(NoteFor(load).Visible);

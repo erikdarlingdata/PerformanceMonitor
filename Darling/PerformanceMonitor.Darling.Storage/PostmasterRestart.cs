@@ -78,6 +78,15 @@ public static class PostmasterRestart
     }
 
     /// <summary>
+    /// Both samples carry a start time and the two are equal (#9500): the one case where the server is KNOWN to have
+    /// stayed up between them. It is not the inverse of <see cref="Spans"/>, which answers false (no restart) when
+    /// the newer start is NULL. A caller that needs positive evidence of "no restart", such as telling a platform
+    /// resize from an edit, must not read "<see cref="Spans"/> is false" as "the server stayed up".
+    /// </summary>
+    public static bool BothKnownAndEqual(DateTime? previousStart, DateTime? newestStart) =>
+        previousStart is DateTime previous && newestStart is DateTime newest && previous == newest;
+
+    /// <summary>
     /// The rule in SQL: one boolean expression over the CURRENT row and the row before it, for a read that
     /// differences a series under <c>WINDOW series AS (ORDER BY collection_time)</c>, the name both monitored-target
     /// reads give their window. It is never NULL. The first row of a window has no predecessor, so it compares NULL

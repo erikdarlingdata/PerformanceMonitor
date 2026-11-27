@@ -337,7 +337,7 @@ public sealed partial class ViewerDataService
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 items.Add(new CollectionCaveatRow
@@ -417,7 +417,7 @@ public sealed partial class ViewerDataService
             read_source
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time DESC
         LIMIT $4
@@ -444,7 +444,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS run_count
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         AND   duration_ms IS NOT NULL
@@ -473,7 +473,7 @@ public sealed partial class ViewerDataService
         FROM v_collection_log
         WHERE server_id = $1
         AND   collector_name = $2
-        AND   collection_time >= $3
+        AND   collection_time > $3
         AND   collection_time <= $4
         ORDER BY collection_time DESC
         """;
@@ -499,7 +499,7 @@ public sealed partial class ViewerDataService
                 TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified),
             });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 items.Add(MapHealthRow(reader));
@@ -545,7 +545,7 @@ public sealed partial class ViewerDataService
                 TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 /* Ordinals 0, 4, 5 and 6 of the statement: collector_name, avg_duration_ms, max_duration_ms, p95_duration_ms. */
@@ -618,7 +618,7 @@ LIMIT 1";
                 /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
                 TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
-            var value = await command.ExecuteScalarAsync(cancellationToken);
+            var value = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             ApplyReadSource(rows, value as string);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -711,39 +711,7 @@ LIMIT 1";
     /// <c>UpdateCollectorHealthTextAsync</c>), rather than baking it into the shared read every other
     /// caller also pays for.</para>
     /// </summary>
-    public const string FleetCollectionHealthByServerSql = $"""
-        SELECT
-            server_id,
-            collector_name,
-            COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                     THEN 1 ELSE 0 END) AS success_count,
-            SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-            MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            MAX(collection_time) AS last_run_time,
-            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-                     THEN 1 ELSE 0 END) AS abandoned_count,
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-            MAX(CASE WHEN status IS NULL
-                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-                     THEN collection_time END) AS last_non_skip_time,
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
-            MAX(CASE WHEN NOT (status = 'SUCCESS'
-                               AND COALESCE(rows_collected, 0) = 0
-                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-                     THEN collection_time END) AS last_zero_row_streak_break_time,
-            -- #4812: the newest run's partial-database-failure note, so the Overview cards band a collector that
-            -- lost half its databases the way its own Collection Health tab does (the rollup keeps the same value
-            -- per hour). Plain aggregates only. APPENDED, read positionally.
-            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
-        FROM v_collection_log
-        WHERE collection_time >= $1
-        AND   server_id <> 0
-        AND   {CollectionCycleRow.NotCycleRowSql}
-        GROUP BY server_id, collector_name
-        """;
+    public const string FleetCollectionHealthByServerSql = CollectionHealthRollupSupport.FleetCollectionHealthRawSql;
 
     /// <summary><see cref="FleetCollectionHealthByServerSql"/> served from
     /// <c>collect.collection_health_hourly</c> when <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/>
@@ -779,6 +747,8 @@ LIMIT 1";
     /// the others still waiting on it.</summary>
     private async Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()
     {
+        /* #9194: shared work, so it does not take the ambient token of whichever tab load started it. */
+        ViewerReadScope.Clear();
         /* #4999: the fleet's schedule rows, read once before the health statement's reader opens; each server's
            rows are stamped with the interval its collectors are scheduled at on THAT server, so the Overview cards
            and the status bar band them as the server's own Collection Health tab does. */
@@ -804,34 +774,39 @@ LIMIT 1";
                 ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql, plan.HoleHours)
                 : FleetCollectionHealthByServerComposedSql)
             : null;
-        await using var command = _dataSource.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-        if (plan.Usable)
-        {
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
-            if (plan.HoleHours.Count > 0)
-            {
-                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
-            }
-        }
-
         var byServer = new Dictionary<int, List<CollectorHealthRow>>();
-        await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
         {
-            while (await reader.ReadAsync(CancellationToken.None))
+            /* #8570: the read runs in a short transaction of its own with a larger work_mem (as #5812 does), so a store left at the
+               4 MB default does not pick a sort-based aggregate for the grouping; the scope is disposed after the reader closes. */
+            await using var workMemScope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
+            await using var command = workMemScope.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            if (plan.Usable)
             {
-                var serverId = reader.GetInt32(0);
-                if (!byServer.TryGetValue(serverId, out var rows))
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+                if (plan.HoleHours.Count > 0)
                 {
-                    rows = new List<CollectorHealthRow>();
-                    byServer[serverId] = rows;
+                    command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
                 }
+            }
 
-                var row = MapFleetByServerRow(reader);
-                row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
-                row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
-                rows.Add(row);
+            await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
+            {
+                while (await reader.ReadAsync(CancellationToken.None))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!byServer.TryGetValue(serverId, out var rows))
+                    {
+                        rows = new List<CollectorHealthRow>();
+                        byServer[serverId] = rows;
+                    }
+
+                    var row = MapFleetByServerRow(reader);
+                    row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                    row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
+                    rows.Add(row);
+                }
             }
         }
 
@@ -1092,7 +1067,7 @@ LIMIT 1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CollectorDurationBucketMinutes(startUtc, endUtc) });
 
         var items = new List<CollectorDurationBucket>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* MAX and AVG read type-agnostically (an integer column's AVG is numeric); COUNT is bigint. The WHERE keeps NULL durations out,
@@ -1186,7 +1161,7 @@ LIMIT 1";
         });
 
         var items = new List<ManualPurgeRunRecord>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ManualPurgeRunRecord(
@@ -1204,7 +1179,7 @@ LIMIT 1";
     private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var items = new List<CollectionLogRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectionLogRow
@@ -1506,7 +1481,7 @@ public class CollectorHealthRow
     /// <summary>#5666: whether the newest-runs streak could move this row's band
     /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), over the same inputs <see cref="HealthStatus"/> reads.</summary>
     internal bool RecoveryCouldChangeBand => CollectorHealthClassifier.RecoveryCouldChangeBand(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
 
     /// <summary>
@@ -1518,6 +1493,14 @@ public class CollectorHealthRow
     internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
+    /// #9101: the success count the ladder reads (<see cref="CollectorHealthClassifier.SuccessCountForLadder"/>):
+    /// zero when the window's successes all stored nothing and every run since is EXTENSION_MISSING, so the row
+    /// bands EXTENSION_MISSING, and <see cref="SuccessCount"/> otherwise.
+    /// </summary>
+    internal long LadderSuccessCount => CollectorHealthClassifier.SuccessCountForLadder(
+        TotalRuns, SuccessCount, ExtensionMissingCount, LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else. Applied outside <c>Classify</c> because that signature takes RUN-CLASS
@@ -1526,7 +1509,7 @@ public class CollectorHealthRow
     /// </summary>
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
-            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         RegressedFromProductive || ProducedThenStopped);
 

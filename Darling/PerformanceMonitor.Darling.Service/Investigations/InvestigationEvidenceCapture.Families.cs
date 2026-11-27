@@ -651,10 +651,11 @@ LIMIT $6";
     /// </summary>
     private async Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
+        await using var connection = await _store.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
         async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map)
         {
-            await using var command = _store.CreateCommand(sql);
-            command.CommandTimeout = CommandTimeoutSeconds;
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = CommandTimeoutSeconds };
             DarlingMcpReadParameters.AddWindow(command, serverId, from, to);
             var result = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -663,12 +664,17 @@ LIMIT $6";
             return result;
         }
 
-        var count = (await Query(AttentionWindowSql.Counts("attention_events", bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
-        var apps = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-        var hosts = await Query(AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-        var databases = await Query(AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-        var statements = await Query(AttentionWindowSql.TopStatements("attention_events", bounded: true),
-            r => (Fingerprint: r.GetString(0), Events: r.GetInt64(1), Text: r.IsDBNull(2) ? null : r.GetString(2))).ConfigureAwait(false);
+        /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
+        var (count, apps, hosts, databases, statements) = await AttentionReadRelation.ReadAsync(connection, async events =>
+        {
+            var counted = (await Query(AttentionWindowSql.Counts(events, bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
+            var appList = await Query(AttentionWindowSql.TopBy(events, "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var hostList = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var databaseList = await Query(AttentionWindowSql.TopBy(events, "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var statementList = await Query(AttentionWindowSql.TopStatements(events, bounded: true),
+                r => (Fingerprint: r.GetString(0), Events: r.GetInt64(1), Text: r.IsDBNull(2) ? null : r.GetString(2))).ConfigureAwait(false);
+            return (counted, appList, hostList, databaseList, statementList);
+        }, cancellationToken).ConfigureAwait(false);
         if (count == 0 && apps.Count == 0 && hosts.Count == 0 && databases.Count == 0 && statements.Count == 0)
             return new List<JsonObject>();
 

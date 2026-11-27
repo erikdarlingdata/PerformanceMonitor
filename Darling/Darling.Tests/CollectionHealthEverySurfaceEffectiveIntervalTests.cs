@@ -279,7 +279,7 @@ public sealed class CollectionHealthEverySurfaceEffectiveIntervalTests
         Assert.Equal(1, Count(fleet, "MapFleetHealthRow(reader, serverId, serverOverrides)"));
         Assert.True(
             fleet.IndexOf("DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, cancellationToken)", StringComparison.Ordinal)
-            < fleet.IndexOf("postgres.CreateCommand(composedSql ?? FleetCollectionHealthSql)", StringComparison.Ordinal));
+            < fleet.IndexOf("workMemScope.CreateCommand(composedSql ?? FleetCollectionHealthSql)", StringComparison.Ordinal));
 
         /* The viewer stamps what its two row-building reads return, and resolves only through the shared rule. */
         Assert.Equal(1, Count(viewer, "ApplyScheduledFrequencies(items, serverId, scheduleOverrides);"));

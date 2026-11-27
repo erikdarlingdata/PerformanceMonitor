@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -63,6 +64,87 @@ public sealed class BaselineDiscontinuityDuckDbTests : IClassFixture<SharedDuckD
     {
         _seedConn?.Dispose();
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
+    }
+
+    /// <summary>The marker read as it was before it named the collectors (#8570): no collector filter.</summary>
+    private const string ReferenceMarkerRowsSql =
+        "SELECT collection_time, collector_name, error_message FROM collection_log "
+        + "WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND error_message IS NOT NULL "
+        + "AND (error_message LIKE '%" + ServerEpoch.IdentityChangesMeasurement + "=%' "
+        + "OR error_message LIKE '%" + ServerEpoch.StatementsChangesMeasurement + "=%' "
+        + "OR error_message LIKE '%" + ServerEpoch.PostmasterChangesMeasurement + "=%') "
+        + "ORDER BY collection_time, collector_name";
+
+    private async Task<List<(DateTime At, string Collector, string? Note)>> ReadMarkerRowsAsync(string sql, int serverId, DateTime from, DateTime to)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = from });
+        cmd.Parameters.Add(new DuckDBParameter { Value = to });
+        var rows = new List<(DateTime, string, string?)>();
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            rows.Add((reader.GetDateTime(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+        }
+
+        return rows;
+    }
+
+    [Fact]
+    public async Task MarkerRead_ReturnsWhatTheReadBeforeItReturned_ForEveryWriter()
+    {
+        var day = new DateTime(2026, 1, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        var otherServerId = _serverId + 1;
+
+        /* Noise on two servers: a row per collector per minute for three hours, most notes NULL and one in thirty-seven a short note. */
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            var connection = await SeedConnectionAsync();
+            foreach (var id in new[] { _serverId, otherServerId })
+            {
+                using var noise = connection.CreateCommand();
+                noise.CommandText = $@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
+SELECT {id}::BIGINT * 1000000 + c.idx * 100000 + r.m, {id}, 'noise', c.name, TIMESTAMP '2026-01-10' + r.m * INTERVAL 1 MINUTE, 50, 'SUCCESS',
+       CASE WHEN c.name = '{WaitStatsCollector.Instance.Name}' AND r.m % 13 = 0 THEN 'the {ServerEpoch.IdentityChangesMeasurement} marker is prose here'
+            WHEN c.name = '{PgStatementStatsCollector.Instance.Name}' AND r.m % 11 = 0 THEN '{ServerEpoch.StatementsDeallocMeasurement}=3'
+            WHEN r.m % 37 = 0 THEN 'short note ' || r.m END, 10
+FROM (VALUES (1, '{CpuUtilizationCollector.Instance.Name}'), (2, '{WaitStatsCollector.Instance.Name}'),
+             (3, '{PgStatementStatsCollector.Instance.Name}'), (4, '{PgWaitStatsCollector.Instance.Name}'),
+             (5, 'query_stats'), (6, 'latch_stats')) AS c(idx, name),
+     range(0, 180) AS r(m)";
+                await noise.ExecuteNonQueryAsync();
+            }
+        }
+
+        /* Markers from each of the four writers, on both servers, with a host note in front of some. */
+        foreach (var id in new[] { _serverId, otherServerId })
+        {
+            await SeedLogAsync(CpuUtilizationCollector.Instance.Name, day.AddMinutes(30).AddSeconds(40), ServerEpoch.IdentityChangesMeasurement + "=1", id);
+            await SeedLogAsync(WaitStatsCollector.Instance.Name, day.AddMinutes(30), ServerEpoch.IdentityChangesMeasurement + "=1", id);
+            await SeedLogAsync(PgStatementStatsCollector.Instance.Name, day.AddMinutes(90), "wall-clock budget (120s) reached; " + ServerEpoch.StatementsChangesMeasurement + "=1", id);
+            await SeedLogAsync(PgWaitStatsCollector.Instance.Name, day.AddMinutes(150), "cycle abandoned; " + ServerEpoch.PostmasterChangesMeasurement + "=1", id);
+        }
+
+        var end = day.AddHours(3);
+        foreach (var (server, from, to, expected) in new[]
+        {
+            (_serverId, day, end, 4),
+            (otherServerId, day, end, 4),
+            (_serverId, day.AddMinutes(30), day.AddMinutes(30), 1),
+            (_serverId, day.AddMinutes(100), day.AddMinutes(120), 0),
+            (_serverId + 7, day, end, 0),
+        })
+        {
+            var reference = await ReadMarkerRowsAsync(ReferenceMarkerRowsSql, server, from, to);
+            var read = await ReadMarkerRowsAsync(BaselineDiscontinuities.MarkerRowsSql, server, from, to);
+            Assert.Equal(expected, reference.Count);
+            Assert.Equal(reference, read);
+        }
     }
 
     [Fact]
@@ -162,7 +244,7 @@ public sealed class BaselineDiscontinuityDuckDbTests : IClassFixture<SharedDuckD
         return _seedConn;
     }
 
-    private async Task SeedLogAsync(string collector, DateTime collectionTimeUtc, string? note)
+    private async Task SeedLogAsync(string collector, DateTime collectionTimeUtc, string? note, int? serverId = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -173,7 +255,7 @@ INSERT INTO collection_log
      duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
-        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId ?? _serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = collector });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });

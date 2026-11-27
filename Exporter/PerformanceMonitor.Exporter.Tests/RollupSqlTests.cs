@@ -252,6 +252,71 @@ public class RollupSqlTests
         Assert.Equal(3, RowCount(connection, sql)); // (srv1, 10:00), (srv2, 10:00), (srv1, 11:00)
     }
 
+    // -- pg_statement_stats_hourly carries database_name as the last sample's value, without changing the grain. --
+
+    [Fact]
+    public void Pg_statement_stats_hourly_carries_the_last_database_name_and_keeps_one_row_per_key_and_hour()
+    {
+        using var connection = OpenConnection();
+        Exec(connection, ReadFixture("postgres-tables.sql"));
+        Exec(connection, "CREATE TABLE raw AS SELECT * FROM collect.pg_statement_stats LIMIT 0");
+        // One key (queryid, database_id, user_id, toplevel) seen three times in the hour; the name was renamed in between, and the
+        // samples are inserted out of time order. A second database_id is a second key.
+        Exec(connection, """
+            INSERT INTO raw
+                (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls, database_name)
+            VALUES
+                (1, TIMESTAMP '2026-09-28 10:40:00', 1, 'srv1', 7, 16384, 10, true, 30, 'renamed_db'),
+                (2, TIMESTAMP '2026-09-28 10:10:00', 1, 'srv1', 7, 16384, 10, true, 10, 'old_db'),
+                (3, TIMESTAMP '2026-09-28 10:25:00', 1, 'srv1', 7, 16384, 10, true, 20, 'old_db'),
+                (4, TIMESTAMP '2026-09-28 10:25:00', 1, 'srv1', 7, 16385, 10, true, 5, 'other_db')
+            """);
+
+        var sql = RollupSql.Build("pg_statement_stats_hourly");
+        var columns = ColumnsOf(connection, sql);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        var names = new Dictionary<long, string?>();
+        var samples = new Dictionary<long, long>();
+        while (reader.Read())
+        {
+            var databaseId = ToLong(reader.GetValue(columns["database_id"]));
+            names[databaseId] = reader.IsDBNull(columns["database_name"]) ? null : reader.GetString(columns["database_name"]);
+            samples[databaseId] = ToLong(reader.GetValue(columns["sample_count"]));
+        }
+
+        Assert.Equal(2, names.Count);                       // the grain is still (key, hour)
+        Assert.Equal("renamed_db", names[16384]);           // the 10:40 sample's value, not the alphabetically or first-inserted one
+        Assert.Equal("other_db", names[16385]);
+        Assert.Equal(3L, samples[16384]);
+    }
+
+    // -- Columns a rollup spec took on later: each reaches the output of its spec. --
+
+    [Theory]
+    [InlineData("ag_database_replica_states_hourly", "is_local")]
+    [InlineData("ag_database_replica_states_hourly", "is_suspended")]
+    [InlineData("ag_database_replica_states_hourly", "suspend_reason_desc")]
+    [InlineData("ag_database_replica_states_hourly", "availability_mode_desc")]
+    [InlineData("ag_database_replica_states_hourly", "last_hardened_lsn")]
+    [InlineData("ag_database_replica_states_hourly", "last_commit_lsn")]
+    [InlineData("pg_wait_stats_hourly", "wait_type_id")]
+    [InlineData("pg_wait_stats_hourly", "wait_event_id")]
+    [InlineData("pg_cpu_utilization_hourly", "sample_time")]
+    [InlineData("pg_replication_slot_stats_hourly", "active_pid")]
+    [InlineData("pg_replication_slot_stats_hourly", "is_temporary")]
+    [InlineData("pg_replication_slot_stats_hourly", "two_phase")]
+    public void A_late_added_store_column_is_a_column_of_its_rollups_output(string specName, string column)
+    {
+        using var connection = OpenConnection();
+        Exec(connection, ReadFixture("sqlserver-tables.sql"));
+        Exec(connection, ReadFixture("postgres-tables.sql"));
+        Exec(connection, $"CREATE TABLE raw AS SELECT * FROM collect.\"{SourceTableByOutput[specName]}\" LIMIT 0");
+
+        Assert.Contains(column, ColumnsOf(connection, RollupSql.Build(specName)).Keys);
+    }
+
     // -- CountFalse (pg_replication_slot_stats_hourly.inactive_samples). --
 
     [Fact]

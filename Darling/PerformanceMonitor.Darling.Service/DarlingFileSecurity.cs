@@ -287,6 +287,11 @@ public static class DarlingFileSecurity
     public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
         new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
 
+    /// <summary>Creates the directory at <paramref name="path"/> with the <see cref="HardenDirectory"/> ACL already on it, so
+    /// there is no moment it is readable by anyone else (#9644). Fails when the directory exists.</summary>
+    internal static void CreateHardenedDirectory(string path) =>
+        new DirectoryInfo(path).Create(HardenedDirectorySecurity(allowInteractiveTraverse: false));
+
     /// <summary>The one ACL <see cref="HardenDirectory"/> and <see cref="HardenWithoutFollowingLinks"/> apply to a
     /// directory.</summary>
     private static DirectorySecurity HardenedDirectorySecurity(bool allowInteractiveTraverse)
@@ -520,6 +525,61 @@ public static class DarlingFileSecurity
             foreach (var held in pinned)
             {
                 held.Dispose();
+            }
+        }
+    }
+
+    /// <summary>The folders <see cref="PinFolders"/> holds open. Dispose it when the work inside them is done.</summary>
+    internal sealed class FolderChainPin : IDisposable
+    {
+        private readonly List<Microsoft.Win32.SafeHandles.SafeFileHandle> _held;
+
+        internal FolderChainPin(List<Microsoft.Win32.SafeHandles.SafeFileHandle> held) => _held = held;
+
+        public void Dispose()
+        {
+            foreach (var handle in _held)
+            {
+                handle.Dispose();
+            }
+
+            _held.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Holds every folder from the volume root down to <paramref name="folder"/> open (<see cref="PinFolderChain"/>) for as long as
+    /// the returned pin lives, so a caller that checks the folder and then writes into it by path (#9644) works on the folder it
+    /// checked: none of them can be renamed, deleted or turned into a link in between. Windows only. When one of them is a junction
+    /// or symbolic link, <paramref name="refusal"/> says which, and the result is null with nothing held.
+    /// </summary>
+    internal static FolderChainPin? PinFolders(string folder, out string? refusal)
+    {
+        var held = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        try
+        {
+            refusal = PinFolderChain(Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)), held);
+            if (refusal is null)
+            {
+                var pin = new FolderChainPin(held);
+                held = [];
+                return pin;
+            }
+
+            return null;
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            /* #9644: a folder in the chain that cannot be opened (an access control entry that denies this account, a device path) comes
+               back as a refusal that names that folder and the system's own words, not as an exception the caller has no case for. */
+            refusal = ex.Message;
+            return null;
+        }
+        finally
+        {
+            foreach (var handle in held)
+            {
+                handle.Dispose();
             }
         }
     }
@@ -983,6 +1043,25 @@ public static class DarlingFileSecurity
         try
         {
             return WriteAccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on the directory
+    /// <paramref name="directory"/>, whatever the right (read and list included), as one line, or null when there are none
+    /// (#9644). The folder check for a folder whose contents only the service may see. An entry that only children inherit is
+    /// counted, because the files made inside would carry it. The owner is not judged here (<see cref="IsTrustedOwner"/> is).
+    /// A DACL that cannot be read is reported, not passed.
+    /// </summary>
+    internal static string? DirectoryAccessBeyondTrusted(string directory)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
         {

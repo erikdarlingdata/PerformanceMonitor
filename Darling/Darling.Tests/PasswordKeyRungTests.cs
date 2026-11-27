@@ -40,13 +40,8 @@ public sealed class PasswordKeyRungTests
     [Fact]
     public void TheRungIsRegisteredOnce_InADenseLadder_AtTheVersionTheTablesNameItself()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(PasswordKeyTables.RungVersion, Rung.Version);
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
         Assert.Equal(PasswordKeyTables.CreateSql, Rung.Sql);
     }
 

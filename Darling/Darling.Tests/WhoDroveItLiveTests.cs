@@ -37,7 +37,8 @@ public sealed class WhoDroveItLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static DateTime End => LiveClock.AnchoredEnd();
+    /// <summary>The end of every tool window, and the point each seed is placed before. The tools read the real clock and refuse an <c>as_of</c> after it, so the anchor is one both clocks have passed.</summary>
+    private static DateTime End => LiveClock.AnchoredEndNotAfterNow();
 
     private static string AsOf => End.ToString("o", CultureInfo.InvariantCulture);
 

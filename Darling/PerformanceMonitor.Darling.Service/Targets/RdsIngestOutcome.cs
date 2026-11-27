@@ -65,9 +65,13 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <param name="ResumeFileMissing">#4708: true when the cycle held a position (in memory or saved) whose file RDS no
 /// longer lists, so it fell back to the newest file's last 10,000 lines, the managed-route twin of
 /// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.ResumeFileMissingMeasurement"/>.</param>
+/// <param name="StoreMs">#9523: milliseconds the cycle spent in the monitoring store (the saved-position restore, the
+/// watermark read, the COPY and the position save), timed by <see cref="RdsStorePhase"/>. The runner books this as
+/// <c>storage_duration_ms</c> and the rest of the run, which is the AWS calls and the parse, as
+/// <c>sql_duration_ms</c>.</param>
 public readonly record struct RdsIngestOutcome(
     int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0,
-    int RaiseShapedSkipped = 0, int FilesSkipped = 0, bool ResumeFileMissing = false)
+    int RaiseShapedSkipped = 0, int FilesSkipped = 0, bool ResumeFileMissing = false, long StoreMs = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -99,5 +103,6 @@ public readonly record struct RdsIngestOutcome(
             ForgedCaptures + next.ForgedCaptures,
             RaiseShapedSkipped + next.RaiseShapedSkipped,
             FilesSkipped + next.FilesSkipped,
-            ResumeFileMissing || next.ResumeFileMissing);
+            ResumeFileMissing || next.ResumeFileMissing,
+            StoreMs + next.StoreMs);
 }

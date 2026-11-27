@@ -17,6 +17,12 @@ public sealed record RunSettings
     /// <summary>The child's `--upload` value. Null passes no `--upload` at all.</summary>
     public string? Upload { get; init; }
 
+    /// <summary>
+    /// When true, every child call carries `--upload-destination` and no `--upload` or `--aws-region`: the child uploads to the
+    /// `destination` of the config file its base arguments name.
+    /// </summary>
+    public bool UploadDestination { get; init; }
+
     /// <summary>The child executable. Null means this process's own exe (`Environment.ProcessPath`).</summary>
     public string? ChildExe { get; init; }
 
@@ -37,6 +43,9 @@ public sealed record RunSettings
 
     /// <summary>When set, every child call carries `--aws-region`. Null passes nothing.</summary>
     public string? AwsRegion { get; init; }
+
+    /// <summary>When true, every child call carries `--verbose`. `run --verbose` sets it; it is not a config key.</summary>
+    public bool Verbose { get; init; }
 
     public int StatementTimeoutSeconds { get; init; } = 120;
     public string DuckdbMemoryLimit { get; init; } = "4GB";
@@ -69,6 +78,8 @@ public sealed record RunSettings
         if (string.IsNullOrWhiteSpace(OutDir)) return "out_dir is required";
         if (string.IsNullOrWhiteSpace(StateDir)) return "state_dir is required";
         if (string.IsNullOrWhiteSpace(LogDir)) return "log_dir is required";
+        if (UploadDestination && (!string.IsNullOrEmpty(Upload) || !string.IsNullOrEmpty(AwsRegion) || !ChildBaseArgs.Contains("--config")))
+            return "upload_destination needs --config in child_base_args and no upload or aws_region";
         if (string.IsNullOrWhiteSpace(PgUser) != string.IsNullOrWhiteSpace(PgCredentialFile))
             return "pg_user and pg_credential_file must be set together";
         if (!ScheduleSettings.AllowedWindowMinutes.Contains(Families.FastWindowMinutes))

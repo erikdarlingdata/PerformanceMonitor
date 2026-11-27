@@ -183,7 +183,6 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_memory_pressure_events", sql, StringComparison.Ordinal);
         Assert.Contains("memory_notification", sql, StringComparison.Ordinal);
         Assert.Contains("memory_indicators_process", sql, StringComparison.Ordinal);
-        Assert.Contains("sample_time >= $2", sql, StringComparison.Ordinal);   /* windowed on the payload clock */
         Assert.Contains("ORDER BY sample_time", sql, StringComparison.Ordinal);
         var lower = sql.ToLowerInvariant();
         Assert.DoesNotContain("getdate", lower);

@@ -50,30 +50,6 @@ public sealed class PgStatementTextTests
     }
 
     /// <summary>
-    /// The ladder's own invariants, restated for this rung: it is the top, it is dense, and the build's schema
-    /// version tracks it. A gap is skipped SILENTLY on every upgraded store, so the objects would never exist and
-    /// no later upgrade would repair it.
-    /// </summary>
-    [Fact]
-    public void TheRungIsTheTopOfADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2150 added V74, so this rung is no longer the top — the "I am the top" claim moves to the newest
-           rung's own test (QueryStoreTextStoreTests) and this one keeps the invariants that stay true
-           forever: the rung is PRESENT, the ladder is ordered and dense, and the build's schema version
-           tracks the maximum. A gap is skipped SILENTLY on every upgraded store, so the objects would never
-           exist and no later upgrade would repair it. */
-        Assert.Contains(73, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Dense above the one sanctioned historical hole at V45. */
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
-    }
-
-    /// <summary>
     /// The table is keyed on <c>(server_id, queryid)</c> — one row per statement per server, which is what makes
     /// "stored once" true and the upsert idempotent. Without the primary key the upsert has nothing to conflict
     /// on and every refresh would append a copy, which is precisely the per-snapshot duplication being avoided.

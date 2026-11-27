@@ -46,6 +46,7 @@ internal static class DarlingWhoDroveItReader
         var cpu = hourly ? "worker_time_sum" : "delta_worker_time";
         var elapsed = hourly ? "elapsed_time_sum" : "delta_elapsed_time";
         var executions = hourly ? "execution_count_sum" : "delta_execution_count";
+        var lower = hourly ? ">=" : ">";
         var upper = hourly ? "<" : "<=";
         var tail = hourly
             ? (ceiling ? " AND q.bucket < $5" : string.Empty)
@@ -59,7 +60,7 @@ internal static class DarlingWhoDroveItReader
                        SUM(q.{executions}) AS executions
                 FROM {table} AS q
                 WHERE q.server_id = $1
-                AND   q.{time} >= $2
+                AND   q.{time} {lower} $2
                 AND   q.{time} {upper} $3{tail}
                 GROUP BY COALESCE(q.database_name, ''), q.query_hash
             ),
@@ -103,6 +104,7 @@ internal static class DarlingWhoDroveItReader
         var time = hourly ? "bucket" : "collection_time";
         var cpu = hourly ? "worker_time_sum" : "delta_worker_time";
         var executions = hourly ? "execution_count_sum" : "delta_execution_count";
+        var lower = hourly ? ">=" : ">";
         var upper = hourly ? "<" : "<=";
         var tail = hourly
             ? (ceiling ? " AND q.bucket < $6" : string.Empty)
@@ -115,7 +117,7 @@ internal static class DarlingWhoDroveItReader
                        SUM(q.{executions}) AS executions
                 FROM {table} AS q
                 WHERE q.server_id = $1
-                AND   q.{time} >= $2
+                AND   q.{time} {lower} $2
                 AND   q.{time} {upper} $3{tail}
                 AND   COALESCE(q.database_name, '') = ANY($5)
                 GROUP BY COALESCE(q.database_name, ''), COALESCE(q.schema_name, '') || '.' || COALESCE(q.object_name, '')
@@ -150,7 +152,7 @@ internal static class DarlingWhoDroveItReader
         LEFT JOIN query_text_dim AS d ON d.digest = q.query_text_digest
         WHERE q.server_id = $1
         AND   q.query_hash = ANY($4)
-        AND   q.collection_time >= $2
+        AND   q.collection_time > $2
         AND   q.collection_time <= $3
         AND   (q.query_text IS NOT NULL OR d.query_text IS NOT NULL)
         ORDER BY q.database_name, q.query_hash, q.collection_time DESC, q.collection_id DESC
@@ -287,7 +289,7 @@ internal static class DarlingWhoDroveItReader
                    query_text
             FROM query_snapshots
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
             AND   (query_text IS NULL OR query_text NOT ILIKE '%sp_server_diagnostics%')
@@ -424,7 +426,7 @@ internal static class DarlingWhoDroveItReader
                    COALESCE(wait_time_ms, 0) AS wait_time_ms, COALESCE(blocking_session_id, 0) AS blocking_session_id, query_text
             FROM query_snapshots
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   query_hash IS NOT NULL
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')

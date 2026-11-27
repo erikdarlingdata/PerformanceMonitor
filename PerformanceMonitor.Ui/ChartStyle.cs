@@ -139,6 +139,32 @@ namespace PerformanceMonitor.Ui
         }
 
         /// <summary>
+        /// #9109: restyles a chart that is already drawn after a theme change: colours only, no refit and no data reload. The full theme
+        /// (<see cref="ApplyThemeToChart"/> and the lanes' own variant) sets the axis margins, and ScottPlot refits every axis when a
+        /// margin is set, so a restyle through them alone put each plot's axes back on a fit of the data and dropped the limits the
+        /// load had set (a y axis fixed at 0 to 105, a time axis edge to edge over the selected range). This snapshots every axis' limits
+        /// and tick generator, runs <paramref name="applyTheme"/>, and puts them back. The load-time call to the theme is left as it is:
+        /// there the fit is wanted, since the limits come after it.
+        /// </summary>
+        public static void Restyle(WpfPlot chart, Action<WpfPlot> applyTheme)
+        {
+            var axes = chart.Plot.Axes.GetAxes().ToArray();
+            var saved = axes.Select(a => (Axis: a, a.Min, a.Max, a.TickGenerator)).ToArray();
+
+            applyTheme(chart);
+
+            foreach (var (axis, min, max, ticks) in saved)
+            {
+                axis.Min = min;
+                axis.Max = max;
+                axis.TickGenerator = ticks;
+            }
+        }
+
+        /// <inheritdoc cref="Restyle(WpfPlot, Action{WpfPlot})"/>
+        public static void Restyle(WpfPlot chart) => Restyle(chart, ApplyThemeToChart);
+
+        /// <summary>
         /// Minimal chrome for simple single-series charts (e.g. the history dialogs): backgrounds,
         /// axis, grid, tick label and legend colors only — no legend placement, axis-margin override,
         /// font-size override, background brush, or first-render hook. Sources colors from

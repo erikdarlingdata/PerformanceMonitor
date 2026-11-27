@@ -91,9 +91,13 @@ jobs:
               - 'PerformanceMonitor.Ui/**/!(*.md)'
             # The Darling export tool (Exporter/). It reads PerformanceMonitor.PlanAnalysis (and Common through it), so a change
             # there reaches it too. pr.yml's exporter job reads this filter through ci-select.py. The root files are covered
-            # by the `root` filter above.
+            # by the `root` filter above. Its store-column guard (StoreColumnCoverageTests) builds a real store schema from the
+            # migrations, whose tables come from the migration ladder and the collectors' column lists, so a change to either
+            # reaches it too.
             exporter:
               - 'Exporter/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
               - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
               - 'PerformanceMonitor.Common/**/!(*.md)'
             lite:
@@ -388,142 +392,15 @@ jobs:
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
-      # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
-      # matrix job below, four shards cut over CLASS NAMES (balanced by recorded duration since #5208,
-      # the class-name hash otherwise), because this one step had grown to
-      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The name cut is the
-      # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
-      # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
-      # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
-      # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
-      # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
-      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A cut over class names
-      # cannot drift: every class lands in exactly one shard (by arithmetic for the hash, by a
-      # proof for the duration cut), a class added tomorrow included, and no list anywhere has
-      # to be maintained. Releases keep this single unsharded
-      # pass so the artifact-producing run still executes the suite whole, in one log.
-      - name: Run Lite tests
-        if: github.event_name == 'release'
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -xml TestResults/lite-timing-release.xml
-
-      # #5208: per-test timings of the unsharded release pass, same shape as the lite-tests shards.
-      - name: Lite test timing summary
-        if: always() && github.event_name == 'release'
-        continue-on-error: true
-        run: python .github/scripts/lite-timing-top.py TestResults
-
-      - name: Upload Lite test timings
-        if: always() && github.event_name == 'release'
-        continue-on-error: true
-        uses: actions/upload-artifact@v6
-        with:
-          name: lite-tests-timing-release
-          path: |
-            TestResults/lite-timing-*.xml
-            TestResults/lite-timing-*.xml.cpu.json
-          retention-days: 7
-          if-no-files-found: ignore
-
-      # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
-      # gate matches (the same .github/darling-paths-filter.yml the darling-pg job reads). This no-store pass would
-      # repeat their non-live classes, so while the shards run it keeps only the Stage=Guard classes. Where the gate
-      # does not match (a Lite-only change, a root build file) and on a release it still runs the whole suite.
-      # .github/scripts/ci-select.py holds the rule (darling_scope); the replay of the failure corpus checks it.
-      - name: Detect the Darling PostgreSQL gate
-        id: darling-gate
-        if: github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')
-        uses: dorny/paths-filter@v4
-        with:
-          base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          filters: .github/darling-paths-filter.yml
-
-      - name: Decide the Darling test scope
-        id: darling-scope
-        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GATE: ${{ steps.darling-gate.outputs.darling }}
-          FULL: ${{ steps.filter.outputs.darling_full }}
-          CORE: ${{ steps.filter.outputs.core }}
-          ROOT: ${{ steps.filter.outputs.root }}
-        run: |
-          set -euo pipefail
-          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}"             --full "${FULL:-false}" --core "${CORE:-false}" --root "${ROOT:-false}" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Run Darling tests
-        id: darling-tests
-        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        env:
-          DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
-          DARLING_SCOPE: ${{ steps.darling-scope.outputs.scope }}
-          # #5459 change 5: the slow-skip lookup reads the pull request's file list through the API.
-          GH_TOKEN: ${{ github.token }}
-          SLOW_EVENT: ${{ github.event_name }}
-          SLOW_PR: ${{ github.event.pull_request.number }}
-          SLOW_REPO: ${{ github.repository }}
-          # #5459: a pull request into main runs everything, Cost=Slow classes too (ci-select.py narrows).
-          SLOW_BASE_REF: ${{ github.base_ref }}
-        shell: pwsh
-        run: |
-          # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
-          $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
-          # #5459 change 5: the whole-suite pass on a pull request leaves out the Cost=Slow classes the change does
-          # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
-          $slowArgs = @()
-          if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
-              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
-          }
-          # #5961: the `-trait Reads=Lite` part of a scope is the classes ci-select.py's source scan says read a Lite path, run
-          # by `-class`. xunit ANDs filters of different kinds, so it is a second run (without the Guard classes the first
-          # run already ran). An EMPTY scan skips it: a runner given no -class argument runs the whole suite, and the
-          # empty trait filter it replaces ran nothing.
-          $readsLite = $false
-          $restArgs = @()
-          for ($i = 0; $i -lt $scopeArgs.Count; $i++) {
-              if ($scopeArgs[$i] -eq '-trait' -and ($i + 1) -lt $scopeArgs.Count -and $scopeArgs[$i + 1] -eq 'Reads=Lite') { $readsLite = $true; $i++ }
-              else { $restArgs += $scopeArgs[$i] }
-          }
-          $exitCode = 0
-          if (-not $readsLite -or $restArgs.Count -gt 0) {
-              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @restArgs @slowArgs
-              if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
-          }
-          if ($readsLite) {
-              $readsArgs = @(python .github/scripts/ci-select.py reads-classes --suite darling --args | Where-Object { $_ })
-              if ($LASTEXITCODE -ne 0) { Write-Host 'ci-select.py reads-classes failed'; exit 1 }
-              if ($readsArgs.Count -gt 0) {
-                  Write-Host "Lite-reads scan: $($readsArgs.Count / 2) Darling.Tests classes read a Lite path"
-                  dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @readsArgs -trait- Stage=Guard
-                  if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
-              }
-              else { Write-Host '::warning title=Lite-reads scan is empty::No Darling.Tests class reads a Lite path, so only the Guard stage runs here.' }
-          }
-          if ($exitCode -ne 0) { exit $exitCode }
-
-      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
-      # while any statement-column census entry or watched writer is pending, in every normal Darling
-      # test run (the step above), so a pull request that adds an unjudged column fails on its own.
-      # This step stays as the release-time backstop: it sets DARLING_RELEASE_CUT=1 and runs the one
-      # test by name, ahead of every publish and package step below, and only on the release event,
-      # so a release cannot ship an unhooked column even if the step above was skipped.
-      # ReleaseStatementGateWorkflowTests pins both halves, and that no other workflow sets the
-      # variable. Darling.Tests is already built (Release) by the build step above, so this runs
-      # the one test by name and nothing else.
-      - name: Statement filter release gate
-        if: github.event_name == 'release'
-        env:
-          DARLING_RELEASE_CUT: '1'
-        shell: pwsh
-        run: |
-          # A -method filter that matches nothing exits 0 with "Total: 0", so a renamed test would pass this gate
-          # without running. Fail unless the runner's own summary shows exactly the one test, with nothing failed,
-          # errored, skipped or not run. ReleaseStatementGateWorkflowTests binds the name to the test with nameof.
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -method "*StatementCensus_PendingEntries_BlockARelease*" 2>&1 | Tee-Object -FilePath statement-gate.log
-          if ($LASTEXITCODE -ne 0) { throw "The statement filter release gate failed (exit $LASTEXITCODE)." }
-          if (-not (Select-String -Path statement-gate.log -Pattern 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0' -SimpleMatch -Quiet)) {
-            throw "The statement filter release gate did not run exactly one passing test; the summary above is not 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0'."
-          }
+      # The release build does not run the Lite or Darling test suites (#8756). Both ran here after the release was
+      # published, on the tree the release pull request's CI had already tested in the same Release configuration, so
+      # a failure could only be seen after users could download the build. The release pull request (dev into main) is
+      # the full test gate before the tag: pr.yml plans every area for a base other than dev and runs every class of
+      # both suites with no Cost=Slow skip. The statement filter release gate (#5320) runs there too, before the tag,
+      # so no check in this job can block a release after it is published.
+      # The Lite timing artifact this job used to upload (lite-tests-timing-release, #5208) had no reader: the test
+      # legs take their weights from the committed lite-shard-weights.json and darling-shard-weights.json, and the
+      # nightly uploads its own shard timings.
 
       - name: Get version
         if: steps.fastpath.outputs.engaged != 'true'
@@ -1251,7 +1128,8 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.VERSION }}"
           mkdir -p releases
-          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          # #9701: owned by root, so a root extract (sudo tar -xzf) does not leave the build machine's uid on every file.
+          tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           # #5796: the PowerShell scripts ship signed in the Windows zip only. The service csproj leaves them out
           # of a Linux publish; this fails the job if one comes back. Same check as nightly.yml's linux job.
           listing="$(tar -tzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
@@ -1259,37 +1137,22 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
+          # #9688: the systemd unit, the Linux config sample, and the install and upgrade scripts with their execute bit ship in
+          # the tarball's root. Same check as nightly.yml's linux job.
+          long_listing="$(tar -tvzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          for shipped in darling.service darling.linux.sample.json darling-script-lib.sh; do
+            grep -E " \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} (#9688)."; exit 1; }
+          done
+          for shipped in install-darling.sh upgrade-darling.sh; do
+            grep -E "^-rwxr-xr-x .* \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} with its execute bit (#9688)."; exit 1; }
+          done
           # #6123: the Compose files are their own release asset, because no other download holds Darling/compose/.
-          # The packed copy names THIS release's image tag instead of :latest, so a release's files pull that
-          # release's image (darling-linux-publish pushes the ghcr :<version> tag). Only tracked files ship:
-          # the checkout has no local secrets. The archive opens into one folder so a user can extract it and
-          # cd into it. Line endings are made LF, because .gitattributes checks text out as CRLF.
-          compose_dir="PerformanceMonitorDarling-compose-${version}"
-          compose_stage="$(mktemp -d)"
-          mkdir -p "${compose_stage}/${compose_dir}"
-          cp -R Darling/compose/. "${compose_stage}/${compose_dir}/"
-          find "${compose_stage}/${compose_dir}" -type f -exec sed -i 's/\r$//' {} +
-          compose_file="${compose_stage}/${compose_dir}/docker-compose.yml"
-          sed -i "s|\(image: ghcr\.io/erikdarlingdata/performancemonitor-darling\):latest|\1:${version}|" "${compose_file}"
-          if [ "$(grep -c "image: ghcr\.io/erikdarlingdata/performancemonitor-darling:${version}$" "${compose_file}")" != "1" ] || grep -q "performancemonitor-darling:latest" "${compose_file}"; then
-            echo "::error::The packed compose file does not name the darling image at :${version}."
-            exit 1
-          fi
-          # #6140: setup.sh is the quickstart's first step, so it must open with its execute bit. The checkout holds it as
-          # mode 755 already, and chmod makes that certain. The tar listing below must show it executable and the
-          # script must parse under a POSIX shell, so a bad pack fails this job and not the user's first command.
-          chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
-          sh -n "${compose_stage}/${compose_dir}/setup.sh"
-          tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
-          tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
-          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
-            echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
-            exit 1
-          fi
+          # #9333: .github/scripts/pack-compose.sh packs it, and nightly.yml calls the same script.
+          bash .github/scripts/pack-compose.sh "${version}" releases
           # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
           export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
-          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -E '^-rwxr-xr-x ' >/dev/null; then
             echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
             exit 1
           fi
@@ -1380,7 +1243,9 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker build -f Darling/Dockerfile -t "${image}:${version}" -t "${image}:latest" .
+          # #9591: the checkout's own commit, since the image build's context has no .git.
+          commit="$(git rev-parse HEAD)"
+          docker build -f Darling/Dockerfile --build-arg SOURCE_COMMIT="${commit}" -t "${image}:${version}" -t "${image}:latest" .
           docker push "${image}:${version}"
           docker push "${image}:latest"
 
@@ -1389,10 +1254,12 @@ jobs:
       # workflow identity). SignPath's cosign support is edition-gated, and this path needs no keys or
       # subscription at all. Verify:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:<version> \
-      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-identity 'https://github.com/erikdarlingdata/PerformanceMonitor/.github/workflows/build.yml@refs/tags/v<version>' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The identity is exact (#8871): this workflow file at the release tag, the one identity that signs a released image. An
+      # unanchored --certificate-identity-regexp is a substring match that another repository's workflow can satisfy.
       # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
-      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
+      # Checked: cosign 2.6.5 and 3.0.6 both read that bundle, and cosign 3.1.3 verifies the released image with the command above.
       - name: Install cosign
         if: github.event_name == 'release'
         uses: sigstore/cosign-installer@v4.1.3

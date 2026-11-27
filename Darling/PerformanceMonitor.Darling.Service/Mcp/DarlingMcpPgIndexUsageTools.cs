@@ -52,7 +52,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// enforce correctness on every INSERT for years and still report zero. Advice derived from the counter
     /// alone would tell somebody to drop their primary key.</para>
     /// </summary>
-    internal static string DroppabilityFinding(DarlingPgIndexUsageReader.PgIndexUsageRow r, long scansInWindow, int sampleCount)
+    internal static string DroppabilityFinding(DarlingPgIndexUsageReader.PgIndexUsageRow r, long? scansInWindow, int sampleCount)
     {
         /* Invalid first: it is the one state where "unused" and "safe to remove" genuinely coincide, and it
            is a finding regardless of the scan counters or how long we have been watching. */
@@ -76,7 +76,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         if (r.IsPrimaryKey)
         {
-            return "Backs the PRIMARY KEY. Zero scans does NOT mean unused: enforcing the key on every "
+            return "Backs the PRIMARY KEY. " + (scansInWindow is null ? "A scan count of zero, or no count yet, " : "Zero scans ") + "does NOT mean unused: enforcing the key on every "
                  + "INSERT and UPDATE is not a scan and is not counted here. This cannot be dropped without "
                  + "dropping the constraint.";
         }
@@ -89,7 +89,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         if (r.SupportsConstraint)
         {
-            return "Backs a UNIQUE or EXCLUSION constraint. Zero scans does NOT mean unused - a uniqueness "
+            return "Backs a UNIQUE or EXCLUSION constraint. " + (scansInWindow is null ? "A scan count of zero, or no count yet, " : "Zero scans ") + "does NOT mean unused - a uniqueness "
                  + "check is not counted as a scan - and dropping the index drops the constraint with it, "
                  + "which changes what data the table will accept. Treat the scan count as irrelevant here "
                  + "unless you have already decided the constraint itself is not wanted.";
@@ -103,7 +103,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         if (r.IsUnique)
         {
-            return "This is a UNIQUE index that backs no constraint. Zero scans does NOT mean unused: a uniqueness check is not "
+            return "This is a UNIQUE index that backs no constraint. " + (scansInWindow is null ? "A scan count of zero, or no count yet, " : "Zero scans ") + "does NOT mean unused: a uniqueness check is not "
                  + "counted as a scan, and dropping the index removes the uniqueness it enforces. Decide whether that uniqueness is "
                  + "wanted (if it is, a UNIQUE constraint should own it) before treating the scan count as a reason to drop it.";
         }
@@ -192,7 +192,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// makes the cost visible on an index that is never read: those accesses are the write path maintaining
     /// it, counted by the server rather than inferred from the size.
     /// </summary>
-    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead, long scansInWindow = 0)
+    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead, long? scansInWindow = 0)
     {
         if (indexBytes < 0)
         {
@@ -205,14 +205,17 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         var maintenance = blocksHit + blocksRead > 0
             ? $" The server recorded {(blocksHit + blocksRead).ToString("N0", CultureInfo.InvariantCulture)} block "
-            + (scansInWindow > 0
+            + (scansInWindow is null
+                ? "accesses against it. Scans that read it are part of that figure, beside the WRITE path maintaining it and "
+                  + "VACUUM cleaning it. How many of them fell in this window is not yet known, because that count needs a second sample."
+                : scansInWindow > 0
                 ? "accesses against it. The scans that read it are part of that figure, beside the WRITE path maintaining it and "
                   + "VACUUM cleaning it."
                 : "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
                   + "VACUUM cleaning it, which is the cost being paid stated in the server's own units.")
             : string.Empty;
 
-        if (scansInWindow > 0)
+        if (scansInWindow is null or > 0)
         {
             return $"{DescribeBytes(indexBytes)}." + share + maintenance
                  + " Every write maintains it and every VACUUM cleans it, so its size is also paid on the write path.";
@@ -273,6 +276,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return Math.Round(bytes / 1024.0, 0).ToString("0", CultureInfo.InvariantCulture) + " KB";
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_pg_index_usage")]
     [Description(
         "Per-index usage and droppability advice, beyond raw pg_stat_user_indexes. scans_in_window, not "
@@ -375,6 +379,10 @@ public sealed class DarlingMcpPgIndexUsageTools
                    psql; the windowed one is the answer to the question actually being asked. */
                 total_scans_since_stats_reset = r.TotalScans,
                 scans_in_window = r.ScansInWindow,
+                /* #8915: null above means unknown, not zero. The read has fewer than two samples of this index, so there is no difference to report. */
+                scans_in_window_note = r.ScansInWindow is null
+                    ? "Unknown: this read has fewer than two samples of this index, and a windowed scan count is a difference between samples. total_scans_since_stats_reset is the lifetime count."
+                    : null,
                 tuples_read = r.TuplesRead,
                 tuples_fetched = r.TuplesFetched,
                 blocks_read = r.BlocksRead,

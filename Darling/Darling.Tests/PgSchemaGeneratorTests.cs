@@ -65,7 +65,10 @@ public sealed class PgSchemaGeneratorTests
         /* 76 since #6873: database_protection (V223), also a plain table, so the hypertable count stays 71. */
         /* 77 since #6875: identity_capacity (V224), also a plain table, so the hypertable count stays 71. */
         /* 78 since #7643: schema_objects (V256, the pass log schema_capture_passes), also a plain table, so the hypertable count stays 71. */
-        Assert.Equal(78, CollectorCatalog.All.Count);
+        /* 79 since #8784: object_inventory (V268), also a plain table, so the hypertable count stays 71. */
+        /* 80 since #8798: column_stats (V272, the run log column_stats_runs), also a plain table, so the hypertable count stays 71. */
+        /* 81 since #8784 part 2: object_dependencies (V297), also a plain table, so the hypertable count stays 71. */
+        Assert.Equal(81, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -823,75 +826,5 @@ public sealed class PgSchemaGeneratorTests
     public void SearchPath_ListsCollectConfigPublicInOrder()
     {
         Assert.Equal("collect, config, public", PgSchemaGenerator.SearchPath);
-    }
-
-    /// <summary>
-    /// #4503: the six Query Store rollups' KEPT group indexes must land IDENTICAL on a fresh migrate and on
-    /// an upgraded store — not merely the same key columns, but the same ORDER and the same NAME, because a
-    /// store's physical shape should never reveal whether it was installed fresh or upgraded (the same rule
-    /// <see cref="Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape"/> pins for the collector
-    /// tables above). Both sides are compared here by TEXT, since neither side's SQL can be executed
-    /// offline: <see cref="TimescaleSupport.QueryStoreRollupKeptIndexesSql"/> (the fresh side, run right
-    /// after each view's CREATE) must build its <c>CREATE INDEX</c> UNNAMED and end each kept column's
-    /// statement in <c>, bucket DESC)</c> — an explicit name or an ASC order would make the fresh side's
-    /// index a DIFFERENT object from an upgraded store's surviving auto-created one, which
-    /// <see cref="CaggGroupIndexDropLiveTests"/> proves live. <see cref="PgMigrations"/>'s V152 (the
-    /// upgraded side) must resolve the SAME kept columns — read from the same per-view drop lists this
-    /// rung's PR body documents — by catalog SHAPE rather than by a hand-built name, for the reason that
-    /// migration's own remarks give (a truncated auto-created name is not guessable from the view name
-    /// alone).
-    /// </summary>
-    [Fact]
-    public void QueryStoreRollupKeptIndexes_FreshSql_MatchesTheUpgradedShape_ForAllSixViews()
-    {
-        var v152 = PgMigrations.Scripts.Single(m => m.Version == 152).Sql;
-
-        var keptColumnsByView = new (string View, string[] KeptColumns)[]
-        {
-            (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
-            (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
-            (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
-            (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),
-            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, new[] { "server_id" }),
-        };
-
-        var freshSqlByView = new (string View, string Sql)[]
-        {
-            (TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.CreateQueryStoreStatsHourlyKeptIndexesSql),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, TimescaleSupport.CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql),
-            (TimescaleSupport.QueryStoreStatsDailyView, TimescaleSupport.CreateQueryStoreStatsDailyKeptIndexesSql),
-            (TimescaleSupport.QueryStoreStatsCorrectedDailyView, TimescaleSupport.CreateQueryStoreStatsCorrectedDailyKeptIndexesSql),
-            (TimescaleSupport.QueryStoreStatsIntervalDailyView, TimescaleSupport.CreateQueryStoreStatsIntervalDailyKeptIndexesSql),
-            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, TimescaleSupport.CreateQueryStoreStatsDayGrainDailyKeptIndexesSql),
-        };
-
-        foreach (var (view, keptColumns) in keptColumnsByView)
-        {
-            var freshSql = freshSqlByView.Single(f => f.View == view).Sql;
-
-            /* The fresh side names the aggregate it's building the DO block for, and every kept column
-               gets its own unnamed, DESC-ordered CREATE INDEX — never a hand-built name, never ASC. */
-            Assert.Contains($"view_name = '{view}'", freshSql, StringComparison.Ordinal);
-
-            foreach (var column in keptColumns)
-            {
-                Assert.Contains($"CREATE INDEX ON %s ({column}, bucket DESC)", freshSql, StringComparison.Ordinal);
-                Assert.DoesNotContain($"CREATE INDEX IF NOT EXISTS {view}_{column}_bucket_idx", freshSql, StringComparison.Ordinal);
-
-                /* The upgraded side (V152) drops this same view+column pair by SHAPE, never by a
-                   hand-built _materialized_hypertable_N name — the exact bug this rung's PR body traces. */
-                Assert.Contains($"'{view}'", v152, StringComparison.Ordinal);
-                Assert.DoesNotContain("_materialized_hypertable_", v152, StringComparison.Ordinal);
-            }
-        }
-
-        /* Both sides are driven by resolving the materialization from timescaledb_information.continuous_aggregates,
-           never a hard-coded internal name — the one property that makes either side portable across stores. */
-        Assert.Contains("timescaledb_information.continuous_aggregates", v152, StringComparison.Ordinal);
-        foreach (var (_, freshSql) in freshSqlByView)
-        {
-            Assert.Contains("timescaledb_information.continuous_aggregates", freshSql, StringComparison.Ordinal);
-        }
     }
 }

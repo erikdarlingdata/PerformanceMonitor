@@ -190,6 +190,49 @@ WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
 
     /// <summary>
+    /// <see cref="StoreMetricsDailySql"/> for ONE object kind, <c>$2</c> (#9429). The growth forecast needs only the store's own
+    /// total, and reading every table and index row of the window made each <c>get_store_host</c> call pay for rows it then threw away.
+    /// Same selection and order per object, so the rows it returns for that kind are the rows the full read returns.
+    /// </summary>
+    public const string StoreMetricsDailyForKindSql = @"
+SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
+    object_kind,
+    object_name,
+    date_trunc('day', metric_time) AS day,
+    total_bytes,
+    compressed_before_bytes,
+    compressed_after_bytes,
+    chunk_count,
+    row_count,
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures,
+    toast_bytes,
+    toast_live_bytes,
+    metric_time,
+    size_estimated
+FROM collect.store_metrics
+WHERE metric_time >= $1
+AND   object_kind = $2
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
+
+    /// <summary><see cref="StoreMetricsDailyEstimatesSql"/> for ONE object kind, <c>$2</c>, beside <see cref="StoreMetricsDailyForKindSql"/> (#9429).</summary>
+    public const string StoreMetricsDailyEstimatesForKindSql = @"
+SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
+    object_kind,
+    object_name,
+    date_trunc('day', metric_time) AS day,
+    total_bytes,
+    metric_time
+FROM collect.store_metrics
+WHERE metric_time >= $1
+AND   object_kind = $2
+AND   size_estimated IS TRUE
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
+
+    /// <summary>
     /// The newest ESTIMATE row of each object per day (#5857), beside <see cref="StoreMetricsDailySql"/>, which keeps
     /// the day's exact row when it has one. A growth must subtract like from like (an estimate reads a little low), and
     /// the window's end is the NEWEST row, so a day whose kept point is exact can still need its estimate row to be
@@ -1246,7 +1289,8 @@ FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
             SELECT 1 FROM pg_roles r WHERE r.rolname = s.object_name)
         WHEN '{StoreSelfMetrics.OtherObjectKind}' THEN true
         WHEN '{StoreSelfMetrics.SystemObjectKind}' THEN true
-        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true";
+        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true
+        WHEN '{StoreWalFigures.WalObjectKind}' THEN true";
 
     /// <summary>
     /// Reads <see cref="ObjectExistenceSql"/> (or its plain variant, by the same
@@ -1438,6 +1482,101 @@ AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
 AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
 ORDER BY pg_total_relation_size(c.oid) DESC, 1
 LIMIT $1";
+
+    /// <summary>
+    /// The un-enumerated relations whose name matches <c>$1</c> (#8817), over the SAME census predicate as
+    /// <see cref="LargestUnenumeratedSql"/>, so every relation that list names can be asked for by the name it gives.
+    /// The match is on <c>relname</c> or on <c>schema.relation</c>, case-insensitive: an exact one wins and is the only
+    /// answer, otherwise every relation whose qualified name contains it is returned, the same order the store rows use
+    /// (<see cref="SelectObjects"/>). <c>strpos</c> and not <c>LIKE</c>, so a name with an underscore or a percent sign
+    /// matches itself and not a pattern. Columns: relation, relkind, total_bytes, matched (the count before the limit).
+    /// TimescaleDB variant. $1 the name, $2 the limit.
+    /// </summary>
+    public const string UnenumeratedByNameSql = $@"
+WITH m AS (
+    SELECT
+        n.nspname || '.' || c.relname AS relation,
+        c.relkind::text AS relkind,
+        pg_total_relation_size(c.oid) AS total_bytes,
+        (lower(c.relname) = lower($1) OR lower(n.nspname || '.' || c.relname) = lower($1)) AS is_exact
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+    AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+    AND   {StoreSelfMetrics.TimescaleInventoriedPredicateSql}
+    AND   strpos(lower(n.nspname || '.' || c.relname), lower($1)) > 0
+)
+SELECT relation, relkind, total_bytes, count(*) OVER ()::integer AS matched
+FROM m
+WHERE is_exact OR NOT EXISTS (SELECT 1 FROM m WHERE is_exact)
+ORDER BY total_bytes DESC, relation
+LIMIT $2";
+
+    /// <summary>The plain-PostgreSQL variant of <see cref="UnenumeratedByNameSql"/>, minus the TimescaleDB catalogs it cannot name.</summary>
+    public const string UnenumeratedByNamePlainSql = $@"
+WITH m AS (
+    SELECT
+        n.nspname || '.' || c.relname AS relation,
+        c.relkind::text AS relkind,
+        pg_total_relation_size(c.oid) AS total_bytes,
+        (lower(c.relname) = lower($1) OR lower(n.nspname || '.' || c.relname) = lower($1)) AS is_exact
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+    AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+    AND   strpos(lower(n.nspname || '.' || c.relname), lower($1)) > 0
+)
+SELECT relation, relkind, total_bytes, count(*) OVER ()::integer AS matched
+FROM m
+WHERE is_exact OR NOT EXISTS (SELECT 1 FROM m WHERE is_exact)
+ORDER BY total_bytes DESC, relation
+LIMIT $2";
+
+    /// <summary>Un-enumerated relations matching a name: the page (largest first) and how many matched before the limit.</summary>
+    public sealed record UnenumeratedMatches(IReadOnlyList<UnenumeratedRelation> Relations, int Matched);
+
+    /// <summary>
+    /// Looks <paramref name="name"/> up among the un-enumerated relations (#8817), live. A name the self-metrics rows do not
+    /// carry may still be a relation the inventory names in <c>largest_unenumerated</c>, which the series never has a row for.
+    /// Failure-isolated to NULL, never to "no match", for the reason <see cref="GetLargestUnenumeratedAsync"/> gives.
+    /// </summary>
+    public static async Task<UnenumeratedMatches?> GetUnenumeratedByNameAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        string name,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        try
+        {
+            var rows = new List<UnenumeratedRelation>();
+            var matched = 0;
+            await using var command = postgres.CreateCommand(
+                logging.Status == JobExecutionLoggingStatus.NotRegistered ? UnenumeratedByNamePlainSql : UnenumeratedByNameSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(name);
+            command.Parameters.AddWithValue(limit);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new UnenumeratedRelation(reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
+                matched = reader.GetInt32(3);
+            }
+
+            return new UnenumeratedMatches(rows, matched);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>One un-enumerated relation, sized live.</summary>
     public sealed record UnenumeratedRelation(string Relation, string RelKind, long TotalBytes);
@@ -1786,16 +1925,22 @@ LIMIT $1";
     /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
     /// newest row predates V139 or there is no row.</param>
     /// <param name="Timed">(V140, #4037) TIMED checkpoints inside the interval. Null when either sample predates
-    /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
-    /// from sync alone, never falling back to the old summed-sync rule.</param>
+    /// the rung — <see cref="AverageSyncMsPerCheckpoint"/> then has no denominator and is null, never a figure
+    /// guessed from the requested count alone.</param>
     /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
     /// <param name="LongestSyncMs">(V156, #4834) The longest single checkpoint sync inside the interval, in milliseconds,
     /// as the worker's once-a-minute sample found it and the sweep stored it on the NEWER row. Null unless
     /// <see cref="CheckpointerDeltaStatus.Observed"/> (a restart-spanning interval's sync includes the shutdown
     /// checkpoint), and null on a row from before the rung or in an hour the sampler took no difference in - no
-    /// evidence, never zero. <see cref="IsPressure"/> judges it against the same per-checkpoint bar.</param>
+    /// evidence, never zero. Attribution (#9549): it says why a read or a write suffered, and
+    /// <see cref="IsPressure"/> does not judge it.</param>
     /// <param name="LongestSyncAtUtc">(V156, #4834) The time of the minute sample that saw it, UTC; null with
     /// <paramref name="LongestSyncMs"/>.</param>
+    /// <param name="HarmInsideSync">(#9549) How many store operations suffered while a checkpoint sync of the interval
+    /// ran: alert-pass reads that failed or were retried, served reads cut off at their deadline, and collector store
+    /// writes that stalled. Set by <see cref="WithHarm"/> from the running service's own record of the window, so it is
+    /// null when the service holds no judgment for this interval (it started after the interval began, or the read is
+    /// not an Observed one) and zero when it watched the interval and nothing suffered inside a sync.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1812,7 +1957,8 @@ LIMIT $1";
         long? Timed = null,
         long? CumulativeTimed = null,
         long? LongestSyncMs = null,
-        DateTime? LongestSyncAtUtc = null)
+        DateTime? LongestSyncAtUtc = null,
+        int? HarmInsideSync = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1910,37 +2056,45 @@ LIMIT $1";
         /// denominator. Null when <see cref="Timed"/> is null (a pre-rung sample on either side of the pair).</summary>
         public long? CheckpointCount => Timed is long timed ? timed + (Requested ?? 0) : null;
 
-        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the figure the
-        /// self-alert and the MCP block judge against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>,
-        /// in place of the interval's summed sync milliseconds. Null when there is no checkpoint count to divide
-        /// by, or the interval held zero checkpoints (nothing to average).</summary>
+        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the average the
+        /// self-alert's text and the MCP block state as attribution (#9549), set beside
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>. Null when there is no checkpoint count to
+        /// divide by, or the interval held zero checkpoints (nothing to average).</summary>
         public double? AverageSyncMsPerCheckpoint =>
             CheckpointCount is long count && count > 0 && SyncMs is long sync ? (double)sync / count : null;
 
         /// <summary>
-        /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
-        /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
-        /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
-        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was requested.
-        /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
-        /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
-        /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
-        /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
-        /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
-        /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
-        /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
-        /// finding, and that includes one that spans a postmaster restart (#3955). Since V156 (#4834) a third arm:
-        /// the interval's LONGEST single sync, stored on the newer row, held more than the same bar - an average
-        /// spreads one long sync over the interval's short ones, so a store whose one 23.5 s sync averaged 5.9 s
-        /// read as clean while the alert fired on it. A NULL longest sync (a row from before the rung, or an hour
-        /// the sampler took no difference in) is no evidence and leaves the other two arms to decide exactly as
-        /// they did.
+        /// The self-alert's condition (#3783), on an Observed interval only, and it is harm rather than sync length
+        /// (#9549): at least one store operation suffered while a checkpoint sync of at least the read deadline ran
+        /// (<see cref="HarmInsideSync"/> above zero), OR at least one checkpoint was requested. How long the syncs
+        /// took does not decide it. On a store where PostgreSQL cannot flush early (every <c>*_flush_after</c>
+        /// setting is 0 and has no effect, as on Windows) a checkpoint's whole write lands on its fsync, so a sync
+        /// past ten seconds is normal there and, with nothing suffering inside it, is not a finding. The average
+        /// sync, the longest sync and its minute are the attribution: they say why the read or the write suffered.
+        /// A null <see cref="HarmInsideSync"/> (the running service holds no judgment for this interval) is no
+        /// evidence and leaves the requested arm to decide alone. False on every other status — an unmeasured
+        /// interval is not a finding, and that includes one that spans a postmaster restart (#3955).
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
             && ((Requested is long requested && requested > 0)
-                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
-                || (LongestSyncMs is long longest && longest > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
+                || (HarmInsideSync is int harm && harm > 0));
+
+        /// <summary>
+        /// This reading with <see cref="HarmInsideSync"/> taken from <paramref name="verdict"/> (#9549), the one place
+        /// the service's in-process judgment of a window meets the stored interval: the self-alert and
+        /// <c>get_store_metrics</c> both pass the reading through here, so they judge one number. The reading is
+        /// returned as it is unless it is Observed and the verdict describes its interval
+        /// (<see cref="CheckpointHarmVerdict.Describes"/> against <see cref="ObservedAt"/>): a verdict for another
+        /// hour says nothing about this one.
+        /// </summary>
+        internal CheckpointerReading WithHarm(CheckpointHarmVerdict? verdict) =>
+            Status == CheckpointerDeltaStatus.Observed
+            && verdict is not null
+            && ObservedAt is DateTime observedAt
+            && verdict.Describes(observedAt)
+                ? this with { HarmInsideSync = verdict.Findings.Count }
+                : this;
     }
 
     /// <summary>
@@ -2120,13 +2274,26 @@ ORDER BY object_kind, object_name, metric_time DESC";
             .ToList();
     }
 
-    public static async Task<List<StoreMetricDailyPoint>> GetDailyAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, CancellationToken cancellationToken = default)
+    public static Task<List<StoreMetricDailyPoint>> GetDailyAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, CancellationToken cancellationToken = default) =>
+        ReadDailyAsync(postgres, sinceUtc, null, cancellationToken);
+
+    /// <summary><see cref="GetDailyAsync"/> for only the rows of <paramref name="objectKind"/> (#9429), through <see cref="StoreMetricsDailyForKindSql"/>.</summary>
+    public static Task<List<StoreMetricDailyPoint>> GetDailyForKindAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, string objectKind, CancellationToken cancellationToken = default) =>
+        ReadDailyAsync(postgres, sinceUtc, objectKind ?? throw new ArgumentNullException(nameof(objectKind)), cancellationToken);
+
+    private static async Task<List<StoreMetricDailyPoint>> ReadDailyAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, string? objectKind, CancellationToken cancellationToken)
     {
         var rows = new List<StoreMetricDailyPoint>();
-        await using var command = postgres.CreateCommand(StoreMetricsDailySql);
+        await using var command = postgres.CreateCommand(objectKind is null ? StoreMetricsDailySql : StoreMetricsDailyForKindSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+        if (objectKind is not null)
+        {
+            command.Parameters.AddWithValue(objectKind);
+        }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -2154,10 +2321,15 @@ ORDER BY object_kind, object_name, metric_time DESC";
         /* #5857: the day's newest estimate row, attached to the points that kept an EXACT row. A point that is itself an
            estimate (a day with no exact row) is its own newest estimate. */
         var estimates = new Dictionary<(string Kind, string Name, DateTime Day), (long? Bytes, DateTime Time)>();
-        await using (var estimateCommand = postgres.CreateCommand(StoreMetricsDailyEstimatesSql))
+        await using (var estimateCommand = postgres.CreateCommand(objectKind is null ? StoreMetricsDailyEstimatesSql : StoreMetricsDailyEstimatesForKindSql))
         {
             estimateCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             estimateCommand.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+            if (objectKind is not null)
+            {
+                estimateCommand.Parameters.AddWithValue(objectKind);
+            }
+
             await using var estimateReader = await estimateCommand.ExecuteReaderAsync(cancellationToken);
             while (await estimateReader.ReadAsync(cancellationToken))
             {
@@ -2461,6 +2633,31 @@ ORDER BY object_kind, object_name, metric_time DESC";
             exact.Count > 1
                 ? exact
                 : candidates.Where(r => r.ObjectName.Contains(objectName, StringComparison.OrdinalIgnoreCase)).ToList());
+    }
+
+    /// <summary>
+    /// The rows without the objects the inventory names as retired (#9588). Pure. <see cref="InventoryReconciliation.DroppedObjects"/>
+    /// is the one verdict on what no longer exists, so the summary's three ranked lists leave out exactly the objects the same answer's
+    /// <c>dropped_objects</c> lists and its note says are excluded from the sums. A retired object's last row is append-only history,
+    /// not a live measurement: a job's run telemetry on it is frozen and its crash counters read null, and a retired object's bytes are
+    /// the size it had when it was dropped. The match is on kind AND name, the key the inventory uses. A null inventory (no exact sweep
+    /// to reconcile against) has no verdict to apply and leaves every row in. A filter or an exact name does not call this, so a retired
+    /// object stays reachable by name.
+    /// </summary>
+    public static IEnumerable<StoreMetricRow> WithoutDropped(IEnumerable<StoreMetricRow> rows, InventoryReconciliation? inventory)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        if (inventory is null || inventory.DroppedObjects.Count == 0)
+        {
+            return rows;
+        }
+
+        var dropped = inventory.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName)).ToHashSet();
+        return rows.Where(r => !dropped.Contains((r.ObjectKind, r.ObjectName)));
     }
 
     /// <summary>

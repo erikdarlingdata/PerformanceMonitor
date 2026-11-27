@@ -128,6 +128,13 @@
   // ---- tempdb ---------------------------------------------------------------------------
   "alert_tempdb_space_enabled": true,
   "alert_tempdb_space_threshold_percent": 80,
+  "alert_tempdb_log_space_enabled": true,
+  "alert_tempdb_log_space_threshold_percent": 80,
+  "alert_tempdb_growth_fit_enabled": true,
+
+  // ---- instance events (#8884): on by default, no threshold --------------------------
+  "alert_instance_restarted_enabled": true,
+  "alert_memory_dumps_enabled": true,
 
   // ---- Disk: WARNING tier, then the CRITICAL floors (#2107) ----------------------------
   // Both tiers are OR'd within themselves: whichever of percent/GB trips first wins, which
@@ -233,6 +240,12 @@
   // in DuckDB's collection_log table at every level, including "None".
   "log_minimum_level": "Information",
 
+  // A diagnostic for a slow read, off by default. When true, the analysis anomaly detector, the plan
+  // regression reads and the Query Store top read run with DuckDB profiling on. DuckDB writes one JSON
+  // operator profile per statement to duckdb-profiles under the logs folder, and the 20 newest files
+  // per read are kept. Each profiled read takes somewhat longer. Applied at startup.
+  "duckdb_profile_slow_reads": false,
+
   // ---- Teams / Slack / generic / PagerDuty webhooks --------------------------------------------------
   // The URLs, the generic headers JSON and the PagerDuty routing key are SECRETS and live in
   // Windows Credential Manager, never in this file. Only these plain prefs are stored here.
@@ -298,14 +311,26 @@
   // Set this to true to serve local clients with no token, as earlier builds did: only the read tools are served then, and the
   // write and investigation tools stay off. Import Settings never brings this value in. Change it, then restart Lite.
   "mcp_allow_tokenless_loopback": false,
-  // NO UI. Off by default. The twelve MCP write tools are served only when this is true: mute_analysis_finding,
-  // unmute_analysis_finding, set_notification_route_enabled, delete_notification_route, and the eight query tag tools
-  // (create, update, delete, assign and unassign for a tag, and create, update and delete for a tag rule). With it off a
+  // NO UI. Off by default. The twenty-one MCP write tools are served only when this is true: mute_analysis_finding,
+  // unmute_analysis_finding, set_notification_route_enabled, delete_notification_route, create_notification_route, update_notification_route,
+  // create_mute_rule, update_mute_rule, delete_mute_rule, set_mute_rule_enabled, the eight query tag tools
+  // (create, update, delete, assign and unassign for a tag, and create, update and delete for a tag rule), set_server_excluded_databases,
+  // reset_collector_schedules and update_alert_settings. With it off a
   // call to one fails as an unknown tool. Change it, then restart Lite. Mutes that already exist stay in force while it
   // is off; turn it on to remove one with unmute_analysis_finding.
   // The write tools also need the MCP token: with mcp_allow_tokenless_loopback on they stay off whatever this says, and Lite
   // logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_writes": false,
+  // NO UI. Off by default. The three server admin MCP tools (add_servers, edit_server, remove_server) change which servers Lite connects to,
+  // and add_servers saves a server's login. They are served only when this AND mcp_allow_writes are both true (and the MCP
+  // token is usable). With it off a call to one fails as an unknown tool. Change it, then restart Lite. Import Settings never
+  // brings this value in.
+  "mcp_allow_server_admin": false,
+  // NO UI. Off by default. add_servers and edit_server refuse Windows authentication over a connection whose server identity is not verified
+  // (trust_server_certificate true, or encrypt_mode Optional), before any connection test, because Windows authentication presents the
+  // Windows account Lite runs as to the host the caller names. Set this to true to let them accept it. Change it, then restart Lite. Import
+  // Settings never brings this value in.
+  "mcp_allow_windows_auth_over_unverified_tls": false,
   // NO UI. Off by default. Serves the two tools that claim and report on investigation requests (claim_investigation_request,
   // submit_investigation_report) only when this is true AND mcp_allow_writes is false: with both on, those two stay off and
   // Lite logs one Critical line. With it off a call to one fails as an unknown tool. The two investigation reads

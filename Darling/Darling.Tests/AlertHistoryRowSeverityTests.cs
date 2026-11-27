@@ -222,6 +222,20 @@ public sealed class AlertHistoryRowSeverityTests
     /// a null context, and even a stray tier on one must not turn "Poison Waits Cleared" red. The two
     /// deliberate INFO reports fire with no override and stay unhighlighted, as
     /// <see cref="AlertMetricClassifier.IsInformational"/> intends.</summary>
+    /// <summary>#9583: Instance Restarted fires at Warning and reads as one, by tier and by name, in the web badge's
+    /// <c>DescribeFired</c> and in the grids' predicates. "Agent Restarted" is still a recovery.</summary>
+    [Fact]
+    public void InstanceRestarted_ReadsAsAWarning_AndAgentRestartedAsAResolution()
+    {
+        Assert.Equal(("warning", AlertHistoryRowSeverity.SourceFired), AlertHistoryRowSeverity.DescribeFired("Instance Restarted", AlertSeverityLevel.Warning));
+        Assert.Equal(("warning", AlertHistoryRowSeverity.SourceFired), AlertHistoryRowSeverity.Describe("Instance Restarted", WithSeverity(AlertSeverityLevel.Warning)));
+        Assert.Equal(("warning", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("Instance Restarted", null));
+        Assert.True(AlertHistoryRowSeverity.IsWarning("Instance Restarted", WithSeverity(AlertSeverityLevel.Warning)));
+        Assert.False(AlertHistoryRowSeverity.IsCritical("Instance Restarted", WithSeverity(AlertSeverityLevel.Warning)));
+
+        Assert.Equal(("resolution", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.DescribeFired("Agent Restarted", AlertSeverityLevel.Warning));
+    }
+
     [Fact]
     public void ResolutionAndInformationalRows_AreTheNamesBusiness()
     {

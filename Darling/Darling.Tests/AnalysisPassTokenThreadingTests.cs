@@ -39,14 +39,15 @@ namespace Darling.Tests;
 /// So the pin is on the CALL, not the signature — a no-argument <c>ExecuteReaderAsync()</c> is what
 /// goes red, and no default can hide it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AnalysisPassTokenThreadingTests
 {
     /// <summary>
-    /// The no-argument overloads. Each has a token-taking sibling, so the empty parentheses are the
+    /// The no-argument overloads, and the named open that passes CancellationToken.None (#9416). Each has a token-taking sibling, so the empty parentheses are the
     /// whole tell — there is no shape of correct code in this project that needs them.
     /// </summary>
     private static readonly Regex s_untokenedStoreCall = new(
-        @"\.(?:ExecuteReaderAsync|ExecuteNonQueryAsync|ExecuteScalarAsync|ReadAsync|OpenAsync|OpenConnectionAsync)\(\s*\)",
+        @"\.(?:ExecuteReaderAsync|ExecuteNonQueryAsync|ExecuteScalarAsync|ReadAsync|OpenAsync|OpenConnectionAsync)\(\s*\)|\.OpenConnectionAsync\(StoreSessionNames\.\w+,\s*CancellationToken\.None\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -224,8 +225,10 @@ public sealed class AnalysisPassTokenThreadingTests
            30 since #6640: the spill ranking read that names the queries behind QUERY_SPILLS is one more; it lets the
            abandonment through and drops the names on any other fault, so the fact stays without them.
            31 since #7675: the QUERY_STORE_ERROR read of the newest query_store_health capture is one more; it lets the
-           abandonment through and reports any other fault as a collection failure, as the DB_CONFIG read beside it does. */
-        Assert.Equal(31, AnalysisSources()
+           abandonment through and reports any other fault as a collection failure, as the DB_CONFIG read beside it does.
+           32 since #8883: the TEMPDB_FILE_SETUP read of the newest tempdb file list is one more; it lets the
+           abandonment through and reports any other fault as a collection failure. */
+        Assert.Equal(32, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("PgFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));
@@ -285,7 +288,7 @@ public sealed class AnalysisPassTokenThreadingTests
 
         /* The abandonment point: the batch's connection open observes the pass token. */
         Assert.Contains(
-            "await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);",
+            "await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);",
             store, StringComparison.Ordinal);
 
         /* And nothing after it does. A ThrowIfCancellationRequested between rows would MAKE the partial

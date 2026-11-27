@@ -36,10 +36,11 @@ WITH per_collection AS
         unallocated_mb,
         total_sessions_using_tempdb,
         top_session_id,
-        top_session_tempdb_mb
+        top_session_tempdb_mb,
+        log_used_mb
     FROM v_tempdb_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -53,7 +54,8 @@ SELECT
     arg_max(top_session_id, collection_time) AS top_session_id,
     arg_max(top_session_tempdb_mb, collection_time) AS top_session_tempdb_mb,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) AS collection_count
+    COUNT(*) AS collection_count,
+    MAX(log_used_mb) AS peak_log_used_mb
 FROM per_collection
 GROUP BY 1
 ORDER BY 1";
@@ -81,7 +83,7 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double UserObjectReservedMb, double InternalObjectReservedMb, double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb, int TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb, long CollectionCount)>();
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double UserObjectReservedMb, double InternalObjectReservedMb, double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb, int TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb, long CollectionCount, double? PeakLogUsedMb)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -104,7 +106,9 @@ ORDER BY 1";
                 reader.IsDBNull(6) ? 0 : (int)ToInt64(reader.GetValue(6)),
                 reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                 reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                collectionCount));
+                collectionCount,
+                /* #8881: NULL (a row stored before the log columns, or an engine without the function) stays null, which the chart draws as a gap, never a zero. */
+                reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11))));
         }
 
         var items = new List<TempDbRow>(rows.Count);
@@ -120,11 +124,66 @@ ORDER BY 1";
                 UnallocatedMb = row.UnallocatedMb,
                 TotalSessionsUsingTempDb = row.TotalSessionsUsingTempDb,
                 TopSessionId = row.TopSessionId,
-                TopSessionTempDbMb = row.TopSessionTempDbMb
+                TopSessionTempDbMb = row.TopSessionTempDbMb,
+                LogUsedMb = row.PeakLogUsedMb
             });
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The newest tempdb collection in the window, as far as the log's holder goes (#8881): the row the chart's last point comes from, read
+    /// beside the chart so the screen can say who holds the oldest open tempdb transaction. Null when the window has no collection. The
+    /// holder fields are NULL below 50 percent of the log used, on a row stored before the log columns and on an engine that cannot report
+    /// them, and <see cref="TempDbLogHolderLine.Build"/> draws no line for that. $1 server_id, $2/$3 the UTC window.
+    /// </summary>
+    internal const string TempDbLogHolderSql = @"
+SELECT
+    collection_time,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    log_truncation_holdup_reason,
+    log_total_mb,
+    log_reuse_wait_desc
+FROM v_tempdb_stats
+WHERE server_id = $1
+AND   collection_time > $2
+AND   collection_time <= $3
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    internal async Task<TempDbLogHolder?> GetNewestTempDbLogHolderAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        command.CommandText = TempDbLogHolderSql;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return null;
+        }
+
+        /* The collector stamps UTC into DuckDB's tz-less TIMESTAMP, so each value comes back Kind Unspecified and is stamped Utc. */
+        return new TempDbLogHolder(
+            DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     /// <summary>
@@ -153,7 +212,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM {tempDbRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -180,7 +250,20 @@ LIMIT 1";
                 /* #3653 (A5): the collector stamps UTC into DuckDB's tz-less TIMESTAMP, so the value comes back
                    Kind Unspecified and is stamped Utc because that is what it is — the AG-topology reads' idiom.
                    The engine only ever compares one server's stamps with each other. */
-                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                /* #8881: the tempdb log, NULL on a row collected before v83, on an engine that lacks the function, and (the holder) below
+                   50 percent used. Darling's twin reads the same columns, and a NULL stays null: the log alert never reads it as zero. */
+                LogTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                LogUsedMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                LogUsedPercent = reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                LogReuseWaitDesc = reader.IsDBNull(12) ? null : reader.GetString(12),
+                LogTruncationHoldupReason = reader.IsDBNull(13) ? null : reader.GetString(13),
+                HolderSessionId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                HolderLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+                HolderProgramName = reader.IsDBNull(16) ? null : reader.GetString(16),
+                HolderBeginTimeUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+                HolderLogBytesUsed = reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                HolderLogBytesReserved = reader.IsDBNull(19) ? null : reader.GetInt64(19)
             };
         }
 
@@ -202,4 +285,6 @@ public class TempDbRow
     public int TotalSessionsUsingTempDb { get; set; }
     public int TopSessionId { get; set; }
     public double TopSessionTempDbMb { get; set; }
+    /// <summary>The fullest the tempdb log was in the bucket, in MB (#8881), or null where no collection in it reported the log.</summary>
+    public double? LogUsedMb { get; set; }
 }

@@ -77,7 +77,7 @@ public sealed partial class ViewerDataService
             var entries = new List<KnownPattern>();
             await using var command = _dataSource.CreateCommand(KnownPatternsSelectSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 var id = reader.GetInt64(0);

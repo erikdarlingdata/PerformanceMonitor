@@ -58,7 +58,7 @@ public sealed class QueryStoreSlicerCompressedLiveTests
             FROM query_store_stats
             WHERE server_id = $1
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
             AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

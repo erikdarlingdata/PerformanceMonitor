@@ -134,6 +134,50 @@ public sealed class CollectorCadenceTextTests
         }, CancellationToken.None, TaskCreationOptions.None, oneAtATime).Unwrap();
     }
 
+    /* #9194: the read is shared by every panel, so the scope of the load that started it must not cancel it for the others. */
+    [Fact]
+    public async Task ACancelledScopeOfTheCallerThatStartedTheRead_DoesNotFailTheReadForASecondCaller()
+    {
+        var rows = new[] { new CollectorScheduleRow(null, "pg_server_config", 30, null, null) };
+        var reported = new List<Exception>();
+        var release = new TaskCompletionSource();
+        var reads = 0;
+        var cache = new ViewerScheduleOverridesCache(
+            async () =>
+            {
+                reads++;
+                await release.Task;
+                /* What every store reader does: it takes the ambient scope when it is given no token of its own. */
+                ViewerReadScope.Effective(CancellationToken.None).ThrowIfCancellationRequested();
+                return rows;
+            },
+            () => DateTime.UtcNow,
+            reported.Add);
+
+        using var scope = new CancellationTokenSource();
+        ViewerReadScope.Enter(scope.Token);
+        Task<IReadOnlyList<CollectorScheduleRow>?> first;
+        try
+        {
+            first = cache.GetAsync();
+            /* The starter's own scope is still its own after it asked. */
+            Assert.Equal(scope.Token, ViewerReadScope.Current);
+        }
+        finally
+        {
+            ViewerReadScope.Clear();
+        }
+
+        scope.Cancel();
+        var second = cache.GetAsync();
+        release.SetResult();
+
+        Assert.Same(rows, await second);
+        Assert.Same(rows, await first);
+        Assert.Equal(1, reads);
+        Assert.Empty(reported);
+    }
+
     [Fact]
     public void TheMcpToolsCadence_FollowsTheServersOwnOverride_ThenTheFleetOne_ThenTheShippedDefault()
     {

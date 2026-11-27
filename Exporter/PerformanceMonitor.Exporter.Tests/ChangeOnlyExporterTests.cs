@@ -525,6 +525,10 @@ public class ChangeOnlyExporterTests
                 new("last_received_time", "timestamp", "timestamp"),
                 new("last_hardened_lsn", "text", "text"),
                 new("last_commit_lsn", "text", "text"),
+                new("is_local", "bool", "bool"),
+                new("is_suspended", "bool", "bool"),
+                new("suspend_reason_desc", "text", "text"),
+                new("availability_mode_desc", "text", "text"),
             };
 
             var names = columns.Select(c => c.Name).ToArray();
@@ -536,6 +540,7 @@ public class ChangeOnlyExporterTests
                 (long)100, (long)200, lag, (long)10, (long)20,
                 (double)1.5, (double)2.5,
                 t, t, t, t, "0x01", "0x02",
+                false, false, "NOT_SUSPENDED", "SYNCHRONOUS_COMMIT",
             ];
 
             var w1From = new DateTime(2026, 1, 1, 1, 0, 0, DateTimeKind.Utc);

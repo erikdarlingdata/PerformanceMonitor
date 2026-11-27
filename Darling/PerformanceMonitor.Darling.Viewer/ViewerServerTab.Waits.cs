@@ -71,15 +71,27 @@ public partial class ViewerServerTab
     /// and redraw. The hover helper is created lazily on first load so the picker's chart carries the
     /// same tooltip + click-to-isolate behavior Lite's does.
     /// </summary>
-    private async Task LoadWaitStatsAsync()
+    private async Task LoadWaitStatsAsync(ViewerLoadTimer? timer = null)
     {
         _waitStatsHover ??= new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
-        var waitTypes = await _dataService.GetDistinctWaitTypesAsync(_server.ServerId, startUtc, endUtc);
-        PopulateWaitTypePicker(waitTypes);
-        await UpdateWaitStatsChartFromPickerAsync();
+        var waitTypes = await Timed(timer, "Wait Stats picker read", WaitStatsReads.DistinctWaitTypes(startUtc, endUtc));
+        ClientStep(timer, "Wait Stats picker build", () => PopulateWaitTypePicker(waitTypes));
+        await UpdateWaitStatsChartFromPickerAsync(timer);
     }
+
+    /// <summary>#9112: the Wait Stats tab's two store reads, so a test can hand the tab reads that take a known time. The product uses the data service's.</summary>
+    internal sealed record WaitStatsTabReads(
+        Func<DateTime, DateTime, Task<List<string>>> DistinctWaitTypes,
+        Func<List<string>, DateTime, DateTime, Task<Dictionary<string, List<WaitStatsTrendPoint>>>> TrendsByTypes);
+
+    /// <summary>A test's stand-in for the Wait Stats tab's reads; null in the product.</summary>
+    internal WaitStatsTabReads? WaitStatsReadsOverride { get; set; }
+
+    private WaitStatsTabReads WaitStatsReads => WaitStatsReadsOverride ?? new WaitStatsTabReads(
+        (startUtc, endUtc) => _dataService.GetDistinctWaitTypesAsync(_server.ServerId, startUtc, endUtc),
+        (types, startUtc, endUtc) => _dataService.GetWaitStatsTrendsByTypesAsync(_server.ServerId, types, startUtc, endUtc));
 
     private void PopulateWaitTypePicker(List<string> waitTypes)
     {
@@ -177,7 +189,7 @@ public partial class ViewerServerTab
             () => PickerRefreshCoalescer.SignatureOf(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
-    private async Task UpdateWaitStatsChartFromPickerAsync()
+    private async Task UpdateWaitStatsChartFromPickerAsync(ViewerLoadTimer? timer = null)
     {
         /* Bump a generation on entry; after each (now genuinely async) query, bail if a newer
            invocation has started — rapid checkbox toggling otherwise interleaves two runs and
@@ -202,37 +214,40 @@ public partial class ViewerServerTab
             double globalMax = 0;
 
             // Batched fetch: one query for all selected wait types (mirrors Lite's batched read).
-            var trendsByType = await _dataService.GetWaitStatsTrendsByTypesAsync(
-                _server.ServerId, selected.Select(s => s.DisplayName).ToList(), startUtc, endUtc);
+            var trendsByType = await Timed(timer, "Wait Stats trend read",
+                WaitStatsReads.TrendsByTypes(selected.Select(s => s.DisplayName).ToList(), startUtc, endUtc));
             if (gen != _waitStatsPickerGen) return;
 
-            for (int i = 0; i < selected.Count; i++)
+            ClientStep(timer, "Wait Stats chart draw", () =>
             {
-                if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
+                for (int i = 0; i < selected.Count; i++)
+                {
+                    if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
-                var values = useAvgPerWait
-                    ? trend.Select(t => t.AvgMsPerWait).ToArray()
-                    : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
+                    var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
+                    var values = useAvgPerWait
+                        ? trend.Select(t => t.AvgMsPerWait).ToArray()
+                        : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-                var plot = WaitStatsChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
-                plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-                ChartStyle.StyleScatter(plot);
-                _waitStatsHover?.Add(plot, selected[i].DisplayName);
+                    var plot = WaitStatsChart.Plot.Add.TimeSeries(times, values);
+                    plot.LegendText = selected[i].DisplayName;
+                    plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                    ChartStyle.StyleScatter(plot);
+                    _waitStatsHover?.Add(plot, selected[i].DisplayName);
 
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-            }
+                    if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+                }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            var rangeStart = startUtc;
-            var rangeEnd = endUtc;
-            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
-            ReapplyAxisColors(WaitStatsChart);
-            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "ms/wait" : "ms/sec");
-            SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
-            ShowChartLegend(WaitStatsChart);
-            WaitStatsChart.Refresh();
+                WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+                var rangeStart = startUtc;
+                var rangeEnd = endUtc;
+                WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
+                ReapplyAxisColors(WaitStatsChart);
+                WaitStatsChart.Plot.YLabel(useAvgPerWait ? "ms/wait" : "ms/sec");
+                SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
+                ShowChartLegend(WaitStatsChart);
+                WaitStatsChart.Refresh();
+            });
         }
         catch (Exception ex)
         {

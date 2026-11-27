@@ -293,7 +293,8 @@ public static class CollectorMeasurementNote
     {
         if (string.IsNullOrEmpty(note)
             || PerformanceMonitor.Common.RingBufferTruncationNote.TryParse(note, out _, out _)
-            || PerformanceMonitor.Common.RingBufferLossNote.TryParse(note, out _))
+            || PerformanceMonitor.Common.RingBufferLossNote.TryParse(note, out _)
+            || PerformanceMonitor.Common.DefaultTraceOffNote.TryParse(note))
         {
             return false;
         }

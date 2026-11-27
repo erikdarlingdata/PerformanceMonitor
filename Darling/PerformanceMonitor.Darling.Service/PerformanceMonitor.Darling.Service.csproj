@@ -29,10 +29,11 @@
     <PackageReference Include="AWSSDK.SecurityToken" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
-    <!-- #8650: lifts the transitive System.Formats.Cbor off CborProtocol's 9.0.5; see Directory.Packages.props. -->
+    <!-- #8650: AWSSDK 4.1 CBOR protocol needs System.Formats.Cbor 11.0.0; see Directory.Packages.props. -->
     <PackageReference Include="System.Formats.Cbor" />
     <!-- #3838: the Entra (Active Directory) authentication providers were split OUT of the core
          Microsoft.Data.SqlClient package in 7.x, so a project that sets
@@ -110,6 +111,14 @@
          the MSI payload, the Linux tarball and the container image), not only where the Windows scripts do, because a
          bring-your-own store runs on any of them. The messages name it "in the install folder". -->
     <None Include="..\tools\provision-roles.sql" Link="provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9688: the systemd unit, the install and upgrade scripts with the file they share, and the Linux config sample. They ship
+         in the linux-x64 tarball only, the one publish that names a Linux RID. The container image publishes with no RID and
+         runs under no systemd, and the Windows zip has the PowerShell scripts. -->
+    <None Include="..\tools\darling.service" Link="darling.service" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\install-darling.sh" Link="install-darling.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\upgrade-darling.sh" Link="upgrade-darling.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\darling-script-lib.sh" Link="darling-script-lib.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\darling.linux.sample.json" Link="darling.linux.sample.json" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
   </ItemGroup>
 
   <ItemGroup>

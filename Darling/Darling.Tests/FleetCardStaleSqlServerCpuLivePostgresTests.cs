@@ -40,6 +40,8 @@ public sealed class FleetCardStaleSqlServerCpuLivePostgresTests
     private const int FastScheduleServerId = -993_7199;
     private const int OnLoadServerId = -993_7195;
     private const int OnLoadOldServerId = -993_7194;
+    private const int DisabledSlowServerId = -993_7193;
+    private const string DisabledSlowName = "ee-stale-cpu-disabled-slow";
     private const string OnLoadName = "cc-stale-cpu-on-load";
     private const string OnLoadOldName = "dd-stale-cpu-on-load-old";
     private const string FreshName = "zz-stale-cpu-fresh";
@@ -48,7 +50,7 @@ public sealed class FleetCardStaleSqlServerCpuLivePostgresTests
     private const string StaleName = "aa-stale-cpu-stale";
 
     private static readonly int[] SentinelIds =
-        [FreshServerId, StaleServerId, SlowScheduleServerId, FastScheduleServerId, OnLoadServerId, OnLoadOldServerId];
+        [FreshServerId, StaleServerId, SlowScheduleServerId, FastScheduleServerId, OnLoadServerId, OnLoadOldServerId, DisabledSlowServerId];
 
     [Fact]
     public async Task ADaysOldSqlServerCpuReading_IsNotShownOrBanded_OnTheFleetCardOrTheOverviewCard()
@@ -206,6 +208,65 @@ public sealed class FleetCardStaleSqlServerCpuLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #9139: a <c>cpu_utilization</c> collector that is switched off collects nothing more, so its last reading stops
+    /// showing at the 15-minute floor instead of at twice its last interval. A 20-minute-old reading shows on the
+    /// 30-minute schedule that is enabled (the test above) and does not on the same schedule once it is disabled.
+    /// </summary>
+    [Fact]
+    public async Task ADisabledCpuSchedule_BoundsTheReadingByTheFloor_NotByTwiceItsLastInterval()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live stale-CPU test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            await InsertServerAsync(connection, DisabledSlowServerId, DisabledSlowName, ct);
+            await InsertCollectionLogAsync(connection, DisabledSlowServerId, DisabledSlowName, now.AddSeconds(-30), ct);
+            await InsertSqlServerCpuAsync(connection, DisabledSlowServerId, DisabledSlowName, now.AddMinutes(-20), 30, 4, ct);
+            await InsertCpuScheduleAsync(connection, DisabledSlowServerId, 30, ct, enabled: false);
+
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(
+                postgres, now.AddHours(-1), now, now, cancellationToken: ct);
+            var card = result.Cards.Single(c => c.ServerId == DisabledSlowServerId);
+            Assert.Null(card.TotalCpuPercent);
+            Assert.Equal(FleetCpuSource.NotCollected, card.CpuSource);
+
+            Assert.Null((await viewer.GetServerSummaryAsync(DisabledSlowServerId, DisabledSlowName, cancellationToken: ct)).TotalCpuPercent);
+
+            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, DisabledSlowServerId, cancellationToken: ct);
+            Assert.Null(summary.CpuPercent);
+
+            /* Switched back on, the same reading shows again: the bound is twice the interval. */
+            using (var enable = new NpgsqlCommand(
+                "UPDATE config.config_collector_schedules SET enabled = TRUE WHERE server_id = $1", connection))
+            {
+                enable.Parameters.AddWithValue(DisabledSlowServerId);
+                await enable.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(30.0, (await DarlingHealthReader.GetServerSummaryAsync(postgres, DisabledSlowServerId, cancellationToken: ct)).CpuPercent);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelRowsAsync);
+        }
+    }
+
     private static async Task InsertServerAsync(NpgsqlConnection connection, int serverId, string name, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"
@@ -218,13 +279,14 @@ VALUES ($1, $2, $2, TRUE, 0, $3)", connection);
     }
 
     private static async Task InsertCpuScheduleAsync(
-        NpgsqlConnection connection, int serverId, int frequencyMinutes, CancellationToken ct)
+        NpgsqlConnection connection, int serverId, int frequencyMinutes, CancellationToken ct, bool enabled = true)
     {
         using var command = new NpgsqlCommand(@"
-INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes)
-VALUES ($1, 'cpu_utilization', $2)", connection);
+INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, enabled)
+VALUES ($1, 'cpu_utilization', $2, $3)", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(frequencyMinutes);
+        command.Parameters.AddWithValue(enabled);
         await command.ExecuteNonQueryAsync(ct);
     }
 

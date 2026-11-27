@@ -165,7 +165,7 @@ VALUES ($1, $2, $3, $4, $5)";
         await using var command = _dataSource.CreateCommand(InvestigationRequestsSelectSql(withPractice));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddNullableText(command, string.IsNullOrWhiteSpace(state) ? null : state.Trim());
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new InvestigationRequestViewRow
@@ -199,10 +199,10 @@ VALUES ($1, $2, $3, $4, $5)";
         Guid requestId, CancellationToken cancellationToken = default)
     {
         var detail = new InvestigationRequestDetail { RequestId = requestId };
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
 
         await using (var brief = Command(connection, InvestigationBriefSelectSql, requestId))
-        await using (var reader = await brief.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await brief.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -212,7 +212,7 @@ VALUES ($1, $2, $3, $4, $5)";
         }
 
         await using (var alerts = Command(connection, InvestigationRequestAlertsSelectSql, requestId))
-        await using (var reader = await alerts.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await alerts.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -222,7 +222,7 @@ VALUES ($1, $2, $3, $4, $5)";
         }
 
         await using (var reports = Command(connection, InvestigationReportsSelectSql, requestId))
-        await using (var reader = await reports.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await reports.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -244,7 +244,7 @@ VALUES ($1, $2, $3, $4, $5)";
         if (detail.Reports.Count > 0)
         {
             await using var links = Command(connection, InvestigationLinksSelectSql, requestId);
-            await using var reader = await links.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await links.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 if (InvestigationReportLinks.FromDetail(reader.IsDBNull(0) ? null : reader.GetString(0)) is { } link)
@@ -253,7 +253,7 @@ VALUES ($1, $2, $3, $4, $5)";
         }
 
         await using (var journal = Command(connection, InvestigationJournalSelectSql, requestId))
-        await using (var reader = await journal.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await journal.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -273,7 +273,7 @@ VALUES ($1, $2, $3, $4, $5)";
         await using var command = _dataSource.CreateCommand(InvestigationNotesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddNullableText(command, string.IsNullOrWhiteSpace(state) ? null : state.Trim());
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new InvestigationNoteViewRow
@@ -585,7 +585,7 @@ VALUES ($1, $2, $3, $4, $5)";
     private async Task<T> InTransactionAsync<T>(
         Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> body, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {

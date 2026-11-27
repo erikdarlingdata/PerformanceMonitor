@@ -205,6 +205,81 @@ public sealed class QueryStoreTopMcpLiveTests
     }
 
     /// <summary>
+    /// #8570: a read that names its databases takes the interval table at any window length, and the gate is asked with no
+    /// literal end, so a bounded end before <c>applied_through</c> takes the table too; a read over every database under
+    /// <see cref="DarlingDataReader.QueryStoreTopMinWindow"/> stays on raw. The day-2 interval of query 4 is collected three
+    /// times (5, 12 and 20 executions) and the windows below end between its first and second collection. Raw places the
+    /// window by the interval's start and reads every snapshot up to the collection ceiling, so each tier gives the newest, 20,
+    /// and each table page equals raw's.
+    /// </summary>
+    [Fact]
+    public async Task ANamedReadOfAnyLength_AndABoundedEnd_ReadTheTable_AndEqualRaw_WhileAShortReadOfEveryDatabaseReadsRaw()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8570 MCP top routing live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(runner, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+        await RegisterServerAsync(connection, ct);
+
+        var appliedThrough = await ScalarDateTimeAsync(connection,
+            "SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = @server_id", ct);
+        var day2 = WindowStart.AddDays(2).AddHours(1);
+        var boundedEnd = day2.AddMinutes(20);
+        var shortStart = day2.AddMinutes(-30);
+        Assert.True(boundedEnd < appliedThrough, $"the premise: the bounded end ({boundedEnd:o}) must sit before applied_through ({appliedThrough:o})");
+        Assert.True(boundedEnd - shortStart < DarlingDataReader.QueryStoreTopMinWindow, "the premise: the short window must be under the minimum window");
+
+        var qsB = PerformanceMonitor.Darling.Storage.DatabaseFilter.One("qsB");
+        var all = PerformanceMonitor.Darling.Storage.DatabaseFilter.All;
+
+        var named = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, shortStart, boundedEnd, TestTop, qsB, null, null, ct);
+        Assert.True(named.Table is not null, "a short read that names its database must read the interval table");
+        Assert.All(named.Rows, r => Assert.Equal("qsB", r.DatabaseName));
+        Assert.Equal(20, named.Rows.Single(r => r.QueryId == 4).TotalExecutions);
+        Assert.Equal((await RawTopKeysAsync(connection, shortStart, boundedEnd, null, null, ct, qsB)).OrderBy(k => k).ToList(), KeysOf(named.Rows));
+
+        var everyShort = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, shortStart, boundedEnd, TestTop, all, null, null, ct);
+        Assert.True(everyShort.Table is null, "a short read of every database must read raw");
+        Assert.Equal(20, everyShort.Rows.Single(r => r.DatabaseName == "qsB" && r.QueryId == 4).TotalExecutions);
+
+        var everyBounded = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, WindowStart, boundedEnd, TestTop, all, null, null, ct);
+        Assert.True(everyBounded.Table is not null, "a read of every database over the minimum window, ending before applied_through, must read the interval table");
+        Assert.Equal(20, everyBounded.Rows.Single(r => r.DatabaseName == "qsB" && r.QueryId == 4).TotalExecutions);
+        Assert.Equal((await RawTopKeysAsync(connection, WindowStart, boundedEnd, null, null, ct)).OrderBy(k => k).ToList(), KeysOf(everyBounded.Rows));
+
+        /* The window probe takes the top read's tier: the table for the short named read, whichever database it names. */
+        foreach (var (databases, expected) in new[] { (qsB, true), (PerformanceMonitor.Darling.Storage.DatabaseFilter.One("qsNone"), false) })
+        {
+            using var scope = ReadScope.Open(new CapturingTestLogger());
+            Assert.Equal(expected, await DarlingDataReader.QueryStoreWindowHasRowsAsync(postgres, ServerId, shortStart, boundedEnd, databases, ct));
+            Assert.Equal(ReadScope.SourceIntervalTable, scope.Scope.Source);
+        }
+
+        /* get_query_store_aborts takes the same tier as its probe: a short named window around day 0's aborted interval (its start is
+           WindowStart + 2 h) reads the table, and its page equals the raw page of every database cut to that database. */
+        var abortsStart = WindowStart.AddHours(1).AddMinutes(45);
+        var abortsEnd = WindowStart.AddHours(2).AddMinutes(15);
+        var abortsNamed = await DarlingQueryStoreAbortsReader.ReadAsync(postgres, ServerId, abortsStart, abortsEnd, TestTop, qsB, ct);
+        Assert.True(abortsNamed.Table is not null, "a short aborts read that names its database must read the interval table, as its probe does");
+        var failed = abortsNamed.Rows.Single(r => r.QueryId == 2);
+        Assert.Equal((4L, 1L), (failed.AbortedRuns, failed.ExceptionRuns));
+        var abortsEvery = await DarlingQueryStoreAbortsReader.ReadAsync(postgres, ServerId, abortsStart, abortsEnd, TestTop, all, ct);
+        Assert.True(abortsEvery.Table is null, "a short aborts read of every database must read raw");
+        Assert.Equal(abortsEvery.Rows.Where(r => r.DatabaseName == "qsB").ToList(), abortsNamed.Rows);
+    }
+
+    private static List<(string DatabaseName, long QueryId, long PlanId, string ExecutionTypeDesc, string? ReplicaRole, long TotalExecutions)> KeysOf(
+        IEnumerable<DarlingDataReader.QueryStoreRow> rows) =>
+        rows.Select(r => (r.DatabaseName, r.QueryId, r.PlanId, r.ExecutionTypeDesc, r.ReplicaRole, r.TotalExecutions)).OrderBy(k => k).ToList();
+
+    /// <summary>
     /// The clamp (review D4R H3, the same rule the grid's own live test proves): once raw's oldest chunk is
     /// dropped, the table still holds those rows — its own retention is independent of raw's — so an unclamped
     /// table read would show rows raw no longer has. Bounding the table read at
@@ -381,7 +456,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
     /// compares end-to-end. Column ordinals match <c>ranked</c>'s final SELECT list exactly (0 database_name,
     /// 1 query_id, 2 plan_id, 7 total_executions, 5 execution_type_desc, 16 replica_role).</summary>
     private static async Task<List<(string DatabaseName, long QueryId, long PlanId, string ExecutionTypeDesc, string? ReplicaRole, long TotalExecutions)>> RawTopKeysAsync(
-        NpgsqlConnection connection, DateTime windowStart, DateTime windowEnd, string? executionType, string? moduleName, CancellationToken ct)
+        NpgsqlConnection connection, DateTime windowStart, DateTime windowEnd, string? executionType, string? moduleName, CancellationToken ct,
+        PerformanceMonitor.Darling.Storage.DatabaseFilter databases = default)
     {
         var keys = new List<(string, long, long, string, string?, long)>();
         await using var command = new NpgsqlCommand(DarlingDataReader.QueryStoreTopSql, connection);
@@ -389,7 +465,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-        command.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());
+        command.Parameters.Add(databases.Parameter());
         AddNullableText(command, executionType);
         AddNullableText(command, moduleName);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */

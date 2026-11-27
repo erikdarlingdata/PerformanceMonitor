@@ -187,10 +187,36 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
         Assert.Equal("ad hoc", Assert.Single(rows).ModuleName);
     }
 
+    /// <summary>
+    /// #8549: the grid shows a group's collection-time host object when it has one, so the stitch is read only for the groups with no host. The
+    /// host-named group's handle matches a procedure_stats row here and still gets no stitched module; the NULL-host group's handle gets its module.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_ModuleLookup_IsReadOnlyForGroupsWithNoHostObject()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedQueryStatsAsync("TestDb", "0xHOSTED", "0xMODA", deltaExec: 5, deltaElapsedUs: 300_000, "SELECT hosted", hostObjectName: "dbo.usp_Host");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_StitchedA", "PROCEDURE", "0xMODA");
+        await SeedQueryStatsAsync("TestDb", "0xOLDROW", "0xMODB", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT old row");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_StitchedB", "PROCEDURE", "0xMODB");
+
+        var rows = await service.GetTopQueriesByCpuAsync(ServerId);
+
+        var hosted = rows.Single(r => r.QueryHash == "0xHOSTED");
+        Assert.Equal("TestDb.dbo.usp_Host", hosted.ModuleName);
+        Assert.Equal("", hosted.ModuleObjectName);
+
+        var oldRow = rows.Single(r => r.QueryHash == "0xOLDROW");
+        Assert.Equal("usp_StitchedB", oldRow.ModuleObjectName);
+        Assert.Equal("TestDb.dbo.usp_StitchedB", oldRow.ModuleName);
+    }
+
     // ── Seeding helpers (column-list INSERT; unset columns default to NULL) ──
 
     private async Task SeedQueryStatsAsync(
-        string databaseName, string queryHash, string sqlHandle, long deltaExec, long deltaElapsedUs, string queryText)
+        string databaseName, string queryHash, string sqlHandle, long deltaExec, long deltaElapsedUs, string queryText,
+        string? hostObjectName = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -198,8 +224,8 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
         cmd.CommandText = @"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name,
-     query_hash, sql_handle, last_execution_time, delta_execution_count, delta_elapsed_time, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+     query_hash, sql_handle, last_execution_time, delta_execution_count, delta_elapsed_time, query_text, host_object_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = Collected });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -211,6 +237,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaExec });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaElapsedUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryText });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)hostObjectName ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 

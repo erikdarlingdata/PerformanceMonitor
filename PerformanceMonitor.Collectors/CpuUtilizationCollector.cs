@@ -221,11 +221,19 @@ SELECT /* PerformanceMonitorLite */ TOP (60)
         DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME()))
 FROM
 (
-    SELECT
+    /* #9530: cut to the newest records BEFORE the xml convert. The ring holds up to 256 one-minute records
+       and the outer TOP (60) keeps only the newest 60, so converting the whole ring parsed about four
+       times the xml it returned. 90 is the 60 the outer TOP returns plus 30 spare: the #989 filter below
+       drops a record with no complete SystemHealth block, and the spare records keep such a drop from
+       shortening the window. A ring of complete records returns the same 60 rows as before. The
+       timestamp order is the outer order, so the cut and the outer TOP agree on which records are newest. */
+    SELECT TOP (90)
         dorb.timestamp,
         record = CONVERT(xml, dorb.record)
     FROM sys.dm_os_ring_buffers AS dorb
     WHERE dorb.ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+    ORDER BY
+        dorb.timestamp DESC
 ) AS t
 CROSS APPLY
 (
@@ -240,13 +248,48 @@ AND   x.system_idle IS NOT NULL
 ORDER BY t.timestamp DESC
 OPTION(RECOMPILE);
 
+/* #8884: the memory dumps, three values read in this round trip. The view is read in its own sp_executesql inside a TRY/CATCH, because a
+   missing view or a refused permission is a compile-time error in this scope, which a TRY/CATCH in this scope would not catch. Any failure
+   leaves all three NULL, and a NULL total means unknown, never no dumps: the alert treats it as no stamp. The newest creation time is moved
+   to UTC (creation_time is a datetimeoffset), so the stored stamp is one clock. */
+DECLARE
+    @dump_count bigint,
+    @dump_newest_utc datetime2(7),
+    @dump_recent_count bigint;
+
+IF OBJECT_ID(N'sys.dm_server_memory_dumps', N'V') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXECUTE sys.sp_executesql
+            N'SELECT /* PerformanceMonitorLite */
+                  @count = COUNT_BIG(*),
+                  @newest = CONVERT(datetime2(7), SWITCHOFFSET(MAX(smd.creation_time), 0)),
+                  @recent = COUNT_BIG(CASE WHEN smd.creation_time >= DATEADD(MINUTE, -10 /* InstanceEvents.RecentWindowMinutes */, SYSDATETIMEOFFSET()) THEN 1 END)
+              FROM sys.dm_server_memory_dumps AS smd
+              OPTION(RECOMPILE);',
+            N'@count bigint OUTPUT, @newest datetime2(7) OUTPUT, @recent bigint OUTPUT',
+            @count = @dump_count OUTPUT,
+            @newest = @dump_newest_utc OUTPUT,
+            @recent = @dump_recent_count OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SELECT
+            @dump_count = NULL,
+            @dump_newest_utc = NULL,
+            @dump_recent_count = NULL;
+    END CATCH;
+END;
+
 /* #3653 A5: the instance identity, as a second result set off the payload (the default_trace_events
    idiom for a per-run fact the rows cannot carry). @start_time is the sqlserver_start_time this batch
    read above; a login without VIEW SERVER STATE fails this batch at its first DMV and never reaches
    this set, so an unknown start time here means the column was NULL, not that the read was refused. */
 SELECT /* PerformanceMonitorLite */
     server_start_time = @start_time,
-    server_name = @@SERVERNAME;";
+    server_name = @@SERVERNAME,
+    dump_count = @dump_count,
+    dump_newest_utc = @dump_newest_utc,
+    dump_recent_count = @dump_recent_count;";
 
     public override string Name => "cpu_utilization";
 
@@ -275,6 +318,9 @@ SELECT /* PerformanceMonitorLite */
     {
         ServerEpoch.IdentityStateKey,
         ServerEpoch.IdentityPreviousStateKey,
+        /* #8884: the memory dump stamp, and the one a rise replaced. Same change-only discipline as the pair above. */
+        InstanceEvents.MemoryDumpsStateKey,
+        InstanceEvents.MemoryDumpsPreviousStateKey,
     };
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -377,6 +423,18 @@ SELECT /* PerformanceMonitorLite */
                 new ServerEpoch.Stamp(
                     reader.IsDBNull(0) ? null : reader.GetDateTime(0),
                     reader.IsDBNull(1) ? null : reader.GetString(1)));
+
+            /* #8884: the memory dumps ride the same row. A NULL total is a failed or refused read (the batch's TRY/CATCH) and observes
+               nothing; a reader with only the two identity columns (an older query text) observes nothing either. */
+            if (reader.FieldCount > 4 && !reader.IsDBNull(2))
+            {
+                InstanceEvents.ObserveMemoryDumps(
+                    context,
+                    new InstanceEvents.MemoryDumpStamp(
+                        reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc),
+                        reader.GetInt64(2),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+            }
         }
 
         return rows;

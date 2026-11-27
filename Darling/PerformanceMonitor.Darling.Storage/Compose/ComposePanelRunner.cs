@@ -190,9 +190,7 @@ internal static class ComposePanelRunner
     /// and both become this marker: a stalled send of the query (the write timeout is the command's
     /// <c>CommandTimeout</c>), and a pooled connection whose peer went away, whose first I/O happens inside
     /// <c>ExecuteReaderAsync</c>. A failure to open the connection never becomes this marker (see
-    /// <see cref="ComposeStoreOpenException"/>). One limit: with <c>Multiplexing=true</c> in a bring-your-own
-    /// store connection string, a connect failure surfaces from <c>ExecuteReaderAsync</c> and becomes this
-    /// marker; the managed store's connection string does not set it (Npgsql's default is off).</summary>
+    /// <see cref="ComposeStoreOpenException"/>).</summary>
     internal sealed class ComposeStatementClientTimeoutException : Exception
     {
         internal ComposeStatementClientTimeoutException(NpgsqlException inner)
@@ -327,6 +325,12 @@ internal static class ComposePanelRunner
     private static ComposeRunOutcome EmptyScopedAnswer() =>
         ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
 
+    /// <summary>#8941: every key the runner reads at the root of the run spec. The web page and the Viewer send only these.</summary>
+    internal static readonly IReadOnlySet<string> RunSpecKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "panel", "variables", "values", "server", "hours", "windowStart", "windowEnd",
+    };
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
         ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
@@ -334,6 +338,14 @@ internal static class ComposePanelRunner
         if (body["panel"] is not JsonObject panel)
         {
             return ComposeRunOutcome.BadRequest("Request body must be a JSON object with a 'panel'.");
+        }
+
+        /* #8941: the ROOT of the run spec is strict. A mistyped scope key ("servers" for "server") used to be ignored, so the
+           panel ran across the whole fleet and the reply said nothing. Refused here, in the one runner, so the web route, the
+           MCP tool and the Viewer all get it. The panel object below stays lenient (a stored definition must keep running). */
+        if (ComposeSpec.UnknownKeyError(body, RunSpecKeys, "the run spec") is { } unknownRootKey)
+        {
+            return ComposeRunOutcome.BadRequest(unknownRootKey);
         }
 
         /* The run path stays LENIENT about unknown keys — a definition stored before the #2733 write-path
@@ -572,7 +584,7 @@ internal static class ComposePanelRunner
            route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
            holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
         if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
-            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken) is { } rawTooBig)
+            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, plan!.Filters) is { } rawTooBig)
         {
             return ComposeRunOutcome.BadRequest(rawTooBig);
         }
@@ -1240,14 +1252,15 @@ internal static class ComposePanelRunner
     }
 
     /// <summary>
-    /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> on the run's snapshot connection and returns the verdict
+    /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> (or, for a procedure_stats cell, <see cref="IntervalRollupCountGuard.ProcedureStatsSql"/>, #9357:
+    /// the guard for the candidate's source, over that source's ledger and rollup) on the run's snapshot connection and returns the verdict
     /// the compiler needs to take the hourly-plus-raw-edges route, or null. The guard runs under its own 15 s
     /// <c>statement_timeout</c>, which is put back to the compose deadline before the panel statement. Only a count of 0 is a
     /// pass; any other count, a ledger that does not cover the window (<see cref="IntervalRollupCountGuard.UncoveredResult"/>, noted as
     /// <see cref="ReadFallback.LedgerUncovered"/> with no log line), any fault and any timeout return null, and the panel reads raw.
     /// A store before V164 has no ledger table, and it is found by its schema version, not by the guard's fault: right after the
     /// savepoint, and before the guard's statement timeout and SQL, the run reads the version (<see cref="QueryStoreWideSchemaVersionSql"/>,
-    /// the Query Store route's own probe). Below <see cref="QueryStatsHourLedger.RungVersion"/> the guard never runs; the read is
+    /// the Query Store route's own probe). Below the source's ledger rung (<see cref="IntervalRollupCountGuard.RungVersionFor"/>, V164 for query_stats and V300 for procedure_stats) the guard never runs; the read is
     /// noted <see cref="ReadFallback.GateFailed"/> with no log line, for a state the store's migration ends. An undefined table on a
     /// store at the rung is a real fault and takes the normal path below: one Warning. The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
@@ -1276,7 +1289,7 @@ internal static class ComposePanelRunner
                 schemaVersion = Convert.ToInt32(await probe.ExecuteScalarAsync(cancellationToken));
             }
 
-            if (schemaVersion < QueryStatsHourLedger.RungVersion)
+            if (schemaVersion < IntervalRollupCountGuard.RungVersionFor(candidate.SourceTable))
             {
                 ComposeReadNotes.Note(ReadFallback.GateFailed);
                 return null;
@@ -1287,7 +1300,7 @@ internal static class ComposePanelRunner
             long mismatches;
             /* Bound to a local so the construction reads `new NpgsqlCommand(<identifier>, connection)`, the shape McpReadCommandTimeoutTests'
                store-receiver census recognises; a method call as the first argument is an unclassifiable receiver there (#5525). */
-            var guardSql = IntervalRollupCountGuard.SqlFor(unregisteredServers is { Count: > 0 });
+            var guardSql = IntervalRollupCountGuard.SqlFor(candidate.SourceTable, unregisteredServers is { Count: > 0 });
             await using (var guard = new NpgsqlCommand(guardSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
             {
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });

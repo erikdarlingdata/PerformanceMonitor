@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -143,8 +144,9 @@ public sealed class DarlingMcpSchemaTools
         return null;
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database.")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. Each column carries selectivity and the table carries column_combinations (leading column combinations of a statistic): distinct_estimate, rows_per_value and selectivity from the statistics density vectors the opt-in column_stats collector reads, numbers only, with unique only from a unique index or constraint covering exactly those columns; selectivity_status says whether they are current, not_collected, not_read_yet, not_read (no SELECT grant for a database outside the collector's own list), a precondition with the grant, current_only (an as_of before the stored read shows no numbers), or unavailable (the store read failed; the definition is still returned). Where column_stats is off for the server, only selectivity_status (not_collected) is added: no per-column selectivity and no column_combinations. stats_updated_at is UTC: exact on SQL Server 2022 and later and on Azure, which report their time zone; on earlier versions it is moved by the server's current UTC offset, so it can be an hour off for a statistic updated on the other side of a daylight saving change.")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -245,6 +247,9 @@ public sealed class DarlingMcpSchemaTools
             var (page, hasMoreByLimit) = McpHelpers.BoundPage(columns, column_limit);
             var totalColumns = definition.Columns.Count;
             var agName = version.AgName ?? key.AgName;
+            var selectivity = await ColumnSelectivity.ReadOrUnavailableAsync(
+                postgres, connection, resolved.ServerId, database_name.Trim(), database, resolution.Keys, definition, at, cancellationToken);
+            var combinations = selectivity.View?.Combinations ?? [];
 
             /* A view's text is not paged like its columns: past a quarter of the response budget, as JSON, it is cut on a text element, and
                the answer says so with its length. */
@@ -252,12 +257,14 @@ public sealed class DarlingMcpSchemaTools
             var viewTextKeep = viewText is null ? 0 : ViewTextCutLength(viewText);
             var viewTextCut = viewText is not null && viewTextKeep < viewText.Length;
 
-            string Build(int n)
+            /* n columns and shownCombinations column combinations: the combinations go first when the answer is over the response budget. */
+            string Build(int n, int shownCombinations)
             {
                 var shown = page.Take(n).ToList();
                 var cut = n < page.Count;
+                var combinationsCut = selectivity.View is not null && shownCombinations < combinations.Count;
                 var more = hasMoreByLimit || cut;
-                return JsonSerializer.Serialize(new
+                var answer = JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     database_name = version.DatabaseName,
@@ -312,8 +319,13 @@ public sealed class DarlingMcpSchemaTools
                     columns_returned = shown.Count,
                     columns_has_more = more,
                     next_column_offset = more ? column_offset + shown.Count : (int?)null,
-                    truncated = cut,
-                    budget_note = cut ? McpResponseBudget.PageCutNote(page.Count, shown.Count, "columns in ordinal order", "columns") : null,
+                    truncated = cut || combinationsCut,
+                    budget_note = cut
+                        ? McpResponseBudget.PageCutNote(page.Count, shown.Count, "columns in ordinal order", "columns")
+                        : combinationsCut ? McpResponseBudget.PageCutNote(combinations.Count, shownCombinations, "ordered by column list", "column combinations") : null,
+                    selectivity_status = selectivity.Status.Status,
+                    selectivity_checked_at = selectivity.Status.CheckedAt is { } checkedAt ? Utc(checkedAt) : null,
+                    selectivity_note = selectivity.Status.Note,
                     columns = shown.Select(c => new
                     {
                         ordinal = c.Ordinal,
@@ -332,7 +344,12 @@ public sealed class DarlingMcpSchemaTools
                         collation_name = c.CollationName,
                         is_sparse = c.IsSparse,
                         is_rowguidcol = c.IsRowGuidCol,
+                        selectivity = selectivity.View is { } view && view.Columns.TryGetValue(c.Name, out var item) ? item : null,
+                        selectivity_note = selectivity.View is { } noted && !noted.Columns.ContainsKey(c.Name) ? ColumnSelectivity.NoLeadingStatisticNote : null,
                     }),
+                    column_combinations_returned = selectivity.View is null ? (int?)null : shownCombinations,
+                    column_combinations_has_more = selectivity.View is null ? (bool?)null : combinationsCut,
+                    column_combinations = selectivity.View is null ? null : combinations.Take(shownCombinations).ToList(),
                     index_count = definition.Indexes.Count,
                     indexes = definition.Indexes.Select(i => new
                     {
@@ -366,9 +383,17 @@ public sealed class DarlingMcpSchemaTools
                     trigger_count = definition.Triggers.Count,
                     triggers = definition.Triggers.Select(g => new { name = g.Name, is_instead_of = g.IsInsteadOf, events = g.Events }),
                 }, McpHelpers.JsonOptions);
+                return selectivity.OptedIn ? answer : WithoutSelectivityFields(answer);
             }
 
-            return McpResponseBudget.FitPrefix(page.Count, Build, McpResponseBudget.DefaultBytes, 0).Json;
+            /* The combinations are cut before any column: the columns are the definition, the combinations an addition to it. */
+            var combinationFit = McpResponseBudget.FitPrefix(combinations.Count, c => Build(page.Count, c), McpResponseBudget.DefaultBytes, 0);
+            if (Encoding.UTF8.GetByteCount(combinationFit.Json) <= McpResponseBudget.DefaultBytes)
+            {
+                return combinationFit.Json;
+            }
+
+            return McpResponseBudget.FitPrefix(page.Count, n => Build(n, 0), McpResponseBudget.DefaultBytes, 0).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -376,6 +401,7 @@ public sealed class DarlingMcpSchemaTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_schema_changes"), Description(
         "Lists the table and view changes the schema history recorded in a window, newest first: change_kind (created, altered, renamed, dropped; baseline only with include_baseline), detected_by (xe_event, reconcile, run_now), valid_from (when the change was detected), the login, application and host the change session recorded when it named one, and the diff against the previous version (columns, indexes, constraints and triggers added, removed or changed, a rename, view text changed). The window is hours_back (1 to 168) ending at as_of or now; an out-of-range value is refused. Optionally one database and one object (object_name 'schema.name' or bare). Paged with limit (1 to 100) and offset; has_more and next_offset say whether there is more. valid_from is the detection time, not the change time: a reconcile finds a change up to its interval after it happened. status not_collected: the schema_objects collector has never run for the server, is switched off, cannot run on its engine, or never read the named database. status precondition: the collector is on but the change-tracking session was not running, so the list can miss changes.")]
     public static Task<string> GetSchemaChanges(
@@ -488,6 +514,39 @@ public sealed class DarlingMcpSchemaTools
         }
     }
 
+    /* #8798: the fields column selectivity adds to get_object_definition, apart from selectivity_status. */
+    private static readonly string[] s_selectivityAnswerFields =
+        ["selectivity_checked_at", "selectivity_note", "column_combinations_returned", "column_combinations_has_more", "column_combinations"];
+
+    private static readonly string[] s_selectivityColumnFields = ["selectivity", "selectivity_note"];
+
+    /// <summary>
+    /// #8798: the answer of a server where column_stats is off, without the selectivity fields (top level and per column) except
+    /// <c>selectivity_status</c>, so a server that never opted in gets the answer it got before the collector existed plus that one field.
+    /// </summary>
+    internal static string WithoutSelectivityFields(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        foreach (var field in s_selectivityAnswerFields)
+        {
+            root.Remove(field);
+        }
+
+        if (root["columns"] is JsonArray columns)
+        {
+            foreach (var column in columns.OfType<JsonObject>())
+            {
+                foreach (var field in s_selectivityColumnFields)
+                {
+                    column.Remove(field);
+                }
+            }
+        }
+
+        return root.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "find_schema_objects"), Description(
         "Finds the current tables and views of a server's schema history by name, column, foreign key or definition text. name_prefix and name_contains match the object name; column_name matches a column exactly; references_table finds the objects with a foreign key to a table ('schema.table' or bare); definition_contains searches the text of view definitions, computed columns, column defaults, check constraints and index filters, needs database_name, runs under a 4 second budget (a run that exceeds it is status stopped), and is refused when mcp.dataDetail masks or hides statement text because a search on hidden text would reveal it. All texts are matched ignoring case, a literal substring for the contains filters; give at least one filter. Current objects only: use get_schema_changes for what an object was. Rows carry database, schema, name, type, object_id and since when the current version holds. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database.")]
     public static Task<string> FindSchemaObjects(

@@ -213,6 +213,70 @@ public sealed class QueryStoreSliceRepairLiveTests
     }
 
     /// <summary>
+    /// #9352: this store has no unique index on the key and the backfill writes it with a binary COPY, so a re-walk can store an
+    /// EXACT COPY of a row, equal in every column but <c>collection_id</c>. A copy joins a key group but is not a slice of the
+    /// interval, so the collapse drops it instead of summing it. A group of pure copies keeps the original count, and a group that
+    /// also holds a real second slice sums only its two distinct slices.
+    /// </summary>
+    [Fact]
+    public async Task TheCollapse_DropsExactCopies_AndSumsOnlyTheDistinctSlices()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #9352 slice-repair test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var hour = new DateTime(2026, 6, 10, 14, 0, 0, DateTimeKind.Unspecified);
+        var cycle = hour.AddMinutes(5);
+
+        /* Query 81: one slice of 100 executions stored three times. Nothing was split, so the truth is 100. */
+        for (long copy = 0; copy < 3; copy++)
+        {
+            await SeedSliceAsync(connection, cycle, intervalId: 8101, queryId: 81, planId: 91,
+                intervalStart: hour, executionCount: FlushedCount, avgDurationUs: FlushedAvgUs, ct: ct, copyOffset: copy);
+        }
+
+        /* Query 82: the pre-#1907 split (a flushed slice of 100 and an in-memory slice of 25), then the same batch written again,
+           and the in-memory slice a third time. Two distinct slices, five rows: the truth is 125. */
+        for (long copy = 0; copy < 2; copy++)
+        {
+            await SeedSliceAsync(connection, cycle, intervalId: 8201, queryId: 82, planId: 92,
+                intervalStart: hour, executionCount: FlushedCount, avgDurationUs: FlushedAvgUs, ct: ct, copyOffset: copy);
+            await SeedSliceAsync(connection, cycle, intervalId: 8201, queryId: 82, planId: 92,
+                intervalStart: hour, executionCount: MemoryCount, avgDurationUs: MemoryAvgUs, ct: ct, copyOffset: copy);
+        }
+
+        await SeedSliceAsync(connection, cycle, intervalId: 8201, queryId: 82, planId: 92,
+            intervalStart: hour, executionCount: MemoryCount, avgDurationUs: MemoryAvgUs, ct: ct, copyOffset: 2);
+
+        var survey = await QueryStoreSliceRepair.SurveyAsync(connection, ct);
+        Assert.Equal(2, survey.SplitGroups);
+        Assert.Equal(8, survey.SplitRows);
+
+        var removed = await QueryStoreSliceRepair.CollapseSliceAsync(connection, hour, hour.AddHours(1), ct);
+        Assert.Equal(6, removed);
+
+        Assert.Equal(1, await RawRowCountAsync(connection, queryId: 81, ct));
+        Assert.Equal(FlushedCount, await RawExecutionCountAsync(connection, queryId: 81, ct));
+        Assert.Equal(FlushedAvgUs, await ScalarAsync(connection, "SELECT avg_duration_us FROM collect.query_store_stats WHERE query_id = 81", ct));
+
+        Assert.Equal(1, await RawRowCountAsync(connection, queryId: 82, ct));
+        Assert.Equal(TrueCount, await RawExecutionCountAsync(connection, queryId: 82, ct));
+        Assert.Equal(TrueWeightedAvgUs, await ScalarAsync(connection, "SELECT avg_duration_us FROM collect.query_store_stats WHERE query_id = 82", ct));
+
+        /* A re-run finds nothing, and the counts stay where they are. */
+        Assert.Equal(0, await QueryStoreSliceRepair.CollapseSliceAsync(connection, hour, hour.AddHours(1), ct));
+        Assert.Equal(FlushedCount, await RawExecutionCountAsync(connection, queryId: 81, ct));
+        Assert.Equal(TrueCount, await RawExecutionCountAsync(connection, queryId: 82, ct));
+    }
+
+    /// <summary>
     /// The safety property the whole verb is clamped around, asserted rather than trusted: a refresh whose
     /// range lies entirely within DROPPED raw chunks DESTROYS the materialization there — with force and
     /// without. Measured on PG 18.4 + TimescaleDB 2.28.1 while designing #1912.
@@ -424,7 +488,7 @@ WHERE hypertable_name = 'query_store_stats'
 
     private static async Task SeedSliceAsync(
         NpgsqlConnection connection, DateTime collectionTime, long intervalId, long queryId, long planId,
-        DateTime intervalStart, long executionCount, long avgDurationUs, CancellationToken ct)
+        DateTime intervalStart, long executionCount, long avgDurationUs, CancellationToken ct, long copyOffset = 0)
     {
         const string sql = @"
 INSERT INTO collect.query_store_stats
@@ -433,7 +497,7 @@ INSERT INTO collect.query_store_stats
      runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
      execution_count, avg_duration_us, avg_cpu_time_us, min_duration_us, max_duration_us)
 VALUES
-    ((extract(epoch FROM $1)::bigint * 100000) + $2 + $7, $1, $3, 'SQL01', 'AdventureWorks', 'dbo.GetOrders', '0xABCD',
+    ((extract(epoch FROM $1)::bigint * 100000) + $2 + $7 + $9, $1, $3, 'SQL01', 'AdventureWorks', 'dbo.GetOrders', '0xABCD',
      $4, $5, 'Regular', 'Primary', $2, $6, $6, $1, $7, $8, 50, 998, 4708)";
 
         await using var command = new NpgsqlCommand(sql, connection);
@@ -445,6 +509,7 @@ VALUES
         command.Parameters.AddWithValue(intervalStart);
         command.Parameters.AddWithValue(executionCount);
         command.Parameters.AddWithValue(avgDurationUs);
+        command.Parameters.AddWithValue(copyOffset);
         await command.ExecuteNonQueryAsync(ct);
     }
 

@@ -8,8 +8,8 @@
 
 /*
  * Shared leaf utilities for Darling Web (#1562): DOM builders, UTC->local time, value formatters, and the API
- * fetch helper. This module imports only database-filter-reads.js (pure data) and plain-text.js (pure text rules), neither of which imports
- * anything (so it is
+ * fetch helper. This module imports only database-filter-reads.js (pure data) and plain-text.js (pure text rules), and neither imports a
+ * page module: plain-text.js imports only the tool names module the service serves beside it (so it is
  * still the base of the module DAG: app/panels/charts/pages all import it, so there is no import cycle). Two rules are
  * enforced HERE so every caller inherits them:
  *   R4 (XSS): the el() builder assigns untrusted text ONLY through textContent / text nodes; it throws if a
@@ -401,22 +401,24 @@ export function bucketWidthText(d) {
  * "summed" for counts, waits and I/O (a bucket the window cuts short holds smaller counts; rates are true rates over the
  * time it covers), "level" for CPU, memory, tempdb and other gauges (each point averages the samples in its bucket), or
  * omitted when only the width is worth saying. One collection per point needs neither fact. Null when the read states no width.
+ * `readsNewestHours` is true for a read that sums the hours the hourly rollup has not built from the raw rows (a query's
+ * history, #8801): its chart reaches the window's end, so it owes no sentence about a trailing edge.
  */
-export function chartNoteText(data, kind) {
+export function chartNoteText(data, kind, readsNewestHours = false) {
   const width = bucketWidthText(data);
   if (!width) return null;
   if (width === "is one collection") return "Each point is one collection.";
   const sentence = (kind === "level" ? "Each point " + width + " and is the average of the samples in it." : "Each point " + width + ".") +
     (kind === "summed" ? " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : "");
-  return data.source === "hourly" ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
+  return data.source === "hourly" && !readsNewestHours ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
 }
 
 /**
- * What a read served from the hourly rollup owes its reader: the series trails the clock by up to two hours, because the
- * current hour is never materialized and the one before it lands on the next refresh (DurationTrendRouting, #6359). Said when
+ * What a read served from the hourly rollup alone owes its reader: the series trails the clock by up to three hours, because
+ * the current hour is never materialized and an hour is added one to two hours after it ends (DurationTrendRouting, #6359, #8801). Said when
  * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
  */
-const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+const HOURLY_TRAIL_TEXT = "The newest two or three hours are not in this chart yet: an hour's totals are added one to two hours after it ends.";
 
 /**
  * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the
@@ -489,7 +491,7 @@ export function localizeAlertDetail(text, sample) {
      body (CollectionHistoryAudit.Render) is ONE line of ". "-joined clauses, so the match is the sentence, up to its ". " or the
      end of the text, never the line: the clauses after it (the source names, the ranges, the "Not read" list) print as written. */
   let out = text.replace(/Retained history for .*?(?:\.(?=\s)|$)/gs, (sentence) => plainText(sentence));
-  out = out.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+  out = out.replace(/^(\s*(?:Incident Since|Started|Run Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
     (m, lead, value) => lead + localizeIsoText(value));
   const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
   if (at) {
@@ -667,6 +669,37 @@ export function leftOutNoteStrip(data) {
 }
 
 /**
+ * #8929: the span a read's window floor reaches back, in the page's words ("the last 30 hours" under two days, "the last 3 days" from
+ * two days), from the reply's `effective_hours_back`. Null when the value is not a positive number.
+ */
+export function effectiveSpanText(hours) {
+  const n = Number(hours);
+  if (typeof hours === "boolean" || hours === null || !Number.isFinite(n) || n <= 0) return null;
+  const trim = (x) => String(Math.round(x * 10) / 10);
+  if (n >= 48) {
+    const days = trim(n / 24);
+    return "the last " + days + (days === "1" ? " day" : " days");
+  }
+  const h = trim(n);
+  return "the last " + h + (h === "1" ? " hour" : " hours");
+}
+
+/**
+ * #9116: "The heat map covers the last 4 days, not the whole time range." for a window-floor read that carries `effective_start` and the window's
+ * end under `desc.floorSpan.endKey`, as the Query Store clutter strips say it from `effective_hours_back`. Null when the descriptor names no
+ * subject, or either instant is missing or unreadable, or the data starts at or after the window's end.
+ */
+function floorSpanLead(source, desc) {
+  const named = desc && desc.floorSpan;
+  if (!named || typeof named.subject !== "string" || typeof named.endKey !== "string" || !source) return null;
+  const start = parseUtc(source.effective_start);
+  const end = parseUtc(source[named.endKey]);
+  if (!start || !end) return null;
+  const span = effectiveSpanText((end.getTime() - start.getTime()) / 3600000);
+  return span ? named.subject + " covers " + span + ", not the whole time range." : null;
+}
+
+/**
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
  * read reaches here: readTool composes it with windowNoteText). Null for any other response,
@@ -676,7 +709,10 @@ export function leftOutNoteStrip(data) {
  * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
  * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
  * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
- * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
+ * `floorKey`, and the fields are read from there instead of from the top level. A panel over one arm of a read whose arms can be cut at
+ * different points (#9382: the Query Store clutter read's plan churn and wait arms) names it in `armSpan` ({ key, subject }): the strip says
+ * "<subject> covers <that arm's span>, not the whole time range." from the arm's own `key` in the floor block, and a panel whose arm is not
+ * cut (the key is null) draws no strip, whatever the other arm's note says. The note is text, never markup (R4).
  */
 export function windowFloorStrip(data, desc) {
   if (!desc || desc.windowNote === false) return null;
@@ -684,10 +720,22 @@ export function windowFloorStrip(data, desc) {
   if (desc.viz !== "table" && desc.viz !== "stat" && !chart) return null;
   if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
   const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
+  if (source && source.window_truncated === true && desc.armSpan && typeof desc.armSpan.key === "string" && typeof desc.armSpan.subject === "string") {
+    const armSpan = effectiveSpanText(source[desc.armSpan.key]);
+    return armSpan ? noticeStrip(desc.armSpan.subject + " covers " + armSpan + ", not the whole time range.") : null;
+  }
   if (source && source.window_truncated === true) {
     const note = source.truncation_note;
     if (typeof note !== "string" || !note.trim()) return null;
-    if (!chart) return noticeStrip(note);
+    /* #8929: a note written for an MCP caller says "covers effective_hours_back"; this page says the span the reply states. */
+    const span = effectiveSpanText(source.effective_hours_back);
+    if (!chart) {
+      if (span) return noticeStrip(note.replace(/\beffective_hours_back, not hours_back\b/g, span + ", not the whole time range").replace(/\beffective_hours_back\b/g, span));
+      /* #9116: a read that sends no `effective_hours_back` (the heat map's reply carries `effective_start` and `window_end`) names where its data starts in
+         the same form, from those two instants, when the panel's descriptor says what to call itself (`floorSpan`). */
+      const lead = floorSpanLead(source, desc);
+      return noticeStrip(lead ? lead + " " + note : note);
+    }
     /* A chart draws only the row-capped note (#5644 W12): its time axis already shows the empty span of a data start that
        falls after the window's start, but a chart built from the newest N rows plots nothing before its oldest row while
        the axis and the title claim the whole window. That note names the oldest row shown (oldest_shown_utc). */
@@ -2159,6 +2207,8 @@ async function classifyResponse(resp) {
     /* #8323: an answer that put a plain sentence in front of the engine's own text (a composed cell the store stopped at its
        statement timeout) carries that text as `detail`; the panel shows it behind "More detail". */
     if (body && typeof body.detail === "string" && body.detail) result.detail = body.detail;
+    /* #9357: the service's own name for why a composed cell was refused (`statement_timeout`), so the page does not match its sentence. */
+    if (body && typeof body.reason === "string" && body.reason) result.reason = body.reason;
     return result;
   }
 

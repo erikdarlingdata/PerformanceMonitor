@@ -222,6 +222,14 @@ public interface IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The tempdb files of the newest <c>database_size_stats</c> collection (database_id 2), with each file's growth settings and the
+    /// volume's free space from the same collection, for the TempDB Growth Won't Fit alert (#8882). Empty when the store has no tempdb
+    /// rows for this server.
+    /// </summary>
+    Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// The newest pvs_stats snapshot's per-database persistent version store state, for the
     /// PVS-pressure alert (#1984) — ADR-ON databases only (a database that cannot have a PVS
     /// cannot breach), worst (highest PVS %) first. Empty when the server has no ADR databases or
@@ -305,5 +313,17 @@ public interface IAlertReadAdapter
     /// keeps it active rather than fabricating a recovery.</para>
     /// </summary>
     Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+        string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The restart and the memory dump rise the store holds for the Instance Restarted and Memory Dumps alerts (#8884). One read of the server's
+    /// <c>collector_state</c> rows the identity carriers and <c>cpu_utilization</c> persisted: nothing new is collected for the restart, and the dump stamp
+    /// rides the CPU collector's existing round trip. A restart is a start time that moved later while the server name did not (a failover or a
+    /// rename is not one). A memory dump rise is a newest dump time later than the previous stamp's. Both are events, so a member is null when the store holds
+    /// none. The adapter does not judge age or repeats: the engine does, so the two hosts cannot disagree on them.
+    ///
+    /// <para>Never throws for an absent row. An engine without the dump view leaves no stamp, and the engine skips Azure SQL Database without reading.</para>
+    /// </summary>
+    Task<InstanceEventInfo> GetInstanceEventsAsync(
         string serverKey, CancellationToken cancellationToken = default);
 }

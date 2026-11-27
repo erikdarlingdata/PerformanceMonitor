@@ -28,7 +28,8 @@ namespace Darling.Tests;
 /// the digests the run held as pending must be discarded, not confirmed.
 ///
 /// <para>A trigger on the target table that raises fails the COPY (COPY fires row triggers), and a trigger on the hour
-/// ledger table fails the write after the COPY, in the same transaction. The first test asserts the phase
+/// ledger table or the text dimension fails the write after the COPY, in the same transaction (#9302 puts the baselines back for those),
+/// and a deferred constraint trigger fails the commit itself (the baselines stay advanced). The first test asserts the phase
 /// <see cref="CollectorFaultCopyPhase.For"/> reports for the COPY fault before it relies on it.</para>
 ///
 /// <para><b>#1776 own-store:</b> every store test here creates and drops its own scratch database through
@@ -195,7 +196,7 @@ public sealed class QueryStatsWriteFaultRunnerLiveTests
     }
 
     [Fact]
-    public async Task AFaultAfterTheCopy_KeepsTheAdvancedBaselines()
+    public async Task AFaultAfterTheCopyBeforeTheCommit_PutsTheBaselinesBack()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -212,10 +213,80 @@ public sealed class QueryStatsWriteFaultRunnerLiveTests
 
             Assert.Equal(StoreCopyPhase.Unknown, CollectorFaultCopyPhase.For(fault));
             Assert.Equal(1, rig.Target.TextFetches);
-            Assert.Equal(160, rig.Deltas.PeekBaselines(rig.Server.ServerId, "query_stats_exec")[DeltaKey]);
 
-            /* The transaction rolled back, so the COPY's row is not stored. */
+            /* #9302: the transaction rolled back, so the COPY's row is not stored and the baselines are where the last stored run left them. */
             Assert.Equal(0, await CountAsync(connectionString, RowsOf(rig.Server.ServerId), ct));
+            Assert.Equal(100, rig.Deltas.PeekBaselines(rig.Server.ServerId, "query_stats_exec")[DeltaKey]);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AFailedDimensionFlush_LosesNoExecutions_TheNextCycleCoversBothIntervals()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(-490105, ct);
+        var bodySucceeded = false;
+        try
+        {
+            var connectionString = rig.Scratch.ConnectionString;
+
+            /* The flush's text upsert runs after the COPY, in the same transaction, before the commit (#9302: a field flush timeout after a restart). */
+            await FailWritesAsync(connectionString, "query_text_dim", "INSERT", ct);
+
+            var fault = await FaultOfAsync(rig.RunAsync(ct));
+
+            Assert.Equal(StoreCopyPhase.Unknown, CollectorFaultCopyPhase.For(fault));
+            Assert.Equal(0, await CountAsync(connectionString, RowsOf(rig.Server.ServerId), ct));
+            Assert.Equal(100, rig.Deltas.PeekBaselines(rig.Server.ServerId, "query_stats_exec")[DeltaKey]);
+
+            /* The statement ran 60 more times by the failed cycle and 60 more by the next one: the stored delta is the 120 since the last stored run, not 60. */
+            await StopFailingWritesAsync(connectionString, "query_text_dim", ct);
+            rig.Target.Executions = 220;
+            await rig.RunAsync(ct);
+
+            Assert.Equal(
+                120,
+                await CountAsync(
+                    connectionString,
+                    "SELECT sum(delta_execution_count) FROM collect.query_stats WHERE server_id = " + rig.Server.ServerId.ToString(CultureInfo.InvariantCulture),
+                    ct));
+            Assert.Equal(220, rig.Deltas.PeekBaselines(rig.Server.ServerId, "query_stats_exec")[DeltaKey]);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AFaultAtTheCommit_KeepsTheAdvancedBaselines()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(-490106, ct);
+        var bodySucceeded = false;
+        try
+        {
+            var connectionString = rig.Scratch.ConnectionString;
+
+            /* A deferred constraint trigger raises when the COMMIT runs, so the fault comes out of the commit itself, whose outcome the client cannot know. */
+            await ExecAsync(
+                connectionString,
+                "CREATE FUNCTION collect.wf_fail_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$; "
+                + "CREATE CONSTRAINT TRIGGER wf_fail_at_commit AFTER INSERT ON collect.query_stats DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION collect.wf_fail_at_commit();",
+                ct);
+
+            var fault = await FaultOfAsync(rig.RunAsync(ct));
+
+            Assert.Equal(StoreCopyPhase.Unknown, CollectorFaultCopyPhase.For(fault));
+            Assert.Equal(160, rig.Deltas.PeekBaselines(rig.Server.ServerId, "query_stats_exec")[DeltaKey]);
             bodySucceeded = true;
         }
         finally
@@ -329,7 +400,9 @@ public sealed class QueryStatsWriteFaultRunnerLiveTests
         protected override DbParameterCollection DbParameterCollection => throw new NotSupportedException();
         protected override DbTransaction? DbTransaction { get; set; }
         public override void Cancel() { }
-        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        /* The deferred plan fetch sends SET LOCK_TIMEOUT on the connection before and after its commands (#9535). */
+        public override int ExecuteNonQuery() =>
+            CommandText.StartsWith("SET LOCK_TIMEOUT", StringComparison.Ordinal) ? -1 : throw new NotSupportedException();
         public override object? ExecuteScalar() => null;
         public override void Prepare() { }
         protected override DbParameter CreateDbParameter() => throw new NotSupportedException();

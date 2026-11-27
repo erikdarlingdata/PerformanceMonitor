@@ -120,7 +120,7 @@ public static partial class ThresholdOverrideStore
             await using var globalCommand = postgres.CreateCommand(GlobalRowSql);
             globalCommand.CommandTimeout = CommandTimeoutSeconds;
             if (await globalCommand.ExecuteScalarAsync(ct) is string json)
-                global = JsonDocument.Parse(json).RootElement.Clone();
+                global = JsonElement.Parse(json);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
@@ -128,25 +128,27 @@ public static partial class ThresholdOverrideStore
         }
 
         var rows = new List<ThresholdOverrideRow>();
-        await using var command = postgres.CreateCommand(ListSql);
-        command.CommandTimeout = CommandTimeoutSeconds;
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        /* #9514: each reader is disposed once, in its own scope. A second dispose of a reader whose connection a first dispose already released
+           reaches the reader object the next lease of that pooled connection is using, and closes it under that request. */
+        await using (var command = postgres.CreateCommand(ListSql))
         {
-            var key = reader.GetString(3);
-            double? globalValue = null;
-            if (global is { } g && columnFor(key) is { } column
-                && g.TryGetProperty(column, out var element) && element.ValueKind == JsonValueKind.Number)
+            command.CommandTimeout = CommandTimeoutSeconds;
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
             {
-                globalValue = element.GetDouble();
+                var key = reader.GetString(3);
+                double? globalValue = null;
+                if (global is { } g && columnFor(key) is { } column
+                    && g.TryGetProperty(column, out var element) && element.ValueKind == JsonValueKind.Number)
+                {
+                    globalValue = element.GetDouble();
+                }
+
+                rows.Add(new ThresholdOverrideRow(
+                    reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), key, reader.GetDouble(4), globalValue,
+                    reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetGuid(6), reader.GetDateTime(7)));
             }
-
-            rows.Add(new ThresholdOverrideRow(
-                reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), key, reader.GetDouble(4), globalValue,
-                reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetGuid(6), reader.GetDateTime(7)));
         }
-
-        await reader.DisposeAsync();
 
         await using var tagCommand = postgres.CreateCommand(TagListSql);
         tagCommand.CommandTimeout = CommandTimeoutSeconds;

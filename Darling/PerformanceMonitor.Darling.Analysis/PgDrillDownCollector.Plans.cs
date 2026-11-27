@@ -22,10 +22,12 @@ public sealed partial class PgDrillDownCollector
 {
     /// <summary>
     /// The newest plan handle for the hash in the finding's database (<c>$3</c>), or in any database when
-    /// <c>$3</c> is empty (#8317). Byte-identical to Lite's <c>CollectPlanAnalysis</c> text.
+    /// <c>$3</c> is empty (#8317), with the statement's byte offsets from the same row (#9195): the pair names one
+    /// statement of one plan. The offsets are NULL on a row collected before they were stored. Byte-identical to
+    /// Lite's <c>CollectPlanAnalysis</c> text.
     /// </summary>
     public const string PlanHandleLookupSql = @"
-SELECT plan_handle
+SELECT plan_handle, statement_start_offset, statement_end_offset
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
@@ -51,11 +53,14 @@ LIMIT 1";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from the store for this query_hash in the finding's database (#8317)
+        // Look up plan_handle and the statement's offsets from the store for this query_hash in the finding's database
+        // (#8317). The offsets come from the same newest row as the handle (#9195).
         string? planHandle = null;
+        int? statementStartOffset = null;
+        int? statementEndOffset = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -64,7 +69,15 @@ LIMIT 1";
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
+            {
                 planHandle = reader.GetString(0);
+                /* A row collected before the offsets were stored has neither: the whole batch's plan is fetched. */
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
+                {
+                    statementStartOffset = reader.GetInt32(1);
+                    statementEndOffset = reader.GetInt32(2);
+                }
+            }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -75,8 +88,11 @@ LIMIT 1";
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
-        // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
+        // Fetch plan XML live from SQL Server: the bad actor's own statement when its offsets are known, because a batch
+        // plan can carry many statements and megabytes of XML (#9195).
+        var planXml = statementStartOffset is { } start && statementEndOffset is { } end
+            ? await _planFetcher.FetchStatementPlanXmlAsync(context.ServerId, planHandle, start, end, context.CancellationToken)
+            : await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
         // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
         // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,
@@ -151,33 +167,18 @@ LIMIT 1";
     /// PLAN_WARNING finding's drill-down. The fact carries only counts (Fact.Metadata is numeric),
     /// so the strings — CREATE statements, warning messages — are rendered here. Mirrors the
     /// Lite/Dashboard drill-down collectors. Best-effort: a read/parse failure leaves no detail.
+    ///
+    /// <para>#8570: after a fact pass the plans are the ones that pass read (<see cref="AnalysisContext.PlanAdvisoryPlanXmls"/>),
+    /// so the window is read once per pass, not once per finding. Without them (a drill-down run on its own, or a fact
+    /// read that failed) this reads the same statement itself.</para>
     /// </summary>
     private async Task CollectPlanAdvisoryDetail(AnalysisFinding finding, AnalysisContext context, HashSet<string> pathKeys)
     {
         try
         {
-            var planXmls = new List<string>();
-
-            /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
-               before the CPU-only parse; the scoping is kept so the connection closes before
-               the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
-            {
-                using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
-                cmd.Parameters.AddWithValue(context.ServerId);
-                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await reader.ReadAsync(context.CancellationToken))
-                {
-                    var planXml = PayloadDimensions.ResolveContent(
-                        reader.IsDBNull(0) ? null : reader.GetString(0),
-                        reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
-                    if (!string.IsNullOrEmpty(planXml))
-                        planXmls.Add(SensitiveStatements.Xml(planXml)!); // #4348: judged before the analyzer quotes it
-                }
-            }
+            var planXmls = context.PlanAdvisoryPlanXmls is { } passPlans
+                ? passPlans.Select(planXml => SensitiveStatements.Xml(planXml)!).ToList() // #4348: judged before the analyzer quotes it
+                : await ReadPlanAdvisoryXmlsAsync(context);
 
             if (planXmls.Count == 0)
                 return;
@@ -221,5 +222,35 @@ LIMIT 1";
             // Plan read/parse can fail on malformed XML — skip, the detail is best-effort.
             // An abandonment is NOT swallowed here (#2443).
         }
+    }
+
+    /// <summary>
+    /// The plan-advisory drill-down's own read of the top plans, each statement withheld as the filter rules (#4348).
+    /// </summary>
+    private async Task<List<string>> ReadPlanAdvisoryXmlsAsync(AnalysisContext context)
+    {
+        var planXmls = new List<string>();
+
+        /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
+           before the CPU-only parse; the read is its own method so the connection closes
+           before the parse, even though PG holds no lock. */
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
+
+        using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var planXml = PayloadDimensions.ResolveContent(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+            if (!string.IsNullOrEmpty(planXml))
+                planXmls.Add(SensitiveStatements.Xml(planXml)!); // #4348: judged before the analyzer quotes it
+        }
+
+        return planXmls;
     }
 }

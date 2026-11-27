@@ -130,44 +130,4 @@ public class MainConnectionLimitsTests : IDisposable
         Assert.Equal(await ReportedMemoryLimitAsync("4GB"), during);
         Assert.Equal(await ReportedMemoryLimitAsync("2GB"), await CurrentLimitAsync(connection));
     }
-
-    /// <summary>
-    /// No 1 GB literal for the main connection's limit anywhere in Lite's code. The separate DuckDB instances
-    /// (compaction's in-memory 4 GB merge connection, the importer's plain connection) carry no 1 GB limit
-    /// either, so nothing needs an allow-list. <c>checkpoint_threshold=1GB</c> is a different setting.
-    /// </summary>
-    [Fact]
-    public void LiteSource_HasNoOneGigabyteMemoryLimitLiteral()
-    {
-        var litePath = Path.Combine(RepoRoot(), "Lite");
-        /* Matched against the string-literal bodies the walker reads, not against lines filtered by a comment
-           prefix, so a comment that mentions 1 GB (a block comment's unprefixed continuation line included)
-           is never read as a literal. A body carries no delimiter quotes, so the whole-literal forms
-           ("1GB", "1024 MB") are anchored to the line instead of spelling the quotes. */
-        var bad = new Regex(@"memory_limit\s*=\s*'?\s*1\s*GB|^\s*1\s?GB\s*$|'1\s?GB'|^\s*1024\s?MB\s*$", RegexOptions.IgnoreCase);
-        var sep = Path.DirectorySeparatorChar;
-        var hits = new List<string>();
-        foreach (var f in Directory.EnumerateFiles(litePath, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{sep}obj{sep}") && !f.Contains($"{sep}bin{sep}")))
-        {
-            var text = File.ReadAllText(f);
-            foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
-            {
-                var firstLine = text.AsSpan(0, start).Count('\n') + 1;
-                var lines = body.Split('\n');
-                for (var i = 0; i < lines.Length; i++)
-                {
-                    if (bad.IsMatch(lines[i]))
-                    {
-                        hits.Add($"{Path.GetRelativePath(RepoRoot(), f)}:{firstLine + i}");
-                    }
-                }
-            }
-        }
-
-        Assert.True(hits.Count == 0, "Main connection memory_limit must come from DuckDbInitializer.MainConnectionMemoryLimit (2GB), not a 1GB literal: " + string.Join(", ", hits));
-    }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 }

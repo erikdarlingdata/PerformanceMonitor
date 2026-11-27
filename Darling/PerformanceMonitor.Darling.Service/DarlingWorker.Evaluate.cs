@@ -536,6 +536,7 @@ public sealed partial class DarlingWorker
         await EvaluatePgLongRunningQueryAsync(runtime, snapshot, config, cancellationToken);
         await EvaluatePgPoisonWaitAsync(runtime, snapshot, config, cancellationToken);
         await EvaluatePgCpuAsync(runtime, snapshot, config, cancellationToken);
+        await EvaluatePgCapacityCeilingAsync(runtime, snapshot, config, cancellationToken);
     }
 
     /// <summary>
@@ -741,7 +742,6 @@ public sealed partial class DarlingWorker
 
             DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
             double? lastCapacityPercent = null;
-            DarlingPgCpuUtilizationReader.CpuSample? ceilingLowCpuSample = null;
 
             foreach (var sample in samples)
             {
@@ -779,12 +779,9 @@ public sealed partial class DarlingWorker
                    load (the field review: 73 of the sampled pages had instance CPU under 20%). Every sample this
                    gate reads carries instance CPU (the read requires cpu_percent IS NOT NULL), so there is no
                    "target without an instance CPU source" arm here; a target with no Performance Insights rows
-                   has no samples and never reaches the gate. */
-                if (PgCpuAtCeilingWithLowCpu(capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent))
-                {
-                    ceilingLowCpuSample = sample;
-                }
-
+                   has no samples and never reaches the gate. #9501: a sample at the ceiling with low CPU is not
+                   dropped, it feeds the separate "Capacity at ceiling" gate (EvaluatePgCapacityCeilingAsync), which
+                   needs it to hold for several samples before it says anything. This gate writes no row for it. */
                 var evaluation = AlertPersistenceGate.Evaluate(
                     record.State,
                     breached,
@@ -810,45 +807,6 @@ public sealed partial class DarlingWorker
             }
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
-
-            /* #7082 (digest): a sample with capacity at or over the bar and instance CPU under it is not CPU load (Serverless
-               v2 holds capacity for memory). It is not a breach, so it pages nothing, but it is not nothing either: one
-               held High CPU row per cooldown per server lets the daily digest say "capacity at the ceiling N times". The
-               row never touches the gate, the page cooldown or the open-incident state. */
-            if (ceilingLowCpuSample is { } ceilingSample
-                && PgCpuHeldRowDue(_lastPgCpuHeldRow.TryGetValue(key, out var lastHeldRow) ? lastHeldRow : null, now, cooldown))
-            {
-                _lastPgCpuHeldRow[key] = now;
-                var heldCpuMuted = _isAlertMuted?.Invoke(new AlertMuteContext
-                {
-                    ServerName = snapshot.ServerName,
-                    ServerId = snapshot.ServerId,
-                    MetricName = metricName,
-                }) ?? false;
-                var ceilingCapacity = FleetCpuProvenance.CpuBandInputPercent(
-                    ceilingSample.CpuPercent, ceilingSample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights)!.Value;
-                await _alertDeliverer.DeliverAndReportAsync(
-                    new AlertOutcome(
-                        key,
-                        snapshot.ServerName,
-                        metricName,
-                        $"{ceilingCapacity:F0}%",
-                        $"{alertSettings.CpuThresholdPercent}%",
-                        Context: AlertSampleAge.Stamp(null, "CPU", ceilingSample.SampleTimeUtc, now),
-                        DetailText:
-                            $"  Capacity: {ceilingCapacity:F0}% {FleetCpuProvenance.CapacityDenominator}\n"
-                            + $"  Instance CPU: {ceilingSample.CpuPercent:F0}% of currently allocated capacity (under the threshold)\n"
-                            + $"  Threshold: {alertSettings.CpuThresholdPercent}% on both",
-                        NumericCurrentValue: ceilingCapacity,
-                        NumericThresholdValue: alertSettings.CpuThresholdPercent,
-                        Muted: heldCpuMuted,
-                        Severity: AlertSeverityLevel.Warning,
-                        ShortMessage:
-                            $"Capacity at {ceilingCapacity:F0}% {FleetCpuProvenance.CapacityDenominator}, instance CPU {ceilingSample.CpuPercent:F0}%",
-                        Hold: new AlertHold($"capacity at ceiling, instance CPU {ceilingSample.CpuPercent:F0}%")),
-                    cancellationToken);
-                readClock.Restart();
-            }
 
             /* THE REMINDER'S LEVEL IS THE LATEST KNOWN READING, not only a reading new to this pass — the
                two are different questions and only the gate cares about newness.
@@ -1647,15 +1605,10 @@ public sealed partial class DarlingWorker
         return toWrite;
     }
 
-    /// <summary>A sample at the capacity ceiling whose instance CPU is under the bar (#7082): not CPU load, so not a breach,
-    /// but worth one held row per cooldown for the digest.</summary>
-    internal static bool PgCpuAtCeilingWithLowCpu(double? capacityPercent, double instanceCpuPercent, int thresholdPercent) =>
+    /// <summary>A sample at the capacity ceiling whose instance CPU is under the bar (#7082, #9501): not CPU load, so not a High CPU
+    /// breach, and the one condition the "Capacity at ceiling" gate counts. A sample with no capacity figure never counts.</summary>
+    internal static bool PgCapacityCeilingBreaches(double? capacityPercent, double instanceCpuPercent, int thresholdPercent) =>
         capacityPercent.HasValue && capacityPercent.Value >= thresholdPercent && instanceCpuPercent < thresholdPercent;
-
-    /// <summary>Whether the at-ceiling held High CPU row is due (#7082): none written yet for the server, or the last one
-    /// is a cooldown old.</summary>
-    internal static bool PgCpuHeldRowDue(DateTime? lastHeldRowUtc, DateTime nowUtc, TimeSpan cooldown) =>
-        !lastHeldRowUtc.HasValue || nowUtc - lastHeldRowUtc.Value >= cooldown;
 
     /// <summary>
     /// The tier a PostgreSQL "Blocking Detected" fire wears (#3653, A8e): Warning, and ONLY Warning — stated
@@ -1936,9 +1889,11 @@ public sealed partial class DarlingWorker
     /// exactly the shape AlertEngine's own SQL Server check already uses (an active flag plus a cooldown
     /// timestamp). Reusing the rolling-count gate here would answer a question this alert does not ask.</para>
     ///
-    /// <para>No query-text preview: <c>pg_session_states</c> deliberately stores none (see the collector's
-    /// class remarks), so the message identifies the session by pid/database/command tag instead of the
-    /// statement text SQL Server's equivalent shows.</para>
+    /// <para>The short message identifies the longest session by pid/database/command tag, since
+    /// <c>pg_session_states</c> deliberately stores no query text (see the collector's class remarks). The card
+    /// names each session shown (#8970, <see cref="BuildPgLongRunningSessionItems"/>), with its statement from the
+    /// statement store at the level <c>mcp.dataDetail</c> serves. The read leaves the managed-platform maintenance
+    /// database out (<see cref="DarlingPgSessionStatesReader.ManagedMaintenanceDatabase"/>).</para>
     ///
     /// <para><b>The noise opt-outs ride the SAME switches SQL Server's read takes</b> (#3539): the shared
     /// <c>longRunningQueryExcludeBackups</c> drops the dump/restore utilities' sessions, and the shared
@@ -2072,31 +2027,42 @@ public sealed partial class DarlingWorker
                 var dataDetailMode = McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
                     ? dataDetail
                     : McpDataDetail.MetadataOnly;
-                if (dataDetailMode != McpDataDetail.MetadataOnly && worst.QueryId is { } worstQueryId)
+                /* #8970: the card names each session it shows (the display cap the SQL Server card uses), and each
+                   shown session carries its statement at the level mcp.dataDetail serves. The statement annotates
+                   the page and never decides it: a failed lookup costs that session its Query line and nothing
+                   else. Each lookup is its own counted read, with its own clock, so a fault here records this
+                   lookup's elapsed and not the capture read's. */
+                var shown = rows.Take(AlertContextBuilders.LongRunningQueryDisplayCap).ToList();
+                if (dataDetailMode != McpDataDetail.MetadataOnly)
                 {
-                    /* The statement annotates the page and never decides it: a failed lookup costs the card its
-                       statement line and nothing else. It is its own counted read, with its own clock, so a fault here
-                       records this lookup's elapsed and not the capture read's. */
-                    var statementReadClock = Stopwatch.StartNew();
-                    try
+                    for (var i = 0; i < shown.Count; i++)
                     {
-                        var statementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
-                            _postgres, runtime.ServerId, worstQueryId, cancellationToken);
-                        worst = worst with { StatementText = statementText };
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed after {ElapsedMs} ms, the page goes without it: {Message}",
-                            runtime.Config.DisplayName, statementReadClock.ElapsedMilliseconds, ex.Message);
-                        _readFailures.RecordReadFailure(
-                            snapshot.ServerKey, "PostgreSQL long-running-query statement lookup", statementReadClock.ElapsedMilliseconds);
-                    }
+                        if (shown[i].QueryId is not { } shownQueryId)
+                        {
+                            continue;
+                        }
 
-                    readClock.Restart();
+                        var statementReadClock = Stopwatch.StartNew();
+                        try
+                        {
+                            var statementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
+                                _postgres, runtime.ServerId, shownQueryId, cancellationToken);
+                            shown[i] = shown[i] with { StatementText = statementText };
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed after {ElapsedMs} ms, the page goes without it: {Message}",
+                                runtime.Config.DisplayName, statementReadClock.ElapsedMilliseconds, ex.Message);
+                            _readFailures.RecordReadFailure(
+                                snapshot.ServerKey, "PostgreSQL long-running-query statement lookup", statementReadClock.ElapsedMilliseconds);
+                        }
+
+                        readClock.Restart();
+                    }
                 }
 
                 var longRunningContext = AlertSampleAge.Stamp(
@@ -2114,10 +2080,7 @@ public sealed partial class DarlingWorker
                     /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
                        same label the SQL Server twin uses for its snapshot. */
                     "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now);
-                if (BuildPgLongRunningStatementItem(worst, dataDetailMode) is { } statementDetail)
-                {
-                    longRunningContext!.Details.Insert(0, statementDetail);
-                }
+                longRunningContext!.Details.InsertRange(0, BuildPgLongRunningSessionItems(shown, dataDetailMode));
 
                 var mute = JudgeMute(new AlertMuteContext
                 {
@@ -2227,29 +2190,49 @@ public sealed partial class DarlingWorker
             (double)PgLongRunningSampleMaxCycles * Math.Max(1, collectorIntervalMinutes), PgLongRunningSampleFloorMinutes));
 
     /// <summary>
-    /// The Long-Running Query card's statement item (#7086): the longest session and the statement its query_id
-    /// resolves to. <c>full</c> prints the stored text, <c>maskLiterals</c> prints it through
-    /// <see cref="McpDataDetailMasker.MaskLiterals"/>, <c>metadataOnly</c> leaves the statement out. Null when
-    /// there is nothing to show: no text captured for the query_id, or the level withholds it.
+    /// The Long-Running Query card's session items (#8970): one per session shown, in the SQL Server card's layout
+    /// (<see cref="AlertContextBuilders.BuildLongRunningQueryContext"/>): a heading with the session and its
+    /// duration, then the database (when named), the program (<c>application_name</c>, when set) and the
+    /// statement through <see cref="AlertContextBuilders.TruncateStatement"/>. The heading says <c>pid</c>
+    /// because PostgreSQL's session id is the backend pid. <c>full</c> prints the stored text, <c>maskLiterals</c>
+    /// prints it through <see cref="McpDataDetailMasker.MaskLiterals"/>, <c>metadataOnly</c> leaves the statement
+    /// out. A session with no stored text, or at a level that withholds it, still gets its item without a Query
+    /// field: the page names the session either way.
     /// </summary>
-    internal static AlertDetailItem? BuildPgLongRunningStatementItem(
-        DarlingPgSessionStatesReader.LongRunningSessionRow worst, McpDataDetail mode)
+    internal static List<AlertDetailItem> BuildPgLongRunningSessionItems(
+        IReadOnlyList<DarlingPgSessionStatesReader.LongRunningSessionRow> sessions, McpDataDetail mode)
     {
-        if (mode == McpDataDetail.MetadataOnly || string.IsNullOrWhiteSpace(worst.StatementText))
+        ArgumentNullException.ThrowIfNull(sessions);
+        var items = new List<AlertDetailItem>();
+        foreach (var session in sessions)
         {
-            return null;
+            var seconds = session.QueryDurationMs / 1000;
+            var item = new AlertDetailItem
+            {
+                Heading = $"Session pid {session.Pid}: {seconds / 60}m {seconds % 60}s",
+                Fields = new(),
+            };
+
+            if (!string.IsNullOrEmpty(session.DatabaseName))
+            {
+                item.Fields.Add(("Database", session.DatabaseName));
+            }
+
+            if (!string.IsNullOrEmpty(session.ApplicationName))
+            {
+                item.Fields.Add(("Program", session.ApplicationName));
+            }
+
+            if (mode != McpDataDetail.MetadataOnly && !string.IsNullOrWhiteSpace(session.StatementText))
+            {
+                var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(session.StatementText) : session.StatementText;
+                item.Fields.Add(("Query", AlertContextBuilders.TruncateStatement(text)));
+            }
+
+            items.Add(item);
         }
 
-        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(worst.StatementText) : worst.StatementText;
-        return new AlertDetailItem
-        {
-            Heading = "Longest query",
-            Fields = new()
-            {
-                ("Session", $"pid {worst.Pid} running {worst.QueryDurationMs / 60_000}m ({worst.CommandTag ?? "(unknown)"})"),
-                ("Statement", AlertContextBuilders.TruncateStatement(text)),
-            },
-        };
+        return items;
     }
 
     /// <summary>
@@ -2708,6 +2691,274 @@ public sealed partial class DarlingWorker
         }
     }
 
+    /// <summary>#9501: the first and the latest sample of the capacity-at-ceiling run being held, for the alert's detail.
+    /// <paramref name="StartedInThisProcess"/> is true only when the run began in this process from a held count of zero, so
+    /// <paramref name="Start"/> is the real start. The run is kept in memory and the saved record holds only a count, so after a
+    /// restart in the middle of a held run <paramref name="Start"/> is the first sample this process saw, and the detail says
+    /// "since at least" for it.</summary>
+    internal sealed record PgCapacityRun(
+        DarlingPgCpuUtilizationReader.CpuSample Start, DarlingPgCpuUtilizationReader.CpuSample Latest, bool StartedInThisProcess);
+
+    /// <summary>
+    /// The "Capacity at ceiling" alert (#9501), for a serverless PostgreSQL target whose capacity sits at or over the bar while instance
+    /// CPU stays under it. Serverless v2 scales on memory and buffer cache as well as CPU, so a touch of the ceiling for a minute or
+    /// two is routine and says nothing, and one that holds is real pressure that no High CPU page covers. It replaces the held High
+    /// CPU digest row #7082 wrote for every single such sample.
+    ///
+    /// <para>It is a gate of its own over the same samples <see cref="EvaluatePgCpuAsync"/> reads: its own persisted record under
+    /// <see cref="AlertEngine.PgCapacityCeilingMetric"/>, its own observed-sample watermark, its own cooldown stamp, five
+    /// consecutive samples to open (<see cref="AlertEngine.PgCapacityCeilingSamples"/>) and <see cref="AlertEngine.CpuClearSamples"/> to
+    /// clear. A sample with capacity and instance CPU both at the bar is the High CPU gate's, and counts here as a sample that is not
+    /// held. A sample with no capacity figure neither counts toward the five nor clears an open alert (the same freeze the High CPU
+    /// gate applies to a serverless minute with no ACU point). It rides <see cref="DarlingAlertSettings.CpuEnabled"/> and
+    /// <see cref="DarlingAlertSettings.CpuThresholdPercent"/>, the two knobs the High CPU alert reads, and goes through the same
+    /// deliverer, so mute rules, routes and the agent route apply to it by its own name.</para>
+    /// </summary>
+    private async Task EvaluatePgCapacityCeilingAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config, _logger);
+
+        if (!alertSettings.CpuEnabled)
+        {
+            /* Turning the feature off is not capacity recovering: the gate stays as it stands, as it does for High CPU. */
+            return;
+        }
+
+        const string metricName = AlertEngine.PgCapacityCeilingMetric;
+        var key = snapshot.ServerKey;
+        var stateStore = new PgAlertStateStore(_postgres, _logger);
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            /* Seeded once per key from the saved record, the way EvaluatePgCpuAsync does (#3282, #7295): a restart must not forget an
+               open alert and announce it again, and a load that cannot read the store throws into the catch below and is retried. */
+            if (!_pgCapacityPersistenceSeeded.ContainsKey(key))
+            {
+                var seeded = await _seedLoadCap.LoadOrSeedEmptyAsync(
+                    () => stateStore.LoadAlertPersistenceAsync(key, metricName),
+                    _logger, nameof(PgAlertStateStore), key, "capacity at ceiling persistence record", "PostgreSQL capacity at ceiling persistence seed");
+                readClock.Restart();
+                _pgCapacityPersistenceSeeded[key] = true;
+                if (seeded.HasValue)
+                {
+                    _pgCapacityPersistence[key] = seeded.Value;
+                    if (seeded.Value.State.Firing)
+                    {
+                        _lastPgCapacityAlert[key] = now;
+                    }
+                }
+            }
+
+            var priorRecord = _pgCapacityPersistence.TryGetValue(key, out var cached)
+                ? cached
+                : AlertPersistenceRecord.Initial;
+
+            var samples = await DarlingPgCpuUtilizationReader.GetSamplesSinceAsync(
+                _postgres, runtime.ServerId, priorRecord.LastObservedSampleUtc, now, cancellationToken);
+            readClock.Restart();
+
+            var record = priorRecord;
+            var outcome = PersistenceOutcome.None;
+            DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
+            double? lastCapacityPercent = null;
+            _pgCapacityRun.TryGetValue(key, out var run);
+
+            /* At most one edge per pass, the shape EvaluatePgCpuAsync has: the loop stops at the first Fire or Resolve and the rest of
+               the batch waits for the next sweep, so a fire and a resolve are never folded into one. */
+            foreach (var sample in samples)
+            {
+                var capacityPercent = FleetCpuProvenance.CpuBandInputPercent(
+                    sample.CpuPercent, sample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
+
+                /* No capacity figure: not held, not a clear, and the gate state stays as it is. `continue`, not `break`, because this
+                   is not an edge. The watermark still moves past the sample, in memory only, so a target that never reports a capacity
+                   figure (a provisioned one has no ACU) does not read the same batch again on every sweep. */
+                if (!capacityPercent.HasValue)
+                {
+                    record = new AlertPersistenceRecord(record.State, sample.SampleTimeUtc);
+                    continue;
+                }
+
+                var held = PgCapacityCeilingBreaches(capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent);
+                var evaluation = AlertPersistenceGate.Evaluate(
+                    record.State, held, AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples);
+
+                /* The run follows the gate. A held sample starts or continues it. A sample that is not held ends it only while the
+                   gate is not firing: a one-sample dip under an open alert leaves the alert open (it takes CpuClearSamples to
+                   resolve), so the run keeps its start and its memory figures, and the next held sample continues it. */
+                run = held
+                    ? new PgCapacityRun(
+                        run?.Start ?? sample, sample,
+                        /* A run found in memory keeps its flag. A new one is exact only when the gate held no count before this sample
+                           and is not already open (an open alert with no run in memory began before this process saw it). */
+                        run?.StartedInThisProcess ?? (!record.State.Firing && record.State.ConsecutiveBreaches == 0))
+                    : evaluation.State.Firing ? run : null;
+
+                record = new AlertPersistenceRecord(evaluation.State, sample.SampleTimeUtc);
+                lastCounted = sample;
+                lastCapacityPercent = capacityPercent;
+
+                if (evaluation.Outcome != PersistenceOutcome.None)
+                {
+                    outcome = evaluation.Outcome;
+                    break;
+                }
+            }
+
+            if (run is null)
+            {
+                _pgCapacityRun.TryRemove(key, out _);
+            }
+            else
+            {
+                _pgCapacityRun[key] = run;
+            }
+
+            if (!record.Equals(priorRecord))
+            {
+                _pgCapacityPersistence[key] = record;
+
+                /* A pass that only moved the watermark past samples with no capacity figure leaves the saved record alone: nothing in
+                   the state changed, and a restart that reads those samples again counts none of them. */
+                if (lastCounted is not null)
+                {
+                    await stateStore.SaveAlertPersistenceAsync(key, metricName, record);
+                    readClock.Restart();
+                }
+            }
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+
+            /* The standing condition, as for High CPU: most sweeps see no new sample, so an open alert's reminder (and a retry after a
+               failed send) asks the latest reading whether the ceiling still holds. It never moves the gate or the watermark. */
+            if (lastCounted is null && record.State.Firing)
+            {
+                var standing = await DarlingPgCpuUtilizationReader.GetLatestAsync(
+                    _postgres, runtime.ServerId, now, cancellationToken);
+                readClock.Restart();
+                if (standing is not null)
+                {
+                    lastCapacityPercent = FleetCpuProvenance.CpuBandInputPercent(
+                        standing.CpuPercent, standing.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
+                    lastCounted = new DarlingPgCpuUtilizationReader.CpuSample(
+                        standing.SampleTimeUtc, standing.CpuPercent, standing.AcuUtilizationPercent,
+                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu,
+                        /* The single-latest read carries no memory (LatestCpuSql selects none); stated, not defaulted. */
+                        Memory: null);
+                }
+            }
+
+            var holding = lastCounted is not null
+                && PgCapacityCeilingBreaches(lastCapacityPercent, lastCounted.CpuPercent, alertSettings.CpuThresholdPercent);
+
+            if (record.State.Firing && holding)
+            {
+                var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgCapacityAlert, key, now, out var last)
+                    || now - last >= cooldown;
+                if (!cooldownElapsed)
+                {
+                    return;
+                }
+
+                _lastPgCapacityAlert[key] = now;
+
+                var mute = JudgeMute(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
+                    MetricName = metricName,
+                });
+
+                var reading = lastCounted!;
+                var capacity = lastCapacityPercent!.Value;
+                var heldRun = run ?? new PgCapacityRun(reading, reading, StartedInThisProcess: false);
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
+                    new AlertOutcome(
+                        key,
+                        snapshot.ServerName,
+                        metricName,
+                        $"{capacity:F0}%",
+                        $"{alertSettings.CpuThresholdPercent}%",
+                        Context: AlertSampleAge.Stamp(null, "CPU", reading.SampleTimeUtc, now),
+                        DetailText: BuildPgCapacityCeilingDetail(
+                            heldRun, capacity, alertSettings.CpuThresholdPercent, AlertEngine.PgCapacityCeilingSamples),
+                        NumericCurrentValue: capacity,
+                        NumericThresholdValue: alertSettings.CpuThresholdPercent,
+                        Muted: mute.Muted, Hold: mute.Hold,
+                        Severity: AlertSeverityLevel.Warning,
+                        ShortMessage:
+                            $"Capacity held at {capacity:F0}% {FleetCpuProvenance.CapacityDenominator} with instance CPU at "
+                            + $"{reading.CpuPercent:F0}% (threshold: {alertSettings.CpuThresholdPercent}%)"),
+                    cancellationToken);
+                readClock.Restart();
+
+                /* Only the cooldown stamp moved before the send; the record stays Firing, so a send that failed on every channel is
+                   retried on a later sweep through this same arm (#4795). */
+                AfterPgFire(metricName, _lastPgCapacityAlert, key, now, cooldown, delivery);
+            }
+            else if (outcome == PersistenceOutcome.Resolve)
+            {
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, AlertFamily.CapacityAtCeilingClearedTitle,
+                    $"{snapshot.ServerName}: capacity is no longer held at the ceiling with low instance CPU");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[{Server}] PostgreSQL capacity at ceiling alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL capacity at ceiling alert read", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>The detail text of a "Capacity at ceiling" alert (#9501): capacity and the ACU pair and instance CPU of the latest
+    /// sample, then free plus cached memory at the start of the held run and at its end. The ACU line shows only when both halves
+    /// were sampled and the memory line only when both samples carry both figures, so no line states a figure that was not measured.
+    /// "Free plus cached" is what the store holds (<c>memory_free_bytes</c> and <c>memory_cached_bytes</c>); it does not hold the
+    /// CloudWatch FreeableMemory metric.</summary>
+    internal static string BuildPgCapacityCeilingDetail(PgCapacityRun run, double capacityPercent, int thresholdPercent, int heldSamples)
+    {
+        var latest = run.Latest;
+        var text = new System.Text.StringBuilder();
+        text.Append(CultureInfo.InvariantCulture, $"  Capacity: {capacityPercent:F0}% {FleetCpuProvenance.CapacityDenominator}\n");
+        if (latest.ServerlessCapacityAcu.HasValue && latest.MaxConfiguredAcu.HasValue)
+        {
+            text.Append(CultureInfo.InvariantCulture, $"  Allocated: {latest.ServerlessCapacityAcu:0.#} ACU of a {latest.MaxConfiguredAcu:0.#} ACU maximum\n");
+        }
+
+        text.Append(CultureInfo.InvariantCulture, $"  Instance CPU: {latest.CpuPercent:F0}% of currently allocated capacity (under the threshold)\n");
+        if (PgFreePlusCachedBytes(run.Start.Memory) is { } startBytes && PgFreePlusCachedBytes(latest.Memory) is { } endBytes)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"  Free plus cached memory: {FormatPgGiB(startBytes)} at the start of the run, {FormatPgGiB(endBytes)} now\n");
+        }
+
+        text.Append(CultureInfo.InvariantCulture, $"  Threshold: {thresholdPercent}% on capacity\n");
+        text.Append(CultureInfo.InvariantCulture,
+            $"  Held: {heldSamples} or more consecutive samples, since {(run.StartedInThisProcess ? "" : "at least ")}{run.Start.SampleTimeUtc:HH:mm} UTC");
+        return text.ToString();
+    }
+
+    /// <summary>Free plus cached host memory of one sample, or null when either figure was not measured: half of the pair would
+    /// read as a smaller number than the host has.</summary>
+    internal static long? PgFreePlusCachedBytes(DarlingPgCpuUtilizationReader.HostMemory? memory) =>
+        memory is { FreeBytes: { } free, CachedBytes: { } cached } ? free + cached : null;
+
+    private static string FormatPgGiB(long bytes) =>
+        string.Create(CultureInfo.InvariantCulture, $"{bytes / 1073741824.0:0.0} GiB");
+
     /// <summary>
     /// Pure mapping, pulled out of <see cref="EvaluatePgDeadlocksAsync"/> so it is testable without a
     /// Postgres connection or an <see cref="IAlertDeliverer"/> fake — the same "pure, testable seam"
@@ -3021,7 +3272,7 @@ LIMIT 1";
         DateTime? sampleTime = null;
         DateTime? sampleUtcOnly = null;
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #6968: the shared floor loop remembers where the newest row is; a bounded read that finds nothing means the row the
            bound came from is gone, so it asks again without one (the read that shipped before). */
         await _latestCpuFloor.ReadAsync(serverId, async since =>
@@ -3114,7 +3365,7 @@ LIMIT $3";
     {
         var samples = new List<AlertCpuSample>();
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(
             RecentCpuSamplesSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);

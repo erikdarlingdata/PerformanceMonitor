@@ -368,6 +368,19 @@ def _holders_of(lines: list[str]) -> set[str]:
 # test time, against 509 s for shard 5 in that run). The shard cut is unchanged.
 MAP_SHARD_ENV = frozenset({"DARLING_TEST_PG", "DARLING_TEST_PGRUNTIME"})
 GATE_TRAIT = "Gate=Env"
+# #9260: a Gate=Env class that names the files its tests can run code from is selected when a changed file matches one of them
+# (or its own file or a covered helper changes, the map's usual reasons), not on every narrowed Darling pull request. The
+# list is the class's whole possible reach, not a guess from coverage: the map has none for it, because its tests skip at
+# map build. PgServerLogTailCsvJsonRotationLiveTests (44 s, selected on about half of all pull request runs) drives
+# PgLogEventsCollector, PgServerLogTail and the two log parsers on a live target server and touches no store, so the
+# code it can run is PerformanceMonitor.Collectors and what that project references (PerformanceMonitor.Common only: its
+# csproj has the one ProjectReference), plus start-test-pg.ps1, which starts the log-rotation targets the class reads
+# through its two environment variables. A Darling.Tests helper it names is found by the type-name rule (the map's `files`).
+# A class not in this table stays always selected.
+GATE_ENV_DEPS = {
+    "PgServerLogTailCsvJsonRotationLiveTests": (
+        "PerformanceMonitor.Collectors/**", "PerformanceMonitor.Common/**", ".github/scripts/start-test-pg.ps1"),
+}
 GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
 
 SUITE_DIRS = {
@@ -1487,7 +1500,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
                named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False,
                shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS,
-               listed: "Callable[[str, str], bool] | None" = None) -> dict:
+               listed: "Callable[[str, str], bool] | None" = None, quiet: "set[str] | None" = None) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -1505,6 +1518,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     scan_classes() returns it, which is how a class the map has never seen is found. `named` is `{suite: {Class, ...}}`:
     the test classes whose source names a symbol the pull request declares or changes (symbol_classes(), tight tokens
     only, #5776); None or empty adds nothing.
+    `quiet` (#9441) is the set of changed files no CI area knows and that are no build input (ci-plan.py's keeps_full): a file of it
+    that the map does not know, and no text pattern reads, selects nothing of its own instead of answering FULL. A file of it that
+    a class covers or a text pattern reads still selects those classes.
     `listed` is listed_checker()'s answer (#7739): a selected class the map has never seen is kept only when it says the test
     host lists it (not a private nested fixture, an abstract base, or a class declared inside a test's string). A class in the
     map ran, so it is never asked. None asks nothing.
@@ -1627,6 +1643,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             continue
         if any(isinstance(g, list) and any(matches(p, f) for p in g) for g in globs.values()):
             continue
+        if quiet and f in quiet:
+            # #9441: a generated reference file, a repro tool or a workflow no test class reads. The area filters do not know it, so no
+            # product code depends on it, and no class reads it as text, or the pattern check above would have kept it.
+            unknown[f] = "no area knows it and no class reads it as text, so it selects nothing of its own"
+            continue
         if f.endswith(".cs"):
             if _TEST_PROJECT_FILE.search(f) and new_classes:
                 unknown[f] = "selecting the new test classes the tree scan finds"
@@ -1675,7 +1696,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             elif "Stage=Guard" in traits:
                 reasons.setdefault(cls, "guard stage")
             if GATE_TRAIT in traits and NO_TESTS_TRAIT not in traits:
-                reasons.setdefault(cls, "gated on an environment the map shards lack")
+                deps = GATE_ENV_DEPS.get(cls)
+                if deps is None:
+                    reasons.setdefault(cls, "gated on an environment the map shards lack")
+                elif any(matches(p, f) for p in deps for f in live):
+                    reasons.setdefault(cls, "gated on an environment the map shards lack, and a file it reads changed")
         # #5872: a changed test class's xunit collection mates run too: they share its fixture and its serialized
         # statics, and moving a class into a collection (a changed [Collection] attribute) changes what runs beside
         # them. A collection over COLLECTION_MATE_CAP classes (live-postgres, about 650) is a serialization bucket for
@@ -2293,6 +2318,55 @@ def named_classes(match: dict) -> "dict[str, set[str]]":
     return out
 
 
+# #9779: the classes that measure every served MCP tool description (the `[Description]` text of each tool method) through
+# reflection never name a tool's method or class, and the attribute text runs no code, so neither the changed-symbol rule nor a
+# coverage map links a description edit to them. A change to a file that declares MCP tools therefore selects them by rule: per
+# suite, the product tree whose tools the suite measures, and the classes of that suite that do the measuring (the two catalog
+# classes and the McpToolGuideHeads* family, found by name in the test sources).
+MCP_TOOL_TREES = {"lite": "Lite/", "darling": "Darling/PerformanceMonitor.Darling.Service/"}
+# A tool method carries the attribute at the start of a line; a doc comment that mentions `[McpServerTool]` does not declare one.
+_MCP_TOOL_DECL = re.compile(r"^[ \t]*\[McpServerTool\b", re.MULTILINE)
+_MCP_DESCRIPTION_CLASS = re.compile(r"^(?:McpToolGuideTests|McpToolsListBudgetTests|McpToolGuideHeads\w+Tests)$")
+
+
+def description_classes(files: "list[str]", root: str = ROOT,
+                        classes: "dict[str, dict[str, set[str]]] | None" = None) -> "dict[str, set[str]]":
+    """{suite: {Class, ...}} of the description-measuring classes a change selects (#9779): for each suite, when a changed file
+    under its product tree (MCP_TOOL_TREES) that still exists at `root` declares an MCP tool, every class of that suite named
+    McpToolGuideTests, McpToolsListBudgetTests or McpToolGuideHeads<Name>Tests that holds a test. `classes` is scan_classes()'s
+    answer (read from `root` when None). A suite with no such file is absent from the result, and the result only ever adds classes."""
+    out: "dict[str, set[str]]" = {}
+    for suite, tree in MCP_TOOL_TREES.items():
+        for rel in files:
+            if not (rel.startswith(tree) and rel.endswith(".cs")):
+                continue
+            path = os.path.join(root, rel)
+            try:
+                declares = _MCP_TOOL_DECL.search(read_source(path, "replace")) is not None if os.path.isfile(path) else False
+            except OSError:
+                declares = False
+            if declares:
+                if classes is None:
+                    classes = scan_classes(root)
+                out[suite] = {c for c, t in classes.get(suite, {}).items()
+                              if _MCP_DESCRIPTION_CLASS.match(c) and NO_TESTS_TRAIT not in t}
+                break
+    return out
+
+
+def with_description_classes(named: "dict[str, set[str]] | dict[str, list[str]] | None", files: "list[str]", root: str = ROOT,
+                             classes: "dict[str, dict[str, set[str]]] | None" = None) -> "dict[str, set[str]] | None":
+    """`named` (the classes a change names) joined with description_classes() of `files`; None stays None when nothing joins, so a
+    caller that could not read the change keeps saying so. Never removes a class."""
+    extra = description_classes(files, root, classes)
+    if not extra:
+        return None if named is None else {s: set(v) for s, v in named.items()}
+    out = {s: set(v) for s, v in (named or {}).items()}
+    for suite, names in extra.items():
+        out.setdefault(suite, set()).update(names)
+    return out
+
+
 def commit_diff_text(root: str, base: str, head: str) -> "str | None":
     """symbol_diff_text() of `head` against its merge base with `base`: the diff map_select()'s `shared_diff` reads
     for a replayed commit (#5951). None when this clone lacks the commit, so a shared-project row stays FULL."""
@@ -2365,8 +2439,8 @@ def local_classes(root: str, base: str, map_path: "str | None" = None, wide: boo
         discovered = scan_classes(root)
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), shared_diff=text,
-                         listed=listed_checker(root), **selection_args(Rules()))
+        sel = map_select(test_map, paths, drift, discovered, named=with_description_classes(named_classes(match), paths, root),
+                         shared_diff=text, listed=listed_checker(root), **selection_args(Rules()))
         lines.append(f"MAP coverage answer ({map_path}):")
         if sel["full"]:
             lines.append(f"MAP FULL: {sel['reason']}")
@@ -2443,6 +2517,9 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
     ranked = ordered_hits(match)
     own = [(s, c) for s, c, h in ranked if h["own"] and c in holders and runnable(s, c)]
     named = [(s, c) for s, c, h in ranked if not h["own"] and c in holders and runnable(s, c)]
+    # #9779: the description-measuring classes of a changed MCP tool file; CI selects them too, so the lane's part holds them.
+    named += [(s, c) for s, cs_ in sorted(description_classes(paths, root, discovered).items()) for c in sorted(cs_)
+              if (s, c) not in named and runnable(s, c)]
     pattern: list[tuple[str, str]] = []
     chosen: dict[str, set[str]] = {}
     notes = [f"local-filter: merge base {mb[:10]} of {base}, {len(paths)} changed files"]
@@ -2455,8 +2532,8 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         args = selection_args(Rules())
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text,
-                         listed=listed_checker(root), **args)
+        sel = map_select(test_map, paths, drift, mapped, named=with_description_classes(named_classes(match), paths, root),
+                         shared_diff=text, listed=listed_checker(root), **args)
         count = sum(len(v) for v in sel["selected"].values())
         part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
                 "map that matches a changed file")
@@ -2670,6 +2747,46 @@ def quarantine_args(path: str, suite: str) -> list[str]:
     return out
 
 
+# #8753: the pinned-hour pass of a pull request. A live test that seeds against the real clock can pass at one hour of the UTC
+# day and fail at another (#8752). The pass runs the live classes of the test files the pull request adds or changes with
+# DARLING_TEST_CLOCK_UTC (LiveClock.cs reads it) pinned to the late-day edge and to the midnight edge. It selects only the
+# Darling.Tests classes of those files that hold a test and that the test host lists (the same two checks the plan uses for a
+# changed test file, #6734 and #7739), and of those only the live ones: a file that reads a DARLING_TEST_PG* variable or LiveClock.
+PINNED_TEST_TREE = "Darling/Darling.Tests/"
+PINNED_LIVE = re.compile(r"DARLING_TEST_PG|\bLiveClock\b")
+PINNED_CLASS_LIMIT = 40
+
+
+def pinned_classes(root: str, files: "list[str]", limit: int = PINNED_CLASS_LIMIT) -> "tuple[list[str], list[str]]":
+    """(class names, notes): the live classes of the Darling.Tests files in `files` that still exist at `root`, sorted, at most
+    `limit`. A note says why the list is empty, or how many classes the limit left out."""
+    changed = {f for f in files if f.startswith(PINNED_TEST_TREE) and f.endswith(".cs") and os.path.isfile(os.path.join(root, f))}
+    if not changed:
+        return [], ["the pull request adds or changes no Darling.Tests file"]
+    live: "set[str]" = set()
+    for rel in changed:
+        try:
+            if PINNED_LIVE.search(read_source(os.path.join(root, rel), "replace")):
+                live.add(rel)
+        except OSError:
+            continue
+    if not live:
+        return [], [f"{len(changed)} Darling.Tests file(s) changed, none of them a live class (no DARLING_TEST_PG or LiveClock)"]
+    discovered = scan_classes(root)["darling"]
+    listed = listed_checker(root)
+    names = sorted({name for suite, rel, name, _t in _walk_classes(root)
+                    if suite == "darling" and rel in live and NO_TESTS_TRAIT not in discovered.get(name, set())
+                    and listed("darling", name)})
+    if not names:
+        return [], [f"{len(live)} live Darling.Tests file(s) changed, but none declares a class that holds a test"]
+    notes = []
+    if len(names) > limit:
+        notes.append(f"{len(names)} live classes sit in the changed files; the pass runs the first {limit} by name and leaves "
+                     f"{len(names) - limit} out")
+        names = names[:limit]
+    return names, notes
+
+
 def _bool(s: str) -> bool:
     return s.strip().lower() == "true"
 
@@ -2784,6 +2901,12 @@ def main(argv: list[str]) -> int:
     sc.add_argument("--jobs", help="the latest attempt's jobs, one {name, conclusion} JSON object per line; "
                                    "the row lists the failed ones")
 
+    pc = sub.add_parser("pinned-classes", help="the live Darling.Tests classes of the test files a pull request adds or changes, for the pinned-hour pass (workflow step, #8753)")
+    pc.add_argument("--files-from", required=True, help="one changed path per line (the plan's changed.txt)")
+    pc.add_argument("--limit", type=int, default=PINNED_CLASS_LIMIT, help="the most classes the pass runs (default: %(default)s)")
+    pc.add_argument("--github-output", help="append pinned=true|false and pinned_classes=A,B to this file")
+    pc.add_argument("--root", default=ROOT, help="the repository (default: this one)")
+
     args = ap.parse_args(argv)
     if args.replay:
         misses = replay(args.corpus)
@@ -2812,6 +2935,8 @@ def main(argv: list[str]) -> int:
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         # #5776: with the base, the classes that name a changed symbol are one more reason (it only adds classes).
         named = symbol_classes(args.root, args.base) if args.base else None
+        # #9779: a changed file that declares MCP tools also selects the classes that measure served descriptions.
+        named = with_description_classes(named, files, args.root)
         # #5951: the diff a shared-project change is judged by: a planted file, else the change against the base.
         shared_diff: "str | None" = None
         if args.diff_file:
@@ -2847,6 +2972,17 @@ def main(argv: list[str]) -> int:
         if lines:
             print("\n".join(lines))
         return code
+    if args.cmd == "pinned-classes":
+        with open(args.files_from, encoding="utf-8") as fh:
+            files = [ln.strip() for ln in fh if ln.strip()]
+        names, notes = pinned_classes(args.root, files, args.limit)
+        for n in notes:
+            print(f"pinned-classes: {n}")
+        print(f"pinned-classes: {len(names)} class(es)" + (": " + " ".join(names) if names else ""))
+        if args.github_output:
+            with open(args.github_output, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(f"pinned={'true' if names else 'false'}\npinned_classes={','.join(names)}\n")
+        return 0
     if args.cmd == "map-keep":
         # Line 1 is `SELECTED <n>` (then one class name per line) or `FULL <reason>`; the exit code is always 0, so a
         # caller that cannot read the answer runs everything.

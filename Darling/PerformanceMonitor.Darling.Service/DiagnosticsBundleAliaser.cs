@@ -15,6 +15,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -586,7 +587,7 @@ internal sealed class BundleAliaser
     /// a JSON document and goes to <see cref="SensitiveStatements.Json(string)"/>, which walks its strings; anything else of
     /// five characters or more goes to <see cref="SensitiveStatements.Text"/>. A value that merely looks like JSON (a log
     /// line that opens with a bracket) is judged as text, so it is not replaced by the refusal sentence. Each value has
-    /// its own judging budget, so a long section never runs a later value out of time.
+    /// its own judging budget (<see cref="NewJudgeBudget"/>), so a long section never runs a later value out of time.
     /// </summary>
     internal static string JudgeStatementText(string text)
     {
@@ -603,7 +604,7 @@ internal sealed class BundleAliaser
 
         if (first[0] == '<')
         {
-            return SensitiveStatements.Xml(text) ?? SensitiveStatements.PlaceholderText;
+            return SensitiveStatements.Xml(text, NewJudgeBudget()) ?? SensitiveStatements.PlaceholderText;
         }
 
         if (first[0] is '{' or '[')
@@ -620,11 +621,38 @@ internal sealed class BundleAliaser
 
             if (parsed is JsonObject or JsonArray)
             {
-                return SensitiveStatements.Json(text);
+                return SensitiveStatements.Json(text, NewJudgeBudget());
             }
         }
 
         return SensitiveStatements.Text(text) ?? SensitiveStatements.PlaceholderText;
+    }
+
+    /* A test seam for the wall-clock judge budget, the same shape as AlertStatementFilter.UseBudget (#5459). With no
+       override, each plan or JSON value gets its own JudgeBudget at ReadBudget, the budget the public Xml and Json entry
+       points build. A test that asserts what a document keeps hands in a budget whose clock never moves, so a starved
+       runner cannot spend it and withhold the document (#8852). AsyncLocal, so an override reaches only its own call
+       chain, never another test running beside it. */
+    private static readonly AsyncLocal<Func<SensitiveStatements.JudgeBudget>?> s_judgeBudgetOverride = new();
+
+    /// <summary>Test seam (#8852): every plan or JSON value <see cref="JudgeStatementText"/> judges on this logical flow
+    /// builds its budget with <paramref name="make"/> until the returned scope is disposed.</summary>
+    internal static IDisposable UseJudgeBudget(Func<SensitiveStatements.JudgeBudget> make)
+    {
+        ArgumentNullException.ThrowIfNull(make);
+        var previous = s_judgeBudgetOverride.Value;
+        s_judgeBudgetOverride.Value = make;
+        return new JudgeBudgetScope(previous);
+    }
+
+    /// <summary>A fresh budget for one value: the test override when one is set, otherwise one at
+    /// <see cref="SensitiveStatements.ReadBudget"/>.</summary>
+    private static SensitiveStatements.JudgeBudget NewJudgeBudget() =>
+        s_judgeBudgetOverride.Value?.Invoke() ?? new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+
+    private sealed class JudgeBudgetScope(Func<SensitiveStatements.JudgeBudget>? previous) : IDisposable
+    {
+        public void Dispose() => s_judgeBudgetOverride.Value = previous;
     }
 
     /// <summary>

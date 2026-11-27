@@ -142,6 +142,7 @@ public sealed partial class InvestigationEvidenceCapture
         var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
         {
             [HighCpuMetric] = Sections,
+            [AlertFamily.CapacityAtCeilingMetric] = Sections,
             [DeadlockMetric] = new[] { "deadlocks" },
             [ClientTimeoutsMetric] = new[] { "client_timeouts" },
             [InvestigationEvidenceScope.FamilyKey(InvestigationFamily.QueryPerformance)] = new[] { "regression_targets" },

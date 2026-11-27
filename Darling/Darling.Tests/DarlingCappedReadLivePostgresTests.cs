@@ -872,6 +872,140 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #8926: a window that misses the daily run holds no rows of any kind, so <c>answered_only</c> excluded
+    /// nothing. The reply is the plain read's "widen it" answer, with no "NOT ONE" and no claim that the
+    /// filter removed rows, even though the 48-hour census holds trusted indexes.
+    /// </summary>
+    [Fact]
+    public async Task AnsweredOnlyOverAWindowThatHoldsNoRowsAnswersWidenItAndNotNoAnswers()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8926 empty-window test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var run = now.AddHours(-30);
+
+            for (var i = 0; i < 3; i++)
+            {
+                await SeedIndexAsync(
+                    connection, ct, run, "orders", "orders_ix_" + i.ToString(CultureInfo.InvariantCulture),
+                    (100 + i) * Mib, estTupleBytes: 48L, reclaimable: (10 + i) * Mib, skippedReason: null);
+            }
+
+            await SeedIndexAsync(
+                connection, ct, run, "wide", "wide_ix", 200 * Mib,
+                estTupleBytes: 48L, reclaimable: null, skippedReason: WidthsReason);
+            await LogRunAsync(connection, ct, run, "SUCCESS");
+
+            /* A recent run of ANOTHER collector, so the server reads as online and the empty answer is not the offline note. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time, status)
+VALUES ($1::bigint, $2::integer, $3::text, 'pg_settings', $4::timestamp, 'SUCCESS')",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(now.AddMinutes(-5)));
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            using var filtered = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(
+                    postgres, ServerName, 1, ReadLimit, answered_only: true));
+            using var plain = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(postgres, ServerName, 1, ReadLimit));
+
+            Assert.Equal("empty", filtered.RootElement.GetProperty("status").GetString());
+            Assert.Equal("empty", plain.RootElement.GetProperty("status").GetString());
+
+            var message = filtered.RootElement.GetProperty("message").GetString()!;
+
+            Assert.Contains("widen it before concluding anything", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("NOT ONE", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("excluded", message, StringComparison.Ordinal);
+            Assert.Equal(plain.RootElement.GetProperty("message").GetString(), message);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    /// <summary>
+    /// #8926: the window holds rows, none of them answered, while the 48-hour census holds a trusted index
+    /// (answered on an older cycle, labelled on the newest). The refusal stays, and it never says "NOT ONE"
+    /// beside a trusted count above zero.
+    /// </summary>
+    [Fact]
+    public async Task AnsweredOnlyWhenTheWindowHoldsOnlyUntrustedRowsButTheCoverageReadHoldsATrustedIndexNeverSaysNotOne()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8926 partial-window test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var newest = now.AddHours(-2);
+            var older = now.AddHours(-26);
+
+            await SeedIndexAsync(connection, ct, older, "shipments", "shipments_pkey", 700 * Mib,
+                estTupleBytes: 48L, reclaimable: 70 * Mib, skippedReason: null);
+            await SeedIndexAsync(connection, ct, newest, "shipments", "shipments_pkey", 700 * Mib,
+                estTupleBytes: 48L, reclaimable: null, skippedReason: WidthsReason);
+            await SeedIndexAsync(connection, ct, newest, "wide", "wide_ix", 200 * Mib,
+                estTupleBytes: 48L, reclaimable: null, skippedReason: WidthsReason);
+            await LogRunAsync(connection, ct, older, "SUCCESS");
+            await LogRunAsync(connection, ct, newest, "SUCCESS");
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            using var filtered = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(
+                    postgres, ServerName, 3, ReadLimit, answered_only: true));
+
+            Assert.Equal("no_answers", filtered.RootElement.GetProperty("status").GetString());
+
+            var message = filtered.RootElement.GetProperty("message").GetString()!;
+
+            Assert.DoesNotContain("NOT ONE", message, StringComparison.Ordinal);
+            Assert.Contains("2 candidate btree indexes", message, StringComparison.Ordinal);
+            Assert.Contains("1 of them with a trusted bloat answer", message, StringComparison.Ordinal);
+
+            var hints = filtered.RootElement.GetProperty("hints");
+
+            Assert.Equal(2, hints.GetProperty("candidate_index_count").GetInt64());
+            Assert.Equal(1, hints.GetProperty("trusted_index_count").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
     private static Task SeedIndexAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
         string tableName, string indexName, long indexBytes, long? estTupleBytes, long? reclaimable,

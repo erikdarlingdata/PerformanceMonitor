@@ -330,6 +330,8 @@ public sealed class DarlingStoreUpgradeTests
 
     /// <summary>The free space is read for the path itself: a directory that is not there gets no answer,
     /// where a read from its drive letter reports the letter's free space for any path under it.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ReadAvailableFreeBytes_AnswersForThePath_NotItsDriveLetter()
     {
@@ -342,6 +344,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <summary>The volume's size comes from the same call as its free space, so a report that shows both
     /// describes one volume: free never exceeds the total, and a directory that is not there gets no answer
     /// for either figure.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ReadVolumeSpace_AnswersFreeAndTotalForThePath()
     {
@@ -454,6 +458,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <summary>A folder on the system drive is on that drive's own volume, so its mount point is the drive
     /// root: finding the mount point changes nothing for the ordinary case, where the drive-root read was
     /// already right.</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ResolveVolumeMountPoint_FolderOnTheSystemDrive_IsTheDriveRoot()
     {
@@ -608,6 +614,8 @@ public sealed class DarlingStoreUpgradeTests
     /// (a probe timeout, a cancellation at service stop, a failed reset), so the operator-lines carry never
     /// runs: the file has to be saved beside the new data directory BEFORE either carry, or those lines are
     /// lost with no copy.</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryConfAfterSwapAsync_LinkMode_AutoConfCarryThrows_OperatorLinesSurviveBesideTheNewDataDirectory()
     {
@@ -666,6 +674,8 @@ public sealed class DarlingStoreUpgradeTests
 
     /// <summary>Copy mode: the old postgresql.conf is saved beside the new data directory too, and the
     /// retained directory is kept as today (it is the rollback copy).</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryConfAfterSwapAsync_CopyMode_SavesTheOldConfBesideTheNewDataDirectory_RetainedDirectoryIsKept()
     {
@@ -1036,13 +1046,19 @@ public sealed class DarlingStoreUpgradeTests
 
     [Theory]
     [InlineData("timescaledb-2.28.1.dll", "2.28.1")]
-    [InlineData(@"C:\pg\lib\timescaledb-2.24.0.dll", "2.24.0")]
     /* The TSL sibling and the unversioned loader must NOT answer, or the comparison could read a version
        off the wrong file and call two different runtimes identical. */
     [InlineData("timescaledb-tsl-2.28.1.dll", null)]
     [InlineData("timescaledb.dll", null)]
     [InlineData("libpq.dll", null)]
     public void ParseTimescaleLibraryVersion_ReadsOnlyTheVersionedLoaderName(string fileName, string? expected)
+        => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
+
+    // #9686: The full path has a drive letter and backslashes, which Path.GetFileName splits into folder and file name on Windows only.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData(@"C:\pg\lib\timescaledb-2.24.0.dll", "2.24.0")]
+    public void ParseTimescaleLibraryVersion_ReadsTheVersionedLoaderName_FromAFullWindowsPath(string fileName, string? expected)
         => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
 
     /// <summary>
@@ -1460,6 +1476,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <see cref="CarryAutoConfAsync_CarriesAGoodSetting_LeavesOutOneTheNewBinariesReject_AndTheStoreStarts"/>
     /// above already covers the real-binaries path.
     /// </summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_ProbeThrowsTimeout_ResetsToHeaderAndRethrows()
     {
@@ -1500,6 +1518,8 @@ public sealed class DarlingStoreUpgradeTests
     /// safety write that resets the file must not itself be blocked by the very token whose cancellation
     /// caused the reset to be needed.
     /// </summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_ProbeThrowsAfterCancellation_ResetsToHeaderAndRethrows()
     {
@@ -1752,6 +1772,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <summary>Medium 1: a rejected setting whose name looks like it may hold a credential gets no reason
     /// logged, and never its value — PostgreSQL's own reject reason for an out-of-range value often repeats
     /// the offending value verbatim.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_RejectedSecretNamedSetting_NeverLogsItsValueOrReason()
     {
@@ -1793,6 +1815,8 @@ public sealed class DarlingStoreUpgradeTests
     /// matches one of the new secret fragments ("auth", "token") — PostgreSQL's own reject reason for an
     /// out-of-range value often repeats the offending value verbatim, and an unrecognized extension's own
     /// wording is not something this class can vouch for either way.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_RejectedDotQualifiedSecretNamedSetting_NeverLogsItsValueOrReason()
     {
@@ -1834,6 +1858,8 @@ public sealed class DarlingStoreUpgradeTests
     /// item 3's retry (also on "unused-bin-dir") fails too — unrelated to the settings, which is exactly what
     /// the new throw says. This test cares that the throw, the log, and the file all stay clean of the value
     /// either way.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_CarriedSecretNamedSetting_NeverLogsItsValue()
     {
@@ -1878,6 +1904,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <summary>Medium 1 (the ":2831" finding): a skipped invalid-name line logs a line number, never its
     /// text — with the '=' optional, the text before this parser's name/value boundary can actually be part
     /// of the value.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_SkippedInvalidNameLine_LogsALineNumberNotTheText()
     {
@@ -1919,6 +1947,8 @@ public sealed class DarlingStoreUpgradeTests
     /// original's own message into its text — so a caller or a log that only shows the top-level message still
     /// sees why the carry itself did not finish, not just why the two cleanup attempts after it also failed.
     /// Here a read-only postgresql.auto.conf blocks both the reset write and the delete deterministically.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CarryAutoConfAsync_ResetAndDeleteBothFail_ThrowsNamingTheFile_WithTheOriginalAsInnerException()
     {
@@ -2651,12 +2681,16 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RetainedDataDirectory_IsNamedForTheMajorItCameFrom()
         => Assert.Equal(
             @"C:\ProgramData\PerformanceMonitorDarling\pg-old-17",
             DarlingStoreUpgrade.RetainedDataDirectoryFor(@"C:\ProgramData\PerformanceMonitorDarling\pg", 17));
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PreviousRuntimeRoot_SitsBesideTheRuntimeItRescued()
         => Assert.Equal(
@@ -2674,6 +2708,8 @@ public sealed class DarlingStoreUpgradeTests
     /// <para>No PostgreSQL is needed and nothing is executed; see <see cref="PlantHostAwaitingARuntimeSwap"/>
     /// for how the fixture reaches the rescue without one.</para>
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task RuntimeAdvance_APreviousRuntimeItCannotDelete_DefersTheSwapInsteadOfFailingTheStart()
     {
@@ -3618,23 +3654,30 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
-    /// A live process whose image is named postgres (a copy of a harmless system tool that idles for a
-    /// minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
+    /// A live process whose image is named postgres (the stand-in program on Windows, a copy of /bin/sleep
+    /// elsewhere, either one idling for a minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
     /// </summary>
     private static ProcessHandle StartProcessNamedPostgres(string directory)
     {
         Directory.CreateDirectory(directory);
         var windows = OperatingSystem.IsWindows();
-        var source = windows ? Path.Combine(Environment.SystemDirectory, "PING.EXE") : "/bin/sleep";
         var image = Path.Combine(directory, windows ? "postgres.exe" : "postgres");
-        File.Copy(source, image, overwrite: true);
+        if (windows)
+        {
+            StandinProcess.CopyTo(directory, "postgres.exe");
+        }
+        else
+        {
+            File.Copy("/bin/sleep", image, overwrite: true);
+        }
+
         if (OperatingSystem.IsMacOS())
         {
             using var sign = System.Diagnostics.Process.Start("codesign", ["-f", "-s", "-", image]);
             sign!.WaitForExit();
         }
 
-        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? "-n 60 127.0.0.1" : "60")
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? StandinProcess.SleepArguments(60) : "60")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -4071,6 +4114,8 @@ public sealed class DarlingStoreUpgradeTests
     /// proves the folder surviving the rescue (same folder, not a new one) by comparing its creation time
     /// before and after.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task RuntimeAdvance_LeavesPgRuntimePrevInPlace_RatherThanDeletingAndRecreatingIt()
     {
@@ -6435,6 +6480,8 @@ public sealed class DarlingStoreUpgradeTests
     /// handler to the outer scope and this goes red on the healthy copy, which is the one assertion that
     /// distinguishes the fix from the bug.</para>
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Sweep_ARetainedCopyItCannotDelete_DoesNotStopTheOthers()
     {

@@ -212,6 +212,13 @@ public sealed partial class PgFactCollector : IFactCollector
     /// </summary>
     private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(PgFactCollector));
 
+    private async Task WaitStatsAndGroupStepAsync(AnalysisContext context, List<Fact> facts)
+    {
+        await CollectWaitStatsFactsAsync(context, facts);
+        FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
+        FactCollectorHelpers.GroupParallelismWaits(facts, context);
+    }
+
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
@@ -229,41 +236,65 @@ public sealed partial class PgFactCollector : IFactCollector
            cadence that collector actually runs at. Emits no fact, so it cannot disturb the stamp above. */
         await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
 
-        await CollectWaitStatsFactsAsync(context, facts);
-        FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
-        FactCollectorHelpers.GroupParallelismWaits(facts, context);
-        await CollectBlockingFactsAsync(context, facts);
-        await CollectBlockingChainFactsAsync(context, facts);
-        await CollectDeadlockFactsAsync(context, facts);
-        await CollectServerConfigFactsAsync(context, facts);
-        await CollectMemoryFactsAsync(context, facts);
-        await CollectDatabaseSizeFactAsync(context, facts);
-        await CollectServerMetadataFactsAsync(context, facts);
-        await CollectCpuUtilizationFactsAsync(context, facts);
-        await CollectRunnableTaskFactsAsync(context, facts);
-        await CollectIoLatencyFactsAsync(context, facts);
-        await CollectTempDbFactsAsync(context, facts);
-        await CollectMemoryGrantFactsAsync(context, facts);
-        await CollectQueryStatsFactsAsync(context, facts);
-        await CollectParameterSensitivityFactsAsync(context, facts);
-        await CollectPlanRegressionFactsAsync(context, facts);
-        await CollectBadActorFactsAsync(context, facts);
-        await CollectPerfmonFactsAsync(context, facts);
-        await CollectMemoryClerkFactsAsync(context, facts);
-        await CollectPlanCacheFactsAsync(context, facts);
-        await CollectMemoryPressureEventFactsAsync(context, facts);
-        await CollectDatabaseConfigFactsAsync(context, facts);
-        await CollectFileAutogrowthFactsAsync(context, facts);
-        await CollectProcedureStatsFactsAsync(context, facts);
-        await CollectActiveQueryFactsAsync(context, facts);
-        await CollectRunningJobFactsAsync(context, facts);
-        await CollectSessionFactsAsync(context, facts);
-        await CollectTraceFlagFactsAsync(context, facts);
-        await CollectServerPropertiesFactsAsync(context, facts);
-        await CollectDiskSpaceFactsAsync(context, facts);
-        await CollectPlanAdvisoryFactsAsync(context, facts);
+        /* #9149: the family reads run through one helper so an on-demand pass (context.FamilyParallelism above 1) can overlap them.
+           The order of this list is the order the facts land in. The wait family groups its own facts (the general-lock and
+           parallelism rows) inside its own step, which is where the serial pass grouped them: the list held only the coverage
+           stamp and the wait facts at that point. */
+        /* #8570: a read asked for some sources only (get_analysis_facts with source) runs the families those sources need. */
+        await RunFamiliesAsync(context, facts, NarrowToRequestedSources(context,
+        [
+            WaitStatsAndGroupStepAsync,
+            CollectBlockingFactsAsync,
+            CollectBlockingChainFactsAsync,
+            CollectDeadlockFactsAsync,
+            CollectServerConfigFactsAsync,
+            CollectMemoryFactsAsync,
+            CollectDatabaseSizeFactAsync,
+            CollectServerMetadataFactsAsync,
+            CollectCpuUtilizationFactsAsync,
+            CollectRunnableTaskFactsAsync,
+            CollectIoLatencyFactsAsync,
+            CollectTempDbFactsAsync,
+            CollectMemoryGrantFactsAsync,
+            CollectQueryStatsFactsAsync,
+            CollectParameterSensitivityFactsAsync,
+            CollectPlanRegressionFactsAsync,
+            CollectBadActorFactsAsync,
+            CollectPerfmonFactsAsync,
+            CollectMemoryClerkFactsAsync,
+            CollectPlanCacheFactsAsync,
+            CollectMemoryPressureEventFactsAsync,
+            CollectDatabaseConfigFactsAsync,
+            CollectFileAutogrowthFactsAsync,
+            CollectTempDbFileSetupFactsAsync,
+            CollectProcedureStatsFactsAsync,
+            CollectActiveQueryFactsAsync,
+            CollectRunningJobFactsAsync,
+            CollectSessionFactsAsync,
+            CollectTraceFlagFactsAsync,
+            CollectServerPropertiesFactsAsync,
+            CollectDiskSpaceFactsAsync,
+            CollectPlanAdvisoryFactsAsync
+        ]));
 
         return facts;
+    }
+
+    /// <summary>
+    /// #8570: the families for <see cref="AnalysisContext.RequestedFactSources"/> (<see cref="FamiliesFor"/>). When it skips
+    /// any, the context's family total drops by as many, so a collection caveat counts the families this pass read.
+    /// </summary>
+    private static List<Func<AnalysisContext, List<Fact>, Task>> NarrowToRequestedSources(
+        AnalysisContext context, List<Func<AnalysisContext, List<Fact>, Task>> families)
+    {
+        var kept = FamiliesFor(context.RequestedFactSources, families, out var skipped);
+        if (skipped > 0)
+        {
+            context.CollectionFamilyCount -= skipped;
+            context.FactSourcesNarrowed = true;
+        }
+
+        return kept;
     }
 
     /// <summary>
@@ -305,7 +336,7 @@ public sealed partial class PgFactCollector : IFactCollector
         WaitStatsSql,
         BlockingSql,
         BlockingChainSql,
-        PgBlockingPairRowQuery.DmvSnapshotSql,
+        PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql,
         DeadlocksSql,
         ServerConfigSql,
         MemoryStatsSql,
@@ -337,7 +368,9 @@ public sealed partial class PgFactCollector : IFactCollector
         TraceFlagsSql,
         ServerPropertiesSql,
         DiskSpaceSql,
-        PlanAdvisorySql
+        PlanAdvisorySql,
+        PgTempDbFileSetupReader.FilesSql,
+        PgTempDbFileSetupReader.SchedulerCountSql
     };
 
     // Single impl lives in PgBlockingPairRowQuery (shared with the pair-row reader);

@@ -464,7 +464,7 @@ public static class DarlingManagedRoles
         }
 
         ComposeStoreFacts facts;
-        await using (var connection = await dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken))
         {
             facts = await ReadComposeStoreFactsAsync(connection, cancellationToken);
         }
@@ -795,7 +795,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
         NpgsqlDataSource dataSource, string adminPassword, string viewerPassword, string mcpPassword, string webPassword,
         ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
     {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
 
         /* #5560: the two reads, the plan and the batch all run inside the provisioning lock's transaction, so a sibling
            service's batch cannot rewrite the same catalog rows at once and what this one planned from is read after
@@ -1016,7 +1016,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
 
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
             /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is
                rewriting. The wait is the serial-loop deadline, not the full provisioning wait, because this runs at
                the top of a sweep: a key something else is holding delays the reload by that wait, then the lines run
@@ -1601,7 +1601,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 --    ROLE (the trigger function is SECURITY INVOKER). So mcp ALSO needs UPDATE on JUST the two beacon columns of
 --    config_service, or every update_alert_settings write would fail 42501 in production -- and the superuser-run
 --    gated-live tests would never catch it (they connect as the owner). A COLUMN-level grant lets mcp bump the
---    reload beacon but NOT flip paused / mcp_enabled / mcp_port (the five flags update_service_flags writes, capture_plans among them, are a separate column grant below). The targets exist here because
+--    reload beacon but NOT flip paused / mcp_enabled / mcp_port (the flags update_service_flags writes, capture_plans among them, are a separate column grant below). The targets exist here because
 --    provisioning runs AFTER migration; a recreated table re-grants on the next start (self-heal).
 --    EVERY mcp-writable beacon-triggered table rests on that one grant, not the alert-settings path alone:
 --    config_mute_rules carries trg_bump_mute_rules (V117 / #3315) and config_monitored_servers carries
@@ -1615,10 +1615,10 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 -- #6230: pause_collection / resume_collection queue a pause or resume command through {config}.request_mcp_command, so mcp holds no
 --     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
 REVOKE UPDATE (paused) ON {config}.config_service FROM {mcp};
--- #6393: update_service_flags runs as mcp and sets exactly these five service flags (plan capture, Query Store backfill, text budget, max concurrent
---    sweeps, fetch top N): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
+-- #6393: update_service_flags runs as mcp and sets exactly these service flags (plan capture, Query Store backfill, text budget, max concurrent
+--    sweeps, fetch top N, and #8978 the two trigram text index options): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
 --    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
-GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON {config}.config_service TO {mcp};
+GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) ON {config}.config_service TO {mcp};
 -- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
 --    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
 --    Both tables are non-secret and server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). V181 (#5750)
@@ -2159,6 +2159,14 @@ GRANT SELECT ON {config}.investigation_request_askers TO {admin};
 REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
+-- 10e8. The planned change windows (V318, #9485): when a planned change touches which servers. The service opens requests as the owner and reads the windows to
+--       hold a request that opens inside one, so nothing else needs to write. Every role reads the windows (the web dashboard and the MCP read name them).
+--       REVOKE ALL ... CASCADE takes every privilege the default privileges gave, then SELECT goes back to all four. The declare and clear writes are a later grant.
+--       provision-roles.sql step 3j8 does the same.
+REVOKE ALL ON {config}.investigation_change_windows FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_change_windows TO {admin}, {viewer}, {web};
+GRANT SELECT ON {config}.investigation_change_windows TO {mcp};
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
@@ -2287,6 +2295,9 @@ END $do$;
 
 -- Managed web credentials have their own protected-table carve, after every blanket grant.
 {WebAccessGroupSchema.ReassertPermissionsSql}
+
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+{PersonalTokenSchema.ReassertPermissionsSql(config, admin, viewer, web, mcp)}
 ";
     }
 
@@ -2307,8 +2318,10 @@ END $do$;
     /// locked <c>FOR NO KEY UPDATE</c>, so the count and the insert are atomic for one source while the service's writes to
     /// the state table, whose foreign key takes only a key share on that row, are not held up by an open transaction.
     /// The rate window, <c>submitted_at</c> and <c>expires_at</c> read <c>clock_timestamp()</c>, the time of the call. A clear without a severity is stored as 'warning'; a fire needs one;</item>
-    /// <item>carriage returns and line feeds in the title, detail and server name become spaces, so a text cannot forge
-    /// lines in the mute pre-fill that quotes it.</item>
+    /// <item>carriage returns and line feeds in the title and server name become spaces, so a text cannot forge
+    /// lines in the mute pre-fill that quotes it; the detail keeps its line breaks, a carriage return or a carriage return
+    /// and line feed stored as one line feed (#9576). A store still holding the older body turns the detail's breaks into
+    /// spaces, and the drain copes with both.</item>
     /// </list>
     /// The caller never supplies the context JSON, the source, the expiry or the status: Darling builds those.
     /// </summary>
@@ -2389,7 +2402,7 @@ BEGIN
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
-       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '\r\n?', E'\n', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
        p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;
@@ -3094,7 +3107,7 @@ DECLARE
    v_row {config}.config_notification_routes%ROWTYPE;
    -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
    -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
-   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false);
+   v_operator boolean := COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -3246,7 +3259,7 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{{1,64}}$' THEN
+   IF p_actor IS NULL OR p_actor !~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$' THEN
       RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
@@ -3407,7 +3420,7 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false) THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -4370,21 +4383,26 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
     /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
     /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
-    /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
-    /// admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
+    /// who mapped or granted a person. So are the personal MCP token events (<see cref="PersonalTokenEvents.OwnerOnly"/>, #8737): only
+    /// <see cref="PersonalTokenStore"/>, on the owner connection, journals who made or revoked a token. So are an action proposal's events
+    /// (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
     /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
     /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
-    /// block an approver.</summary>
+    /// block an approver. So is <see cref="InvestigationEvents.ChangeWindowClosed"/> (#9485): the service journals the one summary row of a closed change
+    /// window itself, with no request, so another login could otherwise write a false close summary. It is not in <see cref="InvestigationEvents.Kinds"/>:
+    /// it is audit only and no long poll or signed POST delivers it.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
             .Concat(PersonEvents.OwnerOnly)
+            .Concat(PersonalTokenEvents.OwnerOnly)
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
             .Append(InvestigationRequestStore.SlackThreadPosted)
             .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
             .Append(InvestigationRequestStore.AgentMessage)
+            .Append(InvestigationEvents.ChangeWindowClosed)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
@@ -4533,7 +4551,7 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
 
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
 
             /* #5560: the check and the CREATE OR REPLACE run under the provisioning lock, like the provisioning batch.
                Two services on one self-managed store would otherwise both find the function stale and both replace
@@ -6089,6 +6107,10 @@ internal interface IUnixDirectoryModes
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
 
+    /// <summary>The account name for <see cref="EffectiveUserId"/> as the process sees it (#9793), or null when there is none
+    /// to give (no passwd entry for that id, a stand-in that does not model it).</summary>
+    string? EffectiveUserName => null;
+
     /// <summary>Whether this process can list <paramref name="directory"/> (#8141). When it cannot, a file in it reads as
     /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
     /// model it.</summary>
@@ -6116,6 +6138,8 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public string? EffectiveUserName => string.IsNullOrWhiteSpace(Environment.UserName) ? null : Environment.UserName;
 
     public bool CanList(string directory)
     {

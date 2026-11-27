@@ -75,7 +75,7 @@ public sealed class DeadlocksCollectorDefinitionTests
         var plan = DeadlocksCollector.Instance.BuildQuery(MakeContext());
 
         Assert.Contains("sys.dm_xe_session_targets", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.dm_xe_sessions AS xes", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.dm_xe_sessions AS xes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'PerformanceMonitor_Deadlock'", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
@@ -91,7 +91,7 @@ public sealed class DeadlocksCollectorDefinitionTests
         var plan = DeadlocksCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true));
 
         Assert.Contains("sys.dm_xe_database_session_targets", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'PerformanceMonitor_Deadlock'", plan.Text, StringComparison.Ordinal);
         /* Both Azure arms filter inside the XQuery: the ring buffer's events and the telemetry file's

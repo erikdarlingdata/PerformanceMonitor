@@ -24,7 +24,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// trimmed and never case-folded, because the SQL arm compares it with <c>=</c> and a database called
 /// <c> SalesDb</c> (leading space) is not <c>SalesDb</c>. A repeated name is kept once, in the order first seen.
 /// The MCP tools wrap their one <c>database_name</c> in <see cref="One"/>, the web route wraps its repeated keys
-/// in <see cref="Of"/>, and both reach the same SQL shape.</para>
+/// in <see cref="Of"/>, and both reach the same SQL shape. An MCP caller's name arrives here in its stored spelling:
+/// the host's call filter resolves it against the server's database list first (<c>McpDatabaseNameFilter</c>, #9065),
+/// so this type folds no case and the SQL keeps its <c>=</c>.</para>
 ///
 /// <para><b>One SQL shape.</b> A reader's statement carries <see cref="Clause"/> with one <c>$n</c>, and always
 /// binds <see cref="Parameter"/> at that index, so the statement text never changes with the selection: an

@@ -58,6 +58,10 @@ internal static class StatementFilterCensus
 
     private const string ProbeName = "ssf_census_probe";
 
+    /// <summary>The bearer token <see cref="BuildHostAsync"/> gates on (a request needs it only when asked to
+    /// <c>requireTokenWhenLoopbackOnly</c>).</summary>
+    public const string CensusToken = "ssf-census-token";
+
     private static readonly ConcurrentDictionary<string, (string Text, bool IsError)> s_payloads = new();
 
     /// <summary>The one test-only tool, registered ONLY on a census host (never in production's
@@ -99,7 +103,9 @@ internal static class StatementFilterCensus
     /// read on each call), for the test that pins the real wiring.</para>
     /// <para><paramref name="pseudonymKeys"/> (#6066) is the key source the host registers the way production does: through
     /// <c>DarlingMcpHostService.RegisterToolServices</c>'s own parameter, not a hand-written registration. Null registers none.</para></summary>
-    public static async Task<TestServer> BuildHostAsync(bool? gcf = false, IPseudonymKeySource? pseudonymKeys = null)
+    public static async Task<TestServer> BuildHostAsync(
+        bool? gcf = false, IPseudonymKeySource? pseudonymKeys = null, ReadLatencyAccumulator? readLatency = null,
+        DarlingMcpWritePolicy.Effective writes = default, bool requireTokenWhenLoopbackOnly = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -130,8 +136,8 @@ internal static class StatementFilterCensus
         }
 
         DarlingMcpHostService.ConfigureMcpServices(
-            builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null);
+            builder.Services, DarlingPeerDirectory.Snapshot.Empty, readLatency ?? new ReadLatencyAccumulator(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null, writes);
 
         // Chains onto the SAME builder ConfigureMcpServices created, so every real tool and every real filter stays.
         builder.Services.AddMcpServer().WithTools<ProbeTools>().WithTools<ThrowProbeTools>();
@@ -143,7 +149,8 @@ internal static class StatementFilterCensus
             new MonitoredServerRegistryState());
         host.ConfigurePipeline(
             app, networkMode: false, networkListenIp: null,
-            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), bearerToken: "ssf-census-token");
+            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), bearerToken: CensusToken,
+            requireTokenWhenLoopbackOnly: requireTokenWhenLoopbackOnly);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -162,7 +169,7 @@ internal static class StatementFilterCensus
     /// <see cref="CallRealToolAsync"/>'s <c>bearerToken</c>. Dispose it with the test.
     /// </summary>
     public static async Task<TestServer> BuildLiveHostAsync(
-        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken)
+        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken, bool allowWrites = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -180,9 +187,11 @@ internal static class StatementFilterCensus
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         var writes = DarlingMcpWritePolicy.ResolveForStart(
-            new McpConfig { AllowInvestigations = true, AllowWrites = false }, bearerToken, out var tokenProblem);
+            new McpConfig { AllowInvestigations = !allowWrites, AllowWrites = allowWrites }, bearerToken, out var tokenProblem);
         Assert.Null(tokenProblem);
-        Assert.True(writes.Investigations && !writes.Writes && !writes.ServerAdmin, "The live host must serve the investigation arm only.");
+        Assert.True(
+            writes.Writes == allowWrites && writes.Investigations == !allowWrites && !writes.ServerAdmin,
+            "The live host must serve one arm only: the write tools when asked for them, else the investigation tools.");
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),
@@ -221,7 +230,7 @@ internal static class StatementFilterCensus
     /// serves for this call (#5632), set back to <c>full</c> afterwards; one host serves one call at a time here.</summary>
     public static async Task<(string Text, bool IsError)> FilterThroughHostAsync(
         TestServer server, string rawToolText, bool isError = false, string path = "/",
-        McpDataDetail dataDetail = McpDataDetail.Full, string? bearerToken = null)
+        McpDataDetail dataDetail = McpDataDetail.Full, string? bearerToken = null, bool viaCallTool = false)
     {
         string key = Guid.NewGuid().ToString("N");
         s_payloads[key] = (rawToolText, isError);
@@ -229,7 +238,11 @@ internal static class StatementFilterCensus
         setting.Mode = dataDetail;
         try
         {
-            return await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path, bearerToken);
+            /* #9388: through call_tool on /lean, which has to run the probe through the same filters as a direct call. */
+            return viaCallTool
+                ? await CallRealToolAsync(
+                    server, "call_tool", new JsonObject { ["name"] = ProbeName, ["arguments"] = new JsonObject { ["key"] = key } }, "/lean", bearerToken)
+                : await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path, bearerToken);
         }
         finally
         {
@@ -262,6 +275,15 @@ internal static class StatementFilterCensus
         bool isError = result.TryGetProperty("isError", out var flag) && flag.ValueKind == JsonValueKind.True;
         string text = result.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
         return (text, isError);
+    }
+
+    /// <summary>The tools <c>tools/list</c> advertises on <paramref name="path"/>, each with the input schema it serves.</summary>
+    public static async Task<IReadOnlyList<(string Name, JsonElement InputSchema)>> ListToolSchemasAsync(
+        TestServer server, string path = "/", string? bearerToken = null)
+    {
+        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", bearerToken);
+        return doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Select(t => (t.GetProperty("name").GetString()!, t.GetProperty("inputSchema").Clone())).ToList();
     }
 
     /// <summary>The names <c>tools/list</c> advertises on <paramref name="path"/>.</summary>

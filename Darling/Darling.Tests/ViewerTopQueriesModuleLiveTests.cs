@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,7 +29,8 @@ namespace Darling.Tests;
 /// 'ad hoc'), and (2) the handle groups the module lookup keeps are the ranked handles' only, read from the plan's own row counts (#8549: the lookup is a hash
 /// aggregate now, not a sort, so the count is the aggregate's groups).</para>
 /// </summary>
-[Collection("live-postgres")]
+/* #1776 own-store: the role test creates and revokes a login role, which a shared store's other tests must not see, so every test here
+   boots its own database through ScratchPostgres and is left out of [Collection("live-postgres")] deliberately. */
 public sealed class ViewerTopQueriesModuleLiveTests
 {
     private const int ServerId = -970840;
@@ -44,16 +46,15 @@ public sealed class ViewerTopQueriesModuleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Top Queries module test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(cs);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection, ct);
-        await CleanupAsync(connection, ct);
 
         /* #5608: the window ends at the anchored point and spans four hours, so it sits inside one raw chunk at any hour the test runs. */
         var end = LiveClock.AnchoredEnd();
         var start = end.AddHours(-4);
-        var succeeded = false;
-        try
+
         {
             /* Two ranked queries. 0xOLD's module row was collected three days BEFORE the window; 0xNEW's two rows are inside it
                (the newer name must win); 0xLOOSE matches no module at all. */
@@ -77,7 +78,7 @@ public sealed class ViewerTopQueriesModuleLiveTests
                 new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start.AddHours(-48) }, new NpgsqlParameter { Value = ServerId }, new NpgsqlParameter { Value = ServerName });
 
             /* The answer, through the Viewer's own read. */
-            await using var viewer = new ViewerDataService(cs!);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
             var rows = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end);
             Assert.Equal("db.dbo.usp_Old", rows.Single(r => r.QueryHash == "0xQOLD").ModuleName);     /* older than the window, still named */
             Assert.Equal("db.dbo.usp_NewAfter", rows.Single(r => r.QueryHash == "0xQNEW").ModuleName); /* the newest row wins, no fan-out */
@@ -96,12 +97,84 @@ public sealed class ViewerTopQueriesModuleLiveTests
             using var document = JsonDocument.Parse(json);
             var groups = GroupsKeptFromProcedureStats(document.RootElement[0].GetProperty("Plan"));
             Assert.True(groups is > 0 and <= 3, $"the module lookup kept {groups} handle groups; it should keep only the ranked handles' (at most 3), not the server's {UnrelatedHandles + 2}: {json}");
+        }
+    }
 
-            succeeded = true;
+    /// <summary>
+    /// #8549: the Past day read as a login that can read the collected tables but has no SELECT on the owner-only schema version table. The
+    /// lookup must not name that table: PostgreSQL checks table permissions when a statement starts, for every table it names, even in a branch
+    /// that never runs. The answer is the same as for the owner, with and without a host-named row in the hour before the window.
+    /// </summary>
+    [Fact]
+    public async Task ModuleLookup_RunsForALoginThatCannotReadTheSchemaVersionTable()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Top Queries module test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        string? login = null;
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(owner, ct);
+
+            var end = LiveClock.AnchoredEnd();
+            var start = end.AddHours(-4);
+            await InsertQueryAsync(owner, ct, start.AddHours(1), "0xQOLD", "0xHOLD", elapsed: 900_000);
+            await InsertQueryAsync(owner, ct, start.AddHours(1), "0xQLOOSE", "0xHLOOSE", elapsed: 700_000);
+            await InsertProcedureAsync(owner, ct, start.AddDays(-3), "usp_Old", "0xHOLD");
+
+            var role = "module_role_" + Guid.NewGuid().ToString("N")[..8];
+            login = role;
+            var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+            await ExecAsync(owner, ct, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'");
+            await ExecAsync(owner, ct, $"GRANT USAGE ON SCHEMA collect, config TO {role}");
+            await ExecAsync(owner, ct, $"GRANT SELECT ON ALL TABLES IN SCHEMA collect, config TO {role}");
+            await ExecAsync(owner, ct, $"REVOKE ALL ON darling_schema_version FROM {role}");
+
+            var roleConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = role,
+                Password = password,
+                SearchPath = PerformanceMonitor.Darling.Storage.PgSchemaGenerator.SearchPath,
+            }.ConnectionString;
+
+            /* The login really cannot read the table: without this the test would pass for a role that could. */
+            await using (var probe = new NpgsqlConnection(roleConnectionString))
+            {
+                await probe.OpenAsync(ct);
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(probe, ct, "SELECT 1 FROM darling_schema_version LIMIT 1"));
+                Assert.Equal("42501", refused.SqlState);
+            }
+
+            await using var viewer = new ViewerDataService(roleConnectionString);
+            var rows = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end);
+            Assert.Equal("db.dbo.usp_Old", rows.Single(r => r.QueryHash == "0xQOLD").ModuleName);
+            Assert.Equal("ad hoc", rows.Single(r => r.QueryHash == "0xQLOOSE").ModuleName);
+
+            /* A host-named row in the hour before the window: the lookup reads nothing, and a host-named group shows its host. */
+            await ExecAsync(owner, ct, "UPDATE query_stats SET host_object_name = 'dbo.usp_Host' WHERE query_hash = '0xQOLD'");
+            await InsertQueryAsync(owner, ct, start.AddMinutes(-30), "0xQBEFORE", "0xHBEFORE", elapsed: 1_000);
+            await ExecAsync(owner, ct, "UPDATE query_stats SET host_object_name = 'dbo.usp_Before' WHERE query_hash = '0xQBEFORE'");
+            var withProof = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end);
+            Assert.Equal("db.dbo.usp_Host", withProof.Single(r => r.QueryHash == "0xQOLD").ModuleName);
+            Assert.Equal("ad hoc", withProof.Single(r => r.QueryHash == "0xQLOOSE").ModuleName);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, succeeded, (cleanup, cleanupCt) => CleanupAsync(cleanup, cleanupCt));
+            var loginToDrop = login;
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                if (loginToDrop is not null)
+                {
+                    await ExecAsync(cleanup, cleanupCt, $"DROP OWNED BY {loginToDrop}; DROP ROLE IF EXISTS {loginToDrop}");
+                }
+            });
         }
     }
 
@@ -140,9 +213,6 @@ public sealed class ViewerTopQueriesModuleLiveTests
 
         return found.Max();
     }
-
-    private static Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct) =>
-        ExecAsync(connection, ct, $"DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM procedure_stats WHERE server_id = {ServerId}");
 
     private static async Task ExecAsync(NpgsqlConnection connection, CancellationToken ct, string sql, params NpgsqlParameter[] parameters)
     {

@@ -318,7 +318,7 @@ placed AS
         WHERE server_id = $1
         AND   interval_start_time_utc >= $2
         AND   interval_start_time_utc >= $4
-        AND   interval_start_time_utc <= $3
+        AND   interval_start_time_utc < $3
         /* Tail-tight chunk exclusion — the #2736 fix. See the builder remarks for both margins. */
         AND   collection_time >= GREATEST($2, $4) - interval '1 hour'
         AND   collection_time <= $3 + interval '1 day'
@@ -342,7 +342,7 @@ placed AS
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time >= $4
-    AND   collection_time <= $3
+    AND   collection_time < $3
     AND   interval_start_time_utc IS NULL{legacyFilter}
 ),
 raw_points AS

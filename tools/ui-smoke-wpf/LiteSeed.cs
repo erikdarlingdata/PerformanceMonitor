@@ -28,6 +28,9 @@ internal static class LiteSeed
 {
     public const string ServerName = TestDataSeeder.TestServerName;
 
+    /// <summary>A second server with collection off (#9085): the sidebar dot and the Overview card must say Disabled for it, not a live status.</summary>
+    public const string DisabledServerName = "Paused-Reporting-Box";
+
     /// <summary>%LOCALAPPDATA%\PerformanceMonitorLite-Data, the folder App.xaml.cs resolves (DataRootMigration.DataRootName).</summary>
     public static string DataRoot { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PerformanceMonitorLite-Data");
@@ -59,6 +62,20 @@ internal static class LiteSeed
 
             // Query stats (three plans); its own clear of -999 now finds nothing of the first pass.
             await seeder.SeedParameterSensitiveServerAsync();
+            await RekeyAsync(duck);
+
+            /* #8881: the "on fire" scenario's tempdb rows carry no log columns. Replace them with rows whose log is 92 percent used and held
+               by a named session, so the tempdb chart draws the Log Used line and the card says who holds it. */
+            using (var clearTempDb = duck.CreateConnection())
+            {
+                await clearTempDb.OpenAsync();
+                using var del = clearTempDb.CreateCommand();
+                del.CommandText = $"DELETE FROM tempdb_stats WHERE server_id = {ServerId}";
+                await del.ExecuteNonQueryAsync();
+            }
+            await seeder.SeedTempDbAsync(reservedMb: 9_000, unallocatedMb: 1_000, maxSizeMb: 20_000, logUsedPercent: 92,
+                logHoldup: "ACTIVE_TRANSACTION", holderSessionId: 57, holderLogin: "report_runner", holderProgram: "Nightly Reports",
+                holderOpenMinutes: 95, holderLogBytesUsed: 4_500_000_000);
             await RekeyAsync(duck);
 
             using var conn = duck.CreateConnection();
@@ -102,7 +119,18 @@ internal static class LiteSeed
             ["TrustServerCertificate"] = true,
             ["IsEnabled"] = true,
         };
-        File.WriteAllText(Path.Combine(config, "servers.json"), JsonSerializer.Serialize(new Dictionary<string, object?> { ["Servers"] = new[] { server } }));
+        /* #9085: collection off. It has no rows in the store: the card and the dot must still say Disabled and show no live status. */
+        var disabled = new Dictionary<string, object?>
+        {
+            ["Id"] = Guid.NewGuid().ToString(),
+            ["ServerName"] = DisabledServerName,
+            ["DisplayName"] = DisabledServerName,
+            ["AuthenticationType"] = "Windows",
+            ["EncryptMode"] = "Optional",
+            ["TrustServerCertificate"] = true,
+            ["IsEnabled"] = false,
+        };
+        File.WriteAllText(Path.Combine(config, "servers.json"), JsonSerializer.Serialize(new Dictionary<string, object?> { ["Servers"] = new[] { server, disabled } }));
         File.WriteAllText(Path.Combine(config, "settings.json"), "{ \"default_time_range\": \"2d\" }");
     }
 

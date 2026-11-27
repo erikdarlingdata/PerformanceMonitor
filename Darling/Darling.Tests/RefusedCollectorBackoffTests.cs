@@ -8,6 +8,7 @@
 
 using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -222,5 +223,117 @@ public sealed class RefusedCollectorBackoffTests
             latestRunNote: null, trailingSuccessRuns: 0);
 
         Assert.Equal(CollectorHealthClassifier.NoPermissions, band);
+    }
+
+    /* #8891: a collector whose statement times out on every run held up the collectors after it in the same pass for its whole
+       timeout, every interval. It now backs off the same way a repeated refusal does. */
+
+    private static (DarlingWorker Worker, DarlingWorker.ServerLoopState Server, int[] Runs, bool[] TimesOut, DailyRunLogger Log) TimeoutRig(int serverId)
+    {
+        var log = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(log);
+        var server = DailyRunKit.MakeServer(serverId, Collector);
+        var runs = new int[1];
+        var timesOut = new[] { true };
+        worker.RunOneBodyOverride = (_, _, collector, _) =>
+        {
+            if (collector == Collector)
+            {
+                runs[0]++;
+            }
+
+            return Task.FromResult(1);
+        };
+        /* The real timeout message carries the run's elapsed time, so no two runs read the same. */
+        worker.RunOneTimeoutOverride = collector =>
+            collector == Collector && timesOut[0] ? $"Execution Timeout Expired after {30_000 + runs[0]} ms." : null;
+        return (worker, server, runs, timesOut, log);
+    }
+
+    [Fact]
+    public async Task ACollectorTimingOutRunAfterRun_RunsLessOften_AndARunThatDoesNotTimeOutRestoresTheInterval()
+    {
+        var (worker, server, runs, timesOut, log) = TimeoutRig(7604);
+        const int passes = 12;
+
+        for (var pass = 0; pass < passes; pass++)
+        {
+            await PassAsync(worker, server);
+        }
+
+        /* A different message on every run still builds the streak: the timeout is recorded under one fixed answer. */
+        Assert.Equal(RefusedCollectorBackoff.FreeRefusals + 1, runs[0]);
+        Assert.Equal(RefusedCollectorBackoff.FreeRefusals + 1, server.RefusedBackoff.Streak(Collector));
+        Assert.Single(log.Snapshot(), entry => entry.Level == LogLevel.Information && entry.Message.Contains("timed out", StringComparison.Ordinal) && entry.Message.Contains("#8891", StringComparison.Ordinal));
+
+        /* The wait passes: it is tried again, once, and waits again for longer. */
+        server.RefusedBackoff.SetNotBeforeForTests(Collector, DateTime.UtcNow.AddSeconds(-1));
+        await PassAsync(worker, server);
+        await PassAsync(worker, server);
+        Assert.Equal(RefusedCollectorBackoff.FreeRefusals + 2, runs[0]);
+
+        /* The next try completes: every pass after it runs the collector again. */
+        server.RefusedBackoff.SetNotBeforeForTests(Collector, DateTime.UtcNow.AddSeconds(-1));
+        timesOut[0] = false;
+        await PassAsync(worker, server);
+        Assert.Equal(0, server.RefusedBackoff.Streak(Collector));
+
+        var before = runs[0];
+        for (var pass = 0; pass < 4; pass++)
+        {
+            await PassAsync(worker, server);
+        }
+
+        Assert.Equal(before + 4, runs[0]);
+    }
+
+    [Fact]
+    public async Task ATimeoutAfterARefusalStreak_StartsItsOwnStreak_AtTheNormalInterval()
+    {
+        var (worker, server, runs, answer) = Rig(7605);
+        for (var pass = 0; pass < 8; pass++)
+        {
+            await PassAsync(worker, server);
+        }
+
+        Assert.Equal(RefusedCollectorBackoff.FreeRefusals + 1, runs[0]);
+
+        /* The grant arrives and the read now runs out of time instead: a different failure, so the streak starts over. */
+        answer[0] = null;
+        worker.RunOneTimeoutOverride = collector => collector == Collector ? "Execution Timeout Expired." : null;
+        server.RefusedBackoff.SetNotBeforeForTests(Collector, DateTime.UtcNow.AddSeconds(-1));
+        await PassAsync(worker, server);
+        Assert.Equal(1, server.RefusedBackoff.Streak(Collector));
+
+        var before = runs[0];
+        await PassAsync(worker, server);
+        Assert.Equal(before + 1, runs[0]);
+    }
+
+    [Fact]
+    public void OnlyACommandTimeoutOnAConnectionThatStays_CountsAsATimeoutForTheBackoff()
+    {
+        var timeout = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(-2, 11, "Execution Timeout Expired.");
+        Assert.True(DarlingWorker.IsBackoffTimeout(timeout, dropped: false));
+
+        /* A dropped connection means a fresh login failed too: the server, not this collector's statement. */
+        Assert.False(DarlingWorker.IsBackoffTimeout(timeout, dropped: true));
+
+        Assert.False(DarlingWorker.IsBackoffTimeout(
+            LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(1205, 13, "Chosen as the deadlock victim."), dropped: false));
+        Assert.False(DarlingWorker.IsBackoffTimeout(new TimeoutException("Not a server command timeout."), dropped: false));
+    }
+
+    [Fact]
+    public void ACollectorTimingOutForHours_BandsAsFailing_NotStopped()
+    {
+        /* A day of an hourly timeout: 24 runs, every one an ERROR, the newest under an hour old. The backoff thins the runs
+           but never stops them, so the band names the failure rather than a collector that quit. */
+        var band = CollectorHealthClassifier.Classify(
+            totalRuns: 24, successCount: 0, errorCount: 24, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 0, hoursSinceLastSuccess: 999, hoursSinceLastRun: 0.9, frequencyMinutes: 1,
+            latestRunNote: null, trailingSuccessRuns: 0);
+
+        Assert.Equal(CollectorHealthClassifier.Failing, band);
     }
 }

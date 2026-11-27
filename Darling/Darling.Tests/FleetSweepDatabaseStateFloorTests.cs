@@ -73,11 +73,11 @@ public sealed class FleetSweepDatabaseStateFloorTests
     public void ADatabaseStateAndAnIdentityLimit_NameBothInTheReason()
     {
         var states = States(("Sales", "RECOVERY_PENDING"));
-        var identity = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
+        var identity = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 1, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
         var verdict = Compose(Reading(1, "both", 0, states, identity)).Verdicts.Single();
 
         Assert.Equal("Critical", verdict.Band);
-        Assert.Contains("Identity capacity critical", verdict.BandReason);
+        Assert.Contains("Identity capacity critical (1 column at its limit)", verdict.BandReason);
         Assert.Contains(states.Reason, verdict.BandReason);
     }
 

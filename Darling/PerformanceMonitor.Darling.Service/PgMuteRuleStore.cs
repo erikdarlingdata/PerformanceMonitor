@@ -49,7 +49,7 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
     }
 
     private Task<PgStoreScope> OpenAsync(CancellationToken cancellationToken = default) =>
-        PgStoreScope.OpenAsync(_postgres, _connection, _transaction, transactional: false, cancellationToken);
+        PgStoreScope.OpenAsync(_postgres, _connection, _transaction, transactional: false, applicationName: StoreSessionNames.MuteRules, cancellationToken: cancellationToken);
 
     /// <summary>
     /// Every persisted rule, newest first. A store fault propagates: the one caller that caches these rows

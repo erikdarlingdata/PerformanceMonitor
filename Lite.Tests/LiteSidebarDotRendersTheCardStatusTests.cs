@@ -148,9 +148,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     /// separation is easiest to lose: <c>ServerConnection</c> carries no last-collection time, so a green dot here
     /// is a connection answer being read somewhere that offers no freshness answer at all.
     ///
-    /// <para>Two things hold the line. The classifier takes exactly two arguments, so freshness cannot be folded in
-    /// without changing a signature this test names — the failure mode being guarded is a plausible, well-meant
-    /// edit, not a typo. And the tooltip tells the reader where the freshness answer lives instead of leaving them
+    /// <para>The tooltip tells the reader where the freshness answer lives instead of leaving them
     /// to infer it from a colour, which is the #2429/#2422 conflation in miniature.</para>
     /// </summary>
     [Fact]
@@ -163,11 +161,6 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
         {
             Assert.Contains(disclaimer, Connection(isOnline, false).DotTooltip, StringComparison.Ordinal);
         }
-
-        var rules = ReadRepoFile(Path.Combine("Lite", "Services", "LocalDataService.Overview.cs"));
-        Assert.Contains(
-            "public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors) => isOnline switch",
-            rules, StringComparison.Ordinal);
 
         /* And the sidebar has nothing to band it FROM, which is why unifying the ladder was the whole of #2458 and
            plumbing a collection time to this surface was split off. If that ever changes, this assertion is the

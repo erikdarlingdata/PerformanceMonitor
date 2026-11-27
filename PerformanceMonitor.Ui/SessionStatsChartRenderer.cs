@@ -31,14 +31,15 @@ internal sealed class SessionStatsChartRenderer
 {
     /// <summary>One chart series: its legend label, its shared-palette color key, and the accessor that pulls its
     /// status count out of an <see cref="ISessionStatsPoint"/>. Pure data so the mapping is unit-testable without
-    /// a WpfPlot; the render loop and the parity pins share this single source of truth.</summary>
-    internal readonly record struct SessionSeriesSpec(string Legend, string PaletteKey, Func<ISessionStatsPoint, double> Value);
+    /// a WpfPlot; the render loop and the parity pins share this single source of truth. <paramref name="OnTop"/> marks the
+    /// series drawn last, over the others, with its own style (see <see cref="DrawOrder"/>).</summary>
+    internal readonly record struct SessionSeriesSpec(string Legend, string PaletteKey, Func<ISessionStatsPoint, double> Value, bool OnTop = false);
 
     /// <summary>The seven session-status series in the Dashboard's order (Total first, then the status
     /// breakdown), each pinned to the shared <c>Session*</c> palette key the Dashboard chart uses.</summary>
     internal static IReadOnlyList<SessionSeriesSpec> SessionSeriesSpecs { get; } = new[]
     {
-        new SessionSeriesSpec("Total", "SessionTotal", p => p.TotalSessions),
+        new SessionSeriesSpec("Total", "SessionTotal", p => p.TotalSessions, OnTop: true),
         new SessionSeriesSpec("Running", "SessionRunning", p => p.RunningSessions),
         new SessionSeriesSpec("Sleeping", "SessionSleeping", p => p.SleepingSessions),
         new SessionSeriesSpec("Background", "SessionBackground", p => p.BackgroundSessions),
@@ -46,6 +47,25 @@ internal sealed class SessionStatsChartRenderer
         new SessionSeriesSpec("Idle >30m", "SessionIdle", p => p.IdleSessionsOver30Min),
         new SessionSeriesSpec("Waiting for Memory", "SessionWaiting", p => p.SessionsWaitingForMemory),
     };
+
+    /// <summary>The order the series are drawn in: the status series first, then Total over them (#8937). Total counts every session
+    /// (<c>COUNT(*)</c> over <c>sys.dm_exec_sessions</c>, background included), and Background is not an extra status: a background
+    /// session is also running or sleeping. So on a server with no dormant sessions Total is within a few sessions of Running plus
+    /// Sleeping, and drawn first it sat under the Sleeping line and read as missing.</summary>
+    internal static IReadOnlyList<SessionSeriesSpec> DrawOrder { get; } =
+        SessionSeriesSpecs.Where(spec => !spec.OnTop).Concat(SessionSeriesSpecs.Where(spec => spec.OnTop)).ToArray();
+
+    /// <summary>Total's own look, so it stays visible where a status line runs close beside it: a wider dashed line, no gradient fill
+    /// (a fill drawn last would wash over the series under it), and no markers.</summary>
+    internal static void StyleOnTop(ScottPlot.Plottables.Scatter plot)
+    {
+        plot.FillY = false;
+        plot.ColorPositions.Clear();
+        plot.LineWidth = 3;
+        plot.LinePattern = ScottPlot.LinePattern.Dashed;
+        plot.LineColor = plot.LineColor.WithAlpha(255);
+        plot.MarkerSize = 0;
+    }
 
     private readonly ChartRenderHelper _chartHelper;
     private readonly Func<DateTime, DateTime> _project;
@@ -90,7 +110,7 @@ internal sealed class SessionStatsChartRenderer
         {
             var times = ordered.Select(d => PlotX(d.CollectionTime)).ToArray();
 
-            foreach (var spec in SessionSeriesSpecs)
+            foreach (var spec in DrawOrder)
             {
                 var values = ordered.Select(spec.Value).ToArray();
 
@@ -105,6 +125,11 @@ internal sealed class SessionStatsChartRenderer
                 plot.LegendText = spec.Legend;
                 plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor(spec.PaletteKey));
                 ChartStyle.StyleScatter(plot);
+                if (spec.OnTop)
+                {
+                    StyleOnTop(plot);
+                }
+
                 hover?.Add(plot, spec.Legend);
 
                 globalMax = Math.Max(globalMax, values.Max());

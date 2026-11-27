@@ -9,7 +9,7 @@ tools (the chart README lists which keys are seeds).
 
 WARNING: generated values are in use:
 {{- if not .Values.secrets.existingSecret }}
-- the web and MCP tokens in the Secret {{ include "performancemonitor-darling.secretName" . }}
+- the web, MCP and metrics tokens in the Secret {{ include "performancemonitor-darling.secretName" . }}
 {{- end }}
 {{- if include "performancemonitor-darling.storePasswordGenerated" . }}
 - the bundled store's password in the Secret {{ include "performancemonitor-darling.storeSecretName" . }}
@@ -22,6 +22,14 @@ create the Secrets yourself and set secrets.existingSecret and store.bundled.aut
 
 Read the web token (it is never printed here; the key is {{ .Values.secrets.webTokenKey }}):
   kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.webTokenKey }}}' | base64 -d
+{{- end }}
+{{- if .Values.metrics.enabled }}
+
+Prometheus scrapes the metrics Service {{ include "performancemonitor-darling.surfaceName" (dict "ctx" . "surface" "metrics") }} on port {{ .Values.metrics.port }} (path /metrics) with a bearer token. Read it (the key is {{ .Values.secrets.metricsTokenKey }}):
+  kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.metricsTokenKey }}}' | base64 -d
+{{- if .Values.secrets.existingSecret }}
+The Secret {{ .Values.secrets.existingSecret }} must hold {{ .Values.secrets.metricsTokenKey }}.
+{{- end }}
 {{- end }}
 {{- if eq (toString (default .Chart.AppVersion .Values.image.tag)) "latest" }}
 

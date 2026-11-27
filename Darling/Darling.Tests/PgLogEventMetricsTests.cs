@@ -477,17 +477,9 @@ public sealed class PgLogEventMetricsRungTests
     };
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("pg-log-event-metrics", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* One below the top since V131 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to NotificationRoutesRungTests with the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V130 is expected to sit below the ladder's top now that V131 has landed");
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>Thirteen nullable, default-less ADD COLUMN IF NOT EXISTS on the one table, schema-qualified; no index, no backfill, no view; and the V101 pairing with V129's CREATE, column for column and type for type.</summary>
@@ -544,7 +536,9 @@ public sealed class PgLogEventMetricsRungTests
         Assert.Equal(72, TimescaleSupport.HypertableCount);
         Assert.Equal(29, CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql));
         Assert.Equal(30, CollectorScheduleDefaults.All["pg_log_events"].RetentionDays);
-        Assert.Contains("thirty-five are the PostgreSQL reads", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs"), StringComparison.Ordinal);
+        Assert.Contains(
+            $"{DarlingMcpInstructions.RegisteredToolNames().Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal))} are the PostgreSQL reads",
+            DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     [Fact]

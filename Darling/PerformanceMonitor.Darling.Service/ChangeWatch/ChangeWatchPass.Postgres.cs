@@ -70,6 +70,21 @@ WHERE rn > 1 AND collection_time > $4 AND installed_version IS DISTINCT FROM pre
                 continue;
             }
 
+            /* #9500: a serverless target's platform resizes shared_buffers with its capacity and no restart. The config read
+               keeps the row, labelled; a change nobody made is not something to open a request over. */
+            if (row.PlatformResized)
+            {
+                continue;
+            }
+
+            /* #9500: an undecided row has no pg_write_stats row after the change yet, so the start time cannot say whether the server
+               restarted. The next detect's mark sits MarkSlack before this detect's end, so a row later than that is read again, when
+               its after row exists. An older undecided row is recorded: a request nobody needed costs less than a lost edit. */
+            if (row.PlatformResizeUndecided && time > Naive(end - MarkSlack))
+            {
+                continue;
+            }
+
             if (!scoped)
             {
                 changes.Add(new ChangeWatchChange($"pg_config:{row.Name}:{Stamp(time)}", "pg_config", Utc(time),

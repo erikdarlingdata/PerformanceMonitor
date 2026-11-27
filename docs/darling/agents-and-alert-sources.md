@@ -19,6 +19,31 @@ At Level 1 an agent reads and reports. At Level 2 it can change alert settings o
 
    **Tell Darling whether a report was right (#5913).** Open a reported request and say whether its report was right, partly right or wrong, what it should have said (`real`, `false_positive` or `needs_person`), the step the agent missed, and a comment. Do it in the viewer's Investigations window, on the **Report Feedback** tab, or on the web Admin page's **Report Feedback** tab. Each person has one feedback per report; saving again replaces it, and the author is the login you are signed in as. Feedback is recorded only under the admin login: the viewer needs `postgres.connectAs` set to `"admin"`, and on a store where the web connects as the `web` role, which cannot write feedback (managed and compose stores) the web tab lists feedback with no form, says so, and feedback is given in the viewer instead (the web asks the store whether its login may write, so an admin sign-in on such a store gets no form either). Feedback feeds two things. `get_investigation_reports` returns each report's feedback next to it, and, for a time window, a count per alert family of how many investigations ended as false positives, once as the agent reported them and once after people's corrections (a correction can raise or lower the count). The settled verdict of a request is the corrected verdict of the newest feedback that gave one; a later feedback that gives no corrected verdict does not displace an earlier one that did. The same counts are at the top of both Report Feedback tabs, each stating its window: the viewer's tab defaults to the requests opened in the last 30 days (a 7, 30 or 90 day picker), the web tab to the last 7 days; both list the newest 200 reports, and the counts cover every reported request in the window, not only the listed ones.
 
+## Planned change windows (#9485)
+
+A planned change that touches many servers can open one investigation request on each server it touches. A change window tells Darling that the work is planned, so those requests are held for one review instead of being worked as separate incidents.
+
+A person or an agent declares a window with `declare_change_window`. The call names the servers (one name, a list of names, or `all`), a start, an end and a reason. A start in the future is allowed, so declare the window before the work. A window lasts at most 7 days, and its end must not be in the past. A name that you give twice counts once. One window can name at most 200 different servers: for more, use `all`.
+
+What a window holds:
+
+- A request that opens after the start, and up to 30 minutes after the end, is created held. The 30 minutes after the end are the tail. The tail covers a re-capture or a settle period that runs past the end of the work.
+- Alert requests and Change Watch requests are held.
+- A held request stays in `list_investigation_requests`, and an agent can still claim it. It does not wake `wait_for_investigation_requests`, and it does not count toward the route's hourly and daily limits. Once an agent claims a held request, the request counts toward those limits, because a claim ignores the hold.
+- The held request carries the window id and the reason.
+
+What a window never holds:
+
+- A request that opens after the tail. The tail is fixed at 30 minutes and is not longer, because a change can cause a real problem well after the work ends. A longer tail would hide that problem.
+- A chat request, a force check and a practice request. A person asks for these on purpose.
+- Pages and alert history. Alerts page and are logged as usual.
+
+`clear_change_window` ends a window early. A request that opens after the clear is not held. Clearing also releases, at once, every request that the window still holds. Each released request gets a `hold_released` event, so the request runner and `wait_for_investigation_requests` see it. Clearing a window that is already cleared, or whose tail has ended, answers that fact and is not an error. When the tail ends, Darling records one journal event that counts the held requests by family and by server. Read it with `get_change_windows`, which also lists the held requests of one window.
+
+An agent token can declare and clear windows when `mcp.allowAgentMuteRules` is on. The limits are the same as for an agent's mute rules. Each text field, the reason included, is at most 256 characters. An agent's `starts_at` can be at most 7 days from now, so nothing an agent declares holds requests for more than 14 days. An operator's start is not limited. An agent can make 20 direct writes an hour, and the change window tools share that count with the mute rule tools. An agent can clear only a window that it declared. An operator can clear any window. Both tools write a row to the Agent changes list. That row has no Undo button, because `clear_change_window` is the undo of a declare, and a new declare brings back a cleared window.
+
+A change window is not a quiet window. `set_quiet_window` is a mute rule: it holds pages as well. A change window holds only the investigation hand-off, and it records what it held.
+
 ## Practice requests: how an agent does on cases you already judged (#5918)
 
 Before you trust an agent with Level 2, watch it work cases you have already judged. A practice request replays a reported case that has feedback (see "Tell Darling whether a report was right" above) and scores the agent's report against that feedback.
@@ -65,7 +90,25 @@ PerformanceMonitor.Darling.Service.exe --remove-alert-source orders
 
 The source then sends an alert with one statement, for example `SELECT config.submit_external_alert('fire', 'disk-full', 'warning', 'Disk almost full', '93 percent used', 'web01', 93.5);`. The first argument is `fire` or `clear`, the second is a key of your choosing that pairs a clear with its fire, and the third is `warning` or `critical`.
 
+The detail, the fifth argument, can hold several lines, such as a report with one section per line. Darling keeps the line breaks, and Slack, Teams and email show them as lines. The spaces inside a line stay, and each channel shows them its own way. Email keeps a line's leading spaces and runs of spaces, so an indented or aligned report keeps its shape there. Teams reads the detail as markdown, so Darling sends each line there without its leading spaces, and Teams shows each run of spaces inside a line as one. Send a table to Teams as one line per row with a separator such as ` | `. Darling keeps at most 50 lines and 2,000 characters. When it cuts lines, the last line is `...`. It turns a run of blank lines into one blank line, and it turns a tab or any other control character into a space. The title and the server name always stay on one line.
+
+A store whose roles script is older than this change turns the breaks in a detail into spaces. A managed store takes the new script at its next service start. For a bring-your-own store, run `tools/provision-roles.sql` again.
+
+A second alert on the same key is not always sent. The delivery cooldown (`email_cooldown_minutes` in `config_notification`) also applies to a source's alert that fires again after a clear on the same key. The cooldown stays in force after a clear. If the second alert comes inside the cooldown, Darling holds it back and it never reaches a channel. This is by design.
+
+On Windows, a source that gives its text to `psql` through environment variables cannot send text with non-ASCII characters. `psql` reads that text in the ANSI code page and fails with `invalid multibyte character`. The problem is in the client and not in Darling. Send ASCII text from such a source, or use a client that reads UTF-8.
+
 The host in the printed string is the address this service uses for its store. If the store's owner cannot create logins (a bring-your-own store whose owner lacks CREATEROLE), the verb changes the registry and prints the statements a database administrator runs to make, re-key or drop the login. Those statements end with the login's membership in `darling_alert_sources` (below); `tools/provision-roles.sql` makes that group.
+
+### The same four verbs over MCP
+
+An MCP client manages the sources with `add_alert_source`, `rotate_alert_source`, `remove_alert_source` and `list_alert_sources`. They run the command line's own steps and answer with the command line's own text, in `report`. The three that change a source create, change or drop a database login, so they are served only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on, as `add_servers` is. They run as the store's owner, on the connection the service already holds. `list_alert_sources` is a read and has no password in it.
+
+The answers of `add_alert_source` and `rotate_alert_source` hold the new password once, in the connection strings of `report`. Darling keeps no copy, and no log line, error message or store row has it. Whoever reads the answer holds the password, including the MCP client and any transcript it keeps, so treat the answer as a secret. A lost password is replaced with `rotate_alert_source`.
+
+The password also goes into the MCP client's transcript, because the answer is part of the conversation. Without a `tls` block in `mcp.network`, the network listener is plain HTTP, so the answer crosses the network unencrypted, as the bearer token does. `rotate_alert_source` and `remove_alert_source` change nothing until they are called with `confirm=true`. Without it, each answers `confirm_required` and says which login is affected, how many undelivered queued alerts a remove deletes and how many open sessions end.
+
+A deployment that already has `mcp.allowServerAdmin` on gains these three tools when it upgrades. It can then create, change and remove logins with no new setting. To keep them off, turn `mcp.allowServerAdmin` off, which also removes `add_servers` and the other server admin tools.
 
 ### Alert sources on another machine
 

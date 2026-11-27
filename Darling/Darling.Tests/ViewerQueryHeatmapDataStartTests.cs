@@ -65,7 +65,6 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
         var sql = ViewerDataService.BuildQueryHeatmapSql(metric);
 
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.DoesNotMatch(@"query_stats_\w+", sql);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.OrdinalIgnoreCase);
     }

@@ -8,11 +8,13 @@
     <RootNamespace>CompactionRepro</RootNamespace>
     <AssemblyName>CompactionRepro</AssemblyName>
     <IsPackable>false</IsPackable>
+    <!-- The DuckDB the repro runs on: 1.5.3 by default (its original), -p:ReproDuckDbVersion=1.5.6.1 for the one Lite ships. -->
+    <ReproDuckDbVersion Condition="'$(ReproDuckDbVersion)' == ''">1.5.3</ReproDuckDbVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="DuckDB.NET.Data" VersionOverride="1.5.3" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" VersionOverride="1.5.3" />
+    <PackageReference Include="DuckDB.NET.Data" VersionOverride="$(ReproDuckDbVersion)" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" VersionOverride="$(ReproDuckDbVersion)" />
   </ItemGroup>
 
   <!-- Link the real production compaction code so the reproducer exercises the

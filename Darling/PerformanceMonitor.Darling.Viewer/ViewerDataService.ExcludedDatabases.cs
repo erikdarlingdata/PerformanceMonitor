@@ -38,7 +38,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(CollectedDatabases.NamesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             names.Add(reader.GetString(0));

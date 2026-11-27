@@ -9,10 +9,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service.FrontDoor;
@@ -61,13 +66,18 @@ internal sealed class DarlingFrontDoorWebSession : IDisposable
     /// that is about to lapse. A store that restarted, or that runs a shorter lifetime, answers 401 and the proxy signs in again.</summary>
     internal static readonly TimeSpan CookieReuse = DarlingWebHostService.SessionLifetime - TimeSpan.FromMinutes(5);
 
+    /// <summary>How much of a refused sign-in's body is read to look for the store's refusal code.</summary>
+    private const int RefusalBodyCap = 4096;
+
     private readonly IFrontDoorSecrets _secrets;
+    private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly ConcurrentDictionary<string, PeerState> _peers = new(StringComparer.OrdinalIgnoreCase);
 
-    internal DarlingFrontDoorWebSession(IFrontDoorSecrets secrets, TimeProvider? time = null)
+    internal DarlingFrontDoorWebSession(IFrontDoorSecrets secrets, TimeProvider? time = null, ILogger? logger = null)
     {
         _secrets = secrets;
+        _logger = logger ?? NullLogger.Instance;
         _time = time ?? TimeProvider.System;
     }
 
@@ -219,13 +229,8 @@ internal sealed class DarlingFrontDoorWebSession : IDisposable
                 hold = wait;
             }
 
-            var why = status switch
-            {
-                429 => "the store is holding sign-ins and answered 429",
-                403 => "the store refused the sign-in with 403 (check allowFrom, and that the web token is not the MCP token)",
-                200 => "the store answered its login page, so it did not accept the web token",
-                _ => $"the store answered HTTP {status} to the sign-in",
-            };
+            var body = status == 403 ? await ReadRefusalBodyAsync(response, timeout.Token) : null;
+            var why = DescribeSignInFailure(store.Name, status, body);
             throw Hold(store, state, hold, why);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -239,6 +244,55 @@ internal sealed class DarlingFrontDoorWebSession : IDisposable
         catch (HttpRequestException ex)
         {
             throw Hold(store, state, FailedSignInHold, DarlingFrontDoorWebProxy.DescribeConnectFailure(ex));
+        }
+    }
+
+    /// <summary>What the front door says about a store's failed sign-in. A 403 whose <paramref name="body"/> carries the store's
+    /// <see cref="DarlingTokenSignIn.RefusalMarkerHtml"/> element is the store's <c>web.network.oidc.tokenSignIn</c> refusing a
+    /// network sign-in: the code is matched, never the prose around it.</summary>
+    internal static string DescribeSignInFailure(string storeName, int status, string? body)
+    {
+        if (status == 403 && body is not null && body.Contains(DarlingTokenSignIn.RefusalMarkerHtml, StringComparison.Ordinal))
+        {
+            return $"store '{storeName}' has web.network.oidc.tokenSignIn set to loopback or off, which refuses the web token sign-in " +
+                "the front door makes over the network (a store behind a front door keeps it on)";
+        }
+
+        return status switch
+        {
+            429 => "the store is holding sign-ins and answered 429",
+            403 => "the store refused the sign-in with 403 (check allowFrom, and that the web token is not the MCP token)",
+            200 => "the store answered its login page, so it did not accept the web token",
+            _ => $"the store answered HTTP {status} to the sign-in",
+        };
+    }
+
+    /// <summary>The first <see cref="RefusalBodyCap"/> bytes of a refused sign-in's body as UTF-8, or null when it cannot be read.
+    /// A cancellation still propagates, so the caller's timeout and the page closing keep their meaning.</summary>
+    private async Task<string?> ReadRefusalBodyAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            var buffer = new byte[RefusalBodyCap];
+            var length = 0;
+            while (length < buffer.Length)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(length), ct);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                length += read;
+            }
+
+            return Encoding.UTF8.GetString(buffer, 0, length);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        {
+            _logger.LogDebug(ex, "Front door web: a store's refused sign-in body could not be read.");
+            return null;
         }
     }
 

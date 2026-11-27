@@ -13,7 +13,7 @@ set -euo pipefail
 
 image="${1:?usage: darling-nonroot-legs.sh <image> <previous-image>}"
 previous="${2:?usage: darling-nonroot-legs.sh <image> <previous-image>}"
-store_image="${STORE_IMAGE:-timescale/timescaledb:latest-pg17}"
+store_image="${STORE_IMAGE:-timescale/timescaledb:2.32.1-pg17}"
 prefix="nonroot-$$"
 work="$(mktemp -d)"
 leg="setup"
@@ -222,7 +222,7 @@ JSON
 start_service "${prefix}-missed-chmod" "${image}" -v "${secrets_vol}:/run/secrets:ro"
 wait_log "${prefix}-missed-chmod" "secret file '/run/secrets/store_connection' could not be read"
 log="$(log_of "${prefix}-missed-chmod")"
-grep -qF "/run/secrets/store_connection' is denied. The service runs as user 1654, which cannot read it" <<<"${log}" \
+grep -qE "/run/secrets/store_connection' is denied\. The service runs as user 1654( \([^)]*\))?, which cannot read it" <<<"${log}" \
   || fail "the secret-read refusal does not name the service's user"
 grep -qF 'chmod 700 secrets && chmod 644 darling.json && find secrets -type f ! -name password_key -exec chmod 644 {} +' <<<"${log}" || fail "the secret-read refusal does not give the chmod"
 grep -qF 'chown darling -R 1654:1654 /var/lib/darling' <<<"${log}" || fail "the secret-read refusal does not give the chown"

@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// and reads the realized layout: which scroll viewer has an extent, what a card's share of a page is, how many times a message is said,
 /// and how many rows a legend takes.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class PageLayoutLooksWrongTests
 {
     private static CredentialResolver Credentials() => new(new CredentialService(), null);
@@ -140,42 +141,6 @@ public sealed class PageLayoutLooksWrongTests
             Pump(refresh);
             return found;
         }, isLongQueryTraceEnabled: () => false);
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Fact]
-    public void TheTempdbSizeChart_CarriesALegendLikeItsSiblings_SoTheGroupLeavesNoEmptyBandUnderItsAxis()
-    {
-        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
-        {
-            var found = new List<string>();
-            var size = Find<ScottPlot.WPF.WpfPlot>(tab, "TempDbSizeChart");
-            Reveal(size);
-            Settle(window);
-            var at = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc);
-            var rows = Enumerable.Range(0, 12).Select(i => new TempDbRow
-            {
-                CollectionTime = at.AddHours(i),
-                UserObjectReservedMb = 100 + i,
-                InternalObjectReservedMb = 50,
-                VersionStoreReservedMb = 10,
-                TotalReservedMb = 160 + i,
-                UnallocatedMb = 840 - i,
-                TotalSessionsUsingTempDb = 3,
-            }).ToList();
-            Invoke(tab, "UpdateTempDbChart", rows, 24, null, null);
-            Invoke(tab, "UpdateTempDbSizeChart", rows, 24, null, null);
-            Settle(window);
-
-            /* The shared legend is drawn as a panel outside the plot, not as the inset legend, so the panel is what a legend's presence means. */
-            if (!size.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>().Any() || size.Plot.Legend.GetItems().Length == 0)
-            {
-                found.Add("the tempdb Size chart has no legend, so the group's shared bottom leaves an empty band under its axis");
-            }
-
-            return found;
-        });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }

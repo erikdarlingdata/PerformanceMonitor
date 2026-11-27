@@ -31,6 +31,9 @@ public sealed class ProcedureTrendRunModelLiveTests
 {
     private static readonly TimeSpan RunLogLag = TimeSpan.FromSeconds(3);
 
+    /* A read answers (start, end]: a read that plots the run on the hour opens this long before it. */
+    private static readonly TimeSpan BeforeTheFirstRun = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task RawTrend_BusyIdleBusy_PlotsZeroAtTheIdleRunsOnly()
     {
@@ -48,7 +51,7 @@ public sealed class ProcedureTrendRunModelLiveTests
             await store.RunAsync(server, h.AddMinutes(k) + RunLogLag, durationMs: 3000, "SUCCESS", rowsCollected: k is 0 or 1 or 2 or 5 ? 1 : 0, ct);
         }
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(5).AddSeconds(30), widthMinutes: 1, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(5).AddSeconds(30), widthMinutes: 1, ct);
 
         Assert.Equal(Enumerable.Range(0, 6).Select(k => h.AddMinutes(k)), buckets.Select(b => b.Bucket));
         /* A zero is plotted at the two idle runs and nowhere else: minutes 3 and 4. */
@@ -72,7 +75,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RunAsync(server, h.AddMinutes(1) + RunLogLag, 3000, "ERROR", 0, ct);
         await store.RunAsync(server, h.AddMinutes(2) + RunLogLag, 3000, "SUCCESS", 1, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
 
         var bucket = Assert.Single(buckets);
         Assert.Equal(2, bucket.CollectionCount);
@@ -146,7 +149,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RunAsync(server, h.AddMinutes(1) + RunLogLag, 3000, "SUCCESS", 0, ct);
         await store.RunAsync(server, h.AddMinutes(2) + RunLogLag, 3000, "SUCCESS", 0, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
 
         var bucket = Assert.Single(buckets);
         Assert.Equal(3, bucket.CollectionCount);
@@ -166,7 +169,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RowAsync(server, "usp_Work", h.AddMinutes(-5), elapsedUs: 600_000, executions: 1, interval: 60, ct);
         await store.RowAsync(server, "usp_Work", h, elapsedUs: 600_000, executions: 3, interval: 60, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddSeconds(30), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddSeconds(30), widthMinutes: 10, ct);
 
         var bucket = Assert.Single(buckets);
         Assert.Equal(1, bucket.CollectionCount);
@@ -184,7 +187,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RowAsync(server, "usp_Work", h, elapsedUs: 600_000, executions: 1, interval: 60, ct);
         await store.RowAsync(server, "usp_Work", h.AddSeconds(4000), elapsedUs: 600_000, executions: 1, interval: 60, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddSeconds(4030), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddSeconds(4030), widthMinutes: 10, ct);
 
         Assert.Equal(2, buckets.Count);
         Assert.NotNull(buckets[0].ElapsedMsPerSecond);
@@ -205,7 +208,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RowAsync(server, "usp_Work", h.AddMinutes(1), elapsedUs: 0, executions: 0, interval: 0, ct);
         await store.RowAsync(server, "usp_Work", h.AddMinutes(2), elapsedUs: 600_000, executions: 1, interval: 60, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(2).AddSeconds(30), widthMinutes: 10, ct);
 
         var bucket = Assert.Single(buckets);
         Assert.Equal(1, bucket.UnratedCollections);
@@ -223,7 +226,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         var h = store.Hour;
         await store.RowAsync(server, "usp_Work", h, elapsedUs: 900_000, executions: 9, interval: 45, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddSeconds(30), widthMinutes: 10, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddSeconds(30), widthMinutes: 10, ct);
 
         Assert.Equal(900.0 / 45.0, Assert.Single(buckets).ElapsedMsPerSecond!.Value, precision: 6);
     }
@@ -248,7 +251,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         }
         await store.RunAsync(server, h.AddMinutes(2) + RunLogLag, 3000, "SUCCESS", 0, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
 
         Assert.Equal(Enumerable.Range(0, 3).Select(k => h.AddMinutes(k)), buckets.Select(b => b.Bucket));
         Assert.Equal(0.0, buckets[2].ElapsedMsPerSecond!.Value, precision: 6);
@@ -276,7 +279,7 @@ public sealed class ProcedureTrendRunModelLiveTests
         await store.RowAsync(server, "usp_Work", h.AddMinutes(3), elapsedUs: 600_000, executions: 10, interval: 60, ct);
         await store.RunAsync(server, h.AddMinutes(3) + RunLogLag, 3000, "SUCCESS", 1, ct);
 
-        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
+        var buckets = await store.ReadAsync(server, h - BeforeTheFirstRun, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
 
         Assert.Equal(Enumerable.Range(0, 3).Select(k => h.AddMinutes(k)), buckets.Select(b => b.Bucket));
         Assert.All(buckets, b => Assert.Equal(10.0, b.ElapsedMsPerSecond!.Value, precision: 6));

@@ -95,7 +95,7 @@ public static class DarlingPgPlanCaptureReader
                 max(collection_time)        AS last_seen
             FROM pg_plan_capture
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             /* The optional queryid pin, IN the SQL rather than filtered client-side over a page (#3533): the
                ranking is by total duration, so a cheap-but-wanted query sits arbitrarily far below the top and

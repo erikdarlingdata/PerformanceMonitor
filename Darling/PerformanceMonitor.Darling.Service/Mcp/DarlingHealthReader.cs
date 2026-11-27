@@ -460,12 +460,20 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
     /// calls this between the mutation and the re-read to force the re-read to hit the store. Never call this
     /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
-    internal static void ResetRangeCacheForTests() => RangeCache = new();
+    internal static void ResetRangeCacheForTests()
+    {
+        RangeCache = new();
+        ComposeStoreAvailability.ResetStoreGatesForTests(); // #8824: the store-keyed gate is state a test must not carry over
+    }
 
     /// <summary>#6809: test-only. Replaces <see cref="RangeCache"/> with an empty one that reads <paramref name="clock"/>,
     /// so a live test can move time past the sub-horizon bound without a sleep. <see cref="ResetRangeCacheForTests"/>
     /// puts the wall clock back.</summary>
-    internal static void UseRangeCacheClockForTests(Func<DateTime> clock) => RangeCache = new(clock);
+    internal static void UseRangeCacheClockForTests(Func<DateTime> clock)
+    {
+        RangeCache = new(clock);
+        ComposeStoreAvailability.ResetStoreGatesForTests();
+    }
 
     /// <summary>Test-only. The clock behind the reader's own wall-clock reads: the retention horizon and the default
     /// summary date. Null reads <see cref="DateTime.UtcNow"/>. A live test that seeds from one instant sets this to that
@@ -487,7 +495,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
         DateTime? referenceUtc = null, bool asOfNow = true,
-        IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, bool refreshSubHorizon = false, bool skipOpenDayTail = false, CancellationToken cancellationToken = default)
     {
         /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
            (and never drops raw, so raw is complete there). #1759: and on what they have MATERIALIZED, which is
@@ -509,7 +517,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            would print 0 for every day raw has purged, so the measured accessor probes again rather than route
            on it, and a probe that fails again fails this call as it always did. The viewer's calendar has
            cached the same gate for the same interval all along (ViewerDataService.GetRollupAvailabilityAsync). */
-        var (rollups, coverage) = await ComposeStoreAvailability.GetMeasuredRollupsAsync(postgres, cancellationToken);
+        var (rollups, coverage) = await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(DailySummaryRangeCache.StoreKeyFor(postgres), postgres, cancellationToken); // #8824: per store, not per pool
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
@@ -589,7 +597,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken,
-            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
+            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon), // #6809: the horizon day and older are re-read within the hour, never held for a day
+            refreshSubHorizon: refreshSubHorizon, // #8824: the warmer's read re-reads them now, so a visitor does not
+            skipOpenDayTail: skipOpenDayTail); // #9039: the warmer drops the rows, so a held block needs no open-day read
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks. A scoping fault (the statement drifted, a graph read timed out) must not take the day away: it

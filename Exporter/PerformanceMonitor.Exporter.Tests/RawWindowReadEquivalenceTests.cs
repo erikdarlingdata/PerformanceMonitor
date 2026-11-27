@@ -90,7 +90,8 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
                   query_plan_digest bytea, query_text_digest bytea,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint,
                   delta_logical_reads bigint, delta_logical_writes bigint, delta_physical_reads bigint,
-                  delta_rows bigint, delta_spills bigint, sample_interval_seconds int);
+                  delta_rows bigint, delta_spills bigint, sample_interval_seconds int, host_object_name text,
+                  {{ExtraColumns(QueryStatsWindow.RawColumns, QueryStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "query_hash", "query_plan_hash", "host_object_name", "collection_time", "sample_interval_seconds", "query_plan_digest", "query_text_digest"])}});
                 CREATE INDEX ON collect.query_stats (collection_time);
                 CREATE TABLE collect.procedure_stats (
                   collection_id bigint, collection_time timestamp NOT NULL, server_id int NOT NULL,
@@ -99,7 +100,8 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
                   plan_handle text, cached_time timestamp,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint,
                   delta_logical_reads bigint, delta_logical_writes bigint, delta_physical_reads bigint,
-                  delta_spills bigint, sample_interval_seconds int);
+                  delta_spills bigint, sample_interval_seconds int,
+                  {{ExtraColumns(ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "schema_name", "object_name", "object_type", "collection_time", "sample_interval_seconds", "query_plan_digest", "plan_handle", "cached_time", "query_plan_xml_bytes", "plan_xml_is_null", "has_plan_xml_bytes"])}});
                 CREATE INDEX ON collect.procedure_stats (collection_time);
                 CREATE TABLE collect.query_store_stats (
                   collection_id bigint, server_id int, server_name text, database_name text,
@@ -110,11 +112,25 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
             Assert.True(r.code == 0, r.output);
         }
 
-        private static string PgType(string column) => QueryStoreWindow.DuckDbTypeFor(column) switch
+        private static string PgType(string column) => PgTypeOf(QueryStoreWindow.DuckDbTypeFor(column), column);
+
+        private static string PgTypeOf(string duckDbType, string column) => duckDbType switch
         {
             "INTEGER" => "int", "BIGINT" => "bigint", "VARCHAR" => "text", "BOOLEAN" => "boolean", "TIMESTAMP" => "timestamp",
             _ => throw new NotSupportedException(column),
         };
+
+        /// <summary>
+        /// The window read's columns that the base DDL above does not name: every column the window's raw list adds
+        /// (the DMV attributes), typed like the DuckDB side. The columns the window computes rather than reads, and the
+        /// store-side ones the base DDL already has, are left out.
+        /// </summary>
+        private static string ExtraColumns(string[] rawColumns, Func<string, string> duckDbType, string[] inBase)
+        {
+            return string.Join(", ", rawColumns
+                .Where(c => !inBase.Contains(c) && !c.StartsWith("delta_", StringComparison.Ordinal))
+                .Select(c => $"{c} {PgTypeOf(duckDbType(c), c)}"));
+        }
 
         public void Dispose()
         {
@@ -148,7 +164,8 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
                '0x' || md5(i::text), CASE WHEN i % 13 = 0 THEN NULL ELSE '0x' || md5((i % 9000)::text) END,
                CASE WHEN i % 9 = 0 THEN NULL ELSE decode(md5(i::text) || md5((i % 9000)::text), 'hex') END,
                CASE WHEN i % 10 = 0 THEN NULL ELSE decode(md5((i % 7000)::text) || md5('t'), 'hex') END,
-               i % 100, i * 1000, i * 7919, i * 31, i % 50, i % 9, i % 123, i % 2, CASE WHEN i % 23 = 0 THEN NULL ELSE 60 + i % 3 END
+               i % 100, i * 1000, i * 7919, i * 31, i % 50, i % 9, i % 123, i % 2, CASE WHEN i % 23 = 0 THEN NULL ELSE 60 + i % 3 END,
+               CASE WHEN i % 4 = 0 THEN NULL ELSE 'dbo.proc_' || (i % 50) END
         FROM generate_series(1::bigint, {{n}}::bigint) i;
         INSERT INTO collect.query_store_stats ({{string.Join(", ", QueryStoreWindow.RawColumns.Prepend("collection_id"))}})
         SELECT {{string.Join(", ", QueryStoreWindow.RawColumns.Select(QsExpr).Prepend("i"))}}
@@ -172,9 +189,9 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
          (-2, '2026-10-22 11:59:59.999999', 2, 'sérvér-日本語-🦆', 'dä', 'sch', 'öbj', 'P', '\x00ff80', NULL, NULL, 'h', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -2147483648),
          (-3, '2026-10-22 11:30:00.123457', 3, 'n', NULL, NULL, NULL, NULL, NULL, 'plan', 5, NULL, NULL, 1, 2, 3, 4, 5, 6, 7, NULL);
         INSERT INTO collect.query_stats VALUES
-         (-1, '2026-10-22 11:00:00', 1, '', '', '', '', '\x', '\x', 9223372036854775807, -9223372036854775808, 0, 1, -1, 2, 3, 4, 2147483647),
-         (-2, '2026-10-22 11:59:59.999999', 2, 'sérvér-日本語-🦆', 'dä', '0xabc', NULL, '\x00ff80', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -2147483648),
-         (-3, '2026-10-22 11:30:00.123457', 3, 'n', NULL, NULL, NULL, NULL, '\xdeadbeef', 1, 2, 3, 4, 5, 6, 7, 8, NULL);
+         (-1, '2026-10-22 11:00:00', 1, '', '', '', '', '\x', '\x', 9223372036854775807, -9223372036854775808, 0, 1, -1, 2, 3, 4, 2147483647, ''),
+         (-2, '2026-10-22 11:59:59.999999', 2, 'sérvér-日本語-🦆', 'dä', '0xabc', NULL, '\x00ff80', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -2147483648, 'sch.öbj-🦆'),
+         (-3, '2026-10-22 11:30:00.123457', 3, 'n', NULL, NULL, NULL, NULL, '\xdeadbeef', 1, 2, 3, 4, 5, 6, 7, 8, NULL, NULL);
         INSERT INTO collect.query_store_stats ({{string.Join(", ", QueryStoreWindow.RawColumns.Prepend("collection_id"))}})
         SELECT -1, {{string.Join(", ", QueryStoreWindow.RawColumns.Select(c => EdgeExpr(c, 0)))}}
         UNION ALL SELECT -2, {{string.Join(", ", QueryStoreWindow.RawColumns.Select(c => EdgeExpr(c, 1)))}}

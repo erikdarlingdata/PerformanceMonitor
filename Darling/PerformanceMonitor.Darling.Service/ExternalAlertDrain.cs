@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -70,6 +71,9 @@ public sealed class ExternalAlertDrain
 
     private const int MaxTitleLength = 200;
     private const int MaxDetailLength = 2000;
+
+    /// <summary>The most lines a detail keeps, the "..." line that marks a cut included (#9576).</summary>
+    internal const int MaxDetailLines = 50;
     private const int MaxServerLength = 128;
 
     private readonly ExternalAlertStore _store;
@@ -261,7 +265,7 @@ public sealed class ExternalAlertDrain
             title = row.AlertKey;
         }
 
-        var detail = Clean(row.Detail, MaxDetailLength);
+        var detail = CleanDetail(row.Detail, MaxDetailLength);
         /* The firing state is written before the send, so a clear that follows pairs with this fire even when the send
            has to be retried or a stopped run never marked it. A repeat fire only refreshes it. The severity the operator was
            told about is recorded only once a send has gone out (ConfirmFireAsync), and a fire that opens the subject and gives
@@ -302,7 +306,11 @@ public sealed class ExternalAlertDrain
         var currentText = row.Value is { } value
             ? value.ToString("0.###", CultureInfo.InvariantCulture)
             : row.Severity;
-        var detailText = detail.Length == 0 ? title : $"{title} - {detail}";
+        /* #9576: a detail that carries line breaks starts on its own line, under the title, so a report's first line is not run
+           on to the title. A one-line detail is cleaned by CleanText inside CleanDetail, so it reads as it always has. */
+        var detailText = detail.Length == 0
+            ? title
+            : detail.Contains('\n', StringComparison.Ordinal) ? $"{title}\n{detail}" : $"{title} - {detail}";
 
         var outcome = new AlertOutcome(
             fired.ServerKey, fired.ServerName, metric, currentText, "",
@@ -412,6 +420,8 @@ public sealed class ExternalAlertDrain
 
         var firingMetric = MetricNameFor(row.SourceName, row.AlertKey);
         var title = Clean(row.Title, MaxTitleLength);
+        /* The clear's message stays on one line: it sits beside the labelled lines of the resolution text (Alert:, Fired:,
+           Cleared:), so a detail with breaks could forge one (#9576). */
         var detail = Clean(row.Detail, MaxDetailLength);
 
         /* The server the fire was sent under is the one the state stored: a server registered, renamed or removed since the
@@ -562,6 +572,112 @@ public sealed class ExternalAlertDrain
     internal static string CleanText(string? value, int maxLength)
     {
         var cleaned = CustomAlertEvaluator.SanitizeDisplayText(value, value?.Length ?? 0);
+        return CapCodePoints(cleaned, maxLength);
+    }
+
+    /// <summary>
+    /// The detail's own sanitizer (#9576). Line feeds survive, and only they: <c>\r\n</c> and a lone <c>\r</c> become one, every
+    /// other control character (a tab too), U+0085, U+2028 and U+2029 become a space, and invisible and reordering characters
+    /// are dropped, as <see cref="CleanText"/> does (#5654). Spaces inside a line are kept and trailing spaces are cut, and each
+    /// channel shows the kept spaces its own way (#9608). Plain-text email indents every line two spaces and keeps the line's own
+    /// spaces behind that. HTML email shows a line's leading spaces, and each run of two or more, as non-breaking spaces. Slack is
+    /// sent the spaces as they are. Teams reads the text as markdown, which drops leading spaces and shows a run of spaces as
+    /// one, so a table-shaped detail reads best there as one line per row with a separator such as <c> | </c>. A detail that is
+    /// left with one line or none is cleaned by <see cref="CleanText"/>
+    /// instead, so it reads as it did before this sanitizer existed. A run of blank lines becomes one blank line, blank lines at either end go, and a
+    /// detail past <see cref="MaxDetailLines"/> lines keeps the first ones and ends in a line of "...". The code point cap
+    /// then applies as it does to every text here. The title and the server name never come through here: a card's header
+    /// stays on one line.
+    /// </summary>
+    internal static string CleanDetail(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || maxLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var lines = new List<string>();
+        var line = new StringBuilder();
+        var afterCarriageReturn = false;
+        foreach (var rune in value.EnumerateRunes())
+        {
+            var code = rune.Value;
+            if (afterCarriageReturn)
+            {
+                afterCarriageReturn = false;
+                if (code == '\n')
+                {
+                    continue;
+                }
+            }
+
+            if (code == '\r' || code == '\n')
+            {
+                lines.Add(line.ToString().TrimEnd(' '));
+                line.Clear();
+                afterCarriageReturn = code == '\r';
+                continue;
+            }
+
+            if (CustomAlertTeardown.IsInvisibleOrReordering(rune))
+            {
+                continue;
+            }
+
+            if (code < ' ' || code == 0x7F || code == 0x85 || code == 0x2028 || code == 0x2029)
+            {
+                line.Append(' ');
+                continue;
+            }
+
+            line.Append(rune.ToString());
+        }
+
+        lines.Add(line.ToString().TrimEnd(' '));
+
+        var kept = new List<string>();
+        var blankPending = false;
+        foreach (var text in lines)
+        {
+            if (text.Length == 0)
+            {
+                blankPending = kept.Count > 0;
+                continue;
+            }
+
+            if (blankPending)
+            {
+                kept.Add(string.Empty);
+                blankPending = false;
+            }
+
+            kept.Add(text);
+        }
+
+        /* One line is cleaned exactly as every other text here is, so a one-line detail, and every detail a store still on the
+           old function body has flattened to one line, reads as it always has: each run of spaces, tabs and breaks is one space
+           and leading space goes. Only a detail that keeps two or more lines gets the line-keeping rules above. */
+        if (kept.Count <= 1)
+        {
+            return CleanText(value, maxLength);
+        }
+
+        if (kept.Count > MaxDetailLines)
+        {
+            kept.RemoveRange(MaxDetailLines - 1, kept.Count - (MaxDetailLines - 1));
+            while (kept.Count > 0 && kept[^1].Length == 0)
+            {
+                kept.RemoveAt(kept.Count - 1);
+            }
+
+            kept.Add("...");
+        }
+
+        return CapCodePoints(string.Join('\n', kept), maxLength);
+    }
+
+    private static string CapCodePoints(string cleaned, int maxLength)
+    {
         if (maxLength <= 0)
         {
             return string.Empty;

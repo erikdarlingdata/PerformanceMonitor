@@ -73,11 +73,14 @@ public sealed class CpuSchedulerStatsCollector : CollectorDefinitionBase<CpuSche
         int OfflineCpuCount,
         bool OfflineCpuWarning);
 
-    /* Ported verbatim from install/17_collect_cpu_scheduler_stats.sql's SELECT. The only additions
-       over the proc body are explicit output-type CONVERTs the proc relied on the INSERT to do
-       implicitly (COUNT_BIG -> integer for total_request_count/total_node_count; the 1/0 CASE
-       results -> bit for the warnings; AVG(...) -> decimal(38,2)) so the positional reader gets the
-       exact storage types. Values stored are identical to the Dashboard table. */
+    /* Ported from install/17_collect_cpu_scheduler_stats.sql's SELECT, with two differences. Explicit
+       output-type CONVERTs do what the proc relied on the INSERT to do implicitly (COUNT_BIG -> integer
+       for total_request_count/total_node_count; the 1/0 CASE results -> bit for the warnings;
+       AVG(...) -> decimal(38,2)) so the positional reader gets the exact storage types. And
+       worker_thread_exhaustion_warning is raised when a task waits for a worker (the summed scheduler
+       work queue is not empty), not when current workers reach 90% of max_workers_count (#8778):
+       current_workers_count includes idle pooled workers and the workers of system tasks, which
+       max_workers_count leaves out, so an idle server can hold more workers than the maximum. */
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -101,7 +104,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN sched.total_current_workers_count >= (osi.max_workers_count * 0.90)
+                WHEN sched.total_work_queue_count > 0
                 THEN 1
                 ELSE 0
             END

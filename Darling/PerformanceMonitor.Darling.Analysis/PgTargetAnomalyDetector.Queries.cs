@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -159,7 +160,7 @@ ORDER BY w.stmt_ms DESC";
         try
         {
             var candidates = new List<(long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples)>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             {
                 using var cmd = WindowCommand(StatementShareWindowSql, connection, context);
                 cmd.Parameters.AddWithValue(PgTargetFactCollector.TopStatementCount);

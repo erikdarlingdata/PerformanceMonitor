@@ -39,6 +39,9 @@ internal static class PgServiceStatements
         DarlingServerConnector.PostgresIdentityPrivilegeQueryText,
         PostgresTargetProvider.SearchPathSql,
         HypotheticalIndexExperiment.ExperimentNamesSql,
+        /* #9062: the local work_mem statement in front of the statement-statistics read and the text fetch. */
+        PgReadWorkMem.SetSql(PgStatementStatsCollector.WorkMemBytesPerEntry),
+        PgReadWorkMem.SetSql(PgReadWorkMem.StatementTextBytesPerEntry),
     };
 
     /// <summary>

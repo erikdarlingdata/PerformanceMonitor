@@ -119,14 +119,32 @@ public sealed class FindQueriesByTextTests
         }
     }
 
-    /// <summary>Four completed spans of the four-day tier are the newest day, a hair over 24 hours once the Query Store source's time is
-    /// in the window, so the number renders "1" and the word has to follow the rendered number. One span of a sixteen-hour window is the
-    /// hour the same rule covers.</summary>
+    /// <summary>#9219: the first span is a small slice of the newest data and each span after it is no narrower, up to a cap, so a search starts
+    /// with a statement that is cheap on any store and widens while its budget lasts. The spans still tile the window.</summary>
+    [Fact]
+    public void RawTierSpans_StartWithANewestSlice_AndWidenWithoutShrinking()
+    {
+        var (floor, now) = RawWindow(TimescaleSupport.RawRetentionSpan);
+        var spans = DarlingMcpFindQueriesByTextTools.RawTierSpans(floor, now);
+        var lengths = spans.Select((s, i) => (i == 0 ? now - s.Floor : s.Ceiling - s.Floor)).ToList();
+
+        Assert.True(lengths[0] <= (now - floor) / 90, "the first span must be a small slice of the window");
+        for (var i = 1; i < lengths.Count - 1; i++)
+        {
+            Assert.True(lengths[i] >= lengths[i - 1], "a span after the first is no narrower than the one before it");
+        }
+
+        Assert.True(lengths[^2] <= (now - floor) / 6, "no span but the oldest outgrows a sixth of the window");
+    }
+
+    /// <summary>Completed spans of a window are the newest part of it, from the oldest completed span's floor. Eight parts of a 288-hour window
+    /// are a day and a hair once the Query Store source's time is in the window, so the number renders "1" and the word has to follow the rendered
+    /// number.</summary>
     [Theory]
-    [InlineData(96, 1, "6 hours")]
-    [InlineData(96, 4, "1 day")]
-    [InlineData(96, 16, "4 days")]
-    [InlineData(16, 1, "1 hour")]
+    [InlineData(96, 1, "1 hour")]
+    [InlineData(96, 4, "8 hours")]
+    [InlineData(96, 6, "1.2 days")]
+    [InlineData(288, 4, "1 day")]
     public void DescribeSearched_RendersTheNumber_ThenPicksTheUnitsWordFromIt(int windowHours, int completedSpans, string expected)
     {
         var (floor, now) = RawWindow(TimeSpan.FromHours(windowHours));

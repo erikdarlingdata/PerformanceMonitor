@@ -151,6 +151,48 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
         });
     }
 
+    /// <summary>#8881: the TempDB Log Space switch and bar in the window reach the saved root, the process-wide statics and the engine's settings,
+    /// and the saved file loads back the same. Before the window carried them, the alert could only be changed by editing settings.json.</summary>
+    [Fact]
+    public void TheTempDbLogSpaceSwitchAndBar_InTheWindow_ReachTheSavedFile_AndTheEngineSettings()
+    {
+        StaTestThread.Run(() =>
+        {
+            var (enabledBefore, percentBefore) = (App.AlertTempDbLogSpaceEnabled, App.AlertTempDbLogSpaceThresholdPercent);
+            var dir = Path.Combine(Path.GetTempPath(), $"lite-tdl-save-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var window = NewWindow();
+                window.AlertTempDbLogSpaceCheckBox.IsChecked = false;
+                window.AlertTempDbLogSpaceThresholdBox.Text = "65";
+                var root = new JsonObject();
+                var errors = new SettingsValidationErrors();
+                window.ApplyAlertSettings(root, errors);
+
+                Assert.Equal(0, errors.Count);
+                Assert.False(root["alert_tempdb_log_space_enabled"]!.GetValue<bool>());
+                Assert.Equal(65, root["alert_tempdb_log_space_threshold_percent"]!.GetValue<int>());
+                var engine = new PerformanceMonitorLite.Services.AppAlertEngineSettings();
+                Assert.False(engine.TempDbLogSpaceEnabled);
+                Assert.Equal(65, engine.TempDbLogSpaceThresholdPercent);
+
+                File.WriteAllText(Path.Combine(dir, "settings.json"), root.ToJsonString());
+                App.AlertTempDbLogSpaceEnabled = true;
+                App.AlertTempDbLogSpaceThresholdPercent = 80;
+                App.LoadAlertSettings(dir, key => "stored:" + key, (key, url) => Assert.Fail($"LoadAlertSettings wrote credential '{key}'."));
+                Assert.False(App.AlertTempDbLogSpaceEnabled);
+                Assert.Equal(65, App.AlertTempDbLogSpaceThresholdPercent);
+            }
+            finally
+            {
+                App.AlertTempDbLogSpaceEnabled = enabledBefore;
+                App.AlertTempDbLogSpaceThresholdPercent = percentBefore;
+                Directory.Delete(dir, true);
+            }
+        });
+    }
+
     /// <summary>#5881: the cooldown saved is the one in the box, not whatever the process-wide static holds at the
     /// root write. A second thread rewrites the static the whole time the window applies; the root must still carry the
     /// typed value on every pass.</summary>

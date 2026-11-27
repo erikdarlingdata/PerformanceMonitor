@@ -19,8 +19,8 @@ namespace Lite.Tests;
 /// <summary>
 /// Pins the parity contract of the extracted query_snapshots definition: the live-query-plan
 /// version gate (2016 SP1+/MI, never Azure SQL DB — #857), the Azure #req-staging variant, the
-/// CDC-capture detection on boxed vs the constant-0 on Azure, the exclusion clause injected ahead
-/// of the ORDER BY, and the 35-column payload with the #1286 triage columns.
+/// CDC-capture detection on boxed vs the constant-0 on Azure, the exclusion clause injected into
+/// the ranked request set, and the 35-column payload with the #1286 triage columns.
 /// </summary>
 public sealed class QuerySnapshotsCollectorDefinitionTests
 {
@@ -60,8 +60,10 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("sp_MScdc_capture_job", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("#req", sql, StringComparison.Ordinal);
-        Assert.Contains("der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)", sql, StringComparison.Ordinal);
-        Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
+        /* Allow-list entry (#9683): the unbounded form takes no parameters, and the lab runs on SQL Server 2022 and 2025 showed the
+           statement without RECOMPILE uses far less CPU and returns the same rows (see the comment at OnPremCachedOptions in
+           QuerySnapshotsCollector). The collector's form with excluded databases keeps the hint. */
+        Assert.Contains("OPTION(MAXDOP 1);", sql, StringComparison.Ordinal);
     }
 
     /* #7573: Active Queries STORES the monitor's own sessions now (the Monitor statements switch hides them at read time, so a monitor
@@ -141,7 +143,7 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_InjectsExclusionClause_BeforeOrderBy()
+    public void BuildQuery_BindsEachExcludedDatabaseName_AsAParameter()
     {
         var plan = QuerySnapshotsCollector.Instance.BuildQuery(new CollectorContext
         {
@@ -152,10 +154,6 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
             ExcludedDatabases = new[] { "SO", "AdventureWorks" },
         });
 
-        Assert.Contains(
-            "AND d.name NOT IN (@excl_db_0, @excl_db_1)\nORDER BY der.cpu_time DESC, der.parallel_worker_count DESC",
-            plan.Text,
-            StringComparison.Ordinal);
         Assert.Equal(2, plan.Parameters.Count);
         Assert.Equal("SO", plan.Parameters[0].Value);
         Assert.Equal("AdventureWorks", plan.Parameters[1].Value);

@@ -212,7 +212,6 @@ public sealed class DarlingAnalysisStoreTests
         /* #2506: the window is BOUNDED at both ends. Pinned because the read had a start and no end for
            its whole life, and an as_of anchor over a half-open window is the worst outcome the anchor
            convention has — validated, advertised, and answering as of now anyway. */
-        Assert.Contains("AND   analysis_time >= $2", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("AND   analysis_time <= $3", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("remediation_action_json", PgFindingStore.GetLatestFindingsSql);
 

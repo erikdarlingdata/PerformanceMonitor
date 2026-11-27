@@ -43,24 +43,11 @@ public sealed class MuteRuleReloadBeaconTests
     private const int ProbeOrdinal = 92;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(
             "mute-rules-reload-beacon",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* V118 (#3282) is the top rung now, so the "== SchemaVersion" claim lives there. Strictly LESS
-           rather than <=, so this cannot silently become the top-rung claim again. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count).ToList(), above);
     }
 
     [Fact]

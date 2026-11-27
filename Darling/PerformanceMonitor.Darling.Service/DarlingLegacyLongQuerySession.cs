@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -52,7 +53,7 @@ internal sealed class StoreLegacyLongQueryRecords : ILegacyLongQueryRecords
 
     public async Task<IReadOnlyCollection<string>> ReadAsync(int serverId, CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.LegacyLongQuery, cancellationToken);
         using var command = new NpgsqlCommand(
             "SELECT state_key FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND starts_with(state_key, $3)", connection);
         command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
@@ -72,7 +73,7 @@ internal sealed class StoreLegacyLongQueryRecords : ILegacyLongQueryRecords
 
     public async Task WriteAsync(int serverId, string stateKey, DateTime droppedUtc, CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.LegacyLongQuery, cancellationToken);
         using var command = new NpgsqlCommand(@"
 INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
 VALUES ($1, $2, $3, $4, $5)

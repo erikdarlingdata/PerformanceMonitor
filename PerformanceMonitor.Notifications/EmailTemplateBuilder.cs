@@ -9,8 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -281,6 +283,16 @@ internal static class EmailTemplateBuilder
         sb.Append("</tr>");
     }
 
+    /// <summary>
+    /// Turns each leading space of a line and every space of a run of two or more into <c>&amp;nbsp;</c>, so an indented or aligned
+    /// report keeps its shape in HTML, which folds a run of spaces to one. A single space between words stays a space, so the
+    /// line still wraps there. The input is already HTML-encoded, so the entity this writes cannot be mistaken for the text's own.
+    /// </summary>
+    private static string KeepSpaceRuns(string encoded) =>
+        SpaceRun.Replace(encoded, match => string.Concat(Enumerable.Repeat("&nbsp;", match.Length)));
+
+    private static readonly Regex SpaceRun = new("^ +| {2,}", RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     private static void AppendDetailSection(StringBuilder sb, AlertContext? context, string? prose)
     {
         /* Separator + heading */
@@ -296,7 +308,17 @@ internal static class EmailTemplateBuilder
             sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
             foreach (var para in prose.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
             {
-                sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{WebUtility.HtmlEncode(para)}</p>");
+                /* #9576: an external alert's detail keeps its line breaks, and HTML shows a bare line feed as a space. The text is
+                   encoded first and the break turned into <br> after, so nothing a source sent can become markup. HTML also folds
+                   spaces, so a line's leading spaces and each run of two or more become non-breaking spaces (#9608), which Outlook's
+                   Word engine shows where it ignores white-space: pre-wrap. */
+                var encoded = WebUtility.HtmlEncode(para);
+                if (context?.External is not null)
+                {
+                    encoded = KeepSpaceRuns(encoded).Replace("\n", "<br>", StringComparison.Ordinal);
+                }
+
+                sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{encoded}</p>");
             }
             sb.Append("</td></tr>");
         }
@@ -440,7 +462,10 @@ internal static class EmailTemplateBuilder
             {
                 foreach (var para in prose.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
                 {
-                    sb.Append($"\r\n  {para}\r\n");
+                    /* #9608: an external alert's detail keeps its line breaks, so every line of a paragraph gets the indent, not
+                       only the first, and a line's own leading spaces sit behind it. */
+                    var indented = context?.External is not null ? para.Replace("\n", "\n  ", StringComparison.Ordinal) : para;
+                    sb.Append($"\r\n  {indented}\r\n");
                 }
             }
 

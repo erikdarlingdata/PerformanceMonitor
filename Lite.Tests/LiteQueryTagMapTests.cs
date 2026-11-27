@@ -82,13 +82,13 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task ActiveQueryRows_WriteTheirSightings_AndTheSameKeyTwiceBumpsSeenCount()
+    public async Task ActiveQueryRows_WriteTheirSightings_AndTheSameKeyTwiceInOneFlushSumsItsCount()
     {
         Sight(Snapshot(HashA), Snapshot(HashA), Snapshot(HashB), Snapshot(null));
         Sight(Snapshot(HashA));
 
         Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings WHERE server_id = 7"));
-        Assert.Equal(3, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(2, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
         Assert.Equal(1, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashB}'"));
         Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}' AND text_sample = 'SELECT 1' AND application_name = 'Reports'"));
     }
@@ -489,7 +489,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_AddsToTheCount_AndLeavesLastSeenAlone()
+    public async Task AReSightingWithinTheRefreshWidth_WritesNothing_SoTheCountAndLastSeenStay()
     {
         Sight(Snapshot(HashA));
         await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-10));
@@ -498,20 +498,60 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Sight(Snapshot(HashA));
 
         Assert.Equal(before, await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'"));
-        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(1L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+    }
+
+    private async Task<DateTime> LastSeenAsync(string key)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT last_seen FROM query_tag_sightings WHERE key = $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = key });
+        return (DateTime)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
     }
 
     [Fact]
-    public async Task AReSightingOfARowOverAnHourOld_MovesLastSeen()
+    public async Task AReSightingOfARowOverTheRefreshWidthPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheWidthDoesNot()
     {
-        Sight(Snapshot(HashA));
-        await SetLastSeenAsync(HashA, DateTime.UtcNow.AddHours(-2));
-        var before = await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'");
+        var backdate = QueryTagSightingBuffer.ReSightingBackdate;
+        Sight(Snapshot(HashA), Snapshot(HashB));
+        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(5 * 60 + 59);
+        await SetLastSeenAsync(HashA, within);
+        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(6 * 60 + 1));
+        var withinStored = await LastSeenAsync(HashA);
+        var beforeFlush = DateTime.UtcNow;
 
-        Sight(Snapshot(HashA));
+        Sight(Snapshot(HashA), Snapshot(HashB));
 
-        Assert.True(await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'") > before + 3_600_000_000L);
+        var afterFlush = DateTime.UtcNow;
+        Assert.Equal(withinStored, await LastSeenAsync(HashA));
+        var moved = await LastSeenAsync(HashB);
+        Assert.InRange(moved, beforeFlush - backdate - TimeSpan.FromMilliseconds(1), afterFlush - backdate);
+        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashB}'"));
+    }
+
+    [Fact]
+    public async Task APlainReSighting_IsBehindTheNextExtendsCursor_WhileAnInsertIsInsideIt_AndTheMapStaysRight()
+    {
+        const string HashC = "0x00000000000000CC";
+        var tag = await _service.CreateQueryTagAsync("Reports", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Application, "Reports", tag));
+        Sight(Snapshot(HashA), Snapshot(HashB));
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        Assert.True((await _service.BuildQueryTagMapAsync(cursors)).Rebuilt);
+        /* Past the six-hour refresh width, so the plain re-sighting of HashA is due its backdated move (#9456). */
+        var aged = DateTime.UtcNow.AddHours(-7);
+        await SetLastSeenAsync(HashA, aged);
+        await SetLastSeenAsync(HashB, aged);
+
+        Sight(Snapshot(HashA), Snapshot(HashC));
+        var pass = await _service.BuildQueryTagMapAsync(cursors);
+
+        Assert.False(pass.Rebuilt);
+        Assert.Equal(1, pass.KeysResolved);
         Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(new[] { HashA, HashB, HashC }, (await MapAsync()).Where(r => r.TagId == tag).Select(r => r.Key));
     }
 
     [Fact]
@@ -825,5 +865,310 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         cmd.CommandText = "SELECT CAST($1 AS VARCHAR)";
         cmd.Parameters.Add(new DuckDBParameter { Value = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc) });
         Assert.Equal("2026-01-02 03:04:05", Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+    }
+
+    /* #9308: the extend cursor survives a restart. A key whose sightings are gone leaves the map only at a REBUILD (an extend
+       never deletes), so whether a fresh cursor dictionary kept or dropped it says which path its first pass took. */
+    private async Task<int> MapWithAKeyThatOnlyARebuildWouldDropAsync()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        Sight(Snapshot(HashA, "SELECT * FROM Orders"), Snapshot(HashB, "SELECT * FROM Orders"));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, (await MapAsync()).Count);
+
+        /* Retention removes A's sightings after the last pass. */
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var delete = connection.CreateCommand();
+        delete.CommandText = $"DELETE FROM query_tag_sightings WHERE key = '{HashA}'";
+        await delete.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        return tag;
+    }
+
+    private async Task StoreCursorAsync(Func<long, QueryTagMapCursor, string> edit)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        string text;
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT state_value FROM collector_state WHERE server_id = 7 AND collector_name = 'query_tag_map'";
+            text = (string)(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+        }
+
+        var (version, cursor) = QueryTagMapCursor.TryDecode(text)!.Value;
+        using var write = connection.CreateCommand();
+        write.CommandText = "UPDATE collector_state SET state_value = $1 WHERE server_id = 7 AND collector_name = 'query_tag_map'";
+        write.Parameters.Add(new DuckDBParameter { Value = edit(version, cursor) });
+        await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_ExtendsFromTheStoredCursor_AndPicksUpASightingWrittenAfterTheLastPass()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        var pass = await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.False(pass.Rebuilt);
+        Assert.Equal(new[] { HashA, HashB, "0x00000000000000CC" }, (await MapAsync()).Select(r => r.Key).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenTheStoredCursorWasBuiltAtAnOlderRulesVersion()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreCursorAsync((version, cursor) => cursor.Encode(version - 1));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenBuiltVersionIsBehindRulesVersion()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await _service.CreateQueryTagAsync("Other", null);
+        var state = await _service.GetQueryTagStateAsync();
+        Assert.NotEqual(state.RulesVersion, state.BuiltVersion);
+
+        var pass = await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.True(pass.Rebuilt);
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenTheStoredCursorIsOverADayOld_AndExtendsWhenItIsJustUnderOne()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+
+        await StoreCursorAsync((version, cursor) => (cursor with { Since = DateTime.UtcNow - QueryTagMapCursor.MaxStoredAge + TimeSpan.FromMinutes(5) }).Encode(version));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, (await MapAsync()).Count);
+
+        await StoreCursorAsync((version, cursor) => (cursor with { Since = DateTime.UtcNow - QueryTagMapCursor.MaxStoredAge - TimeSpan.FromMinutes(5) }).Encode(version));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFailureAfterTheMapWrite_RollsBackTheMapAndTheStoredCursorTogether()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors);
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        /* Between the pass's read and its write the cursor table goes away, so the cursor statement fails after the map rows went in. */
+        _service.AfterQueryTagMapReadForTests = () => Exec("ALTER TABLE collector_state RENAME TO collector_state_hidden");
+        try
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => _service.BuildQueryTagMapAsync(cursors));
+        }
+        finally
+        {
+            _service.AfterQueryTagMapReadForTests = null;
+            Exec("ALTER TABLE collector_state_hidden RENAME TO collector_state");
+        }
+
+        Assert.DoesNotContain("0x00000000000000CC", (await MapAsync()).Select(r => r.Key));
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    private void Exec(string sql)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+
+    /* #9308: the weekly staggered rebuild. An extend never deletes, so a key whose sightings were deleted leaves the map only
+       when its server is rebuilt: that is what these tests watch. The service has run 30 minutes unless a test says otherwise. */
+    private static readonly TimeSpan PastTheGrace = TimeSpan.FromMinutes(30);
+
+    private async Task StoreCursorForAsync(int serverId, Func<long, QueryTagMapCursor, string> edit)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        string text;
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = $"SELECT state_value FROM collector_state WHERE server_id = {serverId} AND collector_name = 'query_tag_map'";
+            text = (string)(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+        }
+
+        var (version, cursor) = QueryTagMapCursor.TryDecode(text)!.Value;
+        using var write = connection.CreateCommand();
+        write.CommandText = $"UPDATE collector_state SET state_value = $1 WHERE server_id = {serverId} AND collector_name = 'query_tag_map'";
+        write.Parameters.Add(new DuckDBParameter { Value = edit(version, cursor) });
+        await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    private Task StoreRebuiltAtAsync(int serverId, TimeSpan age) =>
+        StoreCursorForAsync(serverId, (version, cursor) => (cursor with { RebuiltAt = DateTime.UtcNow - age }).Encode(version));
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_IsRebuiltAfterTheStartupGrace_AndADeletedKeyLeavesTheMap()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+        Assert.True(DateTime.UtcNow - cursors[7].RebuiltAt < TimeSpan.FromMinutes(5));
+    }
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_ExtendsInsideTheStartupGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: TimeSpan.FromMinutes(5));
+
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AServerRebuiltSixDaysAgo_ExtendsAfterTheGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(6));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: PastTheGrace);
+
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AStoredCursorWithNoRebuiltAt_DecodesAsRebuiltLongAgo_AndIsRebuiltAfterTheGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+
+        /* The text part 1 stored: no rebuilt_at in it. */
+        string PartOneText(long version, QueryTagMapCursor cursor) =>
+            System.Text.Json.JsonSerializer.Serialize(new { V = version, T = cursor.Since.Ticks, K = cursor.AfterKind, Key = cursor.AfterKey });
+        await StoreCursorForAsync(7, PartOneText);
+        await StoreCursorForAsync(7, (version, cursor) =>
+        {
+            Assert.Equal(DateTime.MinValue, cursor.RebuiltAt);
+            return cursor.Encode(version);
+        });
+        await StoreCursorForAsync(7, PartOneText);
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: PastTheGrace);
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AnExtendCarriesRebuiltAtForwardUnchanged()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        var rebuiltAt = DateTime.UtcNow - TimeSpan.FromDays(3);
+        await StoreCursorForAsync(7, (version, cursor) => (cursor with { RebuiltAt = rebuiltAt }).Encode(version));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+
+        Assert.Equal(rebuiltAt, cursors[7].RebuiltAt);
+        await StoreCursorForAsync(7, (version, cursor) =>
+        {
+            Assert.Equal(rebuiltAt, cursor.RebuiltAt);
+            return cursor.Encode(version);
+        });
+    }
+
+    [Fact]
+    public async Task WithTwoServersDue_AOnePassRebuildsOnlyTheOldest_AndTheNextPassRebuildsTheOther()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        foreach (var serverId in new[] { 7, 8 })
+        {
+            var buffer = new QueryTagSightingBuffer();
+            buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA, "SELECT * FROM Orders"), Snapshot(HashB, "SELECT * FROM Orders")], serverId: serverId);
+            buffer.Flush(_fixture.DuckDb);
+        }
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+
+        using (var connection = _fixture.DuckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var delete = connection.CreateCommand();
+            delete.CommandText = $"DELETE FROM query_tag_sightings WHERE key = '{HashA}'";
+            await delete.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+        await StoreRebuiltAtAsync(8, TimeSpan.FromDays(9));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+    }
+
+    [Fact]
+    public async Task AFailedAgeRebuild_StillExtendsEveryServerInThePass_AndBacksTheServerOffUntilTheBackoffPasses()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        /* The pass picks server 7 for age, and its first attempt fails after the read. */
+        var attempts = 0;
+        _service.AfterQueryTagMapReadForTests = () =>
+        {
+            if (attempts++ == 0)
+            {
+                throw new InvalidOperationException("rebuild failed");
+            }
+        };
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        var backoff = new Dictionary<int, DateTime>();
+        try
+        {
+            var pass = await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+            Assert.False(pass.Rebuilt);
+        }
+        finally
+        {
+            _service.AfterQueryTagMapReadForTests = null;
+        }
+
+        /* The new key was extended in, the deleted one stayed (only a rebuild drops it), and the server is backed off. */
+        Assert.Equal(2, attempts);
+        Assert.Equal([HashA, HashB, "0x00000000000000CC"], (await MapAsync()).Select(r => r.Key).Order());
+        Assert.True(backoff[7] > DateTime.UtcNow.AddMinutes(30));
+
+        /* Inside the back-off the server extends and keeps the deleted key. */
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+        Assert.Contains(HashA, (await MapAsync()).Select(r => r.Key));
+
+        /* Once it passes, the server is picked again, its rebuild drops the deleted key, and the back-off is cleared. */
+        backoff[7] = DateTime.UtcNow.AddSeconds(-1);
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+        Assert.DoesNotContain(HashA, (await MapAsync()).Select(r => r.Key));
+        Assert.Empty(backoff);
     }
 }

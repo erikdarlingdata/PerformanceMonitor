@@ -281,7 +281,8 @@ public sealed class ArchiveSpanReadTests : IDisposable
                 return Task.FromResult(table);
             }, TestContext.Current.CancellationToken);
 
-        Assert.Equal(["query_store_stats", "v_query_store_stats"], reads);
+        /* The hot read is the hot relation (the vh_ view for a table whose text is in the dimension), then the archive view. */
+        Assert.Equal([LiteTextDimensions.HotSource("query_store_stats"), "v_query_store_stats"], reads);
         Assert.Equal("v_query_store_stats", result);
     }
 
@@ -293,7 +294,7 @@ public sealed class ArchiveSpanReadTests : IDisposable
             "query_store_stats", "collection_time", Whole(NowUtc.AddHours(-1)),
             table => { reads.Add(table); return Task.FromResult(table); }, TestContext.Current.CancellationToken);
 
-        Assert.Equal(["query_store_stats"], reads);
+        Assert.Equal([LiteTextDimensions.HotSource("query_store_stats")], reads);
     }
 
     [Fact]

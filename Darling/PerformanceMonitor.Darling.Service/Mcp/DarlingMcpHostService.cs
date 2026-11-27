@@ -113,6 +113,24 @@ public sealed class DarlingMcpHostService : BackgroundService
     private readonly StoreOwnerSource _ownerSource;
     private readonly PseudonymKeySource? _pseudonymKeys;
 
+    /* #8737: the process's personal-token snapshot (a DI singleton the process disposes). Null in a test-constructed host unless the test
+       sets PersonalSnapshot; a start with no snapshot serves no personal token. */
+    private readonly DarlingPersonalTokenSnapshot? _personalSnapshot;
+
+    /// <summary>The personal-token snapshot the bearer gate checks and the supervisor refreshes (#8737). A test sets it.</summary>
+    internal DarlingPersonalTokenSnapshot? PersonalSnapshot
+    {
+        get => _personalSnapshot;
+        init => _personalSnapshot = value;
+    }
+
+    /* #8737: true while the running listener serves personal tokens, so the supervisor tick refreshes the snapshot. */
+    private volatile bool _servesPersonalTokens;
+
+    /* #8737: when the last failed last-used flush was logged at Warning; later failures inside FlushWarnEvery go to Debug. */
+    private DateTime _lastFlushWarnUtc = DateTime.MinValue;
+    private static readonly TimeSpan FlushWarnEvery = TimeSpan.FromMinutes(5);
+
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
@@ -171,11 +189,13 @@ public sealed class DarlingMcpHostService : BackgroundService
     {
         _processServices = processServices;
         _ownerSource = ownerSource ?? new StoreOwnerSource();
+        _personalSnapshot = processServices?.GetService<DarlingPersonalTokenSnapshot>();
         _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _logger = logger;
         PgKnownPatternStore.UseSharedLogger(logger);
+        DarlingObjectUsageReader.UseSharedLogger(logger);
         _state = state;
         _registryState = registryState;
         _baselineCache = baselineCache ?? new BaselineCache();
@@ -330,6 +350,13 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             lastEnabled = toggle.Enabled;
 
+            /* #8737: a listener that serves personal tokens reloads them on every tick (a revocation reaches the gate within one tick) and
+               writes their last-used times. Awaited here, never left running: a stop, or a snapshot the process has disposed, ends the loop. */
+            if (_app is not null && _servesPersonalTokens && await PersonalTokenTickStopsAsync(stoppingToken))
+            {
+                break;
+            }
+
             try
             {
                 await Task.Delay(SupervisorPollInterval, stoppingToken);
@@ -383,6 +410,95 @@ public sealed class DarlingMcpHostService : BackgroundService
         ReleaseServerCertificate();
 
         _runningPort = 0;
+        _servesPersonalTokens = false;
+    }
+
+    /// <summary>
+    /// One supervisor tick's personal-token work (#8737), awaited. True only when the service is stopping (cancellation, or the snapshot
+    /// disposed with the process): the supervisor loop then ends. Any other failure, an <see cref="ObjectDisposedException"/> from a data
+    /// source the worker replaced included, is logged and the next tick tries again, so it never ends MCP supervision.
+    /// </summary>
+    internal async Task<bool> PersonalTokenTickStopsAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await RefreshPersonalTokensAsync(stoppingToken);
+            return false;
+        }
+        catch (Exception ex) when ((ex is OperationCanceledException or ObjectDisposedException) && stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogDebug("The personal MCP token refresh stopped with the service ({Reason})", ex.GetType().Name);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "The personal MCP token refresh failed; personal tokens are refused until a refresh succeeds");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Starts serving (#8737): a listener that serves personal tokens reloads the snapshot first, so a start, and a restart after the
+    /// listener was toggled off, never serves the copy from before (a token revoked meanwhile would pass until the next tick). A reload that
+    /// fails leaves the snapshot unavailable, which refuses every personal token.
+    /// </summary>
+    internal async Task StartListenerAsync(WebApplication app, bool servesPersonalTokens, CancellationToken cancellationToken)
+    {
+        if (servesPersonalTokens)
+        {
+            await RefreshPersonalTokensAsync(cancellationToken);
+        }
+
+        await app.StartAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The personal MCP tokens (#8737) a start serves, from <c>darling.json</c>: null when the feature is off or cannot be served, and always
+    /// null on a front door, which holds no store. <see cref="DarlingPersonalTokenSettings.Resolve"/> already logged its warnings once at the
+    /// worker's start, so it is called here without a logger.
+    /// </summary>
+    internal static PersonalTokenSettings? PersonalTokensFor(DarlingConfig config) =>
+        config.IsFrontDoor ? null : DarlingPersonalTokenSettings.Resolve(config, null);
+
+    /// <summary>
+    /// The supervisor's personal-token work for one tick (#8737): reload the snapshot over the owner connection, then write the last-used
+    /// times. Each runs whatever the other did: a failed flush is logged (at Warning at most every five minutes) and its ids stay pending for
+    /// the next tick. Cancellation and a disposed snapshot (the process is stopping) propagate to the caller, which treats them as a stop.
+    /// </summary>
+    internal async Task RefreshPersonalTokensAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = _personalSnapshot;
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await snapshot.RefreshAsync(_ownerSource, _logger, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
+        {
+            _logger.LogWarning(ex, "Refreshing the personal MCP tokens failed; personal tokens are refused until a refresh succeeds");
+        }
+
+        try
+        {
+            await snapshot.FlushLastUsedAsync(_ownerSource, DateTimeOffset.UtcNow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastFlushWarnUtc >= FlushWarnEvery)
+            {
+                _lastFlushWarnUtc = now;
+                _logger.LogWarning(ex, "Writing the personal MCP tokens' last-used times failed; they are kept and written on a later tick");
+            }
+            else
+            {
+                _logger.LogDebug(ex, "Writing the personal MCP tokens' last-used times failed again; they are kept and written on a later tick");
+            }
+        }
     }
 
     /// <summary>Failed-start cleanup: a partially built app / data source / certificate must not leak between attempts.
@@ -515,9 +631,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical(ex, 
-                        "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
-                        ex.Message);
+                    _logger.LogCritical(ex,
+                        "{Message}",
+                        DarlingSecretSource.DescribeTokenReadFailure(
+                            "MCP network token", "mcp.network", "MCP server not started.", ex.Message,
+                            !string.IsNullOrWhiteSpace(config.Mcp.Network.EncryptedToken)));
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -621,7 +739,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                write only investigation state and need the same token gate as the writes, but never WITH the writes: one
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
-               front of every request cover them as they cover the writes, since they are only served with a token. */
+               front of every request cover them as they cover the writes, since they are only served with a token.
+               The same arm serves the agent action tools (DarlingMcpWritePolicy.AgentActionTools), write tools called with
+               an agent_action, and the Warning line names both groups. */
             if (!namedTokensOnly)
             {
                 LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
@@ -632,7 +752,16 @@ public sealed class DarlingMcpHostService : BackgroundService
                role, unreadable, under the length floor, a shared name or value) is left out with one Critical line. Named tokens were
                configured and none can be served, with no legacy token: the start stops, because serving the listener open would drop
                the credentials the operator asked every client to present. */
-            var tokenSet = DarlingMcpTokenSet.Resolve(config.Mcp, bearerToken, writes, _logger);
+            /* #8737: personal tokens are served beside the file tokens when darling.json asks for them and this process holds the snapshot the
+               gate checks (a front door never serves them). */
+            var personal = PersonalTokensFor(config);
+            if (personal is not null && _personalSnapshot is null)
+            {
+                _logger.LogWarning("MCP personal tokens are not served: this process has no personal token snapshot registered.");
+                personal = null;
+            }
+
+            var tokenSet = DarlingMcpTokenSet.Resolve(config.Mcp, bearerToken, writes, _logger, personal);
             if (config.Mcp.HasNamedTokens && !tokenSet.HasAnyToken)
             {
                 _logger.LogCritical("MCP named tokens (mcp.tokens) are set but none can be served, and no legacy token is set; MCP server not started.");
@@ -646,6 +775,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                     "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
                     string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ", " +
                         McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(t.Name, default, t.DataDetail))) + ")")));
+                writes = tokenSet.Union;
+            }
+
+            if (tokenSet.Personal is { } served)
+            {
+                _logger.LogWarning(
+                    "MCP personal tokens are served alongside the file tokens: each person's token is served its own role (reader, or operator when " +
+                    "an admin mints one and mcp.personalTokens.adminRole is operator; admins may mint {AdminRole}), at {DataDetail}. Every MCP request, " +
+                    "loopback included, must present a token.",
+                    served.AdminRole,
+                    McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(null, default, served.DataDetail))));
                 writes = tokenSet.Union;
             }
 
@@ -839,7 +979,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
                process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
             RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
-                _processServices?.GetService<DailyHealthReportHub>());
+                _processServices?.GetService<DailyHealthReportHub>(), PersonalTokensFor(config), _personalSnapshot, _processServices?.GetService<PasswordKeyStartupFacts>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -863,10 +1003,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                store column defers to. */
             DarlingFileLevelAlertSettings.Publish(config.Analysis);
 
-            /* #7674: the trigram index option, file-only. This host answers get_store_metrics and the all-servers find_queries_by_text before the
-               worker has migrated the store (or when it never does), so it sets the shared tracker from its own load too: the same value from
-               whichever host loads first. */
-            QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+            /* #7674: the trigram index option's file value. This host answers get_store_metrics and the all-servers find_queries_by_text before
+               the worker has migrated the store (or when it never does), so it sets the shared tracker from its own load too: the same value from
+               whichever host loads first. #8978: ignored once the worker has set the value, which the store may override. */
+            QueryTextTrigramIndexTracker.Shared.ConfigureFromFile(config.QueryTextTrigramIndexEnabled);
+            /* #8570: the Query Store text index's option, on the same terms. */
+            QueryStoreTextTrigramIndex.SharedTracker.ConfigureFromFile(config.QueryStoreTextTrigramIndexEnabled);
 
             if (peerPublish.Refused)
             {
@@ -903,7 +1045,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 DarlingAlertSettings.TriageBaseUrlOf(config),
                 tokenSet,
                 frontDoor,
-                config.Mcp.AllowAgentMuteRules);
+                config.Mcp.AllowAgentMuteRules,
+                /* #9577: the hold on tool calls while the worker migrates. */
+                McpStoreReadyFilter.StoreReadyFor(frontDoor is not null, _processServices?.GetService<CollectorRuntimeState>(), StoreHealthWarmGate.Shared));
 
             _app = builder.Build();
 
@@ -974,8 +1118,16 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
-            await _app.StartAsync(stoppingToken);
+            await StartListenerAsync(_app, tokenSet.Personal is not null, stoppingToken);
+            /* #9224: the store table health read for this host's data source, taken once the worker has migrated the store, so the first call
+               finds it held. A front door holds no store. */
+            if (frontDoor is null)
+            {
+                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken: stoppingToken);
+            }
+
             _runningPort = effectivePort;
+            _servesPersonalTokens = tokenSet.Personal is not null;
             return true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -1004,6 +1156,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             EnvironmentName = Environments.Production,
+            /* #9837: not the working folder, which the builder would watch with every folder under it. */
+            ContentRootPath = DarlingHostBinding.ContentRoot,
         });
         PinForwardedHeadersOff(builder.Services);
         return builder;
@@ -1097,25 +1251,28 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 logger.LogWarning(
-                    "MCP investigation tools are ON ({Setting}): {Tools} write investigation state; every MCP request, loopback included, " +
+                    "MCP investigation tools are ON ({Setting}): {Tools}; every MCP request, loopback included, " +
                     "must present the bearer token.",
                     DarlingMcpWritePolicy.InvestigationsSetting,
-                    DescribeInvestigationArmTools(served));
+                    DescribeInvestigationArmTools(served, mcp.AllowAgentMuteRules));
             }
         }
     }
 
     /// <summary>
     /// What the start line says the investigations arm serves (#8611), built from the policy's own sets so it cannot drift from the gate: every
-    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), then the Level 2 agent action tools the
-    /// arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a counted family, not 16 names. The four
-    /// mute rule tools are among those action tools: the arm also serves them without an agent_action, which the line says in a clause.
+    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), which write investigation state, then
+    /// the Level 2 agent action tools the arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a
+    /// counted family, not 16 names, which are write tools called with an agent_action. The four mute rule tools are among those action tools:
+    /// while <paramref name="agentMuteRules"/> (<c>mcp.allowAgentMuteRules</c>) is on the arm also serves them without an agent_action, which
+    /// the line says in a clause.
     /// </summary>
-    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served)
+    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served, bool agentMuteRules = true)
     {
         var actionCount = DarlingMcpWritePolicy.AgentActionTools.Count(served.Offers);
         return string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(t => t, StringComparer.Ordinal))
-            + $", and {actionCount} agent action tools (each with an agent_action; the mute rule tools also work without one)";
+            + $" write investigation state, and {actionCount} agent action tools are write tools called with an agent_action"
+            + (agentMuteRules ? " (the mute rule tools also write mute and digest rules without one)" : string.Empty);
     }
 
     /// <summary>
@@ -1283,15 +1440,25 @@ public sealed class DarlingMcpHostService : BackgroundService
         BaselineCache baselineCache,
         StoreOwnerSource? ownerSource = null,
         IPseudonymKeySource? pseudonymKeys = null,
-        DailyHealthReportHub? dailyReportHub = null)
+        DailyHealthReportHub? dailyReportHub = null,
+        PersonalTokenSettings? personalTokens = null,
+        DarlingPersonalTokenSnapshot? personalSnapshot = null,
+        PasswordKeyStartupFacts? passwordKeyFacts = null)
     {
+        /* #9644: new_password_key and reset_password_key take the startup config's password key facts as a service parameter.
+           Empty until the worker publishes, and the tools refuse until then. */
+        services.AddSingleton(passwordKeyFacts ?? new PasswordKeyStartupFacts());
         /* #7041: send_daily_health_report_now takes the hub as a service parameter. Always registered, so the MCP SDK never advertises it as a
            schema property (and the front door's schema stays the tool's own plus store). */
         services.AddSingleton(dailyReportHub ?? new DailyHealthReportHub());
         /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
-        services.AddSingleton<StoreOwnerSource>(ownerSource ?? new StoreOwnerSource());
+        var toolOwnerSource = ownerSource ?? new StoreOwnerSource();
+        services.AddSingleton<StoreOwnerSource>(toolOwnerSource);
+        /* #9643: mint_personal_token, revoke_personal_token and get_personal_tokens take this. Always registered, so a host with personal tokens
+           off still resolves it and the tools answer not_served: they need the settings and the snapshot, and both are null then. */
+        services.AddSingleton(new DarlingPersonalTokenSeat(personalTokens, personalSnapshot, toolOwnerSource));
         /* Register services that MCP tools need via dependency injection. */
         services.AddSingleton<NpgsqlDataSource>(postgres);
         /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
@@ -1303,7 +1470,15 @@ public sealed class DarlingMcpHostService : BackgroundService
            also carries the owner connection string. Nothing serializes this DI registration today,
            but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
            takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
-        services.AddSingleton(new PostgresConfig { Managed = configuredPostgres.Managed, DataDirectory = configuredPostgres.DataDirectory });
+        /* #9641: the alert source tools word the remote connection string and the network note from the store's port and network block (listen address,
+           allowed range, roles: no secret in them), so the copy carries those too. The connection string stays out. */
+        services.AddSingleton(new PostgresConfig
+        {
+            Managed = configuredPostgres.Managed,
+            DataDirectory = configuredPostgres.DataDirectory,
+            Port = configuredPostgres.Port,
+            Network = configuredPostgres.Network,
+        });
         /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
            section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
            as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
@@ -1313,6 +1488,8 @@ public sealed class DarlingMcpHostService : BackgroundService
            path below) actually shares the one cache window. Registered through
            RegisterToolServices, which a test resolves every tool service parameter from (#5950). */
         services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
+        /* #8787 part D2: who owns the managed postmaster, for get_store_host. The process-wide instance the worker publishes into. */
+        services.AddSingleton<StoreProcessOwnership>(StoreProcessOwnership.Shared);
         /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
            analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
            (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
@@ -1344,11 +1521,11 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true, Func<bool>? storeReady = null)
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
-        var perRequest = tokens is { HasNamed: true };
+        var perRequest = tokens is { PerRequest: true };
         DarlingMcpWritePolicy.Effective PolicyOf(IServiceProvider sp) =>
             DarlingMcpTokenSet.CallerOf(sp.GetService<IHttpContextAccessor>())?.Policy ?? tokens!.LegacyPolicy;
 
@@ -1421,6 +1598,8 @@ public sealed class DarlingMcpHostService : BackgroundService
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
            host share it. */
         services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
+        /* #9636: send_test_notification sends with the worker's live alert settings, published on this seat. Empty until the worker publishes. */
+        services.AddSingleton<NotificationTestSeat>(NotificationTestSeat.Shared);
 
         /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
            service parameter to tell them apart. */
@@ -1456,6 +1635,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 collection.Clear();
                 foreach (var tool in served)
                 {
+                    /* #9388: find_tools and call_tool stay the registered tools. find_tools answers from THIS request's collection (the wrapped
+                       tools, with store in their schemas, after the caller's policy), where a store would search its own set under the front
+                       door's peer token. call_tool is rewritten to the inner tool before dispatch, and its store goes inside arguments. */
+                    if (DarlingFrontDoorRouting.LocalTools.Contains(tool.ProtocolTool.Name))
+                    {
+                        collection.Add(tool);
+                        continue;
+                    }
+
                     collection.Add(new DarlingFrontDoorTool(
                         tool, frontDoor, sp => (perRequest && sp is not null ? PolicyOf(sp) : writes).Investigations));
                 }
@@ -1464,7 +1652,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             options.ServerInstructions = DarlingMcpInstructions.Build(
                 declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection), agentMuteRules);
 
-            if (tokens is { HasNamed: true })
+            if (tokens is { PerRequest: true })
             {
                 roleInstructions.Clear();
                 if (tokens.LegacyToken.Length > 0)
@@ -1480,6 +1668,23 @@ public sealed class DarlingMcpHostService : BackgroundService
                     roleInstructions[entry.Role] = DarlingMcpInstructions.BuildForNamedToken(
                         declaredPeers, catalog,
                         DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
+                }
+
+                /* #8737: a personal token is served operator or reader, so both roles' texts exist whatever mcp.tokens holds. */
+                if (tokens.Personal is not null)
+                {
+                    foreach (var role in new[] { McpTokenEntry.OperatorRole, McpTokenEntry.ReaderRole })
+                    {
+                        if (roleInstructions.ContainsKey(role))
+                        {
+                            continue;
+                        }
+
+                        var policy = tokens.PolicyForRole(role, null);
+                        roleInstructions[role] = DarlingMcpInstructions.BuildForNamedToken(
+                            declaredPeers, catalog,
+                            DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
+                    }
                 }
             }
         });
@@ -1522,16 +1727,18 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* #6542: with named tokens served, each request gets its own token's tool set: tools/list shows it, and a call
                        outside it fails as an unknown tool, because tools/call dispatches over this same collection. The legacy
                        token, when one is served beside them, gets the set its settings give it. */
-                    if (tokens is { HasNamed: true })
+                    if (tokens is { PerRequest: true })
                     {
                         var caller = DarlingMcpTokenSet.CallerOf(context);
                         var policy = caller?.Policy ?? tokens.LegacyPolicy;
                         sessionOptions.ToolCollection = DarlingMcpWritePolicy.FilterToolCollection(sessionOptions.ToolCollection, policy);
 
                         /* The instructions follow the token too (#6542): the tools its role is served and the sentences its role needs. */
-                        var role = caller?.Name is { } name
-                            ? tokens.Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal))?.Role
-                            : LegacyRoleKey;
+                        /* A personal caller carries its role (#8737); a named token's is looked up by its name. */
+                        var role = caller?.Role
+                            ?? (caller?.Name is { } name
+                                ? tokens.Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal))?.Role
+                                : LegacyRoleKey);
                         if (role is not null && roleInstructions.TryGetValue(role, out var instructions))
                             sessionOptions.ServerInstructions = instructions;
                     }
@@ -1542,409 +1749,23 @@ public sealed class DarlingMcpHostService : BackgroundService
                         sessionOptions.ServerInstructions = DarlingCoreToolProfile.CoreInstructions(sessionOptions.ServerInstructions);
                     }
 
+                    /* #9388: call_tool is served on /lean only. /lean keeps the caller's whole served set (its tools/list is narrowed by
+                       DarlingLeanToolProfile.ListFilter), so find_tools and call_tool reach every tool the caller can call on /. Every other
+                       path serves a copy without it, so a call to it gets the unknown-tool answer. */
+                    if (DarlingLeanToolProfile.IsLeanPath(context.Request.Path))
+                        sessionOptions.ServerInstructions = DarlingLeanToolProfile.LeanInstructions(sessionOptions.ServerInstructions);
+                    else
+                        sessionOptions.ToolCollection = DarlingLeanToolProfile.WithoutCallTool(sessionOptions.ToolCollection);
+
                     return Task.CompletedTask;
                 };
             })
-            /* WithGeminiCompatibleTools (not the SDK's WithTools) rewrites parameter schemas into
-               the subset Gemini/Antigravity accepts — collapsing nullable type unions and
-               dropping the default keyword. The companion to stateless transport for issue #1074. */
-            .WithGeminiCompatibleTools<DarlingMcpTools>()
-            /* The five plan-analysis tools (analyze_query_plan / analyze_procedure_plan /
-               analyze_query_store_plan / analyze_plan_xml / get_plan_xml) — the same names the
-               Dashboard and Lite expose, fetching the collectors' STORED plan XML from Postgres
-               (no live monitored-server hit) and running the SHARED PlanAnalysis engine — plus the
-               five raw-plan reads behind the web grids' plan buttons (#5228: get_query_store_plan_xml /
-               get_procedure_plan_xml / get_active_query_plan_xml; #5236: get_blocking_plan_xml /
-               get_deadlock_plan_xml), and the store-only repro-script read (#5233:
-               get_query_repro_script), which are Darling-only. */
-            .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
-            /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryStoreHistoryTools>()
-            /* #5632 step A2: get_plan_force_precheck, the read that checks a Query Store plan before anyone forces it. */
-            .WithGeminiCompatibleTools<DarlingMcpPlanForcePrecheckTools>()
-            /* #5632 step 1b: get_forced_plans, whether each Query Store force works. */
-            .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
-            /* #6875: get_identity_capacity, how full each identity column is and the days until it runs out. */
-            .WithGeminiCompatibleTools<DarlingMcpIdentityCapacityTools>()
-            /* #6874: get_agent_alerts, the SQL Server Agent alerts and what they lack. */
-            .WithGeminiCompatibleTools<DarlingMcpAgentAlertTools>()
-            /* #6873: get_database_protection, the last good CHECKDB and the last full and log backup per database. */
-            .WithGeminiCompatibleTools<DarlingMcpDatabaseProtectionTools>()
-            /* #6073: get_query_store_aborts, the queries ranked by aborted and failed Query Store runs. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryStoreAbortsTools>()
-            /* #6072: get_cpu_by_database, get_load_by_caller and get_query_pileups, who drove the load. */
-            .WithGeminiCompatibleTools<DarlingMcpWhoDroveItTools>()
-            /* #6074: find_database, which monitored server holds a database. */
-            .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
-            /* #7610: find_queries_by_text, which statements on one server contain a piece of text (Query Store text and the raw tier's plan-cache text). */
-            .WithGeminiCompatibleTools<DarlingMcpFindQueriesByTextTools>()
-            /* #7643: get_object_definition, get_schema_changes and find_schema_objects, the table and view definitions the schema_objects collector keeps and what changed in them. */
-            .WithGeminiCompatibleTools<DarlingMcpSchemaTools>()
-            /* #7609: get_query_fleet_summary, one statement's cost on every server. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
-            /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
-            .WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>()
-            /* The core data-read tools (resource metrics, query performance, discovery/health —
-               get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /
-               get_memory_clerks / get_file_io_stats / get_tempdb_trend / get_perfmon_stats /
-               get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top /
-               list_servers / get_collection_health / get_server_properties), the same names Lite
-               and the Dashboard expose, over Darling's Postgres store (STORED reads, no live hit).
-               These are the tools the analysis findings' next_tools recommendations point at. */
-            .WithGeminiCompatibleTools<DarlingMcpDataTools>()
-            /* get_query_store_regressions (#2484) — the viewer's Query Store Regressions tab. Every
-               other Query Store read answers what is EXPENSIVE; this answers what got WORSE, which is
-               not derivable from the first (the costliest query is usually the one that always was).
-               A STORED read over the same query_store_stats the tools above read. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
-            /* get_query_store_clutter (#3797) — the Query Store CLUTTER view: per-database read cost
-               (the collection_log fan-out rollup), plan churn (raw query_store_stats plan identities) and
-               configuration (query_store_health), plus ONE per-server overhead block (the non-sleep QDS_*
-               wait deltas and MEMORYCLERK_QUERYDISKSTORE). Composed from rows the collectors already
-               write — not a new query against the target. Darling-only for now: every input exists on
-               Lite too, so the twin is a port, not a SKU boundary (CrossAppMcpToolInventoryPinTests). */
-            .WithGeminiCompatibleTools<DarlingMcpQueryStoreClutterTools>()
-            /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
-               desktop-only by design; the READ behind it is not, and a bucketed table is the same
-               answer. It is the only query read with a TIME axis: the rankings above cannot show that
-               a window had a quiet half and a bad half. A STORED read over the same query_stats. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryHeatmapTools>()
-            /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
-               index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
-               get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,
-               get_server_config_changes / get_database_config_changes / get_trace_flag_changes /
-               get_database_scoped_config, get_table_index_sizes / get_index_usage / get_object_locking /
-               get_database_sizes — the same names Lite and the Dashboard expose, over Darling's Postgres
-               store (STORED reads, no live hit). Result shapes follow Lite where the two SKUs diverge. */
-            .WithGeminiCompatibleTools<DarlingMcpBlockingTools>()
-            /* #2028 get_plan_corrections — automatic plan correction activity + per-database
-               FORCE_LAST_GOOD_PLAN enablement, the one collected table that previously had no
-               agent-readable path at all. Twin registered in Lite's host. */
-            .WithGeminiCompatibleTools<DarlingMcpPlanCorrectionTools>()
-            /* #2029 get_pvs_stats — the ADR persistent version store, previously reachable only
-               indirectly (alert knobs + compose measures). Twin registered in Lite's host. */
-            .WithGeminiCompatibleTools<DarlingMcpPvsTools>()
-            /* #2068 get_store_metrics — the monitoring store's OWN hourly self-metrics series
-               (per-hypertable size/compression, payload-dimension sizes + row counts, whole-store
-               size + enabled-server count) for capacity forecasting. Darling-only: a single-server
-               edition has no central store to measure, so no Lite twin. */
-            .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
-            /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
-               surface beside get_store_metrics. */
-            .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
-            .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
-            .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
-            /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
-               facts, per-setting verdicts), the read side of part 1's --check-settings verb. Darling-only:
-               Lite has no managed PostgreSQL store to profile. */
-            .WithGeminiCompatibleTools<DarlingMcpStoreHostTools>()
-            .WithGeminiCompatibleTools<DarlingMcpStoreQueryStatsTools>()
-            .WithGeminiCompatibleTools<DarlingMcpStoreQueryHistoryTools>()
-            .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
-            /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
-               while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
-               DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
-            .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
-            /* #3398 get_oversized_plan_backlog - the V121 worklist of cached plans the capture cap
-               declined, and what the out-of-band sweep has done about each one. Darling-only: the
-               sweep is a fleet-level errand on the headless worker's own cadence, which Lite's
-               single-instance runner has no counterpart of. */
-            .WithGeminiCompatibleTools<DarlingMcpOversizedPlanBacklogTools>()
-            /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
-               the duration threshold + attentions), over Darling's Postgres store (STORED read). */
-            .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
-            .WithGeminiCompatibleTools<DarlingMcpClientTimeoutTools>()
-            .WithGeminiCompatibleTools<DarlingMcpSessionTools>()
-            .WithGeminiCompatibleTools<DarlingMcpConfigHistoryTools>()
-            .WithGeminiCompatibleTools<DarlingMcpObjectStatsTools>()
-            /* The resource-contention + jobs data-read tools — get_latch_stats / get_spinlock_stats,
-               get_resource_semaphore / get_memory_grants, get_plan_cache_bloat / get_cpu_scheduler_pressure,
-               get_running_jobs — the same names Lite and the Dashboard expose, over Darling's Postgres store
-               (STORED reads of the collected latch/spinlock/memory-grant/plan-cache/cpu-scheduler/running-job
-               snapshots, no live hit). The Dashboard-only CASE enrichment (latch severity/description/
-               recommendation, spinlock description) and the #1410 client-side classifications (plan-cache
-               bloat_level, cpu-scheduler pressure_level) are reproduced service-side so the full result shape
-               is served. Per-second rates divide by each row's stored sample_interval_seconds (V127, #3540),
-               falling back to the LAG interval only for pre-V127 rows, and are null when the latest interval
-               was unknowable rather than 0. */
-            .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
-            /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
-               pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
-               one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
-               concept, reported in microseconds, so the two engines cannot share a result shape
-               without lying about a unit or emitting mostly-null columns. */
-            .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
-            /* get_pg_cpu_utilization — instance-level CPU for a PostgreSQL/Aurora target (#2719),
-               paired with the pg_cpu_utilization collector. Sourced from AWS Performance Insights
-               rather than a database connection, so it sits beside the wait tools rather than the
-               activity ones: a gauge over time, like SQL Server's own CPU read, not a ranked list. */
-            .WithGeminiCompatibleTools<DarlingMcpPgCpuUtilizationTools>()
-            /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
-               pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
-               peak memory, neither of which the SQL Server tools have an equivalent for. */
-            .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
-            /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
-               statement tools because that is the join: a plan is read alongside the statement it
-               belongs to, on query_id. Carries get_pg_plan_capture_readiness too (#3070): whether the
-               target can capture a plan at all, facet by facet with the remedy for each, which is the
-               read somebody needs the moment the plans one comes back empty. */
-            .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
-            /* get_pg_logging_audit (#3607) - the rest of the logging surface, in readiness's shape:
-               log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
-               log_connections / log_disconnections and log_min_duration_statement, each judged from
-               the stored pg_server_config snapshot with what it unlocks, the recommended value and its
-               cost, and the remedy in the hosting flavour's syntax. Registered beside the plan tools
-               because it is the other half of one onboarding question - is this target telling us
-               everything it could - and lists plan capture's own settings with a pointer to the
-               readiness read rather than judging them twice. */
-            .WithGeminiCompatibleTools<DarlingMcpPgLoggingAuditTools>()
-            /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
-               PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
-            .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
-            /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
-               that are indistinguishable by symptom and need different fixes. */
-            .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
-            /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
-               reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
-               unbounded by default and fills the volume regardless of what vacuum is doing. */
-            .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
-            /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
-               how far past each table's OWN threshold it is. The ratio is the whole tool: a
-               dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
-               one, and the threshold is what makes it so. */
-            .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
-            /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
-               dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
-               more memory would fix from a ring-buffered sequential scan that it would not. */
-            .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
-            /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
-               with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
-               answer: SQL Server's blocked-process report is engine-recorded, this is periodically
-               sampled, so "no blocking" here means "none was sampled" and the tool reports its own
-               capture count so that distinction cannot be lost. */
-            .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
-            /* get_pg_database_stats — four questions off one cluster-wide view: temp-file spills (the
-               PostgreSQL answer to "why is this query slow" that no other read here can give on a stock
-               target), the buffer-cache hit ratio, a server-recorded deadlock count, and the
-               commit/rollback split. The one read whose reset handling is part of its contract: a
-               statistics reset is reported as a reset rather than surfacing as a negative rate. */
-            .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
-            /* get_pg_index_usage — per-index scan counts with the catalog facts that decide whether an
-               index can actually go. The half that is not in pg_stat_user_indexes is the point: a
-               unique index backing a constraint enforces it without ever registering a scan, so advice
-               derived from the counter alone tells somebody to drop their primary key. */
-            .WithGeminiCompatibleTools<DarlingMcpPgIndexUsageTools>()
-            /* get_pg_table_bloat — the damage the vacuum reads above measure the cause of. The only
-               read here whose headline number is an ESTIMATE, and the one whose contract is that it
-               suppresses that number rather than captioning it when its inputs cannot be trusted. */
-            .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
-            /* get_pg_session_states — the session side of the xmin horizon, and the one read here whose
-               job includes REFUSING a causal claim. get_pg_xmin_horizon says a session is holding the
-               horizon; this says which one, and — measured on a live instance — says when an
-               idle-in-transaction session that looks identical is holding nothing at all, because a
-               READ COMMITTED transaction that only read has already released its snapshot. */
-            .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
-            /* #2659: these six shipped REGISTERED NOWHERE. They were implemented, documented, dispatched
-               by the web API and counted in the instructions census, and an agent could not call one of
-               them — the web dashboard could, which is why it went unnoticed. Registration here is
-               per-class and explicit, with no assembly scan, so a tools class is reachable only if
-               someone remembers this line and nothing failed when they did not.
-               McpToolTypeRegistrationTests now derives the check by reflection instead of trusting it. */
-            .WithGeminiCompatibleTools<DarlingMcpPgServerStateTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPgIndexTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPgKernelStatsTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
-            /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
-               server log, rather than pg_stat_database's count. */
-            .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
-            /* get_pg_log_events (#3601) - the classified log-event pipeline's read: errors, connections,
-               lock waits and the recognised-only families, out of the same server log. */
-            .WithGeminiCompatibleTools<DarlingMcpPgLogEventTools>()
-            /* get_pg_wait_trend / get_pg_query_duration_trend / get_pg_io_trend /
-               get_pg_database_trend (#2663) - the PostgreSQL time series. Fourteen trend reads shipped
-               and none worked on this engine. All four live on one tools class, so this line covers
-               the later two as well - which is the only reason adding them needed no edit here. */
-            .WithGeminiCompatibleTools<DarlingMcpPgTrendTools>()
-            .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
-            .WithGeminiCompatibleTools<DarlingMcpJobTools>()
-            /* The windowed-trend siblings of the core data-read tools — get_memory_trend /
-               get_perfmon_trend / get_file_io_trend / get_query_trend / get_query_duration_trend — the
-               same names Lite and the Dashboard expose, over Darling's Postgres store (STORED reads of
-               the collected memory / perfmon / file-io / query-stats series, no live hit). Each mirrors
-               the viewer's proven chart read; the shape follows Lite where the SKUs diverge. */
-            .WithGeminiCompatibleTools<DarlingMcpTrendTools>()
-            .WithGeminiCompatibleTools<DarlingMcpServerTrendTools>()
-            /* The fleet-triage quick-win reads the fleet edition previously lacked — the alerts family
-               (get_alert_history over config_alert_log, get_alert_settings over config_alert_settings,
-               get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
-               (get_server_config / get_database_config / get_trace_flags — latest capture, the companion to
-               the *_changes diff tools), and the health overview (get_server_summary + the daily rollup
-               get_daily_summary and its #2484 range sibling get_daily_summary_range — the Performance
-               Calendar's month grid — both folded through the shared DailyHealthBandCalculator). Same
-               names Lite and the Dashboard expose, all STORED reads over Darling's Postgres store (no live
-               hit). The blocking-trend / deadlock-trend / lock-wait-trend, memory-pressure-event, and
-               wait-type siblings ride along on the existing blocking / memory-grant / core data-read
-               classes above. */
-            .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
-            /* #5632 Phase A: the Level 1 investigation tools. The two reads are ordinary reads; claim and submit are
-               served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
-            .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
-            .WithGeminiCompatibleTools<DarlingMcpThresholdOverrideTools>()
-            .WithGeminiCompatibleTools<DarlingMcpSignatureMergeTools>()
-            /* #5632 step 7: force_query_store_plan and unforce_query_store_plan, behind the server action gate; ship off. */
-            .WithGeminiCompatibleTools<DarlingMcpPlanForceTools>()
-            /* #5632 step 10: get_compiles_after_evict, the store-only read that follows an eviction. */
-            .WithGeminiCompatibleTools<DarlingMcpCompilesAfterEvictTools>()
-            .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
-            .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
-            /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central
-               store can serve, over the SHARED DarlingFleetReader that also powers the web /api/fleet and the
-               WPF viewer's Overview (one reader, one banding). ADDITIVE alongside get_server_summary. */
-            .WithGeminiCompatibleTools<DarlingMcpFleetTools>()
-            /* The Availability Group topology — get_ag_health (#991) — every monitored server's view of the
-               AGs it hosts, replicas plus per-database secondary state, over the SHARED DarlingAgReader that
-               also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
-               get_fleet_overview this is a cross-server read the central store makes possible. */
-            .WithGeminiCompatibleTools<DarlingMcpAgTools>()
-            /* The fleet sweep reports read — get_sweep_reports (#3466) — the third cross-server read, and
-               the one WITH MEMORY: the sweep timeline for a window, the newest sweep in full (mute header,
-               would-have-paged ledger, instrument liveness), and the watch-item worklist, over the SAME
-               FleetSweepStore presentation reads and FleetSweepPresentation builders the web /api/sweeps
-               routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
-               established, applied to the sweep rows. */
-            .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
-            /* The Daily Health Report read - get_daily_health_report (#7041) - the report the scheduler sends, built on demand and never sent. */
-            .WithGeminiCompatibleTools<DarlingMcpDailyReportTools>()
-            /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
-               its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
-               agent may call it. */
-            .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
-            /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
-            .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
-            /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
-               functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
-            .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
-            /* The manual Daily Health Report send - send_daily_health_report_now (#7041) - a write tool (mcp.allowWrites), never offered to an investigation agent. */
-            .WithGeminiCompatibleTools<DarlingMcpDailyHealthReportTools>()
-            /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
-               _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
-               _severe_errors / _significant_waits / _system_health — the same names the Dashboard
-               exposes. Where the Dashboard reads its server-side-parsed collect.HealthParser_*
-               tables, these shred the raw
-               system_health_events on read via the shared SystemHealthParser (Common) and gate with the
-               service-side twin of the viewer's SystemEventSignificance, exactly as the viewer's System
-               Events tab does — the same SIGNIFICANT warning set, no live hit. */
-            .WithGeminiCompatibleTools<DarlingMcpHealthParserTools>()
-            /* The Default Trace tool — get_default_trace_events — the same name the Dashboard exposes.
-               Reads Darling's collected default_trace_events (the base table, no v_* view — like
-               server_properties) and returns the SIGNIFICANT set via the shared
-               DefaultTraceEventSignificance, the same significant-set gate the viewer's System Events
-               surface uses; config-change events are excluded (the config-snapshot diff tools own them). */
-            .WithGeminiCompatibleTools<DarlingMcpDefaultTraceTools>()
-            /* The Custom Views v2 MANAGEMENT tools (#1563) — the one WRITE surface on this server:
-               list_custom_views / get_custom_view / validate_custom_view / create_custom_view /
-               update_custom_view / delete_custom_view / run_custom_view_panel. They CRUD the user-authored
-               views in config.custom_views through the SAME CustomViewStore + ValidateDefinition + compose
-               runner the web viewer's editor uses (no divergent second impl), and run back a composed panel's
-               data for a self-test loop. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
-               config.custom_views (mirroring viewer's) — never the config pivot or the secret columns. */
-            .WithGeminiCompatibleTools<DarlingMcpCustomViewTools>()
-            /* The custom-alert-rule MANAGEMENT tools (#3285) - the second WRITE surface: list_custom_alert_rules
-               / get_custom_alert_rule / validate_custom_alert_rule / create_custom_alert_rule /
-               update_custom_alert_rule / delete_custom_alert_rule. They CRUD the user-authored threshold-alert
-               rules in config.custom_alert_rules through the SAME CustomAlertRuleStore the web editor uses and the
-               SAME CustomAlertRuleDefinition.TryParse the CustomAlertEvaluator applies when it loads a rule (no
-               divergent second impl), validating every definition before it stores. The mcp role carries the
-               narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
-               config pivot or the secret columns. */
-            .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
-            /* The fleet server-tag WRITE tools (#5085) - create_server_tag / update_server_tag / delete_server_tag /
-               assign_server_tag / unassign_server_tag. They write config.server_tags and config.server_tag_map
-               through the SAME ServerTagStore the Viewer uses, with the depth, cycle, duplicate, name and colour
-               rules in ServerTagRules, and every result names the custom alert rules the change affects. The mcp
-               role carries the narrow INSERT/UPDATE/DELETE grant on ONLY those two tables (the admin gate), never
-               the config pivot or the secret columns. */
-            .WithGeminiCompatibleTools<DarlingMcpServerTagTools>()
-            /* The query-tag tools (#5981): create/update/delete/assign/unassign_query_tag (writes, mcp.allowWrites) and list_query_tags
-               (a read). They write config.query_tags and config.query_tag_assignments through QueryTagStore with the shared TagTreeRules;
-               a write bumps config.query_tag_state and the collector's next pass builds the map. The mcp role carries the narrow
-               INSERT/UPDATE/DELETE grant on only those tables. */
-            .WithGeminiCompatibleTools<DarlingMcpQueryTagTools>()
-            /* The query tag RULE tools (#5982) - create_query_tag_rule / update_query_tag_rule / delete_query_tag_rule (writes) and
-               list_query_tag_rules / test_query_tag_rule (reads). They write config.query_tag_rules through QueryTagRuleStore, validated by
-               the shared QueryTagRuleValidator; the test tool runs the shared QueryTagResolver over collect.query_tag_sightings. The mcp role
-               carries the narrow INSERT/UPDATE/DELETE grant on that table (V192). */
-            .WithGeminiCompatibleTools<DarlingMcpQueryTagRuleTools>()
-            /* #5941: run_collectors_now queues a one-time collector pass for one server through the same guarded request the web
-               buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
-               never a grant on the command queue. */
-            .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
-            /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
-            .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
-            /* #6397: get_database_state_expectations (read) and set_database_state_expected (write): the Database State alert's per-database
-               expected state, through the store code the Viewer's override editor runs. The mcp role holds INSERT/UPDATE/DELETE on only that table. */
-            .WithGeminiCompatibleTools<DarlingMcpDatabaseStateTools>()
-            /* #6400: write_investigation_note, approve_investigation_note, reject_investigation_note and close_investigation_request, through the store
-               code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
-            .WithGeminiCompatibleTools<DarlingMcpInvestigationAdminTools>()
-            /* #6400 part 2: start_practice_request, save_environment_profile and record_investigation_feedback, through the practice, profile and
-               feedback store code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
-            .WithGeminiCompatibleTools<DarlingMcpInvestigationFeedbackTools>()
-            /* #6230: pause / resume collection, disable / enable one server, set a server's excluded databases and reload the config,
-               with get_collection_state to read the result. Each runs the command plane's own plan (or the Viewer's shared exclusions
-               write) as the mcp role; the role holds UPDATE on only the paused column of config_service for it. */
-            .WithGeminiCompatibleTools<DarlingMcpCollectionStateTools>()
-            .WithGeminiCompatibleTools<DarlingMcpIncidentActionTools>()
-            .WithGeminiCompatibleTools<DarlingMcpPlanUndoTools>()
-            /* #6401: set_agent_actions_enabled (the global agent switch) and undo_agent_change (a non-plan agent change), the web's two PUT
-               routes over MCP. Writes under mcp.allowWrites, never offered to an investigation agent; they run AgentChangeUndo as the mcp role. */
-            .WithGeminiCompatibleTools<DarlingMcpAgentChangeAdminTools>()
-            /* #6227: disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention
-               (writes, mcp.allowWrites, never offered to an investigation agent) and get_collector_schedules (a read). They run the
-               command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
-               narrow write grant on those two tables. */
-            .WithGeminiCompatibleTools<DarlingMcpCollectorScheduleTools>()
-            /* #6393: update_service_flags (a write, mcp.allowWrites, never offered to an investigation agent) sets plan capture, Query Store
-               backfill, text budget, max concurrent sweeps and fetch top N on config.config_service. The mcp role holds a column grant on
-               exactly those five columns, so the MCP and web flags and ports and paused stay Viewer-only. */
-            .WithGeminiCompatibleTools<DarlingMcpServiceFlagTools>()
-            /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
-               or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
-               Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
-               holds the network path + credentials, so no test_connect command plane is needed), skips
-               case-folded duplicates via the shared ServerIdHelper identity, DPAPI-encrypts the SQL password
-               (the service identity, so it round-trips at collection time), and INSERTs config.config_monitored_
-               servers mirroring StoreConfigProvider.SeedMonitoredServersAsync; remove_server DELETEs by the same
-               resolver the read tools use. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
-               config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
-               config pivot or a schema-wide write. */
-            .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
-            /* #6269: set_server_action (a server-admin write, never offered to an agent) turns one server's agent action switch on or off; get_server_actions reads them. */
-            .WithGeminiCompatibleTools<DarlingMcpServerActionTools>()
-            /* #7107: get_people reads the people directory (people, identities, grants). A read only: no MCP tool writes a person. */
-            .WithGeminiCompatibleTools<DarlingMcpPeopleTools>()
-            /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
-               at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
-               McpToolGuideTools. */
-            .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
-            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
-            .WithGeminiCompatibleTools<DarlingMcpFinOpsInventoryTools>()
-            .WithGeminiCompatibleTools<DarlingMcpFinOpsRecommendationsTools>()
-            // FinOps web parity (#4843), set A ends.
-            // Each set belongs to one series of changes. Append to your own set only,
-            // so the two series never edit the same lines of this registration list.
-            // Entries keep the registration list's existing order and form.
-            // Set A and set B are separated on purpose: keep this gap.
-            //
-            //
-            //
-            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-            .WithGeminiCompatibleTools<DarlingMcpFinOpsTools>()
-            // FinOps web parity (#4843), set B ends.
-            /* Four call-tool filters, each registered ONCE and each covering every tool with no
+            /* Every tool class in this assembly, found by its [McpServerToolType] attribute (DarlingMcpToolTypes), so a new tool class needs
+               no line here. WithGeminiCompatibleTools (not the SDK's WithTools) rewrites parameter schemas into the subset Gemini/Antigravity
+               accepts, collapsing nullable type unions and dropping the default keyword: the companion to stateless transport for issue #1074.
+               Which of them a caller is served is the write policy's decision (DarlingMcpWritePolicy.Apply, above), by tool name. */
+            .WithDarlingTools()
+            /* Five call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
                is made in one place.
 
@@ -1972,6 +1793,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
                never larger than the JSON (see GcfCallToolFilter / GcfOutput).
 
+               The database-name filter (#9065, McpDatabaseNameFilter) sits inside GCF and outside the two masking filters, so
+               it edits the answer as the tool's JSON. Before the tool runs it looks a call's database_name up on the server's
+               database lists (DarlingMcpDatabaseNames): a read is handed the stored spelling when exactly one differs only by
+               letter case, and a tool that changes state is refused with that spelling instead. A spelling one of the
+               server's hourly lists in the look-back holds passes as given.
+
                The statement filter (#4348, SensitiveStatementOutputFilter) is registered LAST, after GCF. The SDK
                documents the first filter added as the outermost, so the last one added sits next to the tool and
                reads each result as the tool's own JSON, before GCF re-encodes it (a GCF wire escapes a line feed
@@ -1988,14 +1815,29 @@ public sealed class DarlingMcpHostService : BackgroundService
                at the level the request is served (the McpDataDetailSetting RegisterDataDetail resolves per request; none, or full, passes through). */
             .WithRequestFilters(filters =>
             {
+                /* #9388: outermost, so a call_tool call is rewritten to a direct call of its inner tool before every filter below, the
+                   dispatch and the front door's routing see it. */
+                filters.AddCallToolFilter(DarlingLeanToolProfile.CallToolFilter);
+                filters.AddListToolsFilter(DarlingLeanToolProfile.ListFilter);
+
+                /* #9577: right after the /lean rewrite, so a call_tool call is held by its inner tool's name, and outside every filter that
+                   reads the store. A start whose migrations are not done answers store_not_ready and runs no tool. Absent from a front door
+                   and a test-built host, which never wait (McpStoreReadyFilter.StoreReadyFor). */
+                if (storeReady is not null)
+                {
+                    filters.AddCallToolFilter(McpStoreReadyFilter.Over(storeReady));
+                }
+
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
-                   what it is sent), the latency record (no store here to record it in), and the GCF re-encode. It keeps the two masking
-                   filters, which pass full through and let the front door mask more strictly than a store. */
+                   what it is sent), the latency record (no store here to record it in), the GCF re-encode, and the database-name filter
+                   (#9065: the store it forwards to holds the database lists and resolves the name). It keeps the two masking filters,
+                   which pass full through and let the front door mask more strictly than a store. */
                 if (frontDoor is null)
                 {
                     filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance);
                     filters.AddCallToolFilter(toolLatency.AsFilter());
                     filters.AddCallToolFilter(GcfCallToolFilter.Instance);
+                    filters.AddCallToolFilter(McpDatabaseNameFilter.Using(DarlingMcpDatabaseNames.CandidatesAsync));
                 }
 
                 filters.AddCallToolFilter(McpDataDetailFilter.Instance);
@@ -2190,9 +2032,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger.LogCritical(ex, 
-                "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the MCP server is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
-                ex.Message);
+            logger.LogCritical(ex,
+                "{Message}",
+                DarlingSecretSource.DescribeTokenReadFailure(
+                    "MCP network token", "mcp.network", "The loopback listener is not served without a token, so the MCP server is not started.",
+                    ex.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken)));
             return new LoopbackTokenResolution(true, "");
         }
     }
@@ -2348,9 +2192,45 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #6542: named tokens always gate the listener, whatever flags the caller passed. A request that skipped the gate would carry
            no caller and be served the legacy token's tool set. */
-        if (networkMode || requireTokenWhenLoopbackOnly || tokens is { HasNamed: true })
+        if (networkMode || requireTokenWhenLoopbackOnly || tokens is { PerRequest: true })
         {
             var token = bearerToken;
+
+            /* #8737: the snapshot the personal check reads. A token set that serves personal tokens without one would refuse them all
+               silently, so the pipeline is not built. */
+            var personalSnapshot = _personalSnapshot;
+            if (tokens?.Personal is not null && personalSnapshot is null)
+            {
+                throw new InvalidOperationException("Personal MCP tokens are served but the host holds no personal token snapshot.");
+            }
+
+            /* THREE client states, never the token's value. Each one is a different next step
+               for the operator, which is the whole point of logging this at all:
+
+                 no header            -> a client that was never configured with a token
+                 header, not a Bearer -> a client configured wrong (Basic, a bare token, an
+                                         empty "Bearer ") - it IS sending something
+                 a Bearer that misses -> a token that does not match this endpoint's
+
+               Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
+               testing only it reported "nothing was presented" about a client that presented
+               a malformed header - collapsing precisely the ambiguity this exists to resolve.
+               None of the three says anything about what the token IS.
+
+               #8737: every refused token goes through here, so a dead, unavailable or wrong-secret personal token is answered with the
+               same status, headers and (empty) body as an unknown token, and logs the same state. */
+            void RefuseToken(HttpContext context, string authorization, IPAddress? remote, DateTime at)
+            {
+                var refusal = DescribeBearerRefusal(authorization);
+                refusals.Report(
+                    _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
+                    remote,
+                    refusal,
+                    at,
+                    state: refusal);
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers.WWWAuthenticate = "Bearer";
+            }
 
             app.Use(async (context, next) =>
             {
@@ -2411,13 +2291,57 @@ public sealed class DarlingMcpHostService : BackgroundService
                     }
                 }
 
+                /* #8737: with personal tokens served, a presented Bearer is checked against the snapshot first. Only a value that is not
+                   dpt1_-shaped, or a dpt1_ value whose id no personal token has, goes on to the file tokens below. A live token is the caller.
+                   A dead one (revoked, expired, or older than maxLifetimeDays now allows) and a check that cannot be made (the snapshot is unavailable) give the reservation back
+                   without a miss or a success: neither says anything about guessing, and neither may exempt the source from the total
+                   budget. A wrong secret on a known id is one miss, and the file tokens are not compared (a dpt1_ value with a known id is
+                   that person's token, whatever a file token holds). */
+                var presented = ExtractBearerToken(authorization);
+                if (tokens?.Personal is not null && presented is not null)
+                {
+                    var personalNow = new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc));
+                    var check = personalSnapshot!.Check(presented, personalNow, tokens.Personal.MaxLifetimeDays);
+                    switch (check.Outcome)
+                    {
+                        case PersonalTokenOutcome.Live:
+                            context.Items[DarlingMcpTokenSet.CallerKey] = tokens.PersonalCaller(check.Row!);
+                            personalSnapshot.MarkUsed(check.Row!.TokenId, personalNow);
+                            tokenThrottle.Accepted(attempt);
+                            await next(context);
+                            return;
+
+                        case PersonalTokenOutcome.Dead:
+                            tokenThrottle.Released(attempt);
+                            if (personalSnapshot.ShouldLogDead(check.Row!.TokenId, personalNow))
+                            {
+                                _logger.LogWarning(
+                                    "personal token {Name} of {Subject} is expired/revoked and still in use from {Source}",
+                                    check.Row.TokenName, check.Row.Subject, source);
+                            }
+
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+
+                        case PersonalTokenOutcome.Unavailable:
+                            tokenThrottle.Released(attempt);
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+
+                        case PersonalTokenOutcome.WrongSecret:
+                            tokenThrottle.Missed(attempt);
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+                    }
+                }
+
                 /* #6542: with named tokens served, the presented token is compared with every served token (each in constant
                    time, never stopping early) and the caller it matches is stored on the request: its tool set and identity
                    follow from it. With none, the one legacy token is compared exactly as before. */
                 bool authorized;
-                if (tokens is { HasNamed: true })
+                if (tokens is { PerRequest: true })
                 {
-                    var caller = tokens.Match(ExtractBearerToken(authorization));
+                    var caller = tokens.Match(presented);
                     authorized = caller is not null;
                     if (caller is not null)
                     {
@@ -2434,28 +2358,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* The reserved attempt's miss is recorded now: the wait is computed from recorded misses,
                        and attempts waiting on this one are decided again. */
                     tokenThrottle.Missed(attempt);
-
-                    /* THREE client states, never the token's value. Each one is a different next step
-                       for the operator, which is the whole point of logging this at all:
-
-                         no header            -> a client that was never configured with a token
-                         header, not a Bearer -> a client configured wrong (Basic, a bare token, an
-                                                 empty "Bearer ") - it IS sending something
-                         a Bearer that misses -> a token that does not match this endpoint's
-
-                       Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
-                       testing only it reported "nothing was presented" about a client that presented
-                       a malformed header - collapsing precisely the ambiguity this exists to resolve.
-                       None of the three says anything about what the token IS. */
-                    var refusal = DescribeBearerRefusal(authorization);
-                    refusals.Report(
-                        _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
-                        remote,
-                        refusal,
-                        now,
-                        state: refusal);
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    context.Response.Headers.WWWAuthenticate = "Bearer";
+                    RefuseToken(context, authorization, remote, now);
                     return;
                 }
 
@@ -2498,6 +2401,10 @@ public sealed class DarlingMcpHostService : BackgroundService
            guard, and in network mode the CIDR check and the bearer token) — nothing about this route is
            exempt from any gate above. / is unchanged and keeps serving every tool, for good. */
         app.MapMcp("/core");
+
+        /* #9388: /lean lists a few tools and serves the caller's whole set, with call_tool added. Mapped on the SAME app after the
+           SAME middleware: the Host, CIDR, token and JSON guards run for it as they do for / and /core. */
+        app.MapMcp("/lean");
     }
 
     /* ---------------------------------------------------------------------------------------------------
@@ -2557,7 +2464,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: mcp.HasNamedTokens || (network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token))),
-            networkConfigured: network is { IsConfigured: true },
+            /* #9571: a token alone is honored in bring-your-own mode, so only the fields that mode ignores count here. */
+            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
             inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
@@ -2709,10 +2617,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                 break;
 
             case McpBindReason.ManagedModeRequired:
+                /* #9571: name the fields that are ignored. A token alone never lands here. */
+                var ignored = mcp.Network?.ByoIgnoredFields ?? [];
                 _logger.Log(level.Value,
-                    "mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
+                    "{Fields} set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.",
+                    string.Join(", ", ignored.Select(f => "mcp.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
                 break;
 
             default:

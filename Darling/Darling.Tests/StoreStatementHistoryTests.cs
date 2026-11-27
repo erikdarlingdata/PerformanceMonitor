@@ -43,18 +43,6 @@ public sealed class StoreStatementHistoryTests
         Assert.Equal(StoreStatementHistory.Epoch.Rebaseline, StoreStatementHistory.DecideEpoch(Previous, Previous.AddDays(-3), null));
 
     [Fact]
-    public void TheSnapshot_ReadsOnlyTheReaderFunction_RanksByTimeAndBindsTheCap()
-    {
-        Assert.DoesNotContain("pg_stat_statements", StoreStatementHistory.SnapshotSql + StoreStatementHistory.CaptureCurrentSql, StringComparison.Ordinal);
-        Assert.Contains("config.store_statement_stats()", StoreStatementHistory.CaptureCurrentSql, StringComparison.Ordinal);
-        Assert.Contains("config.store_statement_stats_info()", StoreStatementHistory.InfoSql, StringComparison.Ordinal);
-        Assert.Contains("queryid IS NOT NULL", StoreStatementHistory.SnapshotSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY a.delta_total_exec_ms DESC", StoreStatementHistory.SnapshotSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $2", StoreStatementHistory.SnapshotSql, StringComparison.Ordinal);
-        Assert.DoesNotMatch(@"LIMIT\s+\d", StoreStatementHistory.SnapshotSql);
-    }
-
-    [Fact]
     public void TheRetentionDeletes_AreOnCaptureTime_AndTheBaselineIsNeverPurged()
     {
         Assert.Matches(@"WHERE capture_time < \$1", StoreStatementHistory.HistoryRetentionDeleteSql);

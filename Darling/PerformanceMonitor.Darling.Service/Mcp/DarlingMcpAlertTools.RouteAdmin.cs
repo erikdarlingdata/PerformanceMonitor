@@ -42,6 +42,7 @@ public sealed partial class DarlingMcpAlertTools
 {
     private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', 'Analysis: *' (every finding), an exact metric name, or * (scoped routes only)";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_notification_route"), Description(
         "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only an operator token sets the agent fields (levels 0 to 3)." +
         "<<GUIDE>>" +
@@ -203,6 +204,7 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_notification_route"), Description(
         "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused. An operator token changes any route, agent fields (levels 0 to 3) included." +
         "<<GUIDE>>" +
@@ -863,6 +865,7 @@ public sealed partial class DarlingMcpAlertTools
 
     // ── Alert history dismiss ──
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "dismiss_alert_history"), Description(
         "Dismisses alert history rows: they leave get_alert_history's default read (include_dismissed true still shows them) and nothing else changes. The rows stay stored. Pass the rows to dismiss as alert_time, server_id and metric_name exactly as get_alert_history returned them. Returns status dismissed (counts: requested, dismissed, already_dismissed, unknown) with the undo call, restore_alert_history; status not_found when no key names a row, unchanged when every named row was dismissed already. Dismissing is a flag, not a delete, so it is fully undone." +
         "<<GUIDE>>" +
@@ -903,6 +906,7 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "restore_alert_history"), Description(
         "Brings dismissed alert history rows back into get_alert_history's default read: the undo of dismiss_alert_history. Pass the rows as alert_time, server_id and metric_name. Returns status restored (counts: requested, restored, not_dismissed_or_unknown) with the call that dismisses them again; status not_found when no key names a row, unchanged when the named rows were not dismissed." +
         "<<GUIDE>>" +

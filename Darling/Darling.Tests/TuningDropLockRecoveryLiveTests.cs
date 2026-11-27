@@ -48,7 +48,7 @@ public sealed class TuningDropLockRecoveryLiveTests
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
 
-        /* A start builds at most one large index, so tune the store fully first; the sweep below then has only the blocked drop to fail. */
+        /* Tune the store fully first; the sweep below then has only the blocked drop to fail. */
         await TuningStartPasses.ConvergeAsync(body, ct);
 
         /* The pre-#4247 shape of one of the five dropped indexes, recreated by hand: PgTableTuning no longer

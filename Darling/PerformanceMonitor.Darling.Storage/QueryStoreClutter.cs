@@ -446,6 +446,26 @@ public static class QueryStoreClutter
         IEnumerable<DarlingQueryStoreClutterReader.ReadCostRow> readCost,
         IEnumerable<DarlingQueryStoreClutterReader.PlanChurnRow> planChurn,
         IEnumerable<DarlingQueryStoreClutterReader.ConfigRow> config,
+        IEnumerable<DarlingQueryStoreClutterReader.QdsWaitRow> waits) =>
+        ComputeFleetMedianCore(fleetServerIds, readCost, planChurn.Select(r => (r.ServerId, r.PlansPerQueryP95)), config, waits);
+
+    /// <summary>
+    /// #9478: the same fleet reference from the narrow churn rows the fleet arm reads. The churn median reads only each database's p95,
+    /// so the figure is the one the full rows give.
+    /// </summary>
+    public static FleetMedian ComputeFleetMedian(
+        IReadOnlyCollection<int> fleetServerIds,
+        IEnumerable<DarlingQueryStoreClutterReader.ReadCostRow> readCost,
+        IEnumerable<DarlingQueryStoreClutterReader.PlanChurnP95Row> planChurn,
+        IEnumerable<DarlingQueryStoreClutterReader.ConfigRow> config,
+        IEnumerable<DarlingQueryStoreClutterReader.QdsWaitRow> waits) =>
+        ComputeFleetMedianCore(fleetServerIds, readCost, planChurn.Select(r => (r.ServerId, r.PlansPerQueryP95)), config, waits);
+
+    private static FleetMedian ComputeFleetMedianCore(
+        IReadOnlyCollection<int> fleetServerIds,
+        IEnumerable<DarlingQueryStoreClutterReader.ReadCostRow> readCost,
+        IEnumerable<(int ServerId, int PlansPerQueryP95)> planChurn,
+        IEnumerable<DarlingQueryStoreClutterReader.ConfigRow> config,
         IEnumerable<DarlingQueryStoreClutterReader.QdsWaitRow> waits)
     {
         var replicaServers = config

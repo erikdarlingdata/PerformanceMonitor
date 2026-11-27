@@ -220,7 +220,7 @@ public class ComposeHourlyEdgesRunnerTests
         var body = Resolver();
         var savepoint = body.IndexOf("HourlyEdgesSavepointSql, StorageCommandDeadlines", StringComparison.Ordinal);
         var probe = body.IndexOf("new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds }", StringComparison.Ordinal);
-        var below = body.IndexOf("if (schemaVersion < QueryStatsHourLedger.RungVersion)", StringComparison.Ordinal);
+        var below = body.IndexOf("if (schemaVersion < IntervalRollupCountGuard.RungVersionFor(candidate.SourceTable))", StringComparison.Ordinal);
         var quiet = body.IndexOf("ComposeReadNotes.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
         var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), StorageCommandDeadlines", StringComparison.Ordinal);
         var guardSql = body.IndexOf("var guardSql = IntervalRollupCountGuard.SqlFor(", StringComparison.Ordinal);

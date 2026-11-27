@@ -303,7 +303,7 @@ FROM collect.schema_objects WHERE version_id = ANY($1)", ids))
        o.change_login, o.change_app, o.change_host
 FROM collect.schema_objects o WHERE ")
             .Append(q.Scope(keys, "o"))
-            .Append(" AND o.valid_from >= ").Append(q.P(NpgsqlDbType.Timestamp, Naive(fromUtc)))
+            .Append(" AND o.valid_from > ").Append(q.P(NpgsqlDbType.Timestamp, Naive(fromUtc)))
             .Append(" AND o.valid_from <= ").Append(q.P(NpgsqlDbType.Timestamp, Naive(toUtc)));
         if (database != null)
         {
@@ -358,11 +358,11 @@ FROM collect.schema_objects o WHERE ")
         if (text != null)
         {
             q.Text.Append($@",
-       coalesce(o.view_definition ILIKE {text} ESCAPE '\', false),
-       EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND x.computed_definition ILIKE {text} ESCAPE '\'),
-       EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND x.default_definition ILIKE {text} ESCAPE '\'),
-       EXISTS (SELECT 1 FROM collect.schema_constraints x WHERE x.version_id = o.version_id AND x.is_current AND x.definition ILIKE {text} ESCAPE '\'),
-       EXISTS (SELECT 1 FROM collect.schema_indexes x WHERE x.version_id = o.version_id AND x.is_current AND x.filter_definition ILIKE {text} ESCAPE '\')");
+       coalesce(o.view_definition ILIKE {text}, false),
+       EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND x.computed_definition ILIKE {text}),
+       EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND x.default_definition ILIKE {text}),
+       EXISTS (SELECT 1 FROM collect.schema_constraints x WHERE x.version_id = o.version_id AND x.is_current AND x.definition ILIKE {text}),
+       EXISTS (SELECT 1 FROM collect.schema_indexes x WHERE x.version_id = o.version_id AND x.is_current AND x.filter_definition ILIKE {text})");
         }
         else
         {
@@ -377,12 +377,12 @@ FROM collect.schema_objects o WHERE ")
 
         if (search.NamePrefix != null)
         {
-            q.Text.Append(" AND lower(o.object_name) LIKE lower(").Append(q.P(NpgsqlDbType.Text, EscapeLike(search.NamePrefix) + "%")).Append(@") ESCAPE '\'");
+            q.Text.Append(" AND lower(o.object_name) LIKE lower(").Append(q.P(NpgsqlDbType.Text, EscapeLike(search.NamePrefix) + "%")).Append(')');
         }
 
         if (search.NameContains != null)
         {
-            q.Text.Append(" AND lower(o.object_name) LIKE lower(").Append(q.P(NpgsqlDbType.Text, "%" + EscapeLike(search.NameContains) + "%")).Append(@") ESCAPE '\'");
+            q.Text.Append(" AND lower(o.object_name) LIKE lower(").Append(q.P(NpgsqlDbType.Text, "%" + EscapeLike(search.NameContains) + "%")).Append(')');
         }
 
         if (search.ColumnName != null)
@@ -405,10 +405,10 @@ FROM collect.schema_objects o WHERE ")
 
         if (text != null)
         {
-            q.Text.Append($@" AND (o.view_definition ILIKE {text} ESCAPE '\'
-       OR EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND (x.computed_definition ILIKE {text} ESCAPE '\' OR x.default_definition ILIKE {text} ESCAPE '\'))
-       OR EXISTS (SELECT 1 FROM collect.schema_constraints x WHERE x.version_id = o.version_id AND x.is_current AND x.definition ILIKE {text} ESCAPE '\')
-       OR EXISTS (SELECT 1 FROM collect.schema_indexes x WHERE x.version_id = o.version_id AND x.is_current AND x.filter_definition ILIKE {text} ESCAPE '\'))");
+            q.Text.Append($@" AND (o.view_definition ILIKE {text}
+       OR EXISTS (SELECT 1 FROM collect.schema_columns x WHERE x.version_id = o.version_id AND x.is_current AND (x.computed_definition ILIKE {text} OR x.default_definition ILIKE {text}))
+       OR EXISTS (SELECT 1 FROM collect.schema_constraints x WHERE x.version_id = o.version_id AND x.is_current AND x.definition ILIKE {text})
+       OR EXISTS (SELECT 1 FROM collect.schema_indexes x WHERE x.version_id = o.version_id AND x.is_current AND x.filter_definition ILIKE {text}))");
         }
 
         q.Text.Append(" ORDER BY o.database_name, o.schema_name, o.object_name, o.version_id LIMIT ").Append(q.P(NpgsqlDbType.Integer, fetch));

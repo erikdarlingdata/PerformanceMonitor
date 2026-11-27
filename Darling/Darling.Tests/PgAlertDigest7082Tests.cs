@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -119,35 +120,85 @@ public sealed class PgAlertDigest7082Tests
         Assert.Null(DarlingWorker.BuildPgDeadlockDetailText(new List<DarlingPgDeadlockReader.PgDeadlockRow>(), patterns));
     }
 
-    /* ---------------- High CPU: capacity at the ceiling, low instance CPU ---------------- */
+    /* ---------------- Capacity at ceiling: low instance CPU (#9501, replaces the held High CPU row of #7082) ---------------- */
 
-    [Fact]
-    public void CapacityAtTheCeilingWithInstanceCpuAtFivePercent_WritesOneHeldRowPerCooldown_AndNeverPages()
+    private static int CeilingFires(IEnumerable<(double? Capacity, double Cpu)> samples)
     {
-        var cooldown = TimeSpan.FromMinutes(15);
-        var start = new DateTime(2026, 11, 1, 3, 0, 0, DateTimeKind.Utc);
-        DateTime? lastHeld = null;
-        var heldRows = 0;
         var state = PersistenceState.Initial;
         var fires = 0;
-
-        for (var minute = 0; minute < 40; minute++)
+        foreach (var (capacity, cpu) in samples)
         {
-            var now = start.AddMinutes(minute);
-            if (DarlingWorker.PgCpuAtCeilingWithLowCpu(100, 5, 90) && DarlingWorker.PgCpuHeldRowDue(lastHeld, now, cooldown))
+            /* A sample with no capacity figure never reaches the gate, as in EvaluatePgCapacityCeilingAsync. */
+            if (!capacity.HasValue)
             {
-                lastHeld = now;
-                heldRows++;
+                continue;
             }
 
             var evaluation = AlertPersistenceGate.Evaluate(
-                state, DarlingWorker.PgCpuSampleBreaches(100, 5, 90), AlertEngine.CpuBreachSamples, AlertEngine.CpuClearSamples);
+                state, DarlingWorker.PgCapacityCeilingBreaches(capacity, cpu, 90),
+                AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples);
             state = evaluation.State;
             fires += evaluation.Outcome == PersistenceOutcome.Fire ? 1 : 0;
         }
 
-        Assert.Equal(0, fires);
-        Assert.Equal(3, heldRows);
+        return fires;
+    }
+
+    [Fact]
+    public void CeilingTouchesOfOneToTwoMinutesAtLowCpu_NeverOpenTheCapacityAlert_AndNeverPageHighCpu()
+    {
+        var series = new List<(double? Capacity, double Cpu)>();
+        for (var touch = 0; touch < 20; touch++)
+        {
+            series.Add((100, 5));
+            series.Add((100, 5));
+            for (var quiet = 0; quiet < 3; quiet++)
+            {
+                series.Add((40, 3));
+            }
+        }
+
+        Assert.Equal(0, CeilingFires(series));
+        var highCpu = PersistenceState.Initial;
+        foreach (var (capacity, cpu) in series)
+        {
+            highCpu = AlertPersistenceGate.Evaluate(
+                highCpu, DarlingWorker.PgCpuSampleBreaches(capacity, cpu, 90), AlertEngine.CpuBreachSamples, AlertEngine.CpuClearSamples).State;
+            Assert.False(highCpu.Firing);
+        }
+    }
+
+    [Fact]
+    public void FiveConsecutiveCeilingSamplesAtLowCpu_OpenTheCapacityAlertOnce_AndHighCpuStaysQuiet()
+    {
+        var series = Enumerable.Range(0, 40).Select(_ => ((double?)100, 5.0)).ToList();
+
+        Assert.Equal(1, CeilingFires(series));
+        Assert.DoesNotContain(series, s => DarlingWorker.PgCpuSampleBreaches(s.Item1, s.Item2, 90));
+    }
+
+    [Fact]
+    public void ASampleWithNoCapacityFigureInsideARun_NeitherCountsTowardTheFive_NorClearsAnOpenAlert()
+    {
+        var withGaps = new List<(double? Capacity, double Cpu)>
+        {
+            (100, 5), (null, 5), (100, 5), (null, 5), (100, 5), (null, 5), (100, 5), (null, 5),
+        };
+        Assert.Equal(0, CeilingFires(withGaps));
+        withGaps.Add((100, 5));
+        Assert.Equal(1, CeilingFires(withGaps));
+
+        var open = Enumerable.Range(0, 5).Select(_ => ((double?)100, 5.0)).ToList();
+        open.AddRange(Enumerable.Range(0, 10).Select(_ => ((double?)null, 5.0)));
+        var state = PersistenceState.Initial;
+        foreach (var (capacity, cpu) in open.Where(s => s.Item1.HasValue))
+        {
+            state = AlertPersistenceGate.Evaluate(
+                state, DarlingWorker.PgCapacityCeilingBreaches(capacity, cpu, 90),
+                AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples).State;
+        }
+
+        Assert.True(state.Firing);
     }
 
     [Theory]
@@ -155,15 +206,54 @@ public sealed class PgAlertDigest7082Tests
     [InlineData(90, 89.9, true)]
     [InlineData(100, 90, false)]
     [InlineData(89, 5, false)]
-    public void OnlyCapacityAtTheBarWithInstanceCpuUnderIt_IsHeld(double capacity, double instanceCpu, bool held)
+    public void OnlyCapacityAtTheBarWithInstanceCpuUnderIt_CountsTowardTheCeilingAlert(double capacity, double instanceCpu, bool held)
     {
-        Assert.Equal(held, DarlingWorker.PgCpuAtCeilingWithLowCpu(capacity, instanceCpu, 90));
+        Assert.Equal(held, DarlingWorker.PgCapacityCeilingBreaches(capacity, instanceCpu, 90));
     }
 
     [Fact]
-    public void ASampleWithNoCapacityFigure_IsNeverAHeldCeilingRow()
+    public void ASampleWithNoCapacityFigure_NeverCountsTowardTheCeilingAlert()
     {
-        Assert.False(DarlingWorker.PgCpuAtCeilingWithLowCpu(null, 5, 90));
+        Assert.False(DarlingWorker.PgCapacityCeilingBreaches(null, 5, 90));
+    }
+
+    [Fact]
+    public void TheCapacityAlertDetail_CarriesAcuMaximumAcuCpuAndFreePlusCachedMemoryAtTheStartAndEndOfTheRun()
+    {
+        const long gib = 1073741824L;
+        var t0 = new DateTime(2026, 11, 1, 3, 0, 0, DateTimeKind.Utc);
+        var start = new DarlingPgCpuUtilizationReader.CpuSample(t0, 2, 100, 8, 8,
+            new DarlingPgCpuUtilizationReader.HostMemory(16 * gib, 3 * gib, 5 * gib, null, null, null));
+        var end = new DarlingPgCpuUtilizationReader.CpuSample(t0.AddMinutes(6), 1, 100, 8, 8,
+            new DarlingPgCpuUtilizationReader.HostMemory(16 * gib, 1 * gib, 2 * gib, null, null, null));
+
+        var text = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, true), 100, 90, 5);
+
+        Assert.Contains("8 ACU of a 8 ACU maximum", text, StringComparison.Ordinal);
+        Assert.Contains("Instance CPU: 1%", text, StringComparison.Ordinal);
+        Assert.Contains("8.0 GiB at the start of the run, 3.0 GiB now", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("reeable", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCapacityAlertDetail_SaysSinceForARunThatBeganInThisProcess_AndSinceAtLeastForOneFoundMidRun()
+    {
+        var t0 = new DateTime(2026, 11, 1, 3, 7, 0, DateTimeKind.Utc);
+        var start = new DarlingPgCpuUtilizationReader.CpuSample(t0, 2, 100, 8, 8, Memory: null);
+        var end = new DarlingPgCpuUtilizationReader.CpuSample(t0.AddMinutes(6), 1, 100, 8, 8, Memory: null);
+
+        var exact = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, true), 100, 90, 5);
+        var floor = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, false), 100, 90, 5);
+
+        Assert.EndsWith("since 03:07 UTC", exact, StringComparison.Ordinal);
+        Assert.EndsWith("since at least 03:07 UTC", floor, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCapacityMetric_IsInBothFamilyTables()
+    {
+        Assert.Equal(AlertFamily.Performance, AlertFamily.MetricFamilies[AlertEngine.PgCapacityCeilingMetric]);
+        Assert.Equal(InvestigationFamily.Resources, InvestigationFamily.PerformanceMetricFamilies[AlertEngine.PgCapacityCeilingMetric]);
     }
 
     /* ---------------- High CPU: provisioned instances carry no capacity figure ---------------- */

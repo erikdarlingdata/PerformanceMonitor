@@ -189,6 +189,47 @@ public partial class DuckDbInitializer
     }
 
     /// <summary>
+    /// DuckDB's total memory use on Lite's own instance, summed over every <c>duckdb_memory()</c> tag (#9423, #9424), or null when it
+    /// cannot be read without waiting: no sentinel, the store lock busy or the read failed. Never blocks and never throws, so the
+    /// slow-call record can take it after a call without adding to the wait it describes.
+    /// </summary>
+    internal long? TryReadDuckDbMemoryBytes()
+    {
+        if (_sentinel is null)
+            return null;
+
+        var holdId = 0L;
+        var held = false;
+        try
+        {
+            if (!s_dbLock.TryEnterReadLock(TimeSpan.Zero))
+                return null;
+            held = true;
+            holdId = StoreLockHolders.Register(nameof(TryReadDuckDbMemoryBytes), "DuckDbInitializer.MemoryDiagnostics.cs", write: false);
+
+            if (_sentinel is null)
+                return null;
+
+            using var connection = CreateConnection();
+            connection.Open();
+            return ReadMemoryTags(connection).Sum(t => t.MemoryBytes);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Slow call record: could not read duckdb_memory()");
+            return null;
+        }
+        finally
+        {
+            if (held)
+            {
+                s_dbLock.ExitReadLock();
+                StoreLockHolders.Unregister(holdId);
+            }
+        }
+    }
+
+    /// <summary>
     /// Writes <c>"{eventName}: {memory line}"</c> at Information, once, and returns the text; null (and no line) when the read
     /// could not be made. A server tab calls it when it opens and when it closes, so a field log reads the step of one open and
     /// what a close gave back straight from the two lines.

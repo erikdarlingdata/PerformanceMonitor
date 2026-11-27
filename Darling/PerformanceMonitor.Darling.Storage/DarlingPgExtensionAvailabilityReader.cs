@@ -108,7 +108,7 @@ public static class DarlingPgExtensionAvailabilityReader
                    is_monitoring_relevant, comment, collection_time
             FROM pg_extension_availability
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             /* THE DATABASE FILTER, and it is INSIDE the DISTINCT ON scope on purpose (#3425). Rows here are
                the product of databases and extension names, and one database's slice is ~102 rows - two
@@ -203,7 +203,7 @@ public static class DarlingPgExtensionAvailabilityReader
                    database_name, extension_name, state
             FROM pg_extension_availability
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             /* THE SAME DATABASE FILTER THE ROW READ APPLIES, so one response describes ONE scope. A census
                measured over the whole server beside rows narrowed to one database puts a denominator of

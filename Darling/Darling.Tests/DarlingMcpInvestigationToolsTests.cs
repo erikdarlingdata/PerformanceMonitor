@@ -168,7 +168,7 @@ public sealed class DarlingMcpInvestigationToolsTests
             Assert.False(byName[name].DestructiveHint);
         }
 
-        /* #5915, #5916: the investigations arm serves exactly the nine Level 2 action tools of the writes, each through the gate. The
+        /* #5915, #5916: the investigations arm serves exactly the nine Level 2 action tools of the writes, each through the gate, plus the change window tools (#9485, served to an agent without an agent_action). The
            literal is the behaviour pin: a write added to or dropped from the served set changes this list on purpose. */
         var servedWrites = byName.Keys.Where(DarlingMcpWritePolicy.IsWrite).OrderBy(n => n, StringComparer.Ordinal).ToArray();
         Assert.Equal(
@@ -176,7 +176,7 @@ public sealed class DarlingMcpInvestigationToolsTests
             {
                 "create_custom_alert_rule", "create_mute_rule", "create_plan_guide", "delete_custom_alert_rule", "delete_mute_rule",
                 "drop_plan_guide", "evict_cached_plan", "force_query_store_plan", "kill_session", "merge_deadlock_signatures", "recompile_module", "set_alert_threshold_override", "set_mute_rule_enabled", "unforce_query_store_plan", "update_custom_alert_rule", "update_mute_rule",
-            },
+            }.Concat(DarlingMcpWritePolicy.ChangeWindowTools).OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             servedWrites);
         /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */
         foreach (var never in new[]
@@ -210,12 +210,18 @@ public sealed class DarlingMcpInvestigationToolsTests
     public void Instructions_NameTheInvestigationSwitch_AndTheWritesOffCondition()
     {
         /* #8463: the parenthetical lists every tool in InvestigationTools, in ordinal order, so a tool added to the set
-           appears here without an edit to the text. */
+           appears here without an edit to the text. #9072: the same sentence counts the agent action tools the arm serves, and, while
+           mcp.allowAgentMuteRules is on, says the mute rule tools among them write with no agent_action, as a clause of this sentence. */
         var names = string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
+        var actions = DarlingMcpWritePolicy.AgentActionTools.Count(n => !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
+        var arm =
+            "When darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off, it serves the investigation tools (" +
+            names + "), which write investigation state, and the " + actions.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            " agent action tools, which are write tools called with an agent_action";
         Assert.Contains(
-            "Investigation tools (" + names + ") write only investigation state and are " +
-            "served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off.",
+            arm + ", and, while mcp.allowAgentMuteRules is on, the mute rule tools among them also write mute and digest rules without an agent_action. ",
             DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.Contains(arm + ". ", DarlingMcpWritePolicy.InstructionsLine(agentMuteRules: false), StringComparison.Ordinal);
     }
 
     [Fact]

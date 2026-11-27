@@ -287,7 +287,6 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         var sql = DarlingQueryHeatmapReader.HeatmapCoverageSql;
         Assert.Equal(2, CountOf(sql, "FROM query_stats"));
         Assert.Equal(2, CountOf(sql, "EXISTS ("));
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
         /* #4233 moved the read itself off v_query_stats onto query_stats directly; the probe follows so

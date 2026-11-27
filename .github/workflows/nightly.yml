@@ -412,7 +412,7 @@ jobs:
   # skipped (no SQL Server on the runner) — expected. Gated like the build job so it only runs
   # when dev actually changed (or on manual dispatch).
   #
-  # #5616: six legs, the same shard cut build.yml's darling-pg job uses (run-darling-pg-shard.ps1), so the
+  # #5616: six legs, the same shard cut the pull request legs use (run-darling-pg-shard.ps1), so the
   # suite runs in about a sixth of the time and the publish job waits for the slowest leg, not the whole suite.
   # Every class still runs in exactly one leg (the Guard classes too: there is no Guard job here), and each leg
   # keeps this job's single cluster and env, so the test set is the one the unsharded step ran.
@@ -423,11 +423,11 @@ jobs:
     # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     runs-on: windows-latest
-    # Cold pg-runtime fetch + build + one shard of the live-PG suite. From numbers (#5616): build.yml's six legs
-    # ran this suite's shards in 5.5 to 10.9 minutes of test step and 7.0 to 12.8 minutes per job over the last
-    # 7 successful dev pushes; this job adds the upgrade-fixture build, so 40 minutes is over three times the
-    # slowest leg and still bounds a cluster that never comes up (pg_ctl -w).
-    timeout-minutes: 40
+    # Cold pg-runtime fetch + build + one shard of the live-PG suite. From numbers (#9015): the six legs ran the
+    # test step in 12.8 to 18.2 minutes (11-17) and 14.9 to 19.7 minutes (11-18, one leg cut off at its 22-minute
+    # step timeout), and the job ran 5.5 to 7.9 minutes longer than the step. 50 minutes is the 30-minute step
+    # plus that setup with 12 minutes to spare, and still bounds a cluster that never comes up (pg_ctl -w).
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -572,20 +572,20 @@ jobs:
       # managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset - the one live-SQL-Server E2E stays skipped
       # (no SQL Server on the runner).
       # #5616: this leg runs one shard of the suite. The cut, the chunking and the per-chunk runs are
-      # .github/scripts/run-darling-pg-shard.ps1, the ONE copy build.yml's darling-pg job calls too; the Guard filter
+      # .github/scripts/run-darling-pg-shard.ps1, the ONE copy the pull request legs call too; the Guard filter
       # is off here (no Guard job ran), so every class lands in exactly one leg, and no event is passed, so no
       # Cost=Slow class is left out. This step keeps only the env and the cluster above it.
       # #5587: the hang report build.yml's shards carry: `-longRunning 300` names a test that has run for 5 minutes,
       # and the runner output is teed to TestResults/darling-runner-<shard>.log and uploaded by the always() step
       # further down. The script's chunk loop fails the step when any chunk's runner fails.
-      # The step timeout is from numbers (#5616): build.yml's six legs ran this step for 5.5 to 10.9 minutes over the
-      # last 7 successful dev pushes (the job 7.0 to 12.8). The job's timeout is 40, and the job ran 1.5 to 2.0 minutes
-      # longer than the step there, plus this job's upgrade-fixture build, so 22 (the step timeout build.yml uses for
-      # the same step) leaves 18 minutes for the setup and the uploads. The slowest leg, 10.9 minutes, is 50% of 22,
-      # under the 70% bar. A job timeout would cancel the job and leave the uploads pending; a step timeout fails
-      # only this step.
+      # The step timeout is from numbers (#9015): the six legs ran this step for 12.8 to 18.2 minutes on 11-17 and 14.9
+      # to 19.7 minutes on 11-18 (the 11-18 leg that hit a 22-minute timeout had finished its first test host run in 18
+      # minutes). The weights table was rebuilt from five full runs, and the same table puts every leg at 17.4 to 18.0
+      # minutes, 19.1 for the slowest leg in any of those runs. 19.1 is 64% of 30, under the 70% bar (21 minutes). The
+      # job's timeout is 50: the job ran 5.5 to 7.9 minutes longer than the step. A job timeout would cancel the job and
+      # leave the uploads pending; a step timeout fails only this step.
       - name: Run Darling PG tests
-        timeout-minutes: 22
+        timeout-minutes: 30
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
@@ -701,7 +701,7 @@ jobs:
   # is passed, so the cut is the class-name hash (the cut the script falls back to when the gate pins none); no
   # ci-select call is made, so every class runs, the Guard classes too (there is no Guard job here). The release
   # run in build.yml still runs the suite whole, in one log.
-  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17 (pr.yml runs the same job when a
+  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16, 17, 18 and 19 (pr.yml runs the same job when a
   # pull request changes a file it covers). Builds Darling.Tests itself: this workflow has no shared test build.
   pg-old-targets:
     name: PostgreSQL collectors on old targets
@@ -771,7 +771,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./.github/scripts/start-test-pg.ps1 -Mode Start
-          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17
+          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17,18,19
 
       # DARLING_TEST_PG_TARGETS_REQUIRED turns a missing target variable into a failure instead of a skip. A run that
       # matched no test exits 0, so the step also fails on a total of zero.
@@ -780,7 +780,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17)) {
+          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17,18,19)) {
             $name, $value = $line -split '=', 2
             [Environment]::SetEnvironmentVariable($name, $value)
           }
@@ -1626,6 +1626,15 @@ jobs:
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-linux-store.yml
 
+  # #9686: the Darling suite on Linux against a Linux TimescaleDB, and the linux-x64 tarball under systemd
+  # (darling-linux-tests.yml, the same workflow a pull request touching its files runs). Both of its jobs are report-only
+  # (continue-on-error), and this job is NOT in publish's needs, so a red one reports and stops nothing.
+  darling-linux-tests:
+    name: Darling Linux tests
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-linux-tests.yml
+
   # #8017: the Darling Helm chart (darling-helm.yml, the same workflow a pull request touching the chart runs): lint, render
   # and schema checks, then installs of both store modes on a kind cluster. Gated like the other jobs here and NOT in
   # publish's needs, for the same reason as the web UI smoke above.
@@ -1709,7 +1718,8 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.VERSION }}"
           mkdir -p releases
-          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          # #9701: owned by root, so a root extract (sudo tar -xzf) does not leave the build machine's uid on every file.
+          tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           # #5796: the PowerShell scripts ship signed in the Windows zip only. The service csproj leaves them out
           # of a Linux publish; this fails the job if one comes back. Same check as build.yml's release job.
           listing="$(tar -tzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
@@ -1717,7 +1727,20 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # #9688: the systemd unit, the Linux config sample, and the install and upgrade scripts with their execute bit ship in
+          # the tarball's root. Same check as build.yml's release job.
+          long_listing="$(tar -tvzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          for shipped in darling.service darling.linux.sample.json darling-script-lib.sh; do
+            grep -E " \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} (#9688)."; exit 1; }
+          done
+          for shipped in install-darling.sh upgrade-darling.sh; do
+            grep -E "^-rwxr-xr-x .* \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} with its execute bit (#9688)."; exit 1; }
+          done
+          # #9333: the Compose files ride the nightly too, pinned to this nightly's own :<version> image tag (pushed
+          # beside :nightly), so the archive the release checklist tests exists before the release is cut. The same
+          # script build.yml's release job runs.
+          bash .github/scripts/pack-compose.sh "${version}" releases
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
           echo "${version}" > releases/linux-version.txt
 
       # The container image build needs THIS checkout (docker build's context is the repo root,
@@ -1737,7 +1760,9 @@ jobs:
           # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
           # build.yml's release image and any hand-run docker build keep publishing against the
           # clean declared version.
-          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
+          # #9591: the checkout's own commit, the one the runner-side publishes stamp, since the image build's context has no .git.
+          commit="$(git rev-parse HEAD)"
+          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" --build-arg SOURCE_COMMIT="${commit}" -t "${image}:nightly" -t "${image}:${version}" .
           mkdir -p releases
           docker save "${image}:nightly" "${image}:${version}" -o releases/darling-container-image.tar
 
@@ -1747,6 +1772,7 @@ jobs:
           name: linux-release-assets
           path: |
             releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+            releases/PerformanceMonitorDarling-compose-*.tar.gz
             releases/SHA256SUMS-linux.txt
             releases/linux-version.txt
           if-no-files-found: error
@@ -1864,6 +1890,15 @@ jobs:
           fi
           echo "Windows and Linux versions match: ${windows_version}"
 
+      # A re-run attempt cannot create the release. On 11-22, attempts 2 and 3 of a nightly run deleted the nightly
+      # release and then got HTTP 403 from the create, which left no nightly at all, while a fresh run published a few
+      # minutes later. Stop before the delete, so the previous nightly stays up.
+      - name: Refuse to publish from a re-run attempt
+        if: github.run_attempt != '1'
+        run: |
+          echo "::error::A re-run cannot create the nightly release (GitHub refuses the create with HTTP 403 after the delete). Start a fresh nightly run instead."
+          exit 1
+
       - name: Delete previous nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1901,7 +1936,7 @@ jobs:
       - name: Upload linux artifact to the nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/PerformanceMonitorDarling-compose-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
 
       - name: Push container image (ghcr, :nightly)
         env:
@@ -1921,10 +1956,12 @@ jobs:
       # anywhere to manage or leak — the signature attests "built by this repository's workflow",
       # which is the claim a container consumer actually wants verified. Verify:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
-      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-identity 'https://github.com/erikdarlingdata/PerformanceMonitor/.github/workflows/nightly.yml@refs/heads/dev' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The identity is exact (#8871): this workflow file on dev, where the schedule runs it. An unanchored
+      # --certificate-identity-regexp is a substring match that another repository's workflow can satisfy.
       # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
-      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
+      # Checked: cosign 2.6.5 and 3.0.6 both read that bundle, and cosign 3.1.3 verifies the nightly image with the command above.
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.3
 

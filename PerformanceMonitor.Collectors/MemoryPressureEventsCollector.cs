@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -139,6 +140,13 @@ OPTION(RECOMPILE);";
     /// row's raw ring buffer <c>timestamp</c>, which does not move with the clocks, and <see cref="ReadAsync"/>
     /// remembers the highest raw value it has seen stored per server (<see cref="ReadMemory"/>).</para>
     ///
+    /// <para>#8981: the memory is persisted through the host's collector state (<see cref="MemoryStateKey"/>), so a
+    /// service restart finds it again and this guess runs only when the state is absent (the first restart after
+    /// an upgrade, a failed state read, a value that does not parse). The guess is weakest on a quiet server: a
+    /// record stored months ago is read back with a stamp about 60 ppm of that time above the one it was stored
+    /// with (8 minutes at 95 days), so every record of an old burst within that drift of the watermark reads above
+    /// it, and the guess spares one row of them.</para>
+    ///
     /// <para>With no memory the read can only guess, and the guess is the row nearest the watermark by absolute
     /// gap. That is NOT exact: shared skew moves every row in a read the same way, so it is right about which
     /// row is nearest only when no older record sits within twice the skew of the held one. An older record
@@ -170,6 +178,62 @@ OPTION(RECOMPILE);";
 
     private readonly ConcurrentDictionary<int, ReadMemory> _memory = new();
 
+    /// <summary>
+    /// #8981: the per-server state this collector persists through the host (both hosts load and save a
+    /// definition's <see cref="StateKeys"/> around the cycle). It holds <see cref="ReadMemory"/> so a service restart
+    /// does not start the dedupe cold. The cold-start guess above cannot be exact, and it is not even close for a
+    /// quiet server: every record the earlier process stored comes back with a stamp that has drifted up by about 60 ppm
+    /// of the time since it was stored (minutes for a record months old), so every record of an old burst that sits within
+    /// that drift of the watermark reads ABOVE it, and the guess spares only the one row nearest the watermark.
+    /// </summary>
+    internal const string MemoryStateKey = "memory_pressure_ring_position";
+
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { MemoryStateKey };
+
+    private static string SerializeMemory(ReadMemory memory) => string.Join(
+        "|",
+        memory.StartTime.Ticks.ToString(CultureInfo.InvariantCulture),
+        memory.Confirmed?.ToString(CultureInfo.InvariantCulture) ?? "",
+        memory.Pending?.ToString(CultureInfo.InvariantCulture) ?? "",
+        memory.PendingBasis?.Ticks.ToString(CultureInfo.InvariantCulture) ?? "");
+
+    /// <summary>A value that does not parse is no state: the read takes the cold-start guess, as it did before the state existed.</summary>
+    private static bool TryParseMemory(string? text, out ReadMemory memory)
+    {
+        memory = null!;
+        var parts = text?.Split('|');
+        if (parts is not { Length: 4 }
+            || !long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var startTicks)
+            || startTicks < DateTime.MinValue.Ticks || startTicks > DateTime.MaxValue.Ticks
+            || !TryParseOptional(parts[1], out var confirmed)
+            || !TryParseOptional(parts[2], out var pending)
+            || !TryParseOptional(parts[3], out var basisTicks)
+            || (basisTicks is { } b && (b < DateTime.MinValue.Ticks || b > DateTime.MaxValue.Ticks)))
+        {
+            return false;
+        }
+
+        memory = new ReadMemory(new DateTime(startTicks), confirmed, pending, basisTicks is { } ticks ? new DateTime(ticks) : null);
+        return true;
+    }
+
+    private static bool TryParseOptional(string text, out long? value)
+    {
+        value = null;
+        if (text.Length == 0)
+        {
+            return true;
+        }
+
+        if (!long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return false;
+        }
+
+        value = parsed;
+        return true;
+    }
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var all = new List<(Row Row, bool NullStamp, long Raw)>();
@@ -192,6 +256,17 @@ OPTION(RECOMPILE);";
 
         var watermark = context.Watermark;
         _memory.TryGetValue(context.ServerId, out var memory);
+
+        /* #8981: a service restart empties _memory. The host hands back what the earlier process left (the same
+           memory, persisted after each cycle), so the first read after a restart skips by raw timestamp too. The
+           Pending part is judged below exactly as in-process memory is: only a watermark that has moved past
+           its basis confirms it. Absent or unreadable state leaves memory null and the guess below runs. */
+        if (memory is null
+            && context.State.TryGetValue(MemoryStateKey, out var savedMemory)
+            && TryParseMemory(savedMemory, out var restored))
+        {
+            memory = restored;
+        }
 
         /* The last read's rows count as stored only if the watermark has moved since: the host advances it after
            a successful write, so an unmoved watermark means the write failed (or nothing was handed over) and
@@ -295,11 +370,20 @@ OPTION(RECOMPILE);";
                 newConfirmed = confirmed is { } old ? Math.Max(old, sm) : sm;
             }
 
-            _memory[context.ServerId] = new ReadMemory(newStart, newConfirmed, keptMax, keptMax is null ? null : watermark);
+            memory = new ReadMemory(newStart, newConfirmed, keptMax, keptMax is null ? null : watermark);
         }
-        else if (memory is not null)
+
+        if (memory is not null)
         {
             _memory[context.ServerId] = memory;
+
+            /* Persist only a change: a quiet server's memory is the same on most cycles. The host saves this after the
+               cycle's write, and a cycle that threw saves nothing, so the older state stands and its rows come back. */
+            var text = SerializeMemory(memory);
+            if (!context.State.TryGetValue(MemoryStateKey, out var persisted) || !string.Equals(persisted, text, StringComparison.Ordinal))
+            {
+                context.PendingState[MemoryStateKey] = text;
+            }
         }
 
         return rows;

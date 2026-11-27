@@ -154,8 +154,8 @@ public class RunConfigMappingTests
     }
 
     [Theory]
-    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "default_credential" } }""", "destination.type")]
-    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "http://minio:9000" }""", "destination")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "exports", "auth": { "method": "shared_key" } }""", "destination.auth.method")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "http://minio:9000", "hive_store_folder": true }""", "destination.hive_store_folder")]
     [InlineData("""{ "type": "s3" }""", "destination.bucket")]
     public void Destinations_run_cannot_pass_are_a_config_error(string destination, string key)
     {
@@ -187,7 +187,8 @@ public class RunConfigMappingTests
         var cfg = Path.Combine(r.Root, "c.json");
         File.WriteAllText(cfg, json);
         var output = new StringWriter();
-        var exit = await RunCommand.MainAsync(["--config", cfg, "--plan-only", "--now", "2026-09-28T16:30:00Z"], output, new StringWriter(), CancellationToken.None);
+        var exit = await RunCommand.MainAsync(["--config", cfg, "--plan-only", "--now", "2026-09-28T16:30:00Z"], output, new StringWriter(), CancellationToken.None,
+            planStoreCheck: (_, _) => Task.FromResult<string?>(null));
         Assert.Equal(0, exit);
         var line = File.ReadAllLines(Path.Combine(r.Logs, "plan-only-store_b-20260928.jsonl")).Single();
         Assert.Contains("\"late_margin\":{\"value\":5,\"source\":\"config\"}", line);

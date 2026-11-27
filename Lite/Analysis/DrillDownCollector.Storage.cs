@@ -159,6 +159,17 @@ LIMIT 50";
             finding.DrillDown!["autogrowth_percent_files"] = items;
     }
 
+    /// <summary>#8883: tempdb's files with their size and growth, from the same collection the TEMPDB_FILE_SETUP fact read.</summary>
+    private async Task CollectTempDbSetupFiles(AnalysisFinding finding, AnalysisContext context)
+    {
+        /* A no-op in the pass, whose fact collector stamped the bounds on this context already. */
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
+
+        var files = await TempDbFileSetupReader.ReadFilesAsync(_duckDb, context);
+        if (files.Count > 0)
+            finding.DrillDown!["tempdb_files"] = TempDbFileSetup.DrillDownRows(files);
+    }
+
     private async Task CollectTempDbBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
         var plan = await _duckDb.PlanArchiveReadAsync("tempdb_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);

@@ -650,15 +650,16 @@ public sealed partial class DarlingWorker
     /// #5985: the shutdown drain's query-tag step. Waits (briefly) for the map pass in flight, which on the stop's cancellation
     /// puts back the sightings its own flush had taken, and then flushes the buffer once more under its own time limit
     /// (<see cref="QueryTagSightingBuffer.ShutdownFlushLimit"/>), because the service's token is already cancelled. Never throws.
+    /// Sightings a store that is going down did not take go to <paramref name="stopNotice"/> (#9794).
     /// </summary>
-    internal static async Task DrainQueryTagSightingsAsync(Task? mapPass, QueryTagSightingBuffer sightings)
+    internal static async Task DrainQueryTagSightingsAsync(Task? mapPass, QueryTagSightingBuffer sightings, StoreStopNotice? stopNotice = null)
     {
         if (mapPass is { IsCompleted: false })
         {
             await Task.WhenAny(mapPass, Task.Delay(QueryTagSightingBuffer.ShutdownFlushLimit, CancellationToken.None));
         }
 
-        await sightings.FlushOnShutdownAsync(QueryTagSightingBuffer.ShutdownFlushLimit);
+        await sightings.FlushOnShutdownAsync(QueryTagSightingBuffer.ShutdownFlushLimit, stopNotice);
     }
 
     /// <summary>
@@ -785,6 +786,10 @@ public sealed partial class DarlingWorker
     /// </summary>
     internal static bool IsSchemaObjectsCollector(string collectorName) =>
         string.Equals(collectorName, SchemaObjectsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#8798: whether a dispatched collector name is column_stats, detached from the sequential body like schema_objects: a first baseline reads every statistic of every database for minutes. A skipped tick is safe, the next run re-reads whatever STATS_DATE says changed.</summary>
+    internal static bool IsColumnStatsCollector(string collectorName) =>
+        string.Equals(collectorName, ColumnStatsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
@@ -923,7 +928,7 @@ public sealed partial class DarlingWorker
     ///
     /// <para><b>Due-ness is asked of the STORE</b> (<see cref="PgStatementText.IsDueSql"/>), not remembered here.
     /// A restart therefore cannot re-fetch the fleet, and two hosts writing one store cannot disagree about when
-    /// text was last written. The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
+    /// text was last written (the store's per-server fetch marker, #8988). The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
     /// cannot drift against its own timestamps.</para>
     ///
     /// <para>Only for PostgreSQL targets: <c>aurora_stat_statements</c> does not exist elsewhere, and the
@@ -959,28 +964,23 @@ public sealed partial class DarlingWorker
                 return;
             }
 
-            var stamps = new DateTime[queryIds.Count];
-            Array.Fill(stamps, now);
-
-            await using var upsert = _postgres!.CreateCommand(PgStatementText.UpsertSql);
-            upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            upsert.Parameters.AddWithValue(Enumerable.Repeat(runtime.ServerId, queryIds.Count).ToArray());
-            upsert.Parameters.AddWithValue(queryIds.ToArray());
-            upsert.Parameters.AddWithValue(texts.ToArray());
-            upsert.Parameters.AddWithValue(stamps);
-            upsert.Parameters.AddWithValue(ownEntries.ToArray());
-            upsert.Parameters.AddWithValue(candidates.ToArray());
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            /* #8988: the upsert leaves an unchanged row's last_seen alone, so the fetch writes its own marker after it, and the due
+               check above reads that marker. */
+            var written = await PgStatementText.WriteFetchAsync(
+                _postgres!, runtime.ServerId, queryIds, texts, ownEntries, candidates, now,
+                ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
             _logger.LogInformation(
-                "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
-                runtime.Config.DisplayName, queryIds.Count);
+                "  [{Server}] pg_statement_text => {Fetched} statement text(s) fetched, {Written} written (#2219)",
+                runtime.Config.DisplayName, queryIds.Count, written);
 
             /* #5320: a refresh that worked writes a SUCCESS row under the same name the failure row uses. Collection
                health bands a name from the counts of its rows and the age of its newest success, so a name that
                only ever wrote errors would read failing until the error aged out of the window, whatever the
-               refreshes after it did. The row carries the rows stored and the fetch-plus-store time; a due check
-               that finds nothing due, and a fetch that returns no statements, write none. */
+               refreshes after it did. The row carries the rows fetched (not the rows written, which is 0 on a pass that finds
+               every text unchanged: health reads three zero-row SUCCESS runs after a productive one as a collector that stopped,
+               and this refresh runs hourly) and the fetch-plus-store time; a due check that finds nothing due, and a fetch that
+               returns no statements, write none. */
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, PgStatementText.CollectorName, "SUCCESS", queryIds.Count, fetchClock.ElapsedMilliseconds, 0,
                 errorMessage: null,
@@ -1055,10 +1055,22 @@ public sealed partial class DarlingWorker
         };
         await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
+        /* #9062: inside a transaction that starts with a local work_mem statement (see PgReadWorkMem), so the function's tuplestore, the
+           sort and the windows stay in memory. This read runs hourly, so the BEGIN and ROLLBACK it adds to the target's statistics are
+           two entries a call; the minute read sends its setting in its own command instead. The cap is a positional parameter, and
+           Npgsql does not split a command that has one, so the setting cannot ride in the same command here. */
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var setting = new Npgsql.NpgsqlCommand(
+            PerformanceMonitor.Collectors.PgOwnStatement.Mark(PgReadWorkMem.SetSql(PgReadWorkMem.StatementTextBytesPerEntry)),
+            connection, transaction) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds })
+        {
+            await setting.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = new Npgsql.NpgsqlCommand(
             PerformanceMonitor.Collectors.PgOwnStatement.Mark(
                 PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)),
-            connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
+            connection, transaction) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -1101,6 +1113,39 @@ public sealed partial class DarlingWorker
     private static readonly TimeSpan BackfillSliceDeadline = TimeSpan.FromSeconds(300);
 
     /// <summary>
+    /// #9392: runs one background pass and says whether its loop should go on. A pass that ends because the service is
+    /// stopping returns false and logs nothing: that is a cancelled token, or a dependency (the data source, a scope) the
+    /// host disposed first while the pass was still using it. Any other failure, a disposed object while the service is
+    /// NOT stopping included, is logged at Warning with <paramref name="failureMessage"/> and the loop goes on.
+    /// </summary>
+    internal static async Task<bool> RunDaemonPassAsync(
+        ILogger logger, Func<Task> pass, string failureMessage, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await pass();
+            return true;
+        }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{Failure}", failureMessage);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// #9392: what a stop leaves behind once the service token has been cancelled is not a fault. It is the one rule the
+    /// analysis passes already use: a cancellation, a disposed object (bare or wrapped one level, as Npgsql throws it), or
+    /// the server going away (SQLSTATE 57P01, 57P02 or 57P03).
+    /// </summary>
+    internal static bool IsStopping(Exception ex, CancellationToken stoppingToken) =>
+        AnalysisShutdown.IsExpectedAbandon(ex, stoppingToken);
+
+    /// <summary>
     /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
     /// ~5-second tick. Each tick DRAINS every currently-pending command (claim one at a time until the
     /// queue is empty), so a burst of viewer commands is not throttled to one per 5 seconds. Never throws
@@ -1130,6 +1175,10 @@ public sealed partial class DarlingWorker
                 }
             }
             catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex) when (IsStopping(ex, stoppingToken))
             {
                 return;
             }
@@ -1166,58 +1215,30 @@ public sealed partial class DarlingWorker
             if (ShouldRunCollection(_paused))
             {
                 /* #6234: its own try, like the passes below. */
-                try
-                {
-                    await changeWatchPass.RunOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => changeWatchPass.RunOnceAsync(stoppingToken),
+                        "Change watch pass failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Change watch pass failed; it is tried again next pass");
                 }
 
                 /* #6005: the deadlock digest, once per 4-hour bucket; its own try, like the two below. */
-                try
-                {
-                    await deadlockRollup.RunDigestAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => deadlockRollup.RunDigestAsync(stoppingToken),
+                        "Deadlock digest failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Deadlock digest failed; it is tried again next pass");
                 }
 
-                try
-                {
-                    await InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken),
+                        "Investigation sweep failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation sweep failed; it is tried again next pass");
                 }
 
                 /* #6003: its own try, so a failed sweep still delivers what is already journaled, and the reverse. */
-                try
-                {
-                    await events.RunOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => events.RunOnceAsync(stoppingToken),
+                        "Investigation event delivery failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation event delivery failed; it is tried again next pass");
                 }
             }
 
@@ -1244,17 +1265,10 @@ public sealed partial class DarlingWorker
         {
             if (ShouldRunCollection(_paused))
             {
-                try
-                {
-                    await capture.CaptureOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => capture.CaptureOnceAsync(stoppingToken),
+                        "Investigation evidence capture failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation evidence capture failed; it is tried again next pass");
                 }
             }
 
@@ -1282,24 +1296,20 @@ public sealed partial class DarlingWorker
         {
             if (ShouldRunCollection(_paused))
             {
-                try
-                {
-                    var pass = await drain.RunPassAsync(stoppingToken);
-                    if (pass.Claimed > 0 || pass.Expired > 0)
+                if (!await RunDaemonPassAsync(_logger, async () =>
                     {
-                        _logger.LogInformation(
-                            "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
-                            pass.Claimed, pass.Delivered, pass.Muted, pass.NoChannel,
-                            pass.Retried, pass.Failed, pass.Ignored, pass.Interrupted, pass.Expired);
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                        var pass = await drain.RunPassAsync(stoppingToken);
+                        if (pass.Claimed > 0 || pass.Expired > 0)
+                        {
+                            _logger.LogInformation(
+                                "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
+                                pass.Claimed, pass.Delivered, pass.Muted, pass.NoChannel,
+                                pass.Retried, pass.Failed, pass.Ignored, pass.Interrupted, pass.Expired);
+                        }
+                    },
+                    "External alert pass failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "External alert pass failed; it is tried again next pass");
                 }
             }
 
@@ -1312,6 +1322,18 @@ public sealed partial class DarlingWorker
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// #8978: sets both trigram index trackers to the options as resolved from <paramref name="config"/> (the store's value when its column
+    /// holds one, else darling.json's) and records which, for get_store_metrics. Called after each store config load is applied.
+    /// </summary>
+    internal static void ConfigureTrigramIndexTrackers(DarlingConfig config)
+    {
+        QueryTextTrigramIndexTracker.Shared.Configure(
+            config.QueryTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryTextTrigramIndexStoreValue));
+        QueryStoreTextTrigramIndex.SharedTracker.Configure(
+            config.QueryStoreTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryStoreTextTrigramIndexStoreValue));
     }
 
     /// <summary>
@@ -1352,6 +1374,8 @@ public sealed partial class DarlingWorker
         StoreConfigProvider.ApplyToConfig(config, view);
         _collectorState.SigningStatus.Publish(config.Webhooks, config.NotificationRoutes, DateTime.UtcNow); // #5998: presence and dates for the web page, no key text
         DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
+        /* #8978: a store write to a trigram index option shows in get_store_metrics now; the pass acts on it at its next pass. */
+        ConfigureTrigramIndexTrackers(config);
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
@@ -1583,6 +1607,8 @@ public sealed partial class DarlingWorker
                 _deltas?.ClearServer(id);
                 /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
                 _runner?.ForgetRdsVerdicts(id);
+                /* #9743: and its blocked process threshold refusal, so a re-add is asked again. */
+                _runner?.BlockedProcessThresholdBootstrap.Forget(id);
                 /* #5518: and the backfill's cached database list and the fence's database names for it. */
                 _queryStoreBackfill?.ForgetServer(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
@@ -1945,6 +1971,15 @@ public sealed partial class DarlingWorker
     internal static DateTime ColdStartFirstSweepDue(DateTime coldStartInstant, int serverId)
         => coldStartInstant.Add(CadencePhaseOffset(serverId, ColdStartSpreadSeconds));
 
+    /// <summary>
+    /// #9696: whether the initial fleet's first launches are spread across <see cref="ColdStartSpreadSeconds"/>. The spread keeps first
+    /// bodies from queueing, so it applies only when the fleet is larger than the narrower of the sweep gate's width
+    /// (<paramref name="sweepWidth"/>) and the connect gate's (<paramref name="connectWidth"/>, which every first body passes
+    /// before it takes a sweep slot). A fleet that fits both launches every first body at once.
+    /// </summary>
+    internal static bool SpreadsColdStart(int initialServers, int sweepWidth, int connectWidth)
+        => initialServers > Math.Min(sweepWidth, connectWidth);
+
     /// <summary>#4732: the longest a connect-retry stamp can sit ahead of now when it is written: the backoff cap plus
     /// its jitter (<see cref="ServerConnectBackoff"/>), so a stamp further out than this came from a clock that
     /// stepped backwards.</summary>
@@ -2145,7 +2180,7 @@ public sealed partial class DarlingWorker
         var watermarks = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(ReadCollectorWatermarksSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
@@ -2231,7 +2266,7 @@ public sealed partial class DarlingWorker
                 return new ServerClockStamp(await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken));
             }
 
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
 
             /* The newest day first, then every retained snapshot only when that day held none: the bounds the analysis side
                reads the same row with. The day's newest qualifying row is the newest one the unbounded read would find, so

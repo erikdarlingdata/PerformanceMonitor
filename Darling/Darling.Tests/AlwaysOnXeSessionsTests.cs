@@ -925,6 +925,68 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("ELSE 1", azure, StringComparison.Ordinal);
     }
 
+    /* #9675: another entry on the instance is still creating the session, so the first (dirty) probe reads its half-written definition as
+       another one. The ensure acts on the committed re-read, and the drop that would remove the other entry's session never runs. */
+    [Fact]
+    public async Task AMismatchTheFirstProbeReads_IsReadAgainCommitted_AndTheSecondAnswerIsTheOneActedOn()
+    {
+        var mismatch = (object)AlwaysOnXeSessions.AttentionDefinitionMismatch;
+        var reads = 0;
+
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            mismatch, _ => { reads++; return Task.FromResult<object?>(0); }, TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(0, settled);
+        Assert.Equal(1, reads);
+        Assert.Equal(DarlingXeSessions.ServerSessionState.Stopped, DarlingXeSessions.ServerSessionStateOf(settled));
+    }
+
+    [Fact]
+    public async Task AMismatchThatTheSecondReadStillShows_StaysAMismatch()
+    {
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            AlwaysOnXeSessions.AttentionDefinitionMismatch, _ => Task.FromResult<object?>(AlwaysOnXeSessions.AttentionDefinitionMismatch), TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(AlwaysOnXeSessions.AttentionDefinitionMismatch, settled);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task AnAnswerThatIsNotAMismatch_IsNotReadAgain(object? answer)
+    {
+        var reads = 0;
+
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            answer, _ => { reads++; return Task.FromResult<object?>(null); }, TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(answer, settled);
+        Assert.Equal(0, reads);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(1)]
+    public async Task ADropAnotherEntryGotToFirst_IsNotAFailure_WhenTheSessionIsGoneOrNowMatches(object? after)
+    {
+        var failure = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15151, 16, "Cannot drop the event session because it does not exist.");
+
+        await AlwaysOnXeSessions.DropAttentionMismatchAsync(
+            _ => throw failure, _ => Task.FromResult<object?>(after), CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ADropThatFailsWhileTheSessionIsStillAnotherDefinition_Throws()
+    {
+        var failure = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(25641, 16, "The drop was refused.");
+
+        var thrown = await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => AlwaysOnXeSessions.DropAttentionMismatchAsync(
+            _ => throw failure, _ => Task.FromResult<object?>(AlwaysOnXeSessions.AttentionDefinitionMismatch), CancellationToken.None));
+
+        Assert.Same(failure, thrown);
+    }
+
     /* #8146: the limit the host asks for reaches the create the ensure sends, for both ring-buffer captures. */
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
@@ -1019,6 +1081,95 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
 
         var create = Assert.Single(database.Statements, s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal));
         Assert.DoesNotContain("max_events_limit", create, StringComparison.Ordinal);
+    }
+
+    /* #9507: an install already on its own client-timeout session before the upgrade has a session without the completed events.
+       The own name is the install's to drop, so it is dropped and created again with the current definition. */
+    [Fact]
+    public async Task AnOwnAttentionSessionWithAnOlderDefinition_IsDroppedAndCreatedAgain()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = true;
+        database.WrongEvent.Add(shared);
+        database.Started[Own(kind)] = true;
+        database.WrongEvent.Add(Own(kind));
+
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Own, CancellationToken.None);
+
+        Assert.Equal(AlwaysOnXeChoice.Own, result.Choice);
+        Assert.Equal(AlwaysOnXeChange.Created, result.Change);
+        Assert.True(database.Sent("DROP EVENT SESSION", Own(kind)));
+        Assert.Equal(1, database.Created(Own(kind)));
+        Assert.False(database.Sent("DROP EVENT SESSION", shared));
+    }
+
+    /* #9507: an own session with the current definition is only started when it is stopped, never dropped. */
+    [Fact]
+    public async Task AnOwnAttentionSessionWithTheCurrentDefinition_IsOnlyStarted()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = true;
+        database.WrongEvent.Add(shared);
+        database.Started[Own(kind)] = false;
+
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Own, CancellationToken.None);
+
+        Assert.Equal(AlwaysOnXeChange.Started, result.Change);
+        Assert.True(database.Sent("ALTER EVENT SESSION", Own(kind)));
+        Assert.False(database.Sent("DROP EVENT SESSION", Own(kind)));
+        Assert.Equal(0, database.Created(Own(kind)));
+    }
+
+    /* #9507: a shared client-timeout session with an older definition is replaced once per run and then used. A second read in
+       the same run does not replace it again, so an install whose recreated session still reads wrong falls back to its own. */
+    [Fact]
+    public async Task ASharedAttentionSessionWithAnOlderDefinition_IsReplacedOncePerRun_AndUsed()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = true;
+        database.WrongEvent.Add(shared);
+        var claims = 0;
+        Func<bool> claim = () => ++claims == 1;
+
+        var first = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: claim);
+
+        Assert.Equal(AlwaysOnXeChoice.Shared, first.Choice);
+        Assert.Equal(AlwaysOnXeChange.Created, first.Change);
+        Assert.Equal(1, database.Statements.Count(s => s.StartsWith("DROP EVENT SESSION [" + shared + "]", StringComparison.Ordinal)));
+        Assert.Equal(1, database.Created(shared));
+
+        var second = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: claim);
+
+        Assert.Equal(AlwaysOnXeChoice.Own, second.Choice);
+        Assert.Equal(1, database.Statements.Count(s => s.StartsWith("DROP EVENT SESSION [" + shared + "]", StringComparison.Ordinal)));
+        Assert.Equal(1, database.Created(shared));
+        Assert.Equal(2, claims);
+    }
+
+    /* #9507: only the client-timeout session is replaced. Another kind's shared session in the same state is left alone, and the
+       claim is never asked for it. */
+    [Fact]
+    public async Task ASharedDeadlockSessionWithAnOlderDefinition_IsStillLeftAlone()
+    {
+        var kind = AlwaysOnXeSessionKind.Deadlock;
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = true;
+        database.WrongEvent.Add(shared);
+        var claims = 0;
+
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(
+            database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: () => ++claims > 0);
+
+        Assert.Equal(AlwaysOnXeChoice.Own, result.Choice);
+        Assert.False(database.Sent("DROP EVENT SESSION", shared));
+        Assert.Equal(0, claims);
     }
 
     /* #8528: an ensure that found the sessions stopped and started them leaves that on the loop state, and the Capture Down

@@ -48,10 +48,12 @@ public sealed class ViewerTextLookupWindowBoundLiveTests
     /// <summary>The window's end. History runs 12 days back from here, so the 1-day chunks number 13.</summary>
     private static readonly DateTime End = new(2026, 2, 20, 12, 0, 0, DateTimeKind.Unspecified);
 
-    /// <summary>Comparison windows: current = the last 24 h, baseline = the 24 h before it. The text lookup's window is
-    /// baseline start to current end: 48 h, which touches at most 3 one-day chunks.</summary>
-    private static readonly DateTime CurrentStart = End.AddHours(-24);
-    private static readonly DateTime BaselineStart = End.AddHours(-48);
+    /// <summary>Comparison windows: current = the last 23.5 h, baseline = the 24 h before it. Each start sits half an hour
+    /// off the hour the seeds are stamped on, so no seeded row is stamped on a window's start and the oracle's inclusive
+    /// start and the live statements' exclusive one read the same rows. The text lookup's window is baseline start to
+    /// current end: 47.5 h, which touches at most 3 one-day chunks.</summary>
+    private static readonly DateTime CurrentStart = End.AddHours(-24).AddMinutes(30);
+    private static readonly DateTime BaselineStart = End.AddHours(-48).AddMinutes(30);
     private const int WindowChunkCeiling = 3;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -894,7 +896,7 @@ CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-
             var normalized = sql.ReplaceLineEndings("\n");
             var fallback = normalized[normalized.IndexOf("FROM query_store_stats AS s", StringComparison.Ordinal)..];
             fallback = fallback[..fallback.IndexOf("LIMIT 1", StringComparison.Ordinal)];
-            Assert.Contains("s.collection_time >= $2", fallback, StringComparison.Ordinal);
+            Assert.Contains("s.collection_time > $2", fallback, StringComparison.Ordinal);
             Assert.Contains("s.collection_time <= $3", fallback, StringComparison.Ordinal);
         }
     }

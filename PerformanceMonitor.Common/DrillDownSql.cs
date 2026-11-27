@@ -47,7 +47,7 @@ WITH windowed AS
            ) AS newest_rn,
            MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
     FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
     AND   delta_worker_time > 0
 ),
 top_queries AS
@@ -82,7 +82,7 @@ SELECT t.database_name, t.query_hash,
            (
                SELECT MAX(v.query_text)
                FROM v_query_stats AS v
-               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               WHERE v.server_id = $1 AND v.collection_time > $2 AND v.collection_time <= $3
                AND   v.delta_worker_time > 0
                AND   v.database_name = t.database_name
                AND   v.query_hash = t.query_hash
@@ -91,7 +91,7 @@ SELECT t.database_name, t.query_hash,
            (
                SELECT MAX(v.query_text)
                FROM v_query_stats AS v
-               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               WHERE v.server_id = $1 AND v.collection_time > $2 AND v.collection_time <= $3
                AND   v.delta_worker_time > 0
                AND   v.database_name IS NOT DISTINCT FROM t.database_name
                AND   v.query_hash IS NOT DISTINCT FROM t.query_hash
@@ -129,7 +129,7 @@ WITH windowed AS
            MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   query_hash = $4
     AND   ($5 = '' OR database_name = $5)

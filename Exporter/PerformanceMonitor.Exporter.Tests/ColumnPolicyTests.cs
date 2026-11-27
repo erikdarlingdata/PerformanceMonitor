@@ -132,6 +132,52 @@ public class ColumnPolicyTests
     }
 
     [Fact]
+    public void Query_snapshots_policy_drops_both_plan_columns_and_nothing_else()
+    {
+        var policy = ColumnPolicies.For("query_snapshots");
+
+        Assert.NotNull(policy);
+        Assert.Equal(1, policy!.Version);
+        Assert.Null(policy.KeepOnly);
+        Assert.All(policy.Rules, r => Assert.Equal(ColumnAction.Drop, r.Action));
+        Assert.Equal(["live_query_plan", "query_plan"], policy.Rules.Select(r => r.Column).OrderBy(c => c, StringComparer.Ordinal));
+        Assert.Equal(["live_query_plan", "query_plan"], ColumnPolicies.DroppedColumns("query_snapshots").OrderBy(c => c, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Query_tag_sightings_policy_drops_text_sample_and_nothing_else()
+    {
+        var policy = ColumnPolicies.For("query_tag_sightings");
+
+        Assert.NotNull(policy);
+        Assert.Equal(1, policy!.Version);
+        Assert.Null(policy.KeepOnly);
+        var rule = Assert.Single(policy.Rules);
+        Assert.Equal("text_sample", rule.Column);
+        Assert.Equal(ColumnAction.Drop, rule.Action);
+    }
+
+    [Fact]
+    public void DroppedColumns_is_empty_for_a_table_without_a_drop_rule()
+    {
+        Assert.Empty(ColumnPolicies.DroppedColumns("perfmon_stats"));
+        Assert.Empty(ColumnPolicies.DroppedColumns("pg_log_events"));
+        Assert.Empty(ColumnPolicies.DroppedColumns("job_history"));
+    }
+
+    [Theory]
+    [InlineData("id", "name", "parent_id", "sort_order", "colour", "created_at")]
+    [InlineData("id", "tag_id", "kind", "query_hash", "database_name", "schema_name", "object_name", "query_id", "created_at", "created_by")]
+    [InlineData("id", "tag_id", "priority", "enabled", "match_field", "pattern", "created_at", "created_by")]
+    [InlineData("key_kind", "key", "tag_id", "source", "rule_id", "matched_field", "matched_value", "built_at", "server_name")]
+    public void The_query_tag_config_tables_have_no_column_the_secret_tripwire_would_fail_them_on(params string[] columns)
+    {
+        // A config-schema table with a secret-like column is failed whole and never read, so a tag table's own column
+        // names must stay clear of the tripwire.
+        Assert.All(columns, c => Assert.False(ColumnPolicies.IsSecretLikeColumn(c), c));
+    }
+
+    [Fact]
     public void For_unknown_table_returns_null()
     {
         Assert.Null(ColumnPolicies.For("perfmon_stats"));

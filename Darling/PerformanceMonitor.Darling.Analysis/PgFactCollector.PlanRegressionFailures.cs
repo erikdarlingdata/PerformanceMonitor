@@ -40,19 +40,21 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </summary>
 public sealed partial class PgFactCollector
 {
-    private static readonly string s_failureHead = $$"""
+    /// <summary>The wide table's source rows. <paramref name="endBound"/> is empty, or the predicate that ends the read at an instant.</summary>
+    private static string FailureHead(string endBound) => $$"""
         WITH src AS (
             SELECT database_name, query_id, execution_type_desc, execution_count, last_execution_time
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   {{QueryStoreRegressionBaseline.NonRegularPredicate}}
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   last_execution_time >= $2
+            AND   last_execution_time >= $2{{endBound}}
             {{PgSecondaryReplicaScope.Marker}}
         ),
         """;
 
-    private static readonly string s_failureRawHead = $$"""
+    /// <summary>The raw rows' source rows, the newest snapshot of each interval. <paramref name="endBound"/> is empty, or the predicate that ends the read at an instant.</summary>
+    private static string FailureRawHead(string endBound) => $$"""
         WITH src AS (
             SELECT database_name, query_id, execution_type_desc, execution_count, last_execution_time
             FROM (
@@ -65,7 +67,7 @@ public sealed partial class PgFactCollector
                 FROM query_store_stats
                 WHERE server_id = $1
                 AND   {{QueryStoreRegressionBaseline.NonRegularPredicate}}
-                AND   collection_time >= $6
+                AND   collection_time >= $6{{endBound}}
                 {{PgSecondaryReplicaScope.Marker}}
             ) AS d
             WHERE rn = 1
@@ -102,10 +104,22 @@ public sealed partial class PgFactCollector
         """;
 
     /// <summary>The failure read over the wide table: $1 server, $2 window start, $3 recent start, $4 recent hours, $5 baseline hours.</summary>
-    internal static readonly string PlanRegressionFailureWideSql = s_failureHead + s_failureTail;
+    internal static readonly string PlanRegressionFailureWideSql = FailureHead("") + s_failureTail;
 
     /// <summary>The failure read over the raw rows: the same, with $6 the collection bound.</summary>
-    internal static readonly string PlanRegressionFailureRawSql = s_failureRawHead + s_failureTail;
+    internal static readonly string PlanRegressionFailureRawSql = FailureRawHead("") + s_failureTail;
+
+    /// <summary>
+    /// <see cref="PlanRegressionFailureWideSql"/> for a pass anchored at an instant: $6 is the window's end. The table holds one
+    /// snapshot of each interval, the newest, so an interval whose snapshot was stored after the window's end is left out whole.
+    /// </summary>
+    internal static readonly string PlanRegressionFailureWideAsOfSql = FailureHead(" AND collection_time <= $6") + s_failureTail;
+
+    /// <summary>
+    /// <see cref="PlanRegressionFailureRawSql"/> for a pass anchored at an instant: $7 is the window's end, so each interval
+    /// answers with the newest snapshot the store held at that instant.
+    /// </summary>
+    internal static readonly string PlanRegressionFailureRawAsOfSql = FailureRawHead(" AND collection_time <= $7") + s_failureTail;
 
     /// <summary>
     /// Reads the queries whose timeouts or errors rose (#6267), on the connection, as an ordinary statement (the cost read's
@@ -125,7 +139,13 @@ public sealed partial class PgFactCollector
             connection, context.ServerId, windowStart, AsNaive(context.TimeRangeEnd), null,
             QueryStoreIntervalWide.TopMinWindow, FactCommandTimeoutSeconds, _logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(useWide ? PlanRegressionFailureWideSql : PlanRegressionFailureRawSql, connection)
+        /* A pass anchored at an instant reads nothing stored after its window's end. */
+        var anchored = context.AsOfUtc is not null;
+        using var cmd = new NpgsqlCommand(
+            anchored
+                ? (useWide ? PlanRegressionFailureWideAsOfSql : PlanRegressionFailureRawAsOfSql)
+                : useWide ? PlanRegressionFailureWideSql : PlanRegressionFailureRawSql,
+            connection)
         {
             CommandTimeout = FactCommandTimeoutSeconds
         };
@@ -137,6 +157,12 @@ public sealed partial class PgFactCollector
         if (!useWide)
         {
             cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, collectionBound);
+        }
+
+        if (anchored)
+        {
+            /* The window's end, the last parameter of the two anchored statements ($6 wide, $7 raw). */
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, AsNaive(context.TimeRangeEnd));
         }
 
         PgSecondaryReplicaScope.Apply(cmd, context, "PLAN_REGRESSION", "database_name");

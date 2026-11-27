@@ -12,6 +12,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -30,15 +31,35 @@
         <TextBlock Grid.Row="1" x:Name="StatusLine" Margin="10,0,10,6" FontWeight="SemiBold" TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
-        <Grid Grid.Row="2" Margin="10,0,10,6">
+        <!-- #8865: how the error log read went, in the web Error log tile's words. -->
+        <TextBlock Grid.Row="2" x:Name="ErrorLogLine" Margin="10,0,10,6" TextWrapping="Wrap"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+        <Grid Grid.Row="3" Margin="10,0,10,6">
             <DataGrid x:Name="DatabasesDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
                       GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" SelectionMode="Extended">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="200"/>
                     <DataGridTextColumn Header="State" Binding="{Binding State}" Width="90"/>
                     <DataGridTextColumn Header="Last full backup" Binding="{Binding FullBackup}" Width="190"/>
-                    <DataGridTextColumn Header="Last log backup" Binding="{Binding LogBackup}" Width="190"/>
-                    <DataGridTextColumn Header="Last good CHECKDB" Binding="{Binding CheckDb}" Width="190"/>
+                    <!-- #9376: the tooltip is the band's sentence for a system database that expects no log backup. -->
+                    <DataGridTextColumn Header="Last log backup" Binding="{Binding LogBackup}" Width="190">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="ToolTip" Value="{Binding LogBackupNote}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <!-- #8865: the tooltip is the band's sentence: a backfill still running, or a replica that is not readable. -->
+                    <DataGridTextColumn Header="Last good CHECKDB" Binding="{Binding CheckDb}" Width="190">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="ToolTip" Value="{Binding CheckDbNote}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="CHECKDB source" Binding="{Binding CheckDbSource}" Width="110"/>
+                    <DataGridTextColumn x:Name="CheckDbOptionsColumn" Header="CHECKDB options" Binding="{Binding CheckDbOptions}" Width="130"/>
                     <DataGridTextColumn x:Name="PlatformColumn" Header="Platform" Binding="{Binding Platform}" Width="110"/>
                     <DataGridTextColumn Header="Not judged because" Binding="{Binding NotJudgedBecause}" Width="*"/>
                 </DataGrid.Columns>

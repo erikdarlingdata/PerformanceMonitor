@@ -21,8 +21,10 @@ namespace PerformanceMonitorLite.Services;
 /// <summary>
 /// #5990: the in-memory buffer between the collectors and <c>query_tag_sightings</c>. A collection batch only appends here,
 /// so the per-batch path makes no store write. The buffer is keyed by the seven-part identity (server, key kind, key,
-/// database, application, login, host): <c>seen_count</c> is summed, the first text sample is kept (cut to
-/// <see cref="QueryTagLimits.TextSampleCap"/> characters by <see cref="QueryTagLimits.CutText"/>) and <c>last_seen</c> is the latest. The map pass flushes it in ONE upsert before it
+/// database, application, login, host): <c>seen_count</c> is summed and the first text sample is kept (cut to
+/// <see cref="QueryTagLimits.TextSampleCap"/> characters by <see cref="QueryTagLimits.CutText"/>). A new row's <c>last_seen</c> is the
+/// flush clock; a re-sighting moves it at most once every six hours (#9456), to a stamp behind the map's extend window
+/// (<see cref="ReSightingBackdate"/>). The map pass flushes it in ONE upsert before it
 /// reads changed keys. A buffer holding <see cref="MaxEntries"/> entries flushes at the next append. A flush takes the WRITE lock (an
 /// upsert can collide with another writer, DuckDbInitializer's lock rule) and opens its own connection. A flush that is
 /// cancelled, or cannot get the lock in time, writes nothing and leaves its entries buffered. A write that fails is logged
@@ -32,6 +34,28 @@ internal sealed class QueryTagSightingBuffer
 {
     /* Darling's SightingBufferCap. */
     internal const int MaxEntries = 10_000;
+
+    /// <summary>
+    /// How far behind the flush clock a re-sighting moves <c>last_seen</c>, as Darling's writer does. A re-sighting changes
+    /// nothing the resolver reads (the upsert keeps the row's object and text sample), so the extend has no need to read
+    /// its key again. The extend reads the keys last seen after the previous pass's clock less
+    /// <see cref="QueryTagMapCursor.Overlap"/>; a round flushes just before its pass, rounds start a minute apart, and the
+    /// overflow and shutdown flushes run between passes, so a stamp this far back stays out of the window while a flush
+    /// runs within three minutes of the previous pass. A flush later than that lets the extend read the key again, which
+    /// is harmless. A new row takes the flush clock.
+    /// </summary>
+    internal static readonly TimeSpan ReSightingBackdate = QueryTagMapCursor.Overlap + TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// The least time between two moves of a re-sighted row's <c>last_seen</c> (#9456), the same width as Darling's writer. An update
+    /// in DuckDB is a delete and an insert, and the map's changed-keys read needs the stamp to move only on an insert, which still takes
+    /// the flush clock. Retention deletes on a cutoff at least a day back. The one reader that sees the difference is the rule test,
+    /// whose window never goes under <see cref="MinTestWindowHours"/>. Threaded into the SQL as a parameter.
+    /// </summary>
+    internal static readonly TimeSpan ReSightingRefreshWidth = TimeSpan.FromHours(6);
+
+    /// <summary>The shortest window, in whole hours, the rule test honours: the refresh width plus the backdate, rounded up.</summary>
+    internal static readonly int MinTestWindowHours = (int)Math.Ceiling((ReSightingRefreshWidth + ReSightingBackdate).TotalHours);
 
     private readonly object _gate = new();
     private Dictionary<Identity, Entry> _entries = new();
@@ -173,10 +197,14 @@ internal sealed class QueryTagSightingBuffer
         {
             /* One order for every flush (the seven-part identity), as Darling sorts its rows; Lite's single writer under the
                write lock cannot deadlock, the sort keeps the two stores alike. */
-            /* A re-sighting moves last_seen at most once an hour, as Darling's writer does (#8716): the count still adds up on
-               every conflict. */
+            /* A re-sighting moves last_seen at most once every six hours, as Darling's writer does (#8716, #9456), to the flush clock less
+               ReSightingBackdate, behind the next extend's window. A conflict writes only when that move is due (#8979): an update
+               in DuckDB is a delete and an insert, and a changed count alone made every re-sighted row pay it. Lite's upsert never
+               fills an object name or text sample on a conflict, so the move is the only reason to write. seen_count therefore
+               adds only on those writes and is a lower bound; nothing reads it. */
             /* last_seen is stamped HERE, at the write, from the C# UTC clock: the map pass captures its cursor clock from the
-               same clock (DateTime.UtcNow, plain TIMESTAMP), so a row kept by an earlier timed-out flush is never behind a cursor. */
+               same clock (DateTime.UtcNow, plain TIMESTAMP), so a new row, even one kept by an earlier timed-out flush, is
+               never behind a cursor. */
             var flushedAt = DateTime.UtcNow;
             var list = taken.OrderBy(e => e.Key.ServerId).ThenBy(e => e.Key.Kind)
                 .ThenBy(e => e.Key.Key, StringComparer.Ordinal).ThenBy(e => e.Key.Database, StringComparer.Ordinal)
@@ -196,8 +224,9 @@ FROM (SELECT UNNEST($1) AS sv, UNNEST($2) AS k, UNNEST($3) AS c_key, UNNEST($4) 
              UNNEST($7) AS l, UNNEST($8) AS h, UNNEST($9) AS t, UNNEST($10) AS f, UNNEST($11) AS ls, UNNEST($12) AS n)
 ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_name, host_name) DO UPDATE SET
     seen_count = query_tag_sightings.seen_count + excluded.seen_count,
-    last_seen = CASE WHEN query_tag_sightings.last_seen < excluded.last_seen - INTERVAL 1 HOUR
-        THEN excluded.last_seen ELSE query_tag_sightings.last_seen END";
+    last_seen = CASE WHEN query_tag_sightings.last_seen < excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) - to_seconds(CAST($14 AS BIGINT))
+        THEN excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) ELSE query_tag_sightings.last_seen END
+    WHERE query_tag_sightings.last_seen < excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) - to_seconds(CAST($14 AS BIGINT))";
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.ServerId).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => KindText(e.Key.Kind)).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.Key).ToList() });
@@ -210,6 +239,8 @@ ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_na
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.FirstSeen).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(_ => flushedAt).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.Count).ToList() });
+            command.Parameters.Add(new DuckDBParameter { Value = (long)ReSightingBackdate.TotalSeconds });
+            command.Parameters.Add(new DuckDBParameter { Value = (long)ReSightingRefreshWidth.TotalSeconds });
             command.ExecuteNonQuery();
         }
         catch (Exception ex)

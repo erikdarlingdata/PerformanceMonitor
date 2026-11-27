@@ -201,7 +201,7 @@ internal static class QueryStoreIntervalFloorWarmUp
                    poison the next server's. lock_timeout is a session setting: it never touches a pooled
                    connection's next user, because the connection is reset on return to the pool (Npgsql sends
                    DISCARD ALL), and this one is also set explicitly before every read. */
-                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreIntervalWarmUp, cancellationToken);
                 await using (var setLock = new NpgsqlCommand(
                     "SET lock_timeout = " + lockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture), connection))
                 {
@@ -271,7 +271,7 @@ internal static class QueryStoreIntervalFloorWarmUp
         var one = Stopwatch.StartNew();
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreIntervalWarmUp, cancellationToken);
             await using (var setLock = new NpgsqlCommand(
                 "SET lock_timeout = " + lockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture), connection))
             {
@@ -305,7 +305,7 @@ internal static class QueryStoreIntervalFloorWarmUp
     private static async Task<List<int>> ReadServerIdsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var ids = new List<int>();
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreIntervalWarmUp, cancellationToken);
         await using var command = new NpgsqlCommand(ServerIdsSql, connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

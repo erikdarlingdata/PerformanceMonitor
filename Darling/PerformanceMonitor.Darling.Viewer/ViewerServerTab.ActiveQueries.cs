@@ -118,10 +118,11 @@ public partial class ViewerServerTab
 
     private async void OnActiveQueriesSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+            var dataReadTask = Timed(timer, "grid read", _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
             var (totalCount, snapshots) = dataReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -130,7 +131,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"active-queries slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Active Queries", timer, ex));
         }
     }
 
@@ -181,6 +183,7 @@ public partial class ViewerServerTab
     private async void LatestSnapshot_Click(object sender, RoutedEventArgs e)
     {
         LatestSnapshotButton.IsEnabled = false;
+        var timer = new ViewerLoadTimer();
         try
         {
             if (!_dataService.IsReadOnly)
@@ -188,7 +191,7 @@ public partial class ViewerServerTab
                 LatestSnapshotIndicator.Text = "Capturing...";
                 try
                 {
-                    var result = await _dataService.RequestSnapshotNowAsync(_server.ServerId);
+                    var result = await Timed(timer, "snapshot capture", _dataService.RequestSnapshotNowAsync(_server.ServerId));
                     if (result is null)
                     {
                         StatusChanged?.Invoke("snapshot: still running, showing the latest stored capture");
@@ -205,7 +208,7 @@ public partial class ViewerServerTab
             }
 
             LatestSnapshotIndicator.Text = "Loading...";
-            var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+            var (batchTime, rows) = await Timed(timer, "latest snapshot read", _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
             _querySnapshotsFilterMgr!.UpdateData(rows);
             /* #4953: the grid now holds the newest stored batch, not the range the "Showing since" banner described, so the
                banner comes down (collapsed, text cleared). The next range read raises it again through UpdateTruncationBanner.
@@ -219,7 +222,8 @@ public partial class ViewerServerTab
         catch (Exception ex)
         {
             LatestSnapshotIndicator.Text = "";
-            StatusChanged?.Invoke($"latest snapshot failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Active Queries", timer, ex));
         }
         finally
         {
@@ -356,7 +360,7 @@ public partial class ViewerServerTab
     /// "Showing since" banner is set for the drill window too, as every other read of this grid sets it for the
     /// window it draws (#4953); left alone it would keep describing the last range read.
     /// </summary>
-    private async Task NavigateToActiveQueriesForWindowAsync(DateTime fromUtc, DateTime toUtc, string indicator)
+    private async Task NavigateToActiveQueriesForWindowAsync(DateTime fromUtc, DateTime toUtc, string indicator, ViewerLoadTimer? timer = null)
     {
         _suppressDrillDownAutoRefresh = true;
         try
@@ -379,7 +383,7 @@ public partial class ViewerServerTab
            rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
            the same window (a deep link reaches both, and the two writes agree). */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
-        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -388,6 +392,6 @@ public partial class ViewerServerTab
             : indicator;
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), fromUtc);
 
-        await LoadActiveQueriesSlicerAsync(fromUtc.AddHours(-1), toUtc.AddHours(1));
+        await LoadActiveQueriesSlicerAsync(fromUtc.AddHours(-1), toUtc.AddHours(1), timer);
     }
 }

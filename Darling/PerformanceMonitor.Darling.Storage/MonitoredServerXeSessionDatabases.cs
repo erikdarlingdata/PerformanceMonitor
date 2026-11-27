@@ -29,7 +29,7 @@ public static class MonitoredServerXeSessionDatabases
         "UPDATE config.config_monitored_servers SET xe_session_databases = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE server_id = $1";
 
     /// <summary>The refusal text for a list that breaks the bounds, or null when it is acceptable.</summary>
-    public static string? Refusal(IEnumerable<string>? names) => ExcludedDatabaseNames.Refusal(names, "xe_session_databases");
+    public static string? Refusal(IEnumerable<string>? names) => ExcludedDatabaseNames.Refusal(names, "xe_session_databases", patterns: false);
 
     /// <summary>The write as a command the caller runs.</summary>
     public static NpgsqlCommand CreateSetCommand(NpgsqlDataSource dataSource, int serverId, IEnumerable<string> names, int commandTimeoutSeconds)

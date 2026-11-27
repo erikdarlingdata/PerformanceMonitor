@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -216,7 +217,7 @@ WHERE status = 'in_progress'
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
             using var command = new NpgsqlCommand(ReclaimStaleCommandsSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = StaleCommandTimeout });
@@ -245,7 +246,7 @@ WHERE status = 'in_progress'
     /// </summary>
     public async Task<ClaimedCommand?> ClaimNextAsync(CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
         using var command = new NpgsqlCommand(ClaimCommandSql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.AddWithValue(_serviceInstance);                                                          // $1
@@ -316,13 +317,14 @@ WHERE status = 'in_progress'
                    for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
                 if (await TestConnectReferenceRefusalAsync(server, StoredSettingsOfReferenceAsync, cancellationToken) is { } refusal)
                 {
-                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
+                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, ServerFieldText.Escape(server.DisplayName));
                     return new CommandOutcome(false, "refused", ErrorJson(refusal));
                 }
 
-                var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken);
-                var (resultStatus, resultJson) = MapProbeResult(probe);
-                _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
+                var columnStatsDatabases = await ReadColumnStatsGrantDatabasesAsync(server, cancellationToken);
+                var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken, columnStatsDatabases: columnStatsDatabases);
+                var (resultStatus, resultJson) = MapProbeResult(probe, server);
+                _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, ServerFieldText.Escape(server.DisplayName), resultStatus);
                 return new CommandOutcome(probe.Success, resultStatus, resultJson);
             }
 
@@ -641,6 +643,7 @@ WHERE status = 'in_progress'
             case PersonDirectoryCommands.RemoveIdentity:
             case PersonDirectoryCommands.AddGrant:
             case PersonDirectoryCommands.RemoveGrant:
+            case PersonDirectoryCommands.DeletePerson:
                 /* #7107: an administrator's people directory write, run in the service as the store owner. The arguments' shape is checked
                    here and their values when it runs; requested_by is the administrator (a name PersonActor refuses is refused here). */
                 if (!PersonDirectoryCommands.TryParse(command.CommandType, command.ArgsJson, out _, out var personUsage))
@@ -953,8 +956,11 @@ WHERE status = 'in_progress'
             : StoreWrite(CollectorScheduleSql.SetFleetDatabases, new object?[] { canonical, scope }, "collector database scope set (fleet-wide)");
     }
 
-    /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
-    internal static (string ResultStatus, string ResultJson) MapProbeResult(ConnectionProbeResult probe)
+    /// <summary>
+    /// test_connect result mapping (pure): success carries the probe facts, failure the error. <paramref name="server"/> is the entry
+    /// that was tested: a failed Strict test adds the Strict line after the error (#9674). Null adds none.
+    /// </summary>
+    internal static (string ResultStatus, string ResultJson) MapProbeResult(ConnectionProbeResult probe, MonitoredServer? server = null)
     {
         if (probe.Success)
         {
@@ -991,10 +997,12 @@ WHERE status = 'in_progress'
             return ("connected", json);
         }
 
-        return ("connection_failed", ErrorJson(probe.Error ?? "connection failed"));
+        var strict = server is null ? null : Mcp.DarlingMcpServerAdminTools.StrictHintFor(server, probe);
+        var error = probe.Error ?? "connection failed";
+        return ("connection_failed", ErrorJson(strict is null ? error : error + Environment.NewLine + strict));
     }
 
-    private Task ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>
+    private Task<int> ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>
         ExecuteStoreWriteAsync(_postgres, plan, cancellationToken);
 
     /// <summary>
@@ -1003,16 +1011,17 @@ WHERE status = 'in_progress'
     /// toggle verbs execute the SAME plan object <see cref="ResolvePlan"/> hands the running service, against a
     /// data source the verb opened itself — no executor instance, no <see cref="IDarlingCommandHost"/>, and no
     /// second SQL statement anywhere that writes <c>config_collector_schedules</c>. The instance overload above
-    /// is unchanged in behavior; it only forwards its own data source here.
+    /// is unchanged in behavior; it only forwards its own data source here. Returns the number of rows the statement
+    /// wrote, so a caller that wrote by id can tell a row that is gone from a row it changed (#9693).
     /// </summary>
-    internal static async Task ExecuteStoreWriteAsync(NpgsqlDataSource postgres, CommandPlan plan, CancellationToken cancellationToken)
+    internal static async Task<int> ExecuteStoreWriteAsync(NpgsqlDataSource postgres, CommandPlan plan, CancellationToken cancellationToken)
     {
         if (plan.Kind != CommandKind.StoreWrite || plan.Sql is null)
         {
             throw new ArgumentException($"Only a {nameof(CommandKind.StoreWrite)} plan can be executed against the store; got {plan.Kind}.", nameof(plan));
         }
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
         using var command = new NpgsqlCommand(plan.Sql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         if (plan.TimeoutSeconds is { } ownSeconds)
@@ -1025,14 +1034,14 @@ WHERE status = 'in_progress'
             }
         }
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task ReportAsync(long commandId, CommandOutcome outcome, CancellationToken cancellationToken)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
             using var command = new NpgsqlCommand(ReportCommandSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.AddWithValue(commandId);
@@ -1095,6 +1104,50 @@ WHERE status = 'in_progress'
         }
 
         return TestConnectPasswordNeededText;
+    }
+
+    /// <summary>
+    /// #8798: the databases the connection test checks for the column_stats SELECT grant, resolved the way the runner resolves the collector (the
+    /// stored schedule rows and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>): the explicit list when column_stats is enabled for the
+    /// server, otherwise null. An empty scope means "every database" for collection, but the test never checks every database, so it is null too.
+    /// </summary>
+    internal static IReadOnlyList<string>? ResolveColumnStatsGrantDatabases(int serverId, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var name = ColumnStatsCollector.Instance.Name;
+        if (!StoreConfigProvider.ResolveSchedule(name, serverId, overrides).Enabled)
+        {
+            return null;
+        }
+
+        var scope = StoreConfigProvider.ResolveDatabaseScope(name, serverId, overrides);
+        return scope.Count == 0 ? null : scope;
+    }
+
+    /// <summary>
+    /// Reads the schedule rows for the tested server and resolves <see cref="ResolveColumnStatsGrantDatabases"/>. A PostgreSQL target has no such
+    /// grant. A store that cannot be read gives null (the grant check is left out) and a log line: the connection test itself goes on.
+    /// </summary>
+    private async Task<IReadOnlyList<string>?> ReadColumnStatsGrantDatabasesAsync(MonitoredServer server, CancellationToken cancellationToken)
+    {
+        if (server.IsPostgres)
+        {
+            return null;
+        }
+
+        try
+        {
+            var overrides = await Mcp.DarlingDataReader.ReadScheduleOverridesAsync(_postgres, server.ServerId, cancellationToken, throwOnFailure: true);
+            return ResolveColumnStatsGrantDatabases(server.ServerId, overrides);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "test_connect could not read the column_stats schedule, so the column_stats grant is not checked");
+            return null;
+        }
     }
 
     /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
@@ -1234,8 +1287,8 @@ public enum CommandKind
     /// because no other role can write <c>config.config_server_actions</c>; the person is <c>requested_by</c>.</summary>
     SetServerAction,
 
-    /// <summary>The people directory writes (#7107, <see cref="PersonDirectoryCommands.Types"/>): an administrator adds, renames, enables or disables a
-    /// person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
+    /// <summary>The people directory writes (#7107, <see cref="PersonDirectoryCommands.Types"/>): an administrator adds, renames, enables, disables or
+    /// deletes a person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
     /// the administrator is <c>requested_by</c>.</summary>
     PersonDirectoryWrite,
 

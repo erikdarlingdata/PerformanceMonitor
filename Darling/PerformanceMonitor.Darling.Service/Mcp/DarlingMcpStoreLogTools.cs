@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -34,6 +35,8 @@ public sealed class DarlingMcpStoreLogTools
     /// and the detail is what you read after the census points at something.</summary>
     public const int DefaultRetainedLimit = 50;
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_log"), Description(
         "Gets the monitoring STORE's OWN PostgreSQL log, not a monitored server's; no server_name. Returns a "
         + "per-class CENSUS (window total, per-hour median/max over every captured hour), not raw lines. "
@@ -41,9 +44,11 @@ public sealed class DarlingMcpStoreLogTools
         + "classes are named+counted as the expected floor (cancels, admin terminations, memory retries); NO "
         + "health band: a large cancel floor is healthy. Every answer carries the capture denominator "
         + "(captures vs expected, bytes read/unread) separating a quiet store from an unread log. <<GUIDE>> "
-        + "Gets what the monitoring store's OWN PostgreSQL server log recorded, not a monitored server's. The service reads its own store's log hourly, classifies every entry, and stores a per-class census rather than the lines, because a production day of that log holds roughly 1,100 'canceling statement due to user request' entries: the store's rendering of a client-side CommandTimeout cancel, which is the ordinary consequence of having timeouts and not a fault. So each class comes back with its window total, its per-hour median and max over the same window (computed over EVERY captured hour, including the ones the class did not appear in), and whether its text is retained. Classes whose text is NOT retained are the expected floor, named and counted so the exclusion is a number you can see rather than a filter you cannot: user-request cancels, administrator terminations of background workers and connections, and the Windows shared-memory-reservation retry that PostgreSQL retries itself. Classes whose text IS retained are the ones worth reading one at a time: crash recovery, data-integrity and disk complaints, background-worker slot exhaustion (the silent stopper for compression and continuous-aggregate jobs), the store deadlocking against itself, connections lost mid-statement (the signature of a refresh convoy), the store's own statement and lock timeouts, statements that ran past the store's slow-statement line (the statement kept with its literals masked, one row per statement however often it ran), auto_explain plans (kept as redacted JSON, one row per plan, where runs with the same plan and estimates share a row, with the statement's query id when the plan carries one; a plan that cannot be read whole keeps only its duration line), panics, and (this is the safety net) anything at WARNING or worse that no rule recognises, which keeps its text so a shape nobody anticipated is visible rather than filtered. Messages are shown as PostgreSQL wrote them; SQL text is normalized with literals replaced by ?. Messages that differ only in a quoted value or a number count as one, shown with one sample. Every answer carries the CAPTURE DENOMINATOR: how many hourly captures landed against how many the window expected, how many bytes were read, how many captures discarded a resume marker because the weekday log ring truncated the file, and how many bytes are still unread. That denominator is what separates 'the store said nothing' from 'nobody read the log'. NO health band is applied and none is intended: a quiet store with a large cancel floor is healthy and must keep reading that way. Takes no server_name: the store is the subject. A statement cancelled by statement_timeout never finishes, so auto_explain logs no plan for it. "
+        + "Gets what the monitoring store's OWN PostgreSQL server log recorded, not a monitored server's. The service reads its own store's log hourly, classifies every entry, and stores a per-class census rather than the lines, because a production day of that log holds roughly 1,100 'canceling statement due to user request' entries: the store's rendering of a client-side CommandTimeout cancel, which is the ordinary consequence of having timeouts and not a fault. So each class comes back with its window total, its per-hour median and max over the same window (computed over EVERY captured hour, including the ones the class did not appear in), and whether its text is retained. Classes whose text is NOT retained are the expected floor, named and counted so the exclusion is a number you can see rather than a filter you cannot: user-request cancels, administrator terminations of background workers and connections, clients that reached the store while it was shutting down, and the Windows shared-memory-reservation retry that PostgreSQL retries itself. Classes whose text IS retained are the ones worth reading one at a time: crash recovery, data-integrity and disk complaints, background-worker slot exhaustion (the silent stopper for compression and continuous-aggregate jobs), the store deadlocking against itself, connections lost mid-statement (the signature of a refresh convoy), the store's own statement and lock timeouts, autovacuums cancelled for a conflicting lock (one row per relation, so a table cancelled again and again is its own row, with toast_relation and toast_owner when the relation is a TOAST table in this store's database), statements that ran past the store's slow-statement line (the statement kept with its literals masked, one row per statement however often it ran), auto_explain plans (kept as redacted JSON, one row per plan, where runs with the same plan and estimates share a row, with the statement's query id when the plan carries one; a plan that cannot be read whole keeps only its duration line), panics, and (this is the safety net) anything at WARNING or worse that no rule recognises, which keeps its text so a shape nobody anticipated is visible rather than filtered. Messages are shown as PostgreSQL wrote them; SQL text is normalized with literals replaced by ?. Messages that differ only in a quoted value or a number count as one, shown with one sample. Every answer carries the CAPTURE DENOMINATOR: how many hourly captures landed against how many the window expected, how many bytes were read, how many captures discarded a resume marker because the weekday log ring truncated the file, and how many bytes are still unread. That denominator is what separates 'the store said nothing' from 'nobody read the log'. NO health band is applied and none is intended: a quiet store with a large cancel floor is healthy and must keep reading that way. Takes no server_name: the store is the subject. A statement cancelled by statement_timeout never finishes, so auto_explain logs no plan for it. "
         + "Each retained row's sample_line is a 400-character preview: sample_line_truncated says it was cut and sample_line_length gives the stored entry's whole length, and full_text = true returns it whole. "
-        + "The census is never cut. The retained rows are held to the 32,768-byte response budget, newest capture first, whole rows only: retained_events_returned is how many the answer holds, budget_truncated = true says rows were left off the end for the budget, and budget_note says how many of how many fit. The rows left off are older ones: oldest_returned_last_capture_at is the oldest last_capture_at among the rows returned. The retained rows keep one order for a window: newest capture, then most occurrences, then class, severity and message. offset skips that many of them, so it pages inside one capture, which no as_of divides: one capture keeps up to 20 distinct messages a class. budget_note names the way on: the offset that reads on from the last row returned, with as_of held at the answer's own as_of so the window and its order stay put, and as_of at oldest_returned_last_capture_at, or earlier than it when every row returned is from one capture, for the older captures. An offset past the last retained message answers empty.")]
+        + "The census is never cut. The retained rows are held to the 32,768-byte response budget, newest capture first, whole rows only: retained_events_returned is how many the answer holds and retained_events_total is how many distinct messages the window holds, so a page smaller than the total is a page: truncated = true says retained messages follow the last row (cut by limit or the budget), and note says how many of how many are listed and the offset that reads on. budget_truncated = true says rows were left off the end for the budget, and budget_note says how many of how many fit. The rows left off are older ones: oldest_returned_last_capture_at is the oldest last_capture_at among the rows returned. The retained rows keep one order for a window: newest capture, then WARNING and worse ahead of LOG rows, then most occurrences, then class, severity and message. offset skips that many of them, so it pages inside one capture, which no as_of divides: one capture keeps up to 20 distinct messages a class. budget_note names the way on: the offset that reads on from the last row returned, with as_of held at the answer's own as_of so the window and its order stay put, and as_of at oldest_returned_last_capture_at, or earlier than it when every row returned is from one capture, for the older captures. An offset past the last retained message answers empty. "
+        + "query_id keeps only the slow_plan row of that one statement (a plan the store's auto_explain logged), the id get_store_query_history or get_store_query_stats prints. "
+        + "While bytes are unread, log_backlog says the newest hours are not read yet.")]
     public static Task<string> GetStoreLog(
         NpgsqlDataSource postgres,
         [Description("Hours of history. Default 24; max 168.")] int hours_back = 24,
@@ -51,8 +56,9 @@ public sealed class DarlingMcpStoreLogTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each row's whole sample_line instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description("Retained messages to skip before the page, in the answer's order (a page start). Default 0; budget_note names the offset that reads on when budget_truncated is true.")] int offset = 0,
+        [Description("One store statement's id, as get_store_query_history or get_store_query_stats prints it: returns only that statement's slow_plan row. Omit for every retained message.")] string? query_id = null,
         CancellationToken cancellationToken = default) =>
-        GetStoreLog(postgres, hours_back, limit, as_of, full_text, offset, McpResponseBudget.DefaultBytes, cancellationToken);
+        GetStoreLog(postgres, hours_back, limit, as_of, full_text, offset, query_id, McpResponseBudget.DefaultBytes, cancellationToken);
 
     /// <summary>Characters of <c>sample_line</c> a default row carries (#8568). A logged plan ran past 6,500
     /// characters and a logged statement past 4,600, each several times the rest of its row.</summary>
@@ -65,7 +71,7 @@ public sealed class DarlingMcpStoreLogTools
     /// and keep every row whole.
     /// </summary>
     internal static async Task<string> GetStoreLog(
-        NpgsqlDataSource postgres, int hours_back, int limit, string? as_of, bool full_text, int offset, int? responseByteBudget,
+        NpgsqlDataSource postgres, int hours_back, int limit, string? as_of, bool full_text, int offset, string? query_id, int? responseByteBudget,
         CancellationToken cancellationToken)
     {
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -83,6 +89,18 @@ public sealed class DarlingMcpStoreLogTools
         if (offset < 0 || offset > DarlingMcpPgServerStateTools.MaxPageOffset)
         {
             return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0-{DarlingMcpPgServerStateTools.MaxPageOffset}.");
+        }
+
+        long? queryId = null;
+        if (!string.IsNullOrWhiteSpace(query_id))
+        {
+            if (!long.TryParse(query_id.Trim(), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            {
+                return McpHelpers.Refusal("query_id",
+                    $"Invalid query_id '{query_id}'. Use the query_id get_store_query_history or get_store_query_stats printed (a 64-bit integer, as text).");
+            }
+
+            queryId = parsed;
         }
 
         try
@@ -109,20 +127,32 @@ public sealed class DarlingMcpStoreLogTools
                     + "Two conditions make this permanently empty on a store the "
                     + "operator brought themselves rather than one the service provisioned: the server may "
                     + "have no logging collector writing files for pg_ls_logdir() to list, and the role the "
-                    + "service connects as needs pg_read_server_files plus EXECUTE on pg_read_binary_file "
+                    + "service connects as needs pg_monitor plus EXECUTE on pg_read_binary_file "
                     + "(the managed store's own role is the cluster's bootstrap superuser and has both). "
                     + "The service log carries a warning naming whichever it was.");
             }
 
             var classes = await DarlingStoreLogReader.GetClassCensusAsync(postgres, windowStart, windowEnd, cancellationToken);
-            var (retained, skipped) = await DarlingStoreLogReader.GetRetainedEventsAsync(
-                postgres, windowStart, windowEnd, limit, offset, full_text ? null : SampleLinePreviewLength, cancellationToken);
+            var (retained, skipped, retainedTotal) = await DarlingStoreLogReader.GetRetainedEventsAsync(
+                postgres, windowStart, windowEnd, limit, offset, full_text ? null : SampleLinePreviewLength, queryId, cancellationToken);
             if (skipped > 0 && retained.Count == 0)
             {
                 return McpHelpers.Status("empty", $"offset {offset} is past the {CountText.Plural(skipped, "retained message")} this window holds.");
             }
 
+            /* #9435: a statement with no logged plan in the window is an empty answer, not the census with nothing under it. */
+            if (queryId is long wanted && retained.Count == 0)
+            {
+                return McpHelpers.Status("empty", $"No slow_plan row for query_id {wanted} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: the statement did not run past the store's auto_explain threshold, or its plan was not kept.");
+            }
+
             var absent = DarlingStoreLogReader.ComputeAbsentClasses(classes);
+
+            /* #8904: only while bytes are pending, the log time the read had reached, so the newest hours are not
+               taken for quiet ones. */
+            var newestStamp = captures.BytesPending > 0
+                ? await DarlingStoreLogReader.GetNewestSampleLogStampAsync(postgres, windowStart, windowEnd, cancellationToken)
+                : null;
 
             /* #8568: the census is the answer and is never cut; the retained rows are the detail under it, so they are
                what gives way, newest first, whole rows only. */
@@ -131,10 +161,12 @@ public sealed class DarlingMcpStoreLogTools
                 WindowHours = hours_back,
                 AsOf = windowEnd.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
                 Captures = captures,
+                NewestSampleLogStamp = newestStamp,
                 Classes = classes,
                 ClassesNotSeen = absent,
                 RetainedEvents = kept < retained.Count ? retained.GetRange(0, kept) : retained,
                 RetainedEventsSkipped = skipped,
+                RetainedEventsTotal = retainedTotal,
                 BudgetTruncated = kept < retained.Count,
                 BudgetNote = kept < retained.Count
                     ? McpResponseBudget.PageCutNote(retained.Count, kept, "newest capture first", "retained messages",

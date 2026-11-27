@@ -55,6 +55,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpLatchSpinlockTools
 {
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_latch_stats"), Description("Latch contention by class. Darling sums waits over the whole hours_back window and returns the top classes by that total. Lite: LATEST IS A TIME, only the newest snapshot within hours_back, paged to limit, heaviest last-interval wait first. interval_seconds, both per-second rates and (on Darling) severity come from the LATEST interval only; on a restart or first sample (interval unknowable, stored 0) they are null, never 0 or LOW. Zero rows: not_collected on a non-SQL Server target, else unavailable, never empty. <<GUIDE>> Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. ACCESS_METHODS_DATASET_PARENT synchronizes child dataset access to the parent dataset during parallel operations, and FGCB_ADD_REMOVE synchronizes filegroup add, drop, grow and shrink file operations. TWO CLOCKS PER ROW, NAMED: total_delta_* SUM every collection in the window; severity, waits_per_second and wait_ms_per_second are banded/derived from the LATEST interval only - interval_seconds is the seconds that interval accrued over, and the severity_banded_from block names it in full (its delta wait, the same seconds, and the collection it ended at, which is also latest_collection_time). A LOW severity beside a large window total is a class that was hot earlier in the window and is quiet now, not a contradiction. When the latest interval was unknowable (a restart or first sample, stored as 0), interval_seconds, both per-second rates, severity and severity_banded_from.delta_wait_time_ms are all null - unknowable, never a quiet 0.00 or a LOW banded from a zero nobody measured; the window totals beside them still stand.")]
     public static async Task<string> GetLatchStats(
         NpgsqlDataSource postgres,
@@ -77,8 +78,12 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
-            var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
-                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
+            /* The caller's top + 1 as the fetch, the extra row as the observed truncation signal: the classes are ranked, so the extra row
+               is the next one and the first top are the same rows in the same order. */
+            var fetched = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
+                postgres, resolved.ServerId, windowStart, now, top + 1, cancellationToken);
+            var truncated = fetched.Count > top;
+            var rows = truncated ? fetched.Take(top).ToList() : fetched;
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "latch_stats", cancellationToken)
                     /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
@@ -143,6 +148,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 latch_count = rows.Count,
+                truncated,
                 latches
             }, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
@@ -153,6 +159,7 @@ public sealed class DarlingMcpLatchSpinlockTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_spinlock_stats"), Description("Gets spinlock contention: collisions, spins, backoffs, per-second rates. High contention is CPU-bound, not in wait stats. Darling sums every collection in hours_back, top N by total collisions. Lite: LATEST IS A TIME, only the newest snapshot within hours_back, cumulative counters plus last-interval deltas, bounded by limit (truncated flags more). interval_seconds and the rates reflect the latest interval, never a window total; null - never 0 - when unknowable (restart/first sample); totals/counters still stand. No rows: unavailable (or not_collected first). <<GUIDE>> Gets top spinlock contention. Shows collisions, spins, backoffs, and per-second rates. High spinlock contention indicates CPU-bound internal contention that doesn't appear in wait stats. total_delta_* SUM every collection in the window; collisions_per_second and spins_per_second are derived from the LATEST interval only, and interval_seconds is the seconds that interval accrued over. When the latest interval was unknowable (a restart or first sample, stored as 0), interval_seconds and both per-second rates are null - unknowable, never a quiet 0.00; the window totals beside them still stand.")]
     public static async Task<string> GetSpinlockStats(
         NpgsqlDataSource postgres,
@@ -175,8 +182,12 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
-            var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
-                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
+            /* The caller's top + 1 as the fetch, the extra row as the observed truncation signal: the spinlocks are ranked, so the extra row
+               is the next one and the first top are the same rows in the same order. */
+            var fetched = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
+                postgres, resolved.ServerId, windowStart, now, top + 1, cancellationToken);
+            var truncated = fetched.Count > top;
+            var rows = truncated ? fetched.Take(top).ToList() : fetched;
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "spinlock_stats", cancellationToken)
                     /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
@@ -222,6 +233,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 spinlock_count = rows.Count,
+                truncated,
                 spinlocks
             }, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;

@@ -31,20 +31,11 @@ public sealed class CustomAlertCoreMigrationTests
     private const int ProbeOrdinal = 91;
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(
             "custom-alert-core",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* V117 (#3315) is the top rung, so the "== SchemaVersion" claim lives there. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     [Fact]

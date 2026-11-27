@@ -195,7 +195,7 @@ public sealed class RetentionReevaluationTests
            non-raw statement name still has to appear in that ternary for this pin to mean anything. */
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
         var readAt = sweep.IndexOf("isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation)", StringComparison.Ordinal);
-        var measureAt = sweep.IndexOf("await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, DateTime.UtcNow, cancellationToken);", StringComparison.Ordinal);
+        var measureAt = sweep.IndexOf("await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, sweepNow, cancellationToken);", StringComparison.Ordinal);
         var armAt = sweep.IndexOf("new NpgsqlCommand(ArmRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         var holdAt = sweep.IndexOf("new NpgsqlCommand(HoldRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         Assert.True(readAt > 0 && measureAt > readAt && armAt > measureAt && holdAt > armAt,
@@ -230,7 +230,7 @@ public sealed class RetentionReevaluationTests
     /// <summary>
     /// Per-policy noise on the hourly pass is controlled by TRANSITION, not silenced: a hold that was already a
     /// hold logs at Debug on the periodic pass and stays a Warning at startup (the line the runbook and the
-    /// alert send an operator to); a policy re-held this pass is a Warning on both; a policy armed this pass is
+    /// alert send an operator to) and on the pass that finds its oldest row just aged past the horizon (#9695); a policy re-held this pass is a Warning on both; a policy armed this pass is
     /// Information on both. Pinned on the source because the levels are the design — the issue's own
     /// objection to an hourly sweep was 24 identical warnings a day per held policy.
     /// </summary>
@@ -239,15 +239,18 @@ public sealed class RetentionReevaluationTests
     {
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
 
-        /* The steady-state hold: level by pass. */
-        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumers} do not yet cover everything it holds", StringComparison.Ordinal);
+        /* The steady-state hold: level by pass. The templates below are the ones that name a remedy, the holds that can
+           drop history (#9695 words the holds that cannot, on a store younger than the horizon, separately). */
+        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumers} do not yet cover everything it holds, so arming", StringComparison.Ordinal);
         Assert.True(heldAt > 0);
         var heldStatement = sweep[sweep.LastIndexOf("logger?.Log(", heldAt, StringComparison.Ordinal)..heldAt];
-        Assert.Contains("pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,", heldStatement, StringComparison.Ordinal);
+        Assert.Contains("pass == RetentionSweepPass.Startup || CrossedHorizonRecently(measure.SourceOldest, dropAfter, sweepNow)", heldStatement, StringComparison.Ordinal);
+        Assert.Contains("? LogLevel.Warning", heldStatement, StringComparison.Ordinal);
+        Assert.Contains(": LogLevel.Debug,", heldStatement, StringComparison.Ordinal);
 
         /* The transitions: unconditional levels. The statement each template sits in is found by walking back
            to its `logger?.Log` and reading which method it is. */
-        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover", StringComparison.Ordinal);
+        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover everything it holds, so the {DropAfter} purge is stopped before", StringComparison.Ordinal);
         Assert.True(reHeldAt > 0);
         Assert.StartsWith("logger?.LogWarning(", sweep[sweep.LastIndexOf("logger?.Log", reHeldAt, StringComparison.Ordinal)..], StringComparison.Ordinal);
 
@@ -360,7 +363,7 @@ public sealed class RetentionReevaluationTests
 
         /* Its own connection from the worker's pool — the startup connection is disposed with the setup
            block, which is the one thing the issue said to get right. */
-        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.RetentionReevaluate, budget.Token);", body, StringComparison.Ordinal);
 
         /* The Periodic pass, named explicitly, on the budget token. */
         Assert.Contains("TimescaleSupport.RetentionSweepPass.Periodic,", body, StringComparison.Ordinal);
@@ -532,7 +535,7 @@ public sealed class RetentionReevaluationLiveTests
 
         Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.ConvertedTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
         /* #3893: collection_log too, as the worker's "collection_log hypertable" step does before its aggregate ensure
            (pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate is sourced from it. On a
            store whose migrations ran before CREATE EXTENSION (CI's bundled PostgreSQL), it is still a plain table here,
@@ -662,6 +665,102 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
         {
             Assert.Equal(total, tally.Evaluated + tally.Failed);
         }
+    }
+
+    /// <summary>
+    /// #9695: the hold lines on a store younger than its horizon, and the pass that finds the store has aged past it.
+    /// query_stats keeps <see cref="TimescaleSupport.RawRetentionInterval"/> (4 days), and its hourly rollups are left
+    /// empty, so the short verdict is genuine and the hourly pass does not fill it (an empty consumer is the backfill's
+    /// case). One row 3 days back: the start pass and the hourly pass log the hold below Warning, and a hand-armed
+    /// policy whose coverage regressed (the #1877 RE-HELD event) is Information. A row just past the horizon then makes
+    /// the next hourly pass warn with the remedy, and a row well past it leaves the hourly pass at Debug again.
+    /// </summary>
+    [Fact]
+    public async Task AYoungStoresHoldLines_StayBelowWarning_AndTheHourlyPassWarnsOnceTheStoreAgesPastTheHorizon_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live retention re-evaluation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        Assert.Equal(TimescaleSupport.ConvertedTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+        Assert.Equal("4 days", TimescaleSupport.RawRetentionInterval);
+
+        await SeedQueryStatsRowAsync(connection, DateTime.UtcNow.AddDays(-3), "young", ct);
+
+        /* The start pass: held, and Information, with no remedy named. */
+        var startLog = new CapturingTestLogger();
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, startLog, ct);
+        var start = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, startLog, ct);
+        Assert.True(start.Held >= 1, $"query_stats must be HELD at creation on short coverage; {startLog.Joined}");
+        Assert.False(await RawArmedAsync(connection, HeldRelation, ct), "short coverage must HOLD the policy at creation");
+        Assert.Contains($"Information: Retention policy for {HeldRelation} HELD PAUSED", startLog.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain($"Warning: Retention policy for {HeldRelation} HELD PAUSED", startLog.Joined, StringComparison.Ordinal);
+
+        /* The hourly pass: the same hold at Debug. */
+        var pass1Log = new CapturingTestLogger();
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, pass1Log, TimescaleSupport.RetentionSweepPass.Periodic, ct);
+        Assert.Contains($"Debug: Retention policy for {HeldRelation} HELD PAUSED", pass1Log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain($"Warning: Retention policy for {HeldRelation}", pass1Log.Joined, StringComparison.Ordinal);
+
+        /* The #1877 event on a young store: a hand-arm the next pass re-holds, as Information. */
+        await HandArmAsync(connection, ct);
+        Assert.True(await RawArmedAsync(connection, HeldRelation, ct), "the hand-arm must set darling_armed, or the re-hold below proves nothing");
+        var reHeldLog = new CapturingTestLogger();
+        var reHeld = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reHeldLog, TimescaleSupport.RetentionSweepPass.Periodic, ct);
+        Assert.Equal(1, reHeld.ReHeld);
+        Assert.False(await RawArmedAsync(connection, HeldRelation, ct), "the hourly pass must re-hold a hand-armed policy whose coverage is still short (#1877)");
+        Assert.Contains($"Information: Retention policy for {HeldRelation} RE-HELD", reHeldLog.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain($"Warning: Retention policy for {HeldRelation} RE-HELD", reHeldLog.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("--backfill-rollups", reHeldLog.Joined, StringComparison.Ordinal);
+
+        /* The store ages past the horizon while the service runs: the oldest row is now 30 minutes past it, and the
+           hourly pass warns with the remedy. */
+        await SeedQueryStatsRowAsync(connection, DateTime.UtcNow.AddDays(-4).AddMinutes(-30), "crossed", ct);
+        var crossedLog = new CapturingTestLogger();
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, crossedLog, TimescaleSupport.RetentionSweepPass.Periodic, ct);
+        Assert.Contains($"Warning: Retention policy for {HeldRelation} HELD PAUSED", crossedLog.Joined, StringComparison.Ordinal);
+        Assert.Contains("The remedy for each", crossedLog.Joined, StringComparison.Ordinal);
+
+        /* Well past the horizon, the hourly pass is the steady state again: Debug. */
+        await SeedQueryStatsRowAsync(connection, DateTime.UtcNow.AddDays(-6), "aged", ct);
+        var agedLog = new CapturingTestLogger();
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, agedLog, TimescaleSupport.RetentionSweepPass.Periodic, ct);
+        Assert.Contains($"Debug: Retention policy for {HeldRelation} HELD PAUSED", agedLog.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain($"Warning: Retention policy for {HeldRelation} HELD PAUSED", agedLog.Joined, StringComparison.Ordinal);
+    }
+
+    private static async Task SeedQueryStatsRowAsync(NpgsqlConnection connection, DateTime at, string hashSeed, System.Threading.CancellationToken ct)
+    {
+        using var seed = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+ delta_worker_time, delta_elapsed_time, delta_execution_count)
+VALUES (1, $1, 9138, '" + Seed + "', 'TestDb', decode(md5($2), 'hex'), decode(md5('h'), 'hex'), 1, 1, 1)", connection) { CommandTimeout = PolicyReadTimeoutSeconds };
+        seed.Parameters.AddWithValue(DateTime.SpecifyKind(at, DateTimeKind.Unspecified));
+        seed.Parameters.AddWithValue(hashSeed);
+        await seed.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>The hand-arm the runbook forbids, parked so it cannot run, as the test above writes it.</summary>
+    private static async Task HandArmAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var handArm = new NpgsqlCommand(@"
+SELECT alter_job(j.job_id, scheduled => true, next_start => 'infinity'::timestamptz, config => j.config || jsonb_build_object('darling_armed', true))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout = PolicyReadTimeoutSeconds };
+        await handArm.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>The flag the sweep's prior read reads, through the shipped statement — so the test and the

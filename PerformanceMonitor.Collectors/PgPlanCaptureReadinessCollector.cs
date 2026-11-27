@@ -179,7 +179,10 @@ WITH settings AS (
            satisfied about a server whose backends translate. Distinguishing it means reading
            pg_settings.source rather than the resolved value, which is a refinement and not this change;
            naming the limit is what stops the row being over-read in the meantime. */ @"
-        current_setting('lc_messages', true)                                     AS message_locale
+        current_setting('lc_messages', true)                                     AS message_locale,
+        " + /* #8912: whether this target is Aurora, spliced by BuildQuery from the target facts the host probed at attach
+           (the same IsAurora every Aurora gate reads), never read from the server here. */ @"
+        {{IS_AURORA}}::boolean                                                   AS is_aurora
 ),
 probe AS (
     SELECT
@@ -188,6 +191,7 @@ probe AS (
         s.log_format,
         s.line_prefix,
         s.message_locale,
+        s.is_aurora,
         " + /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
            substring test reports true for any library whose name merely CONTAINS this one (measured: both
            my_auto_explain_shim and auto_explain_extra false-positive that way). */ @"
@@ -408,6 +412,14 @@ SELECT
         WHEN p.prefix_qid_after_pid
             THEN 'log_line_prefix carries %Q directly after [%p], as the last thing in the prefix and followed by one space, so each captured plan is stamped with the '
                  || 'query id that joins it to pg_stat_statements.'
+        " + /* #8912: on Aurora the prefix cannot be fixed, so the arms below that tell the operator to change log_line_prefix
+           describe a change the parameter group refuses. The row stays unmet (no plan is stored), and the detail says it is an engine limit. */ @"
+        WHEN p.is_aurora
+            THEN '" + AuroraPlanAttributionLimitPrefix + @"The parameter group does not let you put %Q in log_line_prefix: '
+                 || 'the parameter is either not modifiable or accepts only fixed values, and none of them carries %Q. '
+                 || 'Without it a plan in the log has no query id to join on, and the stderr plan reader stores no plan at all from a prefix like this one. '
+                 || 'The plan rows it does store keep no process id and no log time, so there is no other way to join a plan to its statement. '
+                 || 'Nothing to change in log_line_prefix.'
         WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
             THEN 'log_line_prefix carries %Q, but not directly after [%p] as the last thing in the prefix, '
                  || 'followed by one space, or it does not start with %t or %m followed by a space or a colon, or it has a literal '
@@ -518,7 +530,18 @@ FROM probe AS p";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// #8912: how the <c>plan_attribution</c> detail opens on an Aurora target, where <c>log_line_prefix</c> cannot carry <c>%Q</c>. It is the
+    /// one spelling the SQL above and every reader of the stored row share, so a reader can tell an engine limit from a setting the operator can
+    /// change without parsing the sentence after it.
+    /// </summary>
+    public const string AuroraPlanAttributionLimitPrefix = "Engine limit on Aurora PostgreSQL, not a setting you can change. ";
+
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return new(QueryText.Replace("{{IS_AURORA}}", context.Target.IsAurora ? "true" : "false", StringComparison.Ordinal));
+    }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

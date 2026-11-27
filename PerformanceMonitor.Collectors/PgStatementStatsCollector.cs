@@ -487,6 +487,16 @@ WHERE calls > 0";
     public override bool ReadsAuroraFunctions => true;
 
     /// <summary>
+    /// #9062: both reads are a function in FROM, whose whole result a tuplestore holds under <c>work_mem</c>; at the default
+    /// 4 MB a target near its <c>pg_stat_statements.max</c> spilled a temp file on every call. About 450 bytes an entry were
+    /// measured, 1 KB leaves headroom. The host sizes the setting from the target's own max (see <c>PgReadWorkMem</c>).
+    /// </summary>
+    public override int? ReadWorkMemBytesPerEntry => WorkMemBytesPerEntry;
+
+    /// <summary>The bytes an entry <see cref="ReadWorkMemBytesPerEntry"/> sizes the read's work_mem from (#9062).</summary>
+    public const int WorkMemBytesPerEntry = 1024;
+
+    /// <summary>
     /// The statements epoch this collector persists per server (#3653 A5): <c>pg_stat_statements_info.stats_reset</c>
     /// as last observed, and the value the latest change replaced. Declared so both hosts read the prior
     /// before the run and write the observed one after it (#1962's generic wiring). One row per server per

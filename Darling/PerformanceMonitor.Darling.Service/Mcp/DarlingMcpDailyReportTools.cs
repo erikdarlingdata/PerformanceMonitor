@@ -10,7 +10,6 @@ using System;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Reports;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -30,6 +30,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpDailyReportTools
 {
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_daily_health_report"), Description(
         "Builds the Daily Health Report for one day from stored data and returns it as text plus structured sections: the fleet counts, " +
         "then each server worst first with its alerts, failed Agent jobs, overdue backups and CHECKDB, low disk and collection problems. " +
@@ -44,11 +46,21 @@ public sealed class DarlingMcpDailyReportTools
         "(volumes under the low-disk alert's bars at the newest snapshot in the period, SQL Server only) and collection_problems (the server " +
         "offline, or failing collectors). A section with nothing in it is an empty list, and a server with every list empty is healthy with " +
         "nothing to report. The band, alert, job and disk sections are the chosen day's, but collection_problems and database_protection are " +
-        "read as the store holds them now. Stored read.")]
-    public static async Task<string> GetDailyHealthReport(
+        "read as the store holds them now. The servers list is cut to the response budget, worst first, and budget_truncated and " +
+        "budget_note say so. Stored read.")]
+    public static Task<string> GetDailyHealthReport(
         NpgsqlDataSource postgres,
         [Description("Local date in the report's time zone, yyyy-MM-dd. Default: the latest day whose period has ended.")] string? date = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetDailyHealthReportWithin(postgres, date, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_daily_health_report under an explicit <paramref name="responseByteBudget"/> (#9398): the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> and keeps the worst servers that fit it, the web viewer's <c>/api/read</c> mirror
+    /// passes null and keeps the whole servers list.
+    /// </summary>
+    internal static async Task<string> GetDailyHealthReportWithin(
+        NpgsqlDataSource postgres, string? date, int? responseByteBudget, CancellationToken cancellationToken)
     {
         try
         {
@@ -106,7 +118,16 @@ public sealed class DarlingMcpDailyReportTools
                 node["message"] = "No servers are registered yet, so the report has nothing to cover.";
             }
 
-            return node.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+            /* #9398: the servers array alone ran past the shared response budget on a busy day (many failed Agent jobs and alerts), with
+               no budget keys to say so. The servers are already worst first, so the cut drops the healthiest. summary and text were built
+               from the whole report above and still count every server. One entry over the budget by itself is still answered whole.
+               The web read passes no budget and keeps the whole list. */
+            return responseByteBudget is int budget
+                ? McpResponseBudget.CapArray(
+                    node, "servers", "worst first", "server entries",
+                    _ => "The summary and text above still count every server.", budget,
+                    "budget_truncated", "budget_note", null)
+                : node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -70,6 +70,7 @@ public sealed class DarlingMcpMemoryGrantTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_resource_semaphore"), Description("Resource semaphore stats: granted/available memory vs target/max-target ceiling, waiters, timeout/forced pressure, window ends at as_of. TWO READS, per semaphore+pool: grants[] is the NEWEST snapshot (moment: captured_at/age_seconds); window[] aggregates EVERY snapshot (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (not_collected first). sample_interval_seconds/interval_known null/false on a restart-marker or pre-column row; its zero deltas aren't 'no timeouts'. <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per resource semaphore and pool), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per (resource_semaphore_id, pool_id): peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting for a grant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). Each grants[] row also carries sample_interval_seconds, the measured seconds its two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column. interval_seconds is the interval these deltas cover, null when it can't be known - the same name the latch and spinlock tools use; sample_interval_seconds carries the same value and is kept for existing readers. " + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
     public static async Task<string> GetResourceSemaphore(
         NpgsqlDataSource postgres,
@@ -154,6 +155,7 @@ public sealed class DarlingMcpMemoryGrantTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore stats: granted vs available workspace memory per resource pool, waiters, timeout/forced grant deltas, over a window ending at as_of (default 1h). TWO READS: grants[] is the NEWEST snapshot in the window (a moment: captured_at/age_seconds), one row per pool; window[] aggregates EVERY snapshot in it, per pool (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (or not_collected first). <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per pool, summed across its semaphores), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per pool: peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting on the pool at one instant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). CHART=TRUE instead answers the whole window as a series: one point per bucket per pool (bucket_minutes picks the width, only with chart=true), each with granted/available/used/target MB, grantees, waiters and the timeout/forced-grant deltas summed in the bucket, and no grants[]/window[]. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
     public static Task<string> GetMemoryGrants(
         NpgsqlDataSource postgres,
@@ -312,6 +314,7 @@ public sealed class DarlingMcpMemoryGrantTools
         forced_grants_in_window = w.ForcedGrantsInWindow
     };
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure events (memory_notification: RESOURCE_MEMPHYSICAL_LOW/_HIGH, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR, over a sample_time window ending at as_of (default 24h), oldest first. Newest 200 (limit); summary counts the window; read truncated. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed)." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetMemoryPressureEvents(
         NpgsqlDataSource postgres,
@@ -392,12 +395,15 @@ public sealed class DarlingMcpMemoryGrantTools
                    page's count; total_events is the window's. */
                 limit,
                 truncated = page.Truncated,
-                events_returned = rows.Count,
+                events_returned = page.ShownEvents,
+                /* #9337: the page's raw rows. events_returned counts events (a notification and one second), the unit total_events uses, so
+                   it never exceeds total_events; several rows can share an event. */
+                rows_returned = rows.Count,
                 order = "oldest_first",
                 oldest_returned_at = McpHelpers.FormatEffectiveStart(rows[0].SampleTime),
                 newest_returned_at = McpHelpers.FormatEffectiveStart(rows[^1].SampleTime),
                 limit_note = page.Truncated
-                    ? $"Showing the newest {rows.Count} of {page.TotalEvents} events in the window (limit {limit}); the older {page.TotalEvents - rows.Count} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
+                    ? $"Showing the newest {page.ShownEvents} of {page.TotalEvents} events in the window (limit {limit}); the older {Math.Max(0, page.TotalEvents - page.ShownEvents)} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
                     : null,
                 summary = new
                 {

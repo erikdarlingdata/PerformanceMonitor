@@ -82,8 +82,9 @@ public static class DarlingFinOpsIndexAnalysisReader
     /// snapshot was dropped: the collector reads every user index of each database it sweeps, so a row that
     /// only an older cycle carries describes an index that no longer exists and is not shown. A database that
     /// left collection scope still shows its last snapshot (marked left over past <see cref="LeftOverAfter"/>, #7701), and a server that stopped collecting still shows
-    /// its last cycle. The lower bound (the oldest per-database anchor) exists to keep the join on the newest
-    /// chunks instead of every retained one. DISTINCT ON still dedupes on the index identity, and two rows for
+    /// its last cycle. The rows are filtered on the anchors' distinct instants, an InitPlan array, so TimescaleDB
+    /// excludes at run time every chunk that holds none of them: a database that left scope weeks ago costs its own
+    /// last chunk, not every chunk since. DISTINCT ON still dedupes on the index identity, and two rows for
     /// one index can share a collection_time (a re-run in the same instant), so the final ORDER BY key is
     /// collection_id DESC: the newest-written row wins the tie deterministically. $1 server_id. Column order
     /// is the read contract for <see cref="ReadIndexObjectStatsRow"/>; collection_time is the last column (ordinal 40).
@@ -146,7 +147,7 @@ SELECT DISTINCT ON (s.database_id, s.object_id, s.index_id)
 FROM v_index_object_stats AS s
 JOIN anchor AS a ON a.database_id = s.database_id AND a.t = s.collection_time
 WHERE s.server_id = $1
-AND   s.collection_time >= (SELECT min(t) FROM anchor)
+AND   s.collection_time = ANY (ARRAY(SELECT DISTINCT t FROM anchor))
 ORDER BY s.database_id, s.object_id, s.index_id, s.collection_time DESC, s.collection_id DESC";
 
     /// <summary>
@@ -304,12 +305,14 @@ LIMIT 1";
         }
 
         double? uptimeDays = null;
+        DateTime? measuredFrom = null;
         if (sqlServerStartTime is { } start)
         {
             var days = (referenceLocalTime - start).TotalDays;
             if (days >= 0)
             {
                 uptimeDays = days;
+                measuredFrom = start;
             }
         }
 
@@ -324,6 +327,10 @@ LIMIT 1";
             ServerSupportsCompression = supportsCompression,
             ServerSupportsOnline = supportsOnline,
             ServerUptimeDays = uptimeDays,
+            /* #8880: the heap finding's note dates its counters from the start time the uptime above was measured from, so the two
+               never disagree. Its thresholds keep the record defaults; there is no setting for them. */
+            ServerStartTime = measuredFrom,
+            IncludeHeaps = true,
             /* CompressionMin/MaxSavingsFactor keep the record defaults (0.20 / 0.60 — sp_IndexCleanup's band). */
         };
     }

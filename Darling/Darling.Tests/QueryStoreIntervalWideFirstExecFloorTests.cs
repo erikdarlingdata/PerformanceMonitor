@@ -103,7 +103,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Equal(2, arms.Length);
 
         /* Arm 1 (#5523) is placed by interval_start_time_utc, so its range comes from the window: the first execution
-           lies inside the interval, which starts in [$2, $3] and spans at most a day. The collector-derived floor
+           lies inside the interval, which starts in [$2, $3) and spans at most a day. The collector-derived floor
            (PurgeEdgeMarginSql) is arm 2's alone, which is placed by collection_time, and that arm takes the upper twin. */
         Assert.Contains("first_execution_time >= $2 - " + QueryStoreIntervalWide.IntervalStartSlackSql, arms[0], StringComparison.Ordinal);
         Assert.Contains("first_execution_time <= $3 + " + QueryStoreIntervalWide.IntervalStartFirstExecMarginSql, arms[0], StringComparison.Ordinal);
@@ -113,9 +113,9 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Single(Regex.Matches(sql, Regex.Escape(QueryStoreIntervalWide.PurgeEdgeMarginSql)));
 
         /* Each bound follows its own arm's time filter. */
-        var arm1End = arms[0].IndexOf("interval_start_time_utc <= $3", StringComparison.Ordinal);
+        var arm1End = arms[0].IndexOf("interval_start_time_utc < $3", StringComparison.Ordinal);
         Assert.True(arm1End >= 0 && arm1End < arms[0].IndexOf("first_execution_time >=", StringComparison.Ordinal), "arm 1's bounds follow its interval_start_time_utc bounds");
-        var arm2End = arms[1].IndexOf("collection_time <= $4", StringComparison.Ordinal);
+        var arm2End = arms[1].IndexOf("collection_time < $4", StringComparison.Ordinal);
         Assert.True(arm2End >= 0 && arm2End < arms[1].IndexOf("first_execution_time >=", StringComparison.Ordinal), "arm 2's bounds follow its collection_time bounds");
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
 

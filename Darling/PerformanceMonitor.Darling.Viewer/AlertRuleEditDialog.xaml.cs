@@ -13,6 +13,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -45,6 +46,9 @@ public partial class AlertRuleEditDialog : Window
         IReadOnlyList<string> serverNames, IReadOnlyList<DarlingTag> tags, CustomAlertRule? existing = null, CustomAlertTemplate? template = null)
     {
         InitializeComponent();
+        /* The form scrolls above its pinned buttons when it is taller than the work area of the monitor it is on (#8804). */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        SizeChanged += (_, _) => WindowWorkArea.Clamp(this);
         _existing = existing;
         _tags = tags;
         _baseJson = existing?.DefinitionJson ?? template?.DefinitionJson;
@@ -77,6 +81,8 @@ public partial class AlertRuleEditDialog : Window
         else
         {
             MeasureCombo.SelectedIndex = 0;
+            // The change handler skips while loading, so the first metric's aggregate and unit are filled here (they stayed blank).
+            FillAggregateAndUnit(null, null);
         }
 
         _loading = false;
@@ -130,17 +136,25 @@ public partial class AlertRuleEditDialog : Window
         }
 
         var aggregates = AlertRuleEditorModel.AggregatesFor(measure);
-        AggregateCombo.ItemsSource = aggregates;
+        var choices = AlertRuleEditorModel.AggregateChoicesFor(measure);
+        AggregateCombo.ItemsSource = choices;
         AggregateCombo.IsEnabled = aggregates.Count > 0;
-        AggregateCombo.SelectedItem = aggregates.Contains(aggregate ?? "") ? aggregate : AlertRuleEditorModel.DefaultAggregateFor(measure);
+        AggregateCombo.SelectedItem = aggregates.Count == 0 ? choices[0] : aggregates.Contains(aggregate ?? "") ? aggregate : AlertRuleEditorModel.DefaultAggregateFor(measure);
         FillUnits(measure, unit);
     }
 
+    /// <summary>The aggregate the form sends: null when the metric has none to choose, so the "not used" line is never read as a value.</summary>
+    private string? ChosenAggregate => AggregateCombo.SelectedItem is string a && AlertRuleEditorModel.IsChoice(a) ? a : null;
+
+    private string? ChosenUnit => UnitCombo.SelectedItem is string u && AlertRuleEditorModel.IsChoice(u) ? u : null;
+
     private void FillUnits(ComposeMeasure measure, string? unit)
     {
-        var units = AlertRuleEditorModel.UnitsFor(measure, AggregateCombo.SelectedItem as string);
+        var units = AlertRuleEditorModel.UnitChoicesFor(measure, ChosenAggregate);
+        var real = AlertRuleEditorModel.IsChoice(units[0]);
         UnitCombo.ItemsSource = units;
-        UnitCombo.SelectedItem = unit is not null && units.Contains(unit) ? unit : units.Contains(measure.DefaultUnit) ? measure.DefaultUnit : units.Count > 0 ? units[0] : null;
+        UnitCombo.IsEnabled = real;
+        UnitCombo.SelectedItem = !real ? units[0] : unit is not null && units.Contains(unit) ? unit : units.Contains(measure.DefaultUnit) ? measure.DefaultUnit : units[0];
     }
 
     private void MeasureCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -155,7 +169,7 @@ public partial class AlertRuleEditDialog : Window
     {
         if (!_loading && SelectedMeasure is { } measure)
         {
-            FillUnits(measure, UnitCombo.SelectedItem as string);
+            FillUnits(measure, ChosenUnit);
         }
     }
 
@@ -187,8 +201,8 @@ public partial class AlertRuleEditDialog : Window
 
     private AlertRuleForm ReadForm() => new(
         SelectedMeasure?.Key ?? "",
-        AggregateCombo.SelectedItem as string,
-        UnitCombo.SelectedItem as string,
+        ChosenAggregate,
+        ChosenUnit,
         HoursBox.Text,
         OpCombo.SelectedItem as string ?? "ge",
         WarnBox.IsEnabled ? WarnBox.Text : "",

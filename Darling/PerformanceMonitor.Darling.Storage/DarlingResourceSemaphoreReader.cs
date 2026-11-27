@@ -73,7 +73,7 @@ public static class DarlingResourceSemaphoreReader
             SELECT MAX(collection_time) AS mx
             FROM v_memory_grant_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -155,7 +155,7 @@ public static class DarlingResourceSemaphoreReader
                 forced_grant_count_delta
             FROM v_memory_grant_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         agg AS

@@ -238,7 +238,6 @@ public sealed class DarlingStoreConnectionParseFailureTests
     /// the CLI proves with), so a Npgsql that rewords a message makes this test fail.
     /// </summary>
     [Theory]
-    [InlineData("Host=127.0.0.1;Username=u;Password=pw;Multiplexing=true;Pooling=false", "Multiplexing needs Pooling to be on.")]
     [InlineData("Host=127.0.0.1;Username=u;Password=pw;SslNegotiation=direct;SSL Mode=Prefer", "SSL Negotiation=Direct needs SSL Mode Require, Verify CA or Verify Full.")]
     [InlineData("Host=127.0.0.1;Username=u;Password=pw;Target Session Attributes=primary", "Target Session Attributes other than Any needs more than one host in Host.")]
     [InlineData("Host=127.0.0.1;Username=u;Password=pw;Minimum Pool Size=10;Maximum Pool Size=5", "Maximum Pool Size is smaller than Minimum Pool Size.")]
@@ -253,6 +252,23 @@ public sealed class DarlingStoreConnectionParseFailureTests
         Assert.Equal(expected, DarlingStoreConnection.TryDescribeParseFailure(connectionString));
         Assert.DoesNotContain(FixedHintStart, expected, StringComparison.Ordinal);
         Assert.DoesNotContain(fromDataSource.Message, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Npgsql 11 removed multiplexing, so <c>Multiplexing=true</c> in a bring-your-own string is an unknown keyword.
+    /// It gets the general hint, not Npgsql's own text, and the keyword that Npgsql no longer knows is not printed.
+    /// </summary>
+    [Fact]
+    public void TheRemovedMultiplexingKeyword_GetsTheGeneralHint_NotNpgsqlsText()
+    {
+        const string connectionString = "Host=127.0.0.1;Username=u;Password=pw;Multiplexing=true";
+        var fromDataSource = Assert.ThrowsAny<Exception>(() => { using var dataSource = NpgsqlDataSource.Create(connectionString); });
+
+        var text = DarlingStoreConnection.DescribeParseFailure(fromDataSource);
+
+        Assert.StartsWith(FixedHintStart, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(fromDataSource.Message, text, StringComparison.Ordinal);
+        Assert.Equal(text, DarlingStoreConnection.TryDescribeParseFailure(connectionString));
     }
 
     /// <summary>

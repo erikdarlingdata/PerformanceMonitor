@@ -165,13 +165,20 @@ public sealed class StatsHistoryBehaviourTests
     [Fact]
     public void AHourlyTierRead_SaysTheNewestHoursAreNotInTheChartYet_AndARawTierReadDoesNot()
     {
-        // #6359: the hourly rollup never holds the current hour and gets the previous one on the next refresh, so the chart's
-        // right edge is empty for up to two hours. The panel says so from the read's `source` field, never from its note text.
-        const string trail = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+        // #6359, #8801: the hourly rollup is refreshed once an hour and builds only the hours that ended an hour or more before
+        // the refresh, so a chart read from the rollup alone has an empty right edge: the current hour and the one or two before
+        // it. The panel says so from the read's `source` field, never from its note text.
+        const string trail = "The newest two or three hours are not in this chart yet: an hour's totals are added one to two hours after it ends.";
         var r = Run("hourlyTierTrail");
         Assert.Equal(
             new[] { "Each point covers 1 hour. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers. " + trail },
             r.GetProperty("hourly").EnumerateArray().Select(s => s.GetString()));
+
+        // #8801: a query's history sums the hours the rollup has not built from the raw rows, so its chart reaches the window's
+        // end and the panel owes no such sentence.
+        Assert.Equal(
+            new[] { "Each point covers 1 hour. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." },
+            r.GetProperty("hourlyQuery").EnumerateArray().Select(s => s.GetString()));
         Assert.Equal(
             new[] { "Each point covers 5 minutes. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." },
             r.GetProperty("raw").EnumerateArray().Select(s => s.GetString()));

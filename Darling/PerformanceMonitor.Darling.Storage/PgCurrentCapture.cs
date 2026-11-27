@@ -57,7 +57,7 @@ public static class PgCurrentCapture
         '
                 AND   status = 'SUCCESS'
                 AND   (error_message IS NULL OR error_message NOT LIKE '%{PartialDatabaseFailureNote.Marker}%')
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 ORDER BY collection_time DESC
                 FETCH FIRST 2 ROWS ONLY

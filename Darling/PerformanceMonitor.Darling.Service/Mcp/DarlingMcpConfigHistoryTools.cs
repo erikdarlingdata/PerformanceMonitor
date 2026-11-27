@@ -44,6 +44,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpConfigHistoryTools
 {
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_server_config_changes"), Description("Gets server configuration change history by diffing sp_configure (sys.configurations) snapshots. Shows which settings changed and their old vs new configured/in-use values. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; requires_restart and the setting description are not collected and are omitted.")]
     public static async Task<string> GetServerConfigChanges(
         NpgsqlDataSource postgres,
@@ -79,7 +80,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice), cancellationToken, windowStart);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice), cancellationToken, windowStart);
             }
 
             var notice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -118,6 +119,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting, so its flips are listed apart in status_changes and never in changes. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
     public static Task<string> GetDatabaseConfigChanges(
         NpgsqlDataSource postgres,
@@ -181,7 +183,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.WithDatabase(
-                    NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
+                    NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice, DatabaseScopeText(databases)),
                     databases.Describe())!, cancellationToken, windowStart);
             }
 
@@ -228,6 +230,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_trace_flag_changes"), Description("Gets trace flag change history by diffing DBCC TRACESTATUS snapshots. Shows which trace flags were enabled or disabled (change_type), with scope (global/session) and the change time. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
     public static async Task<string> GetTraceFlagChanges(
         NpgsqlDataSource postgres,
@@ -264,7 +267,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
                    run (or stored rows) really has "fewer than two snapshots". */
                 var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts), cancellationToken, windowStart);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice, runFacts), cancellationToken, windowStart);
             }
 
             var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -302,6 +305,7 @@ public sealed class DarlingMcpConfigHistoryTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
     public static Task<string> GetDatabaseScopedConfig(
         NpgsqlDataSource postgres,
@@ -367,6 +371,7 @@ public sealed class DarlingMcpConfigHistoryTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_health"), Description("Per-database Query Store health: actual/desired state (desired READ_WRITE, actual READ_ONLY = the storage-cap failure). query_capture_mode (churn knob): ALL (2016/17 default) churns most; AUTO (2019+ default) skips minor ones; CUSTOM tunes AUTO; NONE stops new capture. wait_stats_capture_mode: ON default, OFF empties per-query waits. null on either: pre-rung row, or pre-2017 engine for wait_stats - never OFF. No verdict rendered. No rows = unavailable or not_collected; an unmatched database_name gives database_count 0. LATEST IS A TIME: captured_at is the newest hourly capture. <<GUIDE>> Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, the runtime-stats interval length, and (the two trailing fields on every row) query_capture_mode and wait_stats_capture_mode. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit: check this when Query Store data looks stale or missing. CAPTURE MODE IS THE PLAN-CHURN KNOB: query_capture_mode is the one option on this row that names a plan-churn factory. ALL captures every query the engine compiles, one-off ad hoc statements included, on an ad hoc workload each distinct text is a new query with a new plan, so the store fills toward max_storage_size_mb, size-based cleanup cycles, and the READ_ONLY cap hit that readonly_reason decodes follows; ALL was the engine default on SQL Server 2016 and 2017. AUTO skips insignificant queries (the engine's own thresholds over a day: fewer than 30 executions, under 1 s of compile CPU and under 100 ms of execution CPU) and has been the default since SQL Server 2019 and on Azure SQL Database. CUSTOM (2019+) is AUTO with operator-set thresholds: the capture_policy_* knobs, which this row does not collect, so CUSTOM here says the thresholds were tuned, not to what. NONE stops capturing NEW queries while the store keeps collecting compile and runtime statistics for the ones it already holds. wait_stats_capture_mode ON (the default) records per-plan wait statistics into every runtime-stats interval, at a per-execution bookkeeping cost and more store bytes per interval; OFF saves both and leaves the store's per-query wait view empty. Both are the DMV's *_desc spelling verbatim. null means the row was written by a build that did not record it or, for wait_stats_capture_mode, the engine is older than SQL Server 2017 (the column does not exist there), never OFF. Consumed by the Viewer's Query Store grid and, next, on Darling, by get_query_store_clutter as its churn × ALL 'switch to AUTO' arm; this tool reports the modes and renders no verdict on them. Collected hourly by default; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static Task<string> GetQueryStoreHealth(
         NpgsqlDataSource postgres,
@@ -462,9 +467,10 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>The number of distinct config CAPTURES (capture_time values) among the snapshot rows — the
     /// reads return one row per setting/database/flag per capture, so a raw row count would never hit the
-    /// "fewer than two snapshots" branch on a freshly-connected server.</summary>
-    private static int DistinctCaptures(IEnumerable<DateTime> captureTimes) =>
-        captureTimes.Distinct().Count();
+    /// "fewer than two snapshots" branch on a freshly-connected server. Only captures at or before
+    /// <paramref name="upperEdge"/> count, so an answer as of a past instant counts the captures that existed then.</summary>
+    private static int DistinctCaptures(IEnumerable<DateTime> captureTimes, DateTime upperEdge) =>
+        captureTimes.Where(t => t <= upperEdge).Distinct().Count();
 
     /// <summary>The "empty" miss for a change tool — distinguishes "no snapshots collected yet" from "snapshots
     /// exist but nothing changed", so a caller understands why the history is empty (the on-connect cadence).</summary>

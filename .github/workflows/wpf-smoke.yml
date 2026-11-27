@@ -65,8 +65,8 @@ jobs:
             echo "Draft pull request: the smoke is skipped until it is marked ready."
             exit 0
           fi
-          # The paths the smoke exercises (the list the old `paths:` filter held).
-          pattern='^(Lite/|Darling/|tools/ui-smoke-wpf/|tools/ui-smoke/|Lite\.Tests/TestDataSeeder\.cs$|\.github/workflows/wpf-smoke\.yml$)'
+          # The paths the smoke exercises (the list the old `paths:` filter held), plus PerformanceMonitor.Ui, the window code both apps share (#9093).
+          pattern='^(Lite/|Darling/|PerformanceMonitor\.Ui/|tools/ui-smoke-wpf/|tools/ui-smoke/|Lite\.Tests/TestDataSeeder\.cs$|\.github/workflows/wpf-smoke\.yml$)'
           files=$(git diff --name-only HEAD^1 HEAD)
           echo "Changed files: $(printf '%s\n' "$files" | grep -c .)"
           matched=$(printf '%s\n' "$files" | grep -E "$pattern" || true)

@@ -306,7 +306,7 @@ public static class FleetSweepEngine
                     var clauses = new List<string>();
                     if (reading.IdentityCapacityCritical && reading.IdentityCapacity is { } identity)
                     {
-                        clauses.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+                        clauses.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns, identity.ExhaustedColumns));
                     }
 
                     if (reading.DatabaseStateCritical && reading.DatabaseStates is { } databaseStates)

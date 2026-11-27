@@ -194,46 +194,35 @@ public sealed class McpToolsListBudgetTests
     /// registers.</summary>
     internal static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
     {
-        var registered = Regex
-            .Matches(File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs")),
-                @"WithGeminiCompatibleTools<(\w+)>")
-            .Select(m => m.Groups[1].Value)
-            .ToHashSet(StringComparer.Ordinal);
-        var types = typeof(DarlingMcpHostService).Assembly.GetTypes()
-            .Where(t => registered.Contains(t.Name))
-            .OrderBy(t => t.FullName, StringComparer.Ordinal)
-            .ToList();
-        Assert.Equal(registered.Count, types.Count);
+        /* The host registers exactly these classes (DarlingMcpToolTypes.WithDarlingTools). */
+        var types = DarlingMcpToolTypes.All.ToList();
 
         var services = new ServiceCollection();
-        foreach (var serviceType in types
-            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
-            .SelectMany(m => m.GetParameters())
-            .Select(p => p.ParameterType)
-            .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
-            .Distinct())
+        foreach (var serviceType in ToolServiceParameterTypes(types))
         {
             services.AddSingleton(serviceType, _ => null!);
         }
 
         var builder = services.AddMcpServer();
-        var register = typeof(McpSchemaCompat).GetMethod(nameof(McpSchemaCompat.WithGeminiCompatibleTools), BindingFlags.Public | BindingFlags.Static)!;
-        foreach (var type in types)
-        {
-            register.MakeGenericMethod(type).Invoke(null, new object?[] { builder });
-        }
+        builder.WithDarlingTools();
 
         var provider = services.BuildServiceProvider();
         var isService = provider.GetRequiredService<IServiceProviderIsService>();
         return (provider.GetServices<McpServerTool>().ToList(), types, isService);
     }
 
-    private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
+    /// <summary>The DI service types the registered tools take as parameters, which a host registers so the served schemas leave them out.</summary>
+    internal static List<Type> ToolServiceParameterTypes() => ToolServiceParameterTypes(BuildServedTools().Types);
 
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+    private static List<Type> ToolServiceParameterTypes(IEnumerable<Type> types) => types
+        .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+        .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
+        .SelectMany(m => m.GetParameters())
+        .Select(p => p.ParameterType)
+        .Where(McpServedSchema.IsServiceParameter)
+        .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
+        .Distinct()
+        .ToList();
 }
 
 /// <summary>
@@ -253,6 +242,8 @@ internal static class McpServedSchema
 
         return !(underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(string) || underlying == typeof(decimal)
             || underlying == typeof(DateTime) || underlying == typeof(DateTimeOffset) || underlying == typeof(Guid)
-            || underlying == typeof(TimeSpan));
+            || underlying == typeof(TimeSpan)
+            /* #9388: call_tool's arguments are a JSON value the client sends, not a DI service. */
+            || underlying == typeof(System.Text.Json.JsonElement));
     }
 }

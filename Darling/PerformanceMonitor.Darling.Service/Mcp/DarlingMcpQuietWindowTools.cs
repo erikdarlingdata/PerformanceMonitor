@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -73,6 +74,7 @@ public sealed class DarlingMcpQuietWindowTools
     private static bool SameInstant(DateTime? a, DateTime? b) =>
         a is null || b is null ? a is null && b is null : Math.Abs((a.Value - b.Value).Ticks) < TimeSpan.TicksPerMillisecond;
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_quiet_window"), Description(
         "Sets a QUIET WINDOW: no alert is delivered for one server (server_name) or for the WHOLE FLEET (server_name omitted) from starts_at (optional, default now) until ends_at (required). Alerts are still logged. Changes shared alert configuration the service delivers on. The window ends on its own. Returns the rule id and the clear_quiet_window call that undoes it.<<GUIDE>>" +
         "A quiet window is a mute rule with only a server scope (or none, for the fleet) and an end time, so get_mute_rules lists it with its " +
@@ -99,7 +101,7 @@ public sealed class DarlingMcpQuietWindowTools
             (int ServerId, string DisplayName)? target = null;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
                 if (error is not null)
                 {
                     return error;
@@ -216,6 +218,7 @@ public sealed class DarlingMcpQuietWindowTools
         }, McpHelpers.JsonOptions);
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "clear_quiet_window"), Description(
         "Ends a quiet window NOW by its rule id (from set_quiet_window or get_mute_rules): the window's mute rule is deleted, so alerts it was holding back are delivered again. Changes shared alert configuration the service delivers on. Refuses any rule that is not a quiet window (an ordinary mute with a metric or pattern is not touched). Returns the window as it was and the set_quiet_window call that restores it.<<GUIDE>>" +
         "Clears one quiet window by rule_id, whether it is active or still upcoming. Only a rule with the shape of a quiet window that set_quiet_window wrote (the \"Quiet window\" reason, an end " +

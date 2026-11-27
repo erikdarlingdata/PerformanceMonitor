@@ -50,14 +50,7 @@ public sealed class CollectorRunTimeRungTests
     [Fact]
     public void TheRungIsRegisteredInADenseLadder_AtVersion160()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* No longer the top rung: V161 (the Query Store top daily summary) landed above it. */
         Assert.Equal(160, Rung.Version);
-        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
     }
 
     /// <summary>The rung creates the one table, its two partial unique indexes and the reload trigger, schema-qualified,

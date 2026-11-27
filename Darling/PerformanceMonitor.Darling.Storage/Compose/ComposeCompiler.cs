@@ -158,6 +158,50 @@ public static class ComposeCompiler
     private const char RankBaseAlias = 'b';
 
     /// <summary>
+    /// The hourly-raw-edges FROM item (#4605): the successor rollup for the whole-hour middle <c>[edgeStart, edgeEnd)</c> and raw for the
+    /// edges outside it, one SELECT list for every arm. The window, scope, filters and module join stay outside, on the caller's alias.
+    ///
+    /// <para><c>query_stats</c> has a third arm: the raw restart rows (<c>sample_interval_seconds = 0</c>) the rollup excludes, so a group
+    /// or bucket holding only restart rows stays in the result with a NULL value, as the raw read gives it.</para>
+    ///
+    /// <para><c>procedure_stats</c> has no restart arm (#9357). The route accepts only a Cumulative delta measure
+    /// (<see cref="ComposeSourceRouter"/>'s IsHourlyEdgesMeasure) under SUM, MAX or MIN (HourlyRawEdgesCandidate's aggregate check), and
+    /// every one of them compiles with <c>FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0)</c> (MeasuredDeltaFilter, because
+    /// procedure_stats is in CollectorDeltaCalculator.DeltaFamilyCollectors). A restart row therefore never adds a value to an
+    /// aggregate. It can only add a group or a bucket whose value is NULL, and the arm-less read leaves that group or bucket out. The arm
+    /// was measured to dominate the cold read of this source: its restart rows sit on scattered heap pages, one random read each, so
+    /// dropping it is the point of the route here. A line panel drops NULL points before it draws (charts.js), so a missing bucket and a NULL
+    /// bucket draw the same line.</para>
+    /// </summary>
+    internal static string HourlyRawEdgesRelation(
+        string sourceTable, string successorRelation, ComposeAggregate aggregate,
+        string startParam, string endParam, string edgeStartParam, string edgeEndParam)
+    {
+        var groups = ComposeHybridColumns.GroupColumns[sourceTable];
+        var mid = ComposeRoute.HybridMidAlias;
+        var suffix = aggregate switch
+        {
+            ComposeAggregate.Max => "max",
+            ComposeAggregate.Min => "min",
+            _ => "sum",
+        };
+        var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
+            + $", {mid}.bucket AS collection_time, "
+            + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
+            + ", 1 AS sample_interval_seconds";
+        var rawCols = string.Join(", ", groups) + ", collection_time, "
+            + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
+        var restartArm = ComposeHybridColumns.ReadsRestartRows(sourceTable)
+            ? $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
+            : "";
+        return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{successorRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
+            + restartArm
+            + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+            + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+    }
+
+    /// <summary>
     /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
     /// <c>query_store_stats</c> on the RAW route, which is wrapped in a per-interval dedup first (#1841).
     ///
@@ -227,32 +271,11 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null)
+        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null, string? sharedQueryStoreRelation = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
-            /* Three arms with one SELECT list: the rollup for the whole-hour middle, the raw restart rows the rollup
-               excludes (literal `sample_interval_seconds = 0`, so the planner can use the partial index), and raw for the
-               edges outside the middle. The window, scope, filters and module join stay outside, on the caller's alias. */
-            var groups = ComposeHybridColumns.GroupColumns[sourceTable];
-            var mid = ComposeRoute.HybridMidAlias;
-            var suffix = aggregate switch
-            {
-                ComposeAggregate.Max => "max",
-                ComposeAggregate.Min => "min",
-                _ => "sum",
-            };
-            var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
-                + $", {mid}.bucket AS collection_time, "
-                + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
-                + ", 1 AS sample_interval_seconds";
-            var rawCols = string.Join(", ", groups) + ", collection_time, "
-                + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
-            return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
-                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
-                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
-                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
-                + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+            return HourlyRawEdgesRelation(sourceTable, route.CaggRelation!, aggregate, startParam, endParam, edgeStartParam!, edgeEndParam!);
         }
 
         if (route.IsCagg)
@@ -370,7 +393,8 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null);
+        /* #9151: a RankedTimeSeries panel reads the deduped rows from the shared CTE the caller built once (QueryStoreSharedDedupeCte). */
+        return sharedQueryStoreRelation ?? QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null);
     }
 
     /// <summary>
@@ -449,7 +473,7 @@ public static class ComposeCompiler
     /// </summary>
     private static string QueryStorePartitionRestriction(
         string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe,
-        string? rawServersParam = null)
+        string? rawServersParam = null, string outerRef = QueryStoreTable)
     {
         if (!restrictDedupe || dimensionFilters is not { Count: > 0 })
         {
@@ -470,11 +494,78 @@ public static class ComposeCompiler
             _ => "''",
         };
         var hashKey = string.Concat(keys.Select(c => c == "server_id"
-            ? $" AND k.server_id = {QueryStoreTable}.server_id"
-            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({QueryStoreTable}.{c}, {Sentinel(c)})"));
-        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
+            ? $" AND k.server_id = {outerRef}.server_id"
+            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({outerRef}.{c}, {Sentinel(c)})"));
+        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {outerRef}.{c}"));
         return $" AND EXISTS (SELECT 1 FROM (SELECT DISTINCT {string.Join(", ", keys.Select(c => FactAlias + "." + c))}"
             + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
+    }
+
+    /// <summary>The columns the shared Query Store dedupe CTE carries (#9151): every column a Query Store measure or dimension reads
+    /// (<see cref="s_splitColumns"/>), the dedupe's own key, and the tie-break column. Not <c>SELECT *</c>: the text and plan columns
+    /// of a wide row would ride through the sort and the materialization for nothing.</summary>
+    private static readonly string[] s_sharedDedupeColumns = s_splitColumns
+        .Concat(s_queryStorePartitionKey)
+        .Concat(new[] { "execution_count" })
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>
+    /// The shared dedupe CTE of an all-raw Query Store RankedTimeSeries panel (#9151). The rank CTE and the series query each read the
+    /// deduped rows, and each used to build them (the window ranked twice, plus the partition restriction's scan twice: four heap passes
+    /// of the window). This is the same dedupe, built once as a MATERIALIZED CTE of the columns the panel reads, which both read. Same
+    /// window, same key, same ORDER BY, same partition restriction as <see cref="QueryStoreRawDedupe"/>.
+    ///
+    /// <para>The outer query's server scope and the filters on a partition column (server, database) are repeated inside, because
+    /// Postgres pushed them through the old subquery's window function and cannot push them into a MATERIALIZED CTE. That is exact: every
+    /// row of a partition has one value of its partition columns, so keeping or dropping a partition before the ranking picks the same
+    /// survivors. A filter on a non-partition column (module_name, query_hash) stays outside, and the restriction decides which partitions
+    /// are ranked, exactly as before. The outer query repeats the scope and every filter, as it always did.</para>
+    ///
+    /// <para>The table is aliased <c>f</c> here (as the restriction's own scan is) so the scope and filter text, which is spelled
+    /// <c>f.column</c>, applies unchanged; the restriction's inner <c>f</c> hides it inside its derived table, and the correlation
+    /// to this scan is its <c>outerRef</c>.</para>
+    /// </summary>
+    private static string QueryStoreSharedDedupeCte(
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string> dimensionFilters, IReadOnlyList<string> partitionFilters,
+        string? serverScopeSql, bool restrictDedupe)
+    {
+        var f = FactAlias.ToString();
+        return $"{QueryStoreSharedCte} AS MATERIALIZED (\n"
+            + $"    SELECT {string.Join(", ", s_sharedDedupeColumns)} FROM (SELECT {string.Join(", ", s_sharedDedupeColumns.Select(c => f + "." + c))}, "
+            + $"ROW_NUMBER() OVER (PARTITION BY {string.Join(", ", s_queryStorePartitionKey.Select(c => f + "." + c))} "
+            + $"ORDER BY {f}.{timeColumn} DESC, {f}.execution_count DESC) AS qs_rn\n"
+            + $"        FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} AS {f}\n"
+            + $"        WHERE {f}.{timeColumn} >= {startParam} AND {f}.{timeColumn} <= {endParam}"
+            + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
+            + string.Concat(partitionFilters.Select(c => " AND " + c))
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null, f)
+            + ") AS qs_ranked WHERE qs_rn = 1\n)\n";
+    }
+
+    private const string QueryStoreSharedCte = "qs_dedup";
+
+    /// <summary>The raw sources whose only usable index is (server_id, collection_time): they have no index on collection_time alone
+    /// (#9151). A fleet read of a short window on them, with no server predicate, makes the planner read the whole day's chunk and
+    /// throw most of it away (measured: 128 thousand blocks for a 4 hour window, because the plan never picks the index's skip scan).</summary>
+    private static readonly HashSet<string> s_noTimeOnlyIndexSources = new(StringComparer.Ordinal) { "procedure_stats", "query_stats" };
+
+    /// <summary>
+    /// Every server_id the raw table holds a row for inside the panel's window, read with one index probe per server (a loose index scan
+    /// over (server_id, collection_time)). An unscoped panel adds <c>server_id = ANY(this)</c> so the planner has a server list to drive
+    /// the (server_id, collection_time) index with and reads only the window, as a scoped panel always did. Both arms of the walk carry the
+    /// window, so TimescaleDB leaves only the chunks the window touches: unbounded, the walk probed every chunk of the table, which a cold
+    /// store with many chunks paid for on every panel run (#9151). A server with no row in the window adds nothing to the panel, and
+    /// the panel's own predicate follows the list, so the answer is the same; a server missing from the registry (a removed server's
+    /// history, #5525) is still in the list when it has rows in the window. server_id is NOT NULL. The bounds are the panel's exact
+    /// bounds (<paramref name="startParam"/> inclusive, <paramref name="endParam"/> inclusive, as the WHERE below it).
+    /// The table and column names are compile-time catalog constants, never caller strings.
+    /// </summary>
+    private static string DistinctServerIdsSql(string sourceTable, string timeColumn, string startParam, string endParam)
+    {
+        var table = $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+        var window = $"{timeColumn} >= {startParam} AND {timeColumn} <= {endParam}";
+        return $"ARRAY(WITH RECURSIVE ids(id) AS (SELECT min(server_id) FROM {table} WHERE {window} UNION ALL SELECT (SELECT min(server_id) FROM {table} WHERE server_id > ids.id AND {window}) FROM ids WHERE ids.id IS NOT NULL) SELECT id FROM ids WHERE id IS NOT NULL)";
     }
 
     /// <summary>True when two normalized server scopes are the same set under ordinal comparison (the case rule of
@@ -500,10 +591,12 @@ public static class ComposeCompiler
     /// <see cref="Compile"/> with the #5582 single-scan RankedTimeSeries shape switchable. <c>false</c> compiles exactly the
     /// text every route emitted before that change (the rank CTE and the outer query each scan the fact rows). It is the
     /// live exactness oracle in <c>ComposeQueryStoreRankedSingleScanLiveTests</c> and the plan test's two-scan baseline;
-    /// no product path passes <c>false</c>.
+    /// no product path passes <c>false</c>. <paramref name="sharedQueryStoreDedupe"/> is the same kind of switch for #9151: <c>false</c>
+    /// compiles the all-raw Query Store RankedTimeSeries statement that builds the deduped rows twice, the live oracle's baseline.
     /// </summary>
     internal static (ComposeCompiled? Compiled, string? Error) CompileCore(
-        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null)
+        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null,
+        bool sharedQueryStoreDedupe = true)
     {
         if (plan is null)
         {
@@ -626,6 +719,7 @@ public static class ComposeCompiler
            placeholders rather than double-binding each value. */
         var filterClauses = new List<string>(plan.Filters.Count);
         var pushableFilterClauses = new List<string>();
+        var partitionFilterClauses = new List<string>();
         var restrictDedupe = false;
         foreach (var filter in plan.Filters)
         {
@@ -635,7 +729,12 @@ public static class ComposeCompiler
                 && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
             {
                 pushableFilterClauses.Add(clause);
-                restrictDedupe |= !s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
+                var onPartitionColumn = s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
+                restrictDedupe |= !onPartitionColumn;
+                if (onPartitionColumn)
+                {
+                    partitionFilterClauses.Add(clause);
+                }
             }
         }
 
@@ -657,6 +756,17 @@ public static class ComposeCompiler
         }
 
         var singleScan = partialValue is not null;
+
+        /* #9151: an all-raw Query Store RankedTimeSeries panel (the wide route has its own single scan above) builds the deduped rows once,
+           into the qs_dedup CTE below, and the rank CTE and the series query both read it. Every other statement is unchanged. */
+        var sharedQsDedupe = sharedQueryStoreDedupe
+            && !singleScan
+            && plan.Mode == PanelMode.RankedTimeSeries
+            && !route.IsCagg
+            && route.Tier == ComposeSourceTier.Raw
+            && !context.QueryStoreWideEligible
+            && !plan.UsesModuleJoin
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal);
 
         /* The stamp relation's inputs: its partial columns, $stampThrough, and the server scope spelled on the registry join the
            three arms share (`s.`), because the rollup rows and the wide rows both carry server_id and the registry row carries the name. */
@@ -680,7 +790,8 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null,
+                sharedQsDedupe ? QueryStoreSharedCte : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -722,6 +833,10 @@ public static class ComposeCompiler
             if (hasServerScope)
             {
                 sql.Append(indent).Append("  AND ").Append(FactScope()).Append('\n');
+            }
+            else if (route.Tier == ComposeSourceTier.Raw && s_noTimeOnlyIndexSources.Contains(plan.Measure.SourceTable))
+            {
+                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_id = ANY(").Append(DistinctServerIdsSql(plan.Measure.SourceTable, timeColumn, startParam, endParam)).Append(")\n");
             }
 
             foreach (var clause in filterClauses)
@@ -779,6 +894,12 @@ public static class ComposeCompiler
                 sql.Append("    WHERE rn = 1\n");
                 sql.Append(")\n");
             }
+        }
+
+        if (sharedQsDedupe)
+        {
+            sql.Append(sql.Length == 0 ? "WITH " : ", ")
+                .Append(QueryStoreSharedDedupeCte(timeColumn, startParam, endParam, pushableFilterClauses, partitionFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe));
         }
 
         /* The #2734 rank pass: RankedTimeSeries prepends a CTE that IS the Ranked query minus the time

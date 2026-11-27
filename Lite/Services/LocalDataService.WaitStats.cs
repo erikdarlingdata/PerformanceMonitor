@@ -63,7 +63,7 @@ SELECT
     COUNT(*) AS sample_count
 FROM v_wait_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 {exclude}
 GROUP BY rtrim(wait_type)
@@ -139,7 +139,7 @@ SELECT
     SUM(delta_wait_time_ms) AS total_delta
 FROM v_wait_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 {exclude}
 GROUP BY rtrim(wait_type)
@@ -216,6 +216,8 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   rtrim(wait_type) = rtrim($2)
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $3 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($3, $4]. */
     AND   collection_time >= $3
     AND   collection_time <= $4
 )
@@ -225,6 +227,7 @@ SELECT
     CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
     CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
 FROM raw
+WHERE collection_time > $3
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -282,6 +285,8 @@ WITH raw AS
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   rtrim(wait_type) IN ({typeParams})
@@ -296,6 +301,7 @@ rated AS
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
         CASE WHEN interval_seconds > 0 THEN delta_waiting_tasks END AS rated_tasks
     FROM raw
+    WHERE collection_time > $2
 )
 SELECT
     wait_type,
@@ -500,6 +506,8 @@ WITH per_collection AS
         extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS lag_seconds
     FROM v_wait_stats
     WHERE server_id = $1
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
     {exclude}
@@ -514,6 +522,7 @@ rated AS
         CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN lag_seconds END
              ELSE cadence_seconds END AS rated_seconds
     FROM per_collection
+    WHERE collection_time > $2
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
@@ -579,7 +588,7 @@ SELECT
     CAST(SUM(delta_wait_time_ms) AS BIGINT) AS accumulated_wait_ms,
     CAST(SUM(delta_waiting_tasks) AS BIGINT) AS accumulated_waits,
     CAST(COUNT(*) AS BIGINT) AS observed_intervals,
-    MAX(collection_time) AS newest_collection_time
+    MAX(collection_time) FILTER (WHERE delta_wait_time_ms > 0 OR delta_waiting_tasks > 0) AS newest_collection_time
 FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
@@ -611,7 +620,7 @@ WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
     {MonitorSnapshotClause("program_name", false)}
@@ -659,7 +668,7 @@ LEFT JOIN blocked_counts bc
   ON  bc.collection_time = q.collection_time
   AND bc.blocker_session_id = q.session_id
 WHERE q.server_id = $1
-AND   q.collection_time >= $2
+AND   q.collection_time > $2
 AND   q.collection_time <= $3
 AND   rtrim(q.wait_type) = rtrim($4)
 {MonitorSnapshotClause("q.program_name", false)}
@@ -747,7 +756,7 @@ WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
     {MonitorSnapshotClause("program_name", false)}
@@ -795,7 +804,7 @@ LEFT JOIN blocked_counts bc
   ON  bc.collection_time = q.collection_time
   AND bc.blocker_session_id = q.session_id
 WHERE q.server_id = $1
-AND   q.collection_time >= $2
+AND   q.collection_time > $2
 AND   q.collection_time <= $3
 {MonitorSnapshotClause("q.program_name", includeMonitor)}
 ORDER BY q.collection_time DESC
@@ -919,14 +928,18 @@ LIMIT 2000";
         // so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE) where the wait-type match
         // alone misses it and the alert fires; the query-text match (case-insensitive, NULL-safe) catches it
         // regardless of the wait it happens to be in at capture time.
+        // A request that is running and not waiting has a NULL wait_type. Each wait-type filter keeps it
+        // (wait_type IS NULL OR ...): an opt-out drops the waits it names, and a request with no current wait is in
+        // none of them. Without the NULL arm a long query would leave the read on every sample that catches it
+        // running, and the alert would clear while it still runs.
         string spServerDiagnosticsFilter = excludeSpServerDiagnostics
-            ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%' AND (r.query_text IS NULL OR r.query_text NOT ILIKE N'%sp_server_diagnostics%')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%') AND (r.query_text IS NULL OR r.query_text NOT ILIKE N'%sp_server_diagnostics%')" : "";
         string waitForFilter = excludeWaitFor
-            ? "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR'))" : "";
         string backupsFilter = excludeBackups
-            ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO'))" : "";
         string miscWaitsFilter = excludeMiscWaits
-            ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF'))" : "";
         // CDC capture sessions are flagged server-side by the collector (is_cdc_capture). COALESCE
         // guards pre-migration / archived rows where the column is NULL.
         string cdcFilter = excludeCdc

@@ -56,7 +56,6 @@ public sealed class ViewerFleetRollupSqlTests
         var sql = ViewerDataService.FleetTotalsSql;
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*)", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlock_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time <= $2", sql, StringComparison.Ordinal);
     }
 
@@ -93,7 +92,6 @@ public sealed class ViewerFleetRollupSqlTests
         /* Both bounds in the pair aggregate AND in the per-server read, so each opens only the window's chunks;
            the graph-count arm filters on $1/$2 through other column names, so two are the PostgreSQL arm's and the
            third is the blocking-capture count on collection_log (#7654). */
-        Assert.Equal(3, CountOccurrences(sql, "collection_time >= $1"));
         Assert.Equal(3, CountOccurrences(sql, "collection_time <= $2"));
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
 
@@ -108,9 +106,8 @@ public sealed class ViewerFleetRollupSqlTests
         var sql = ViewerDataService.FleetTotalsSql;
         /* Both blocking sources and the deadlock read are bounded on BOTH sides so the totals honor a
            settable window exactly (the caller passes the same one-hour window the cards use). */
-        Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Equal(2, CountOccurrences(sql, "event_time >= $1"));   // one per blocking source
+        Assert.Equal(2, CountOccurrences(sql, "event_time > $1"));   // one per blocking source
         Assert.Equal(2, CountOccurrences(sql, "event_time <= $2"));
         /* #3895: and each event-table scan carries the partition-column floor the event window cannot supply
            (two blocking sources + the deadlock count), with no upper bound on it — a late collection is still

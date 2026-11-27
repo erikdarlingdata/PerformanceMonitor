@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -98,7 +99,7 @@ ORDER BY " + WindowTiles.LocalHourSql;
 
             var tiles = new List<WindowTile>();
             var peakMinuteByTile = new List<DateTime?>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             using (var cmd = WindowCommand(BlockedSessionsWindowSql, connection, context))
             {
                 /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the

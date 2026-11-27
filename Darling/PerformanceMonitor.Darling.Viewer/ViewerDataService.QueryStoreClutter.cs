@@ -179,10 +179,24 @@ public partial class ViewerDataService
     /// </summary>
     public Task<DateTime?> GetQueryStoreClutterDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
         LaterStartAsync(
-            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
-                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
+            () => PlanChurnStartAsync(serverId, startUtc, endUtc, cancellationToken),
             () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName), serverId, startUtc, endUtc,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken));
+
+    /// <summary>#9382: the plan churn's coverage start. The read takes whole days and hours from the clutter rollups and raw rows at the edges, so
+    /// the start is where those reach (<see cref="DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync"/>), not raw's oldest row alone.
+    /// Null for a window of 90 minutes or less and for one the sources cover whole, as the shared probe answers.</summary>
+    private async Task<DateTime?> PlanChurnStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return null;
+        }
+
+        var start = await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(
+            _dataSource, [serverId], startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return RawWindowFloor.IsTruncated(start, startUtc) ? start : null;
+    }
 
     /// <summary>
     /// The later of the two coverage starts the clutter panel's sources came back with (#4966): the plan churn's, then the read cost's,

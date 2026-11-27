@@ -339,13 +339,14 @@ public sealed class PayloadProbeFailureTests
         table.Columns.Add("is_percent_growth", typeof(int));
         table.Columns.Add("growth_pct", typeof(int));
         table.Columns.Add("vlf_count", typeof(int));
+        table.Columns.Add("is_autogrow_all_files", typeof(int));
 
         for (var i = 0; i < rowCount; i++)
         {
             table.Rows.Add(
                 $"db{i}", i + 5, 1, "ROWS", $"db{i}_data", $"C:\\{i}.mdf",
                 1024m, DBNull.Value, 64m, -1m,
-                "SIMPLE", 160, "ONLINE", "C:\\", 500000m, 250000m, 0, DBNull.Value, DBNull.Value);
+                "SIMPLE", 160, "ONLINE", "C:\\", 500000m, 250000m, 0, DBNull.Value, DBNull.Value, DBNull.Value);
         }
 
         return table;

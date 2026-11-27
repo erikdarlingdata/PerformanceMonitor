@@ -339,22 +339,63 @@ public sealed class ServerEditRouteTests
     /* ═══════════════════════ credentials and audit ═══════════════════════ */
 
     [Fact]
-    public async Task ASecretThatSomehowReachesTheCoresAnswer_IsRedactedBeforeItIsWritten()
+    public async Task ASecretThatSomehowReachesTheCoresAnswer_IsWithheldWithItsWholeMessage_BeforeItIsWritten()
     {
         var leaky = "{\"status\":\"connection_failed\",\"message\":\"Could not connect: login failed for " + FakeSecret + ". Nothing was saved.\"}";
         await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(leaky));
         var (status, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""));
         Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Contains("[redacted]", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(WithheldMessage, JsonNode.Parse(body)!["message"]!.GetValue<string>());
+        Assert.Equal("connection_failed", JsonNode.Parse(body)!["status"]!.GetValue<string>());
         AssertNoSecret(rig, body);
     }
 
+    private static readonly string WithheldMessage = DarlingMcpServerAdminTools.WithheldText("The message", null);
+
+    /// <summary>#9693: a password that is a word of the answer's own sentence. The sentence is withheld whole in the reply and in
+    /// the audit line, so neither shows a sentence with that word cut out, which would say what the password is.</summary>
+    [Theory]
+    [InlineData("invalid", "saved", "Not saved: a rule of this service refuses the server as it would be saved.")]
+    [InlineData("connection_failed", "connect", "Could not connect to the server. Nothing was saved.")]
+    [InlineData("collides", "another", "Not saved: another monitored server already uses that address.")]
+    public async Task AnAnswerWhoseOwnSentenceRepeatsThePassword_IsWithheldWhole_InTheReplyAndTheAuditLine(string status, string password, string sentence)
+    {
+        var answer = new JsonObject { ["status"] = status, ["message"] = sentence }.ToJsonString();
+        await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(answer));
+
+        var (_, body) = await PatchAsync(rig, Changes("\"password\":\"" + password + "\""), principal: "dana");
+
+        var reply = JsonNode.Parse(body)!.AsObject();
+        Assert.Equal(status, reply["status"]!.GetValue<string>());
+        Assert.Equal(WithheldMessage, reply["message"]!.GetValue<string>());
+        Assert.DoesNotContain("[redacted]", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("[redacted]", rig.Log.Joined, StringComparison.Ordinal);
+        if (status == "connection_failed")
+        {
+            var audit = Assert.Single(rig.Log.Lines, l => l.Contains("Server edit failed for dana", StringComparison.Ordinal));
+            Assert.EndsWith("connection_failed: " + WithheldMessage, audit, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
-    public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling()
+    public async Task AnAnswerThatDoesNotRepeatThePassword_IsWrittenAsTheCoreWroteIt()
+    {
+        const string sentence = "Could not connect to the server. Nothing was saved.";
+        var answer = new JsonObject { ["status"] = "connection_failed", ["message"] = sentence }.ToJsonString();
+        await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(answer));
+
+        var (_, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""), principal: "dana");
+
+        Assert.Equal(sentence, JsonNode.Parse(body)!["message"]!.GetValue<string>());
+        Assert.Contains("connection_failed: " + sentence, rig.Log.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RedactEditAnswer_WithholdsTheMessageThatRepeatsTheSecret_InItsRawAndJsonEscapedSpelling()
     {
         const string secret = "p\"w\\d";
         /* Serialized the way the core writes it: on the wire the secret's quote and backslash are escaped, so the text
-           holds only the escaped spelling and the redaction has to work on the parsed value. */
+           holds only the escaped spelling and the check has to work on the parsed value. */
         var escaped = System.Text.Json.JsonSerializer.Serialize(secret)[1..^1];
         var answer = new JsonObject { ["status"] = "connection_failed", ["message"] = "bad " + secret + " and again " + secret }.ToJsonString();
         Assert.Contains(escaped, answer, StringComparison.Ordinal);
@@ -364,7 +405,7 @@ public sealed class ServerEditRouteTests
         Assert.DoesNotContain(secret, redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(escaped, redacted, StringComparison.Ordinal);
         var envelope = JsonNode.Parse(redacted)!.AsObject();
-        Assert.Equal("bad [redacted] and again [redacted]", envelope["message"]!.GetValue<string>());
+        Assert.Equal(WithheldMessage, envelope["message"]!.GetValue<string>());
         Assert.Equal("connection_failed", envelope["status"]!.GetValue<string>());
         Assert.Equal(answer, DarlingWebEndpoints.RedactEditAnswer(answer, Array.Empty<string>()));
     }
@@ -394,13 +435,15 @@ public sealed class ServerEditRouteTests
     }
 
     [Fact]
-    public void RedactEditAnswer_ReplacesAnAnswerThatDoesNotParse_WithAFixedBody_AndRedactsAnythingThatIsNotAnObject()
+    public void RedactEditAnswer_ReplacesAnAnswerThatDoesNotParse_OrIsNotAnObject_WithAFixedBody()
     {
         var broken = DarlingWebEndpoints.RedactEditAnswer("{\"status\":\"updated\" " + FakeSecret + " ", new[] { FakeSecret });
         Assert.DoesNotContain(FakeSecret, broken, StringComparison.Ordinal);
         Assert.Equal("error", JsonNode.Parse(broken)!["status"]!.GetValue<string>());
 
-        Assert.Equal("[\"x [redacted] y\"]", DarlingWebEndpoints.RedactEditAnswer("[\"x " + FakeSecret + " y\"]", new[] { FakeSecret }));
+        var notAnObject = DarlingWebEndpoints.RedactEditAnswer("[\"x " + FakeSecret + " y\"]", new[] { FakeSecret });
+        Assert.DoesNotContain(FakeSecret, notAnObject, StringComparison.Ordinal);
+        Assert.Equal("error", JsonNode.Parse(notAnObject)!["status"]!.GetValue<string>());
     }
 
     [Theory]

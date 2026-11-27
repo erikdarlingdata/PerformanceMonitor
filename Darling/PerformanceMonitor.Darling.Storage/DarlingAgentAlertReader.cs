@@ -184,7 +184,7 @@ WITH win AS (
            event_description_keyword, performance_condition, delay_between_responses, last_occurrence, last_response,
            occurrence_count, count_reset, has_notification, operator_count, response_job_id
     FROM collect.agent_alerts
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3),
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3),
 bounds AS (
     SELECT MIN(collection_time) AS oldest, MAX(collection_time) AS newest, COUNT(DISTINCT collection_time) AS captures FROM win)
 SELECT n.collection_time, b.oldest, b.captures, n.alert_id, n.alert_name, n.enabled, n.event_source, n.message_id, n.severity,

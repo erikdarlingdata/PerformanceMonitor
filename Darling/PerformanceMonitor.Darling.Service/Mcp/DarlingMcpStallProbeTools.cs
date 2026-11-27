@@ -45,14 +45,25 @@ public sealed class DarlingMcpStallProbeTools
     /// </summary>
     public const int MaxDaysBack = StallWaitProbeRunner.RetentionDays;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_collector_stall_probes"), Description(
-        "Out-of-band DMV samples taken when this service's own collector stalls reading a monitored server: waits/schedulers plus client-side trigger evidence. Sampled only when a collector's wall-clock budget is a quarter elapsed and throughput is under 1 MB/s; rare, so an empty answer is EXPECTED and healthy. scheduler_count is the sample's denominator: waiting_task_count 0 beside it is a real all-clear. outcome_census is never filtered to successes: CONNECT_FAILED/CONNECT_TIMED_OUT are findings. Unbanded, untrended: one row is evidence about a moment. <<GUIDE>> Gets the out-of-band, server-wide wait samples this tool took while one of its OWN collectors was stalled mid-read on a monitored server. This is the answer to a question nothing else here can reach: collectors run strictly sequentially per server, so a collector stalled in its result-set drain is itself holding the sequence that waiting_tasks, dmv_blocking_snapshot and query_snapshots would run in. When a server-scoped collector that declares a wall-clock budget is a quarter of the way through it and delivering under 1 MB/s, the service opens ONE additional connection, takes one sample of sys.dm_os_waiting_tasks and sys.dm_os_schedulers (plus sys.dm_exec_sessions and sys.dm_exec_requests for its own session), stores it, and never retries. Each row carries BOTH halves: the client-side trigger evidence (how far into the budget it fired, how many rows and bytes had arrived, and the terminal silence, trigger_elapsed_ms minus trigger_last_read_ms, which was 0-3 ms on every stall measured, i.e. the stream was streaming SLOWLY and never went quiet) and the server-wide sample (waiting task count and distinct wait types across the WHOLE instance, the heaviest wait among USER tasks with its totals, a summary line of the top five, and the scheduler aggregate: runnable tasks, work-queue length, pending disk IO, and the busiest single scheduler). Read the scheduler figures beside the waits: an instance producing rows 50x slowly with high runnable_tasks is scheduler pressure, with high pending_disk_io is storage, with a leading LCK_ wait is blocking, and with everything quiet is none of those and points off the instance entirely. Background system tasks (sys.dm_exec_sessions.is_user_process = 0) are never ranked, because a long-parked engine thread cannot explain a stall, but they are counted in waiting_task_count and named in wait_summary's 'excluded from ranking' tail. Idle waits (the ignored-wait list, e.g. SP_SERVER_DIAGNOSTICS_SLEEP from the availability-group health check) are not ranked either and are counted as 'idle K tasks/J types' in that tail, so a null top wait can mean only idle waits; SOS_SCHEDULER_YIELD, THREADPOOL and ASYNC_NETWORK_IO always rank. wait_summary also ends with this service's own collector session's wait ('ours: ...'), matched by application name and client host, not by session id: ASYNC_NETWORK_IO there means the instance was waiting on this service's client, and 'ours (oldest of N)' means several sessions matched and the oldest request is shown. Only a row from an old build lacks the tail, and it ranked background waits too. A tail without 'idle K tasks/J types' is from a build that still ranked idle waits. waiting_task_count is the whole instance before the top-five cut, and scheduler_count is the sample's own DENOMINATOR: every live SQL Server reports at least one VISIBLE ONLINE scheduler, so a zero waiting_task_count beside a positive scheduler_count is a real all-clear rather than a probe that read nothing. The outcome census is always returned and is NOT filtered to successful samples, on purpose: whether a fresh connection can be obtained mid-stall has never been established, so CONNECT_FAILED and CONNECT_TIMED_OUT are findings in their own right and connect_ms on a SAMPLED row is the first measurement of it. connect_ms is time-to-usable-connection and not a claim about a login. Deliberately UNBANDED and untrended: a probe row is evidence about one moment, not a series with a healthy range. Takes no band, no thresholds; pass server_name to scope it, or leave it off for the fleet.")]
-    public static async Task<string> GetCollectorStallProbes(
+        "Out-of-band DMV samples taken when this service's own collector stalls reading a monitored server: waits/schedulers plus client-side trigger evidence. Sampled only when a collector's wall-clock budget is a quarter elapsed and throughput is under 1 MB/s, or a plan fetch runs past 500 ms; rare, so an empty answer is EXPECTED and healthy. scheduler_count is the sample's denominator: waiting_task_count 0 beside it is a real all-clear. outcome_census is never filtered to successes: CONNECT_FAILED/CONNECT_TIMED_OUT are findings. Unbanded, untrended: one row is evidence about a moment. <<GUIDE>> Gets the out-of-band, server-wide wait samples this tool took while one of its OWN collectors was stalled mid-read on a monitored server. This is the answer to a question nothing else here can reach: collectors run strictly sequentially per server, so a collector stalled in its result-set drain is itself holding the sequence that waiting_tasks, dmv_blocking_snapshot and query_snapshots would run in. When a server-scoped collector that declares a wall-clock budget is a quarter of the way through it and delivering under 1 MB/s, the service opens ONE additional connection, takes one sample of sys.dm_os_waiting_tasks and sys.dm_os_schedulers (plus sys.dm_exec_sessions and sys.dm_exec_requests for its own session), stores it, and never retries. The query_stats and procedure_stats deferred plan fetch has a second trigger: a plan fetch command still running at 500 ms, half its 1 s lock timeout, takes the same sample once per phase run while the command is still running. Such a row carries the fetch phase's 5,000 ms budget in budget_ms, which is how it is told from a read probe, the phase's elapsed time at the trigger, the plans answered by then, and -1 for the byte and last-read figures, because the fetch has no counted reader. Each row carries BOTH halves: the client-side trigger evidence (how far into the budget it fired, how many rows and bytes had arrived, and the terminal silence, trigger_elapsed_ms minus trigger_last_read_ms, which was 0-3 ms on every stall measured, i.e. the stream was streaming SLOWLY and never went quiet) and the server-wide sample (waiting task count and distinct wait types across the WHOLE instance, the heaviest wait among USER tasks with its totals, a summary line of the top five, and the scheduler aggregate: runnable tasks, work-queue length, pending disk IO, and the busiest single scheduler). Read the scheduler figures beside the waits: an instance producing rows 50x slowly with high runnable_tasks is scheduler pressure, with high pending_disk_io is storage, with a leading LCK_ wait is blocking, and with everything quiet is none of those and points off the instance entirely. Background system tasks (sys.dm_exec_sessions.is_user_process = 0) are never ranked, because a long-parked engine thread cannot explain a stall, but they are counted in waiting_task_count and named in wait_summary's 'excluded from ranking' tail. Idle waits (the ignored-wait list, e.g. SP_SERVER_DIAGNOSTICS_SLEEP from the availability-group health check) are not ranked either and are counted as 'idle K tasks/J types' in that tail, so a null top wait can mean only idle waits; SOS_SCHEDULER_YIELD, THREADPOOL and ASYNC_NETWORK_IO always rank. wait_summary also ends with this service's own collector session's wait ('ours: ...'), matched by application name and client host, not by session id: ASYNC_NETWORK_IO there means the instance was waiting on this service's client, and 'ours (oldest of N)' means several sessions matched and the oldest request is shown. Only a row from an old build lacks the tail, and it ranked background waits too. A tail without 'idle K tasks/J types' is from a build that still ranked idle waits. waiting_task_count is the whole instance before the top-five cut, and scheduler_count is the sample's own DENOMINATOR: every live SQL Server reports at least one VISIBLE ONLINE scheduler, so a zero waiting_task_count beside a positive scheduler_count is a real all-clear rather than a probe that read nothing. The outcome census is always returned and is NOT filtered to successful samples, on purpose: whether a fresh connection can be obtained mid-stall has never been established, so CONNECT_FAILED and CONNECT_TIMED_OUT are findings in their own right and connect_ms on a SAMPLED row is the first measurement of it. connect_ms is time-to-usable-connection and not a claim about a login. Deliberately UNBANDED and untrended: a probe row is evidence about one moment, not a series with a healthy range. Takes no band, no thresholds; pass server_name to scope it, or leave it off for the fleet.")]
+    public static Task<string> GetCollectorStallProbes(
         NpgsqlDataSource postgres,
         [Description("Optional: server name or display name. Omit for the whole fleet.")] string? server_name = null,
         [Description("Days of history. Default 7; max 60 (the samples' own retention).")] int days_back = 7,
         [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetCollectorStallProbes(postgres, server_name, days_back, limit, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_collector_stall_probes under an explicit response byte target: the MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>,
+    /// and the sample rows are left off the end whole when they do not fit it; the web viewer's <c>/api/read</c> mirror and the diagnostics
+    /// bundle pass null and keep every row. The read asks for one row past <paramref name="limit"/>, and the extra row is the proof that
+    /// the window held more.
+    /// </summary>
+    internal static async Task<string> GetCollectorStallProbes(
+        NpgsqlDataSource postgres, string? server_name, int days_back, int limit, int? responseByteBudget, CancellationToken cancellationToken)
     {
         /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
            tool's (the samples' own retention). */
@@ -108,13 +119,16 @@ public sealed class DarlingMcpStallProbeTools
                     + "service build that carries the probe.");
             }
 
-            var probes = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit, cancellationToken);
+            var fetched = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit + 1, cancellationToken);
+            var truncated = fetched.Count > limit;
+            var probes = truncated ? fetched.Take(limit).ToList() : fetched;
 
-            return JsonSerializer.Serialize(
+            var payload = JsonSerializer.SerializeToNode(
                 new
                 {
                     scope,
                     days_back,
+                    truncated,
                     note = "A probe is one out-of-band sample taken from a SECOND connection while a collector "
                         + "was stalled mid-read; it is never retried and is abandoned at "
                         + $"{StallWaitProbePolicy.HardBudget.TotalSeconds:F0}s. terminal_silence_ms is "
@@ -161,7 +175,16 @@ public sealed class DarlingMcpStallProbeTools
                         error_message = p.ErrorMessage,
                     }),
                 },
-                McpHelpers.JsonOptions);
+                McpHelpers.JsonOptions)!.AsObject();
+
+            /* `truncated` is true when the window held more probes than limit; under a response budget it is also true when the budget left
+               probes off the end, and budget_truncated is the budget alone. The oldest probes are left off first, whole. */
+            return responseByteBudget is int budget
+                ? McpResponseBudget.CapArray(
+                    payload, "probes", "newest first", "probes",
+                    _ => "Pass a smaller days_back to read a shorter window, or server_name to read one server's probes.",
+                    budget, "budget_truncated", "budget_note", (node, kept) => node["truncated"] = truncated || kept < probes.Count)
+                : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

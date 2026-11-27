@@ -169,7 +169,7 @@ public sealed class McpGateParityDarlingTests(McpGateParityDarlingTests.Hosts ho
         bool writes, bool serverAdmin, bool investigations, GateToken token, bool tokenlessLoopback, GateCaller caller) =>
         RunRowAsync(new GateConfig(writes, serverAdmin, investigations, token, tokenlessLoopback, NamedTokens: true), caller);
 
-    /// <summary>Darling's investigations arm adds 19 tools to the list, the ones the shared rule names, and no other.</summary>
+    /// <summary>Darling's investigations arm adds 21 tools to the list, the ones the shared rule names, and no other.</summary>
     [Fact]
     public async Task Darling_InvestigationsArm_AddsExactlyTheToolsTheSharedRuleNames() =>
         await McpGateParityMatrix.AssertInvestigationsArmAddsWhatTheRuleNamesAsync(

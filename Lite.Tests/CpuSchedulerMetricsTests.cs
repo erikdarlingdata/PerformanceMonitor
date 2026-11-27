@@ -109,21 +109,27 @@ public class CpuSchedulerMetricsTests
         => Assert.Equal(expectedLevel,
             CpuSchedulerMetrics.ClassifyCpuPressure(new StubSnapshot { TotalRunnableTasksCount = runnable }).Level);
 
+    /// <summary>#8778: the reporter's idle replica. Current workers count idle pooled workers and the workers of system
+    /// tasks, so 1,782 of a 1,472 ceiling with no task waiting for a worker is NORMAL.</summary>
     [Fact]
-    public void ClassifyCpuPressure_WorkerUtilizationOver90_IsHigh_WhenRunnableIsLow()
-        => Assert.Equal("HIGH - Worker thread exhaustion",
-            CpuSchedulerMetrics.ClassifyCpuPressure(
-                new StubSnapshot { MaxWorkersCount = 100, TotalCurrentWorkersCount = 95 }).Level);
-
-    /// <summary>The collector raises the exhaustion flag at 90% of max worker threads, so above 90% the flag and the
-    /// utilization arm both hold, and the flag's CRITICAL is what a server at 95% reads.</summary>
-    [Fact]
-    public void ClassifyCpuPressure_ExhaustionFlagAbove90Percent_IsCritical()
+    public void ClassifyCpuPressure_WorkersPastTheCeilingWithNothingWaiting_IsNormal()
     {
         var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(
-            new StubSnapshot { MaxWorkersCount = 1000, TotalCurrentWorkersCount = 950, WorkerThreadExhaustionWarning = true });
+            new StubSnapshot { MaxWorkersCount = 1472, TotalCurrentWorkersCount = 1782, TotalActiveRequestCount = 2 });
 
-        Assert.StartsWith("CRITICAL", pressure.Level, System.StringComparison.Ordinal);
+        Assert.Equal("NORMAL", pressure.Level);
+        Assert.Equal("No CPU scheduler pressure detected", pressure.Recommendation);
+    }
+
+    /// <summary>The exhaustion flag (a task waiting for a worker) is CRITICAL whatever the worker count.</summary>
+    [Fact]
+    public void ClassifyCpuPressure_ExhaustionFlag_IsCritical()
+    {
+        var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(
+            new StubSnapshot { MaxWorkersCount = 1000, TotalCurrentWorkersCount = 400, TotalWorkQueueCount = 3, WorkerThreadExhaustionWarning = true });
+
+        Assert.Equal("CRITICAL - Worker thread exhaustion warning", pressure.Level);
+        Assert.Equal("Worker thread exhaustion - check max worker threads setting", pressure.Recommendation);
     }
 
     [Fact]

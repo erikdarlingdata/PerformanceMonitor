@@ -168,7 +168,7 @@ public static class DarlingStoreConnection
     /// (<see cref="NpgsqlConnectionStringBuilder.ContainsKey"/>), the CANONICAL spelling of that keyword, taken
     /// from Npgsql's own list (its <c>Port</c>, its <c>SSL Mode</c>) and never the spelling in the exception, which
     /// can be a spelling that came from the secret; (2) one fixed sentence, written here, for each of Npgsql's own
-    /// setting conflicts (Multiplexing without Pooling and the like), which the exception's type and Npgsql's fixed
+    /// setting conflicts (a Maximum Pool Size below the Minimum Pool Size and the like), which the exception's type and Npgsql's fixed
     /// message identify and which carry no operator text; (3) one fixed hint for everything else. The output is
     /// never built from the secret. It does depend on the string in one narrow way: a fragment of a password that
     /// is itself the name of a Npgsql keyword (<c>;port=x</c>) prints that keyword's canonical name, never its value.
@@ -277,11 +277,7 @@ public static class DarlingStoreConnection
 
         if (ex is ArgumentException)
         {
-            if (message.Equals("Pooling must be on to use multiplexing", StringComparison.Ordinal))
-            {
-                conflict = "Multiplexing needs Pooling to be on.";
-            }
-            else if (message.StartsWith("SSL Mode has to be Require or higher to be used with direct SSL Negotiation", StringComparison.Ordinal))
+            if (message.StartsWith("SSL Mode has to be Require or higher to be used with direct SSL Negotiation", StringComparison.Ordinal))
             {
                 conflict = "SSL Negotiation=Direct needs SSL Mode Require, Verify CA or Verify Full.";
             }

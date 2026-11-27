@@ -60,7 +60,7 @@ permissions:
 # The store the service talks to: the same image family and the same worker and preload settings as
 # Darling/compose/docker-compose.yml, pinned to a tag so a new TimescaleDB release cannot turn this red on its own.
 env:
-  STORE_IMAGE: timescale/timescaledb:2.31.0-pg17
+  STORE_IMAGE: timescale/timescaledb:2.32.1-pg17
   DARLING_IMAGE: performancemonitor-darling:pr
 
 concurrency:
@@ -148,7 +148,8 @@ jobs:
           # pg_isready over TCP answers only from the real one, so wait for the init line first and then for TCP.
           ready=0
           for _ in $(seq 1 60); do
-            if docker logs store 2>&1 | grep -q 'PostgreSQL init process complete' \
+            # grep reads the whole log (no -q), so docker logs never writes to a closed pipe under pipefail (#9671).
+            if docker logs store 2>&1 | grep 'PostgreSQL init process complete' >/dev/null \
               && docker exec store pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
               ready=1
               break
@@ -199,7 +200,7 @@ jobs:
 
           # A log-grep wait with a cap: both lines come from the service's startup, in this order.
           for _ in $(seq 1 90); do
-            if docker logs darling 2>&1 | grep -q 'Retention evaluation at startup'; then
+            if docker logs darling 2>&1 | grep 'Retention evaluation at startup' >/dev/null; then
               docker logs darling 2>&1 | grep -E 'Postgres store ready|Retention evaluation at startup|TimescaleDB:'
               exit 0
             fi

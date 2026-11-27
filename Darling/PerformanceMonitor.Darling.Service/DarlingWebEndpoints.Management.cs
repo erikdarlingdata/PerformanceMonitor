@@ -46,8 +46,8 @@ public static partial class DarlingWebEndpoints
     /// <summary>The most request-body bytes the add route reads before it answers 400 (twenty entries are a few KB).</summary>
     internal const int MaxServerAddBodyBytes = 64 * 1024;
 
-    /// <summary>What a redacted secret is replaced with in any text the add route puts on the wire or in a log.</summary>
-    private const string RedactedSecret = "[redacted]";
+    /// <summary>The body that stands in for a core answer the add or edit route cannot read as a JSON object.</summary>
+    private const string UnreadableAnswerBody = "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
 
     /// <summary>
     /// <c>POST /api/servers</c>: adds monitored servers (the web twin of the MCP <c>add_servers</c> tool). The body
@@ -69,8 +69,8 @@ public static partial class DarlingWebEndpoints
     ///
     /// <para><b>Credentials.</b> A password or client secret travels only in the request body. The route never echoes
     /// the body, never logs it, and every 400 it composes is a fixed sentence (a parse failure names no part of the
-    /// body, because a JSON parser's message can quote the character it stopped at). Any submitted secret that
-    /// appears in the core's answer is replaced with <see cref="RedactedSecret"/> before it is written, as a
+    /// body, because a JSON parser's message can quote the character it stopped at). A text of the core's answer that
+    /// repeats a submitted secret is withheld whole before it is written (<see cref="WithheldIfSecretRepeated"/>), as a
     /// backstop: the core's answers carry none today. The core's caught-exception envelope never reaches the wire
     /// either: it answers through <see cref="ServerErrorResult"/>'s fixed body, like every other write route.</para>
     ///
@@ -155,7 +155,7 @@ public static partial class DarlingWebEndpoints
 
             if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
             {
-                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                return ServerErrorResult(WithheldIfSecretRepeated(McpHelpers.ErrorMessageOf(result), secrets, "The failure's text"), "/api/servers", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
             var answer = RedactAddAnswer(result, secrets);
@@ -204,7 +204,7 @@ public static partial class DarlingWebEndpoints
                 secrets.Add(secret);
             }
 
-            /* #5452: the typed AWS external ID is redacted wherever a password is. */
+            /* #5452: a text that repeats the typed AWS external ID is withheld wherever one that repeats a password is. */
             if (TryGetString(changes, "aws_external_id") is { Length: > 0 } externalId)
             {
                 secrets.Add(externalId);
@@ -225,7 +225,7 @@ public static partial class DarlingWebEndpoints
             var result = ran.Answer!;
             if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
             {
-                var sentence = RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets);
+                var sentence = WithheldIfSecretRepeated(McpHelpers.ErrorMessageOf(result), secrets, "The failure's text");
                 if (sentence.Contains(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, StringComparison.Ordinal))
                 {
                     /* A store whose roles predate the edit function (#5240): still a 500, but the body says what to do
@@ -347,10 +347,10 @@ public static partial class DarlingWebEndpoints
         return ServerTagEnvelopeStatus(result);
     }
 
-    /// <summary>The edit answer with every occurrence of the submitted secret removed from its one free-text field,
-    /// <c>message</c> (the only field a driver's text can reach: connection_failed, collides). Structured fields
-    /// (engine, username, host, server, modified_at, numbers, keys) are never rewritten, so a short or common secret
-    /// cannot corrupt them. An answer that does not parse is replaced by a fixed body, never passed through.</summary>
+    /// <summary>The edit answer with its one free-text field, <c>message</c> (the only field a driver's text can reach:
+    /// connection_failed, collides), withheld whole when it repeats a submitted secret (<see cref="WithheldIfSecretRepeated"/>,
+    /// #9693). Structured fields (engine, username, host, server, modified_at, numbers, keys) are never changed, so a short or
+    /// common secret cannot corrupt them. An answer that is not a JSON object is replaced by a fixed body, never passed through.</summary>
     internal static string RedactEditAnswer(string answer, IReadOnlyList<string> secrets)
     {
         if (secrets.Count == 0)
@@ -362,20 +362,20 @@ public static partial class DarlingWebEndpoints
         {
             if (JsonNode.Parse(answer) is not JsonObject envelope)
             {
-                return RedactSecrets(answer, secrets);
+                return UnreadableAnswerBody;
             }
 
-            RedactField(envelope, "message", secrets);
+            WithholdField(envelope, "message", secrets, "The message");
             return envelope.ToJsonString();
         }
         catch (JsonException)
         {
-            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+            return UnreadableAnswerBody;
         }
     }
 
     /// <summary>One Information line per saved edit: who, the server id and the field NAMES. Never a value, never the
-    /// secret. A refused probe gets a line with the core's sanitized detail (redacted already).</summary>
+    /// secret. A refused probe gets a line with the core's sanitized detail (withheld already when it repeats a secret).</summary>
     private static void LogServerEdit(ILogger logger, string principal, int id, string answer)
     {
         try
@@ -628,7 +628,7 @@ public static partial class DarlingWebEndpoints
     }
 
     /// <summary>The non-empty <c>password</c> values the request carried (a SQL password or a service-principal client secret),
-    /// and the typed <c>aws_external_id</c> (#5452), redacted the same way.</summary>
+    /// and the typed <c>aws_external_id</c> (#5452), withheld from the answer the same way.</summary>
     private static List<string> SubmittedSecrets(List<JsonObject> entries)
     {
         var secrets = new List<string>();
@@ -652,20 +652,18 @@ public static partial class DarlingWebEndpoints
         return secrets;
     }
 
-    /// <summary>PURE: <paramref name="text"/> with every occurrence of every secret replaced.</summary>
-    internal static string RedactSecrets(string text, IReadOnlyList<string> secrets)
-    {
-        foreach (var secret in secrets)
-        {
-            text = text.Replace(secret, RedactedSecret, StringComparison.Ordinal);
-        }
+    /// <summary>PURE: <paramref name="text"/> as it is, or the sentence that stands in for it when it repeats a submitted secret
+    /// (#9693). This is the rule the edit and add cores apply to a driver's text
+    /// (<see cref="DarlingMcpServerAdminTools.RepeatsTypedSecret"/>, <see cref="DarlingMcpServerAdminTools.WithheldText"/>): the
+    /// text is withheld whole and never rewritten around the secret, because a text with the secret cut out shows which of its
+    /// words was the secret (a password of <c>saved</c> would mark that word in "Not saved"). <paramref name="what"/> names the
+    /// text the sentence stands in for.</summary>
+    internal static string WithheldIfSecretRepeated(string text, IReadOnlyList<string> secrets, string what) =>
+        DarlingMcpServerAdminTools.RepeatsTypedSecret(text, [.. secrets]) ? DarlingMcpServerAdminTools.WithheldText(what, null) : text;
 
-        return text;
-    }
-
-    /// <summary>The core's envelope with any submitted secret removed from its free-text fields (<c>detail</c>,
-    /// <c>message</c>, <c>server</c>). The envelope keeps its shape; an envelope that does not parse is replaced
-    /// by a fixed refusal rather than passed through unredacted.</summary>
+    /// <summary>The core's envelope with each free-text field (<c>message</c>, and a row's <c>detail</c> and <c>server</c>)
+    /// withheld whole when it repeats a submitted secret (<see cref="WithheldIfSecretRepeated"/>). The envelope keeps its
+    /// shape; an answer that is not a JSON object is replaced by a fixed body rather than passed through.</summary>
     internal static string RedactAddAnswer(string answer, IReadOnlyList<string> secrets)
     {
         if (secrets.Count == 0)
@@ -677,16 +675,16 @@ public static partial class DarlingWebEndpoints
         {
             if (JsonNode.Parse(answer) is not JsonObject envelope)
             {
-                return RedactSecrets(answer, secrets);
+                return UnreadableAnswerBody;
             }
 
-            RedactField(envelope, "message", secrets);
+            WithholdField(envelope, "message", secrets, "The message");
             if (envelope["results"] is JsonArray results)
             {
                 foreach (var row in results.OfType<JsonObject>())
                 {
-                    RedactField(row, "detail", secrets);
-                    RedactField(row, "server", secrets);
+                    WithholdField(row, "detail", secrets, "The detail");
+                    WithholdField(row, "server", secrets, "The server's name");
                 }
             }
 
@@ -694,15 +692,15 @@ public static partial class DarlingWebEndpoints
         }
         catch (JsonException)
         {
-            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+            return UnreadableAnswerBody;
         }
     }
 
-    private static void RedactField(JsonObject node, string key, IReadOnlyList<string> secrets)
+    private static void WithholdField(JsonObject node, string key, IReadOnlyList<string> secrets, string what)
     {
         if (node[key] is JsonValue value && value.TryGetValue<string>(out var text))
         {
-            node[key] = RedactSecrets(text, secrets);
+            node[key] = WithheldIfSecretRepeated(text, secrets, what);
         }
     }
 
@@ -716,7 +714,7 @@ public static partial class DarlingWebEndpoints
         _ => "other",
     };
 
-    /// <summary>One Information line per failed row with the core's full detail (secrets already redacted), so the
+    /// <summary>One Information line per failed row with the core's full detail (a text that repeats a secret already withheld), so the
     /// operator keeps what the web answer no longer shows.</summary>
     private static void LogServerAddFailures(ILogger logger, string principal, string answer)
     {

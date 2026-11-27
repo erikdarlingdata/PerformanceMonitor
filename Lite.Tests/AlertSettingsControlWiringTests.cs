@@ -109,7 +109,9 @@ public sealed class AlertSettingsControlWiringTests
         var assigned = Regex.Matches(body, @"App\.(\w+)\s*=(?!=)")
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.Ordinal);
-        var persisted = Regex.Matches(body, @"root\[""[^""]+""\]\s*=\s*App\.(\w+)")
+        /* #9639: the root[...] writes moved into WriteAlertKeys, shared with update_alert_settings. */
+        var writer = MethodBody(source, "WriteAlertKeys", "Lite");
+        var persisted = Regex.Matches(body + writer, @"root\[""[^""]+""\]\s*=\s*App\.(\w+)")
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.Ordinal);
 

@@ -35,7 +35,8 @@ namespace PerformanceMonitorLite.Tests;
 /// connection string through a <see cref="CredentialResolver"/> over the process-wide credential service, which the other tests
 /// that do the same share.</para>
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

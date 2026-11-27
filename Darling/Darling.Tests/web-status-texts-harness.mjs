@@ -64,8 +64,13 @@ const FLEET = {
     { server_name: "page-stale", display_name: "page-stale", is_online: false },
     { server_name: "page-online", display_name: "page-online", is_online: true },
     { server_name: "page-flip", display_name: "page-flip", is_online: true },
+    { server_name: "pg-aurora", display_name: "pg-aurora", is_online: true, is_postgres: true, is_aurora: true },
+    { server_name: "pg-stock", display_name: "pg-stock", is_online: true, is_postgres: true, is_aurora: false },
   ],
 };
+/* The two empty answers get_pg_replication_stats gives (DarlingMcpPgReplicationStatsTools.EmptyWords, #8920), as the service writes them. */
+const AURORA_REPLICAS_EMPTY = "No standby was streaming from pg-aurora in the last 24 hours. On an Aurora target that is the expected answer. Aurora readers use the shared storage volume instead of streaming replication, so they never appear in pg_stat_replication and this read is always empty on an Aurora writer. That is not a replication fault. Reader lag would need aurora_replica_status(), which Performance Monitor does not read.";
+const STOCK_REPLICAS_EMPTY = "No replica was connected to pg-stock in the last 24 hours. On a server with no replicas that is the expected answer. If a replica is supposed to be attached, check get_pg_replication_slots: a slot that persists with nothing connected to it retains WAL indefinitely, which is the case worth acting on.";
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const body = u.pathname === "/api/fleet"
@@ -76,6 +81,8 @@ globalThis.fetch = async (url) => {
     ? { can_queue: true, can_edit: true, managed_store: false }
     : u.pathname.endsWith("/get_running_jobs")
     ? { status: "empty", message: "No SQL Agent job is running." }
+    : u.pathname.endsWith("/get_pg_replication_stats")
+    ? { status: "empty", message: u.searchParams.get("server") === "pg-aurora" ? AURORA_REPLICAS_EMPTY : STOCK_REPLICAS_EMPTY }
     : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
@@ -115,6 +122,16 @@ try {
     await new Promise((r) => setTimeout(r, 300));
     const section = find(holder, (n) => n.children.some((c) => c.tag === "h3" && c.textContent.startsWith("Running Jobs")));
     return section ? section.textContent : null;
+  };
+
+  /* #9117: the Connected Replicas panel of a PostgreSQL server's Replication tab, as the page draws an empty answer: its empty strip's whole text. */
+  const pageReplicasText = async (server) => {
+    const holder = new FakeNode("div");
+    pageSrv.renderServer(holder, server, "replication", {});
+    await new Promise((r) => setTimeout(r, 400));
+    const section = find(holder, (n) => n.children.some((c) => c.tag === "h3" && c.textContent.startsWith("Connected Replicas")));
+    const strip = section ? find(section, (n) => String(n.className).includes("strip empty")) : null;
+    return strip ? strip.textContent : null;
   };
 
   /* The poll where a server first goes stale: the page already holds an online card for it, paints from that, and the fresh card
@@ -172,6 +189,8 @@ try {
       pageJobsStale: await pageRunningJobsText("page-stale"),
       pageJobsOnline: await pageRunningJobsText("page-online"),
       pageJobsFlip: await pageFlipText(),
+      replicasAurora: await pageReplicasText("pg-aurora"),
+      replicasStock: await pageReplicasText("pg-stock"),
       liveBar: await liveBarFor(),
       liveRowsDefault: live.liveRows(liveSample).map((r) => r.session_id),
       liveRowsIncluded: live.liveRows(liveSample, true).map((r) => r.session_id),

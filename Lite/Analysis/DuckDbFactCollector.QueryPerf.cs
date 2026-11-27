@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
@@ -10,6 +12,7 @@ using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
 using PerformanceMonitorLite;
+using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DuckDbFactCollector
@@ -57,7 +60,8 @@ LIMIT " + FactRanked.MaxObjects + ";";
                MAXDOP is the ordinary remediation for this very finding, so without the cross-check
                the finding survives its own fix. A current_maxdop of 0 (unlimited) or unknown (no
                v_server_config row yet) makes no configuration impossible, so the count is unchanged
-               in both of those cases.
+               in both of those cases. The setting is the newest capture at or before $3, the analysis
+               window's end, so a pass over an earlier window is held to the setting that window had.
                LEFT JOIN ... ON true rather than a correlated subquery: the CTE is at most one row, so
                the join stays one-to-one and the config read is evaluated once, not per query row. */
             cmd.CommandText = @"
@@ -67,6 +71,7 @@ WITH current_maxdop AS
     FROM v_server_config
     WHERE server_id = $1
     AND   configuration_name = 'max degree of parallelism'
+    AND   capture_time <= $3
     ORDER BY capture_time DESC
     LIMIT 1
 )
@@ -238,31 +243,51 @@ WITH svr AS
 ),
 latest AS
 (
+    -- #9195: each plan's newest row by one hash aggregate, not ROW_NUMBER() over the window. The window sorted every row of the
+    -- analysis window, so its time and memory grew with the window (a week's rows against a day's). The newest row is the
+    -- largest (collection_time, collection_id), the old ORDER BY collection_time DESC, collection_id DESC, and the grouping
+    -- is the old PARTITION BY (a NULL key groups with its own kind in both). Its fields ride in the struct, so they are the winner row's.
     SELECT
-        query_hash,
-        query_plan_hash,
-        database_name,
-        execution_count,
-        creation_time,
-        creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        g.query_hash,
+        g.query_plan_hash,
+        g.database_name,
+        g.w.execution_count AS execution_count,
+        g.w.creation_time AS creation_time,
+        g.w.creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
         svr.offset_minutes AS server_offset_minutes,
         svr.time_zone_id AS server_time_zone_id,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC, collection_id DESC
-        ) AS rn
-    FROM v_query_stats, svr
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   delta_execution_count > 0
+        g.w.min_worker_time AS min_worker_time,
+        g.w.max_worker_time AS max_worker_time,
+        g.w.min_grant_kb AS min_grant_kb,
+        g.w.max_grant_kb AS max_grant_kb,
+        g.w.min_spills AS min_spills,
+        g.w.max_spills AS max_spills
+    FROM
+    (
+        SELECT
+            database_name,
+            query_hash,
+            query_plan_hash,
+            max(
+            {
+                'collection_time': collection_time,
+                'collection_id': collection_id,
+                'execution_count': execution_count,
+                'creation_time': creation_time,
+                'min_worker_time': min_worker_time,
+                'max_worker_time': max_worker_time,
+                'min_grant_kb': min_grant_kb,
+                'max_grant_kb': max_grant_kb,
+                'min_spills': min_spills,
+                'max_spills': max_spills
+            }) AS w
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   delta_execution_count > 0
+        GROUP BY database_name, query_hash, query_plan_hash
+    ) AS g, svr
 )
 SELECT
     min_worker_time,
@@ -277,7 +302,7 @@ SELECT
     query_hash,
     query_plan_hash
 FROM latest
-WHERE rn = 1
+WHERE 1 = 1
 " + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
@@ -377,6 +402,52 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
         }
     }
 
+    /// <summary>One statement of the plan regression pass: the wait for its read lock, the statement alone, the whole hold and the rows it returned.</summary>
+    internal struct PlanRegressionStatementTime
+    {
+        public TimeSpan Wait;
+        public TimeSpan Statement;
+        public TimeSpan Held;
+        public int Rows;
+    }
+
+    /// <summary>
+    /// A test seam: runs after the failures read has let go of the store's read lock and before the cost read asks for it, so a
+    /// test can see what the lock allows in between (#9353). Null in production.
+    /// </summary>
+    internal Action? AfterPlanRegressionFailuresReadForTests { get; set; }
+
+    /// <summary>
+    /// A test seam: runs before each database's cost read after the first, with the store's read lock let go, so a test can see that a
+    /// writer gets in between the databases (#9353). Null in production.
+    /// </summary>
+    internal Action? AfterPlanRegressionDatabaseReadForTests { get; set; }
+
+    /// <summary>A test seam: the longest hold a batch of databases aims for (#9353), so a test can make every database a batch of its own (zero) or none. Null in production.</summary>
+    internal TimeSpan? PlanRegressionHoldTargetForTests { get; set; }
+
+    /// <summary>
+    /// #9195, #9353: one Information line when the plan regression pass took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
+    /// with the time split between its steps: the archive read plan, each statement (its read lock wait, its own time and its rows),
+    /// the longest single hold of the read lock, and the plan check that follows once the lock is let go with the plan fetches it
+    /// made. A fast pass logs nothing. Counts and times only.
+    /// </summary>
+    private static void ReportSlowPlanRegressionPass(
+        AnalysisContext context, TimeSpan total, TimeSpan archivePlan, PlanRegressionStatementTime failures, PlanRegressionStatementTime cost,
+        TimeSpan verify, int planFetches, DuckDbProfileTrail profiles)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        var longestHold = failures.Held > cost.Held ? failures.Held : cost.Held;
+        AppLogger.Info("DuckDbFactCollector",
+            string.Create(CultureInfo.InvariantCulture,
+                $"Plan regression read took {Ms(total)} ms for {context.ServerName} (server {context.ServerId}): archive read plan {Ms(archivePlan)} ms, " +
+                $"failures read {Ms(failures.Statement)} ms for {failures.Rows} rows (read lock wait {Ms(failures.Wait)} ms), " +
+                $"cost read {Ms(cost.Statement)} ms for {cost.Rows} candidates (read lock wait {Ms(cost.Wait)} ms), " +
+                $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches{profiles.Describe()}"));
+    }
+
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
     /// cost >= 2x the best plan that query is known to perform well with. Emits one
@@ -388,7 +459,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// or whose two plans differ in compiled values alone, is dropped before the fact
     /// (<see cref="VerifyPlanRegressionInputsAsync"/>).
     /// </summary>
-    private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
+    internal async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
@@ -397,16 +468,31 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
         try
         {
+            var passStarted = Stopwatch.GetTimestamp();
+            /* #9195: the profile files this pass writes when DuckDbReadProfile is on, named on the slow-read line. */
+            using var profiles = DuckDbProfileTrail.Begin();
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
+            var failuresRead = default(PlanRegressionStatementTime);
+            var costRead = default(PlanRegressionStatementTime);
+
+            var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
+            var archivePlanTime = Stopwatch.GetElapsedTime(passStarted);
+
+            /* #9353: one lock acquisition and one connection per statement, not one across both. The two reads are independent
+               facts, so a write that lands between them changes neither's meaning, and a housekeeping writer waiting on its 5 s
+               budget now gets in between the statements instead of waiting out both. */
             {
-                var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
+                var waitStarted = Stopwatch.GetTimestamp();
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+                var heldFrom = Stopwatch.GetTimestamp();
+                failuresRead.Wait = Stopwatch.GetElapsedTime(waitStarted, heldFrom);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
 
                 /* #6267: the queries whose timeouts or errors rose. The cost read below counts Regular runs only, so a plan
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
+                var statementFrom = Stopwatch.GetTimestamp();
                 try
                 {
                     failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
@@ -416,243 +502,24 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ReportCollectionFailure(ex, context);
                 }
 
-                using var cmd = connection.CreateCommand();
-                cmd.CommandText = @"
-WITH deduped AS
-(
-    -- Collapse incremental re-collections of the same open runtime-stats interval:
-    -- keep only the latest collection_time row per logical interval.
-    --
-    -- #1850: replica_role is part of the interval's identity, not a passenger.
-    -- sys.query_store_runtime_stats is keyed by (plan_id, interval, execution_type, replica_group), and
-    -- on a SQL Server 2022+ AG with Query Store for secondary replicas enabled the primary holds ONE
-    -- shared Query Store carrying every replica's rows. Two rows differing only in replica_role are
-    -- distinct legitimate work, so a partition without it does not de-duplicate — it DISCARDS one
-    -- replica's row at the rn = 1 filter. That is an under-count, which is strictly worse than the
-    -- double-count this CTE exists to fix: a double-count is visible in the number, a dropped row is
-    -- silent. Same reasoning, same key as the read side (#1845).
-    -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
-    SELECT
-        database_name,
-        query_id,
-        plan_id,
-        replica_role,
-        query_plan_hash,
-        execution_count,
-        avg_cpu_time_us,
-        avg_duration_us,
-        -- #5631: appended to the dedup's columns; feeds rows per call below.
-        avg_rowcount,
-        last_execution_time,
-        is_forced_plan,
-        force_failure_count,
-        query_text,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
-            ORDER BY collection_time DESC, execution_count DESC, collection_id DESC
-        ) AS rn
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   execution_type_desc = 'Regular'
-    AND   last_execution_time >= $2
-    /*SEC*/
-),
-plan_agg AS
-(
-    -- Execution-weighted per-exec cost per plan_id, per replica. Keeping replica_role in the grain all
-    -- the way down is what makes the wider dedup key an improvement rather than a blend: were it dropped
-    -- here, both replicas' rows would survive the dedup and then be summed into one number, and primary
-    -- and secondary workload would be indistinguishable in the output.
-    SELECT
-        database_name,
-        query_id,
-        plan_id,
-        replica_role,
-        any_value(query_plan_hash) AS query_plan_hash,
-        SUM(execution_count) AS execs,
-        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
-        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
-        MAX(last_execution_time) AS last_exec,
-        bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count,
-        any_value(query_text) AS query_text,
-        -- #5631: rows returned per call, weighted by executions over the same deduplicated intervals as
-        -- cpu_per_exec. NULL when any interval has no avg_rowcount: a partial average would understate the
-        -- output, and the output rule must not fire on it.
-        CASE WHEN COUNT(avg_rowcount) < COUNT(*) THEN NULL
-             ELSE SUM(avg_rowcount * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
-        END AS rows_per_exec
-    FROM deduped
-    WHERE rn = 1
-    GROUP BY database_name, query_id, plan_id, replica_role
-),
-plan_dedup AS
-(
-    -- Collapse plan_ids that share a query_plan_hash (a recompile can produce an
-    -- identical plan under a new plan_id); keep only plans with enough executions.
-    SELECT
-        database_name,
-        query_id,
-        replica_role,
-        query_plan_hash,
-        SUM(execs) AS execs,
-        SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
-        SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
-        MAX(last_exec) AS last_exec,
-        bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count,
-        -- #5630: one representative plan_id per plan group, for the compiled-inputs check. The latest group's is
-        -- the plan that ran last; the best group's is the one that ran most. Their XML is fetched live, for
-        -- candidates only.
-        -- Ties break on plan_id (the struct orders by its second field), as Darling's read does, so the pick is the
-        -- same on every pass and in both products.
-        arg_max(plan_id, (last_exec, plan_id)) AS newest_plan_id,
-        arg_max(plan_id, (execs, plan_id)) AS busiest_plan_id,
-        any_value(query_text) AS query_text,
-        -- #5631: NULL when any plan_id of the group has none.
-        CASE WHEN COUNT(rows_per_exec) < COUNT(*) THEN NULL
-             ELSE SUM(rows_per_exec * execs) / NULLIF(SUM(execs), 0)
-        END AS rows_per_exec
-    FROM plan_agg
-    GROUP BY database_name, query_id, replica_role, query_plan_hash
-    HAVING SUM(execs) >= 25
-),
-ranked AS
-(
-    -- Rank WITHIN a replica: a regression means this replica's current plan is worse than the best plan
-    -- this replica has run, never a cross-replica comparison of two different workloads.
-    SELECT
-        *,
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY last_exec DESC) AS recency,
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY cpu_per_exec ASC) AS cheapness
-    FROM plan_dedup
-),
-compared AS
-(
-    -- Latest active plan vs the best-performing plan for the same query on the same replica.
-    -- IS NOT DISTINCT FROM, never =: replica_role is NULL on every standalone server, every non-AG
-    -- server and everything below SQL Server 2022, and NULL = NULL is UNKNOWN — an equi-join here would
-    -- match nothing and silently disable plan-regression detection for the overwhelming majority of
-    -- installs. The NULL-safe operator groups those rows the same way the PARTITION BYs above do.
-    SELECT
-        l.query_id,
-        l.cpu_per_exec AS latest_cpu,
-        l.dur_per_exec AS latest_dur,
-        l.is_forced_plan AS latest_is_forced,
-        l.force_failure_count AS force_failure_count,
-        b.cpu_per_exec AS best_cpu,
-        b.dur_per_exec AS best_dur,
-        -- #2138: CPU is the PRIMARY signal — duration alone is confounded by blocking, IO waits, and
-        -- machine contention that no plan choice caused, so it must not fire a plan-regression verdict
-        -- by itself. A CPU regression scores at its own ratio; a duration-dominant one fires only when
-        -- EXTREME (>= 4x) AND corroborated by at least mild CPU worsening (>= 1.25x), scored at half
-        -- the duration ratio so it competes honestly with CPU-detected rows. NULL when neither path
-        -- fires — the >= 2 gate below drops it.
-        CASE
-            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
-                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
-            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
-             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
-                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
-        END AS regression_factor,
-        -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
-        -- over the window. The exec-count floor above only counts; this weighs.
-        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
-        -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
-        -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
-        -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
-        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
-        l.database_name,
-        -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
-        -- on both SKUs, so a best plan can be two weeks old.
-        b.last_exec AS best_last_exec,
-        -- #5630: the statement text and the two groups' representative plans, for the OPTION (RECOMPILE) and
-        -- compiled-inputs checks the C# side makes before it reports.
-        l.query_text AS query_text,
-        l.newest_plan_id AS latest_plan_id,
-        b.busiest_plan_id AS best_plan_id,
-        -- #5631: rows per call of the two plans, for the output rule (a newer plan that returns far more rows).
-        l.rows_per_exec AS latest_rows,
-        b.rows_per_exec AS best_rows
-    FROM ranked AS l
-    JOIN ranked AS b
-      ON  b.database_name = l.database_name
-      AND b.query_id = l.query_id
-      AND b.replica_role IS NOT DISTINCT FROM l.replica_role
-      AND b.cheapness = 1
-    WHERE l.recency = 1
-    AND   l.query_plan_hash <> b.query_plan_hash
-)
-SELECT
-    query_id,
-    latest_cpu,
-    latest_dur,
-    latest_is_forced,
-    force_failure_count,
-    best_cpu,
-    best_dur,
-    regression_factor,
-    -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
-    -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
-    database_name,
-    -- #3953: appended for the same reason.
-    best_last_exec,
-    -- #5630: appended for the same reason.
-    query_text,
-    latest_plan_id,
-    best_plan_id,
-    -- #5631: appended for the same reason.
-    latest_rows,
-    best_rows
-FROM compared
-WHERE regression_factor >= 2
--- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
--- near-zero-cost queries whose ratios are all sampling jitter. Magnitude ranking is the ORDER BY below (#7417).
-AND   latest_total_cpu_us >= 10000000
--- #7417: and a CPU-path regression must have LOST that much of it (PlanRegressionRanking). A duration-path row keeps the
--- bar above: it got slower through waits more than CPU, so its CPU loss is small by construction.
-AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
--- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
--- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
-AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
--- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
--- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
--- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
--- offender short.
-LIMIT 100";
-
-                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
-                /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
-                   primary stay in the window, so the read skips those databases. */
-                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
-
-                cmd.CommandText = plan.Apply(cmd.CommandText);
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await reader.ReadAsync(context.CancellationToken))
-                {
-                    candidates.Add(new PlanRegressionCandidate(
-                        QueryId: reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0)),
-                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
-                        LatestIsForced: (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0,
-                        ForceFailureCount: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
-                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
-                        RegressionFactor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                        DatabaseName: reader.GetString(8),
-                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
-                        QueryText: reader.IsDBNull(10) ? null : reader.GetString(10),
-                        LatestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
-                        BestPlanId: reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12)),
-                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
-                }
+                failuresRead.Statement = Stopwatch.GetElapsedTime(statementFrom);
+                failuresRead.Rows = failures.Count;
+                failuresRead.Held = Stopwatch.GetElapsedTime(heldFrom);
             }
+
+            AfterPlanRegressionFailuresReadForTests?.Invoke();
+
+            /* #9353: the cost statement is the pass's longest hold of the read lock, so it is read one database at a time. */
+            (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan);
+            costRead.Rows = candidates.Count;
 
             /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
                call to the monitored server and must not hold the store's read lock. */
+            var verifyStarted = Stopwatch.GetTimestamp();
             var verification = await VerifyPlanRegressionInputsAsync(context, candidates);
+            ReportSlowPlanRegressionPass(
+                context, Stopwatch.GetElapsedTime(passStarted), archivePlanTime, failuresRead, costRead,
+                Stopwatch.GetElapsedTime(verifyStarted), verification.PlanFetches, profiles);
             var kept = verification.Kept;
 
             var offenderCount = kept.Count;

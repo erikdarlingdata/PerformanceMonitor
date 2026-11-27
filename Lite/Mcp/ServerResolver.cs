@@ -74,6 +74,34 @@ internal static class ServerResolver
         return holders == 1 ? display : storageName;
     }
 
+    /// <summary>
+    /// The one list entry a resolved storage name picks, or the refusal to return (#9640). Two entries can share a
+    /// storage name (a pair saved before #4789) or share one <c>Id</c>, and the credential, the schedule and the
+    /// collection state all key on that value, so a call that picked the first of them could change or remove the
+    /// other server's. Either duplicate refuses the call, and the caller changes nothing.
+    /// </summary>
+    internal static (ServerConnection? Server, string? Error) PickByStorageName(IReadOnlyList<ServerConnection> servers, string storageName)
+    {
+        var named = servers.Where(s => RemoteCollectorService.GetServerNameForStorage(s) == storageName).ToList();
+        if (named.Count == 0)
+        {
+            return (null, McpHelpers.Refusal("server_name", $"'{storageName}' is no longer in the server list. Nothing was changed."));
+        }
+
+        var picked = named[0];
+        var sharesName = named.Count > 1;
+        if (!sharesName && servers.Count(s => string.Equals(s.Id, picked.Id, StringComparison.Ordinal)) <= 1)
+        {
+            return (picked, null);
+        }
+
+        var what = sharesName ? "more than one entry in the server list holds the storage name" : "another entry in the server list shares the id of";
+        return (null, McpHelpers.Refusal(
+            "server_name",
+            $"Nothing was changed: {what} '{storageName}', so Lite cannot tell which one this call means. " +
+            "The duplicate entries must be fixed in the Lite window (Manage Servers) first."));
+    }
+
     private static string Miss(IReadOnlyList<ServerConnection> servers, string? serverName) =>
         McpHelpers.Refusal("server_name", MissSentence(servers, serverName));
 
@@ -193,6 +221,58 @@ internal static class ServerResolver
             s.ServerName.Contains(name, StringComparison.OrdinalIgnoreCase) ||
             (s.DisplayName?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false)));
 
+        return new CandidateMatch(partial, partial.Count == 0 ? "none" : "partial");
+    }
+
+    /// <summary>The word before a server's id in a name that picks a server by its id, as in <c>id:42</c> (#9693).</summary>
+    internal const string ServerIdNamePrefix = "id:";
+
+    /// <summary>
+    /// The registrations a name answers to for <c>edit_server</c> (#9693), the rule Darling's <c>ResolveForEdit</c> applies.
+    /// A name answers for every registration that has it as its display name, its host or its storage name, capitals aside,
+    /// and for the registration whose <c>server_id</c> it gives as <c>id:&lt;server_id&gt;</c>. A registration that matches in
+    /// more than one of those ways is one candidate. Two or more candidates are all returned as <c>exact</c> and the caller
+    /// refuses: an edit can change where a saved password is sent, so a storage name does not win here over another
+    /// registration's display name or host, as it does in <see cref="MatchCandidates"/>. The display name defaults to the host,
+    /// so a plain registration's storage name is the display name its read-only and per-database registrations have until one
+    /// is typed, and the id form is the name that always picks one of them. A <c>server_id</c> is hashed from the storage name
+    /// (host, database and read-only intent), so it names one registration for as long as those three stay as they are, and it
+    /// is the id the ambiguous answer lists for each candidate. A name that is none of those is matched as a part of a host or
+    /// a display name, except the id form, which never matches a part of a name. Pure.
+    /// </summary>
+    internal static CandidateMatch MatchForEdit(IReadOnlyList<ServerConnection> servers, string? serverName)
+    {
+        var name = (serverName ?? string.Empty).Trim();
+        if (name.Length == 0)
+        {
+            return new CandidateMatch(Array.Empty<ServerCandidate>(), "none");
+        }
+
+        int? id = name.StartsWith(ServerIdNamePrefix, StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(name.AsSpan(ServerIdNamePrefix.Length), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        var exact = DistinctByStorageName(servers.Where(s =>
+        {
+            var storageName = RemoteCollectorService.GetServerNameForStorage(s);
+            return RemoteCollectorService.GetDeterministicHashCode(storageName) == id
+                || string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(storageName, name, StringComparison.OrdinalIgnoreCase);
+        }));
+        if (exact.Count > 0)
+        {
+            return new CandidateMatch(exact, "exact");
+        }
+
+        if (id is not null)
+        {
+            return new CandidateMatch(Array.Empty<ServerCandidate>(), "none");
+        }
+
+        var partial = DistinctByStorageName(servers.Where(s =>
+            s.ServerName.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+            (s.DisplayName?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false)));
         return new CandidateMatch(partial, partial.Count == 0 ? "none" : "partial");
     }
 

@@ -488,7 +488,7 @@ public sealed class ExternalAlertSourceVerbTests
 
         foreach (var setting in ExternalAlertSourceAdmin.StatementTrackingSettings)
         {
-            Assert.Contains($"SET {setting} = off;", script, StringComparison.Ordinal);
+            Assert.Contains($"set_config('{setting}', 'off', false)", script, StringComparison.Ordinal);
         }
     }
 

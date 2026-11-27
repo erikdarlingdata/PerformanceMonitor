@@ -42,7 +42,7 @@ internal static class PgBlockChainRead
         var end = eventTimeUtc.AddMinutes(ChainWindowMinutes);
         var rows = new List<BlockingPairRow>();
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, cancellationToken);
         await using (var command = connection.CreateCommand())
         {
             command.CommandTimeout = commandTimeoutSeconds;

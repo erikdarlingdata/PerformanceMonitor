@@ -34,8 +34,8 @@ public sealed class OptionalRunnerLiveTests : IClassFixture<OptionalRunnerLiveTe
                 CREATE TABLE collect.pg_cpu_utilization (server_name text, collection_time timestamp,
                   cpu_percent double precision, acu_utilization_percent double precision, serverless_capacity_acu double precision,
                   memory_active_bytes bigint, memory_cached_bytes bigint, memory_buffers_bytes bigint, memory_free_bytes bigint,
-                  max_configured_acu double precision, memory_total_bytes bigint, configured_memory_bytes bigint);
-                INSERT INTO collect.pg_cpu_utilization VALUES ('srv1', '2026-10-22 11:30:00', 12.5, 1.0, 2.0, 100, 200, 300, 400, 8.0, 1000, 900);
+                  max_configured_acu double precision, memory_total_bytes bigint, configured_memory_bytes bigint, sample_time timestamp);
+                INSERT INTO collect.pg_cpu_utilization VALUES ('srv1', '2026-10-22 11:30:00', 12.5, 1.0, 2.0, 100, 200, 300, 400, 8.0, 1000, 900, '2026-10-22 11:29:00');
                 CREATE TABLE collect.pg_database_size_stats (server_name text, collection_time timestamp, database_name text, size_bytes bigint);
                 INSERT INTO collect.pg_database_size_stats VALUES ('srv1', '2026-10-21 23:00:00', 'db1', 100), ('srv1', '2026-10-21 23:30:00', 'db1', 110);
                 CREATE SCHEMA timescaledb_information;

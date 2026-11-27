@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #7147: the 31-day Daily Summary and calendar read on a store WITHOUT TimescaleDB, where there is no rollup and the
 /// raw tier reads a month of <c>query_stats</c> and <c>wait_stats</c>. Two changes: the distinct-query count reads
-/// <c>collect.query_stats</c> directly, because <c>v_query_stats</c> (the payload-resolving view) keeps the planner off
-/// an index-only scan, and <see cref="PgTableTuning"/> builds a covering wait_stats index when wait_stats is a plain table so the
+/// <c>collect.query_stats</c> directly, because <c>v_query_stats</c> (the payload-resolving view) kept the planner off
+/// an index-only scan on PostgreSQL 18.6 (18.7 can plan one there too, #8858), and <see cref="PgTableTuning"/> builds a covering wait_stats index when wait_stats is a plain table so the
 /// read has an index to scan (the query_stats side takes the composer index every store already has). These run the statement against a real plain store and prove the rows do not move.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
@@ -38,7 +38,7 @@ public sealed class DailySummaryHeapStoreLiveTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task RawRange_ReadsTheSameRowsDirectlyAsThroughTheView_AndPlansAnIndexOnlyScanOnlyDirectly()
+    public async Task RawRange_ReadsTheSameRowsDirectlyAsThroughTheView_AndPlansAnIndexOnlyScanDirectly()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
 
@@ -70,8 +70,8 @@ public sealed class DailySummaryHeapStoreLiveTests
 
         await Exec(connection, "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", ct);
 
-        /* A start builds at most one large index (the one-build budget), and the seeded tables are no longer empty, so the
-           restart-row and legacy-row indexes take their starts first. Repeat the start pass until the cover exists. */
+        /* The large indexes share one build time budget per start, and the seeded tables are no longer empty, so the
+           restart-row and legacy-row indexes are built first. Repeat the start pass until the cover exists. */
         for (var pass = 0; pass < 8 && !await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct); pass++)
         {
             await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
@@ -82,20 +82,20 @@ public sealed class DailySummaryHeapStoreLiveTests
         Assert.Equal(viewRows, await ReadAsync(connection, viaView, start, end, ct));
         Assert.Equal(viewRows, await ReadAsync(connection, current, start, end, ct));
 
-        /* The plan: with the heap paths off the table, the direct read scans the cover without touching the heap, and the
-           view read cannot (its payload joins keep the digest columns in the scan's target list). #8204: the planner prices
+        /* The plan: with the heap paths off the table, the direct read scans the cover without touching the heap. Whether
+           the view read can too is the planner's call, not Darling's: PostgreSQL 18.6 never planned it index-only there
+           (the payload joins keep the digest columns in the scan's target list) and 18.7 does (#8858), so the test does
+           not plan the view read at all. #8204: the planner prices
            each index-only scan by the share of pages the visibility map marks, and one vacuum cannot mark them while an
            older snapshot is open in the database, so vacuum until every page is marked. */
         await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "collect.query_stats", ct);
         await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "collect.wait_stats", ct);
         await Exec(connection, "SET enable_seqscan = off; SET enable_bitmapscan = off", ct);
         var directPlan = await PlanAsync(connection, current, start, end, ct);
-        var viewPlan = await PlanAsync(connection, viaView, start, end, ct);
         const string QueryStatsIndex = "Index Only Scan using idx_query_stats_server_hash_time";
         /* #8651: the direct read counts only credited hashes through the index-only pair read plus the restart-only take-away
            (DailySummarySql.CreditedPairs), so it still plans the index-only scan. */
         Assert.True(directPlan.Contains(QueryStatsIndex, StringComparison.Ordinal), directPlan);
-        Assert.DoesNotContain(QueryStatsIndex, viewPlan, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using " + PgTableTuning.WaitStatsDailyCoverIndexName, directPlan, StringComparison.Ordinal);
     }
 

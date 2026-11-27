@@ -39,7 +39,7 @@ public sealed class McpWholeNumberArgumentTests
     /// <summary>The host's own rule for which parameters come from DI. The guide catalog is excluded because the tool
     /// registration adds the one real instance itself.</summary>
     private static bool IsServiceParameter(Type t) =>
-        McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
+        McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer);
 
     /// <summary>Lite's tool services are concrete classes, so none needs a hand-made stand-in, except the investigation
     /// request store (#5820), an interface the host registers as one instance: the stand-in answers only the route-use read.</summary>

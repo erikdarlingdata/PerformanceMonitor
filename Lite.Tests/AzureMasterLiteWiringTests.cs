@@ -54,11 +54,11 @@ public sealed class AzureMasterLiteWiringTests
     {
         /* The background service runs scheduled analysis, a sweep returns early until the alert engine is assigned,
            and the MCP server, the server list and the overview timer all read the scope. */
-        var body = MethodBody(StrippedSource("Lite", "MainWindow.xaml.cs"), "private async void MainWindow_Loaded(");
+        var body = MethodBody(StrippedSource("Lite", "MainWindow.xaml.cs"), "private async Task InitializeServicesAsync(");
 
-        var init = body.IndexOf("_databaseInitializer.InitializeAsync(", StringComparison.Ordinal);
+        var init = body.IndexOf("InitializeStoreAsync(", StringComparison.Ordinal);
         var seed = body.IndexOf("await SeedKnownEngineEditionsAsync(", StringComparison.Ordinal);
-        Assert.True(init >= 0, "MainWindow_Loaded initializes the database");
+        Assert.True(init >= 0, "the start initializes the database");
         Assert.True(seed > init, "the stored editions are seeded, and awaited, after the database is initialized");
         foreach (var later in new[] { "new CollectionBackgroundService(", "new AlertEngine(", "StartMcpServerAsync(", "RefreshServerList(", "_statusTimer.Start(", "RefreshOverviewAsync(" })
         {

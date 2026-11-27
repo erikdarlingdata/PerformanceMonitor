@@ -125,6 +125,88 @@ public static class StoreLogClassifier
     /// </summary>
     public const string SlowPlanClass = "slow_plan";
 
+    /// <summary>
+    /// An autovacuum PostgreSQL cancelled because another session asked for a conflicting lock (#8814). Retained: the
+    /// entry's CONTEXT names the relation, and a table whose autovacuum is cancelled again and again never finishes.
+    /// </summary>
+    public const string AutovacuumCancelClass = "autovacuum_cancel";
+
+    /* The relation an autovacuum names in its CONTEXT's last line, database first (`automatic vacuum of table
+       "darling.public.orders"`). */
+    private static readonly Regex s_autovacuumTable = new(
+        @"automatic vacuum of table ""([^""]+)""", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex s_toastTable = new(
+        @"^(?:(.+)\.)?pg_toast\.(pg_toast_[0-9]+)$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex s_toastContextRelation = new(
+        @"\bpg_toast\.(pg_toast_[0-9]+)\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>The prefix of an autovacuum cancel's grouping key. The relation its CONTEXT names follows it, so each
+    /// relation is its own row (#8822).</summary>
+    private const string AutovacuumCancelKeyPrefix = "canceling autovacuum task: ";
+
+    /// <summary>
+    /// A TOAST relation a cancel's CONTEXT names (<see cref="ToastRelationOf"/>): the database the log gives it, null
+    /// when the log names none, and the relation's name (<c>pg_toast_17428</c>).
+    /// </summary>
+    public readonly record struct ToastRelationRef(string? Database, string Name)
+    {
+        /// <summary>The relation as the log writes it: <c>darling.pg_toast.pg_toast_17428</c>, or
+        /// <c>pg_toast.pg_toast_17428</c> when the log gives no database.</summary>
+        public string Qualified => Database is null ? "pg_toast." + Name : Database + ".pg_toast." + Name;
+    }
+
+    /// <summary>
+    /// The TOAST relation a stored entry's CONTEXT names (<c>darling.pg_toast.pg_toast_17428</c> from <c>automatic
+    /// vacuum of table "darling.pg_toast.pg_toast_17428"</c>), or null when it names none (#8814). PostgreSQL names the
+    /// relation by number only, so the reader resolves it to its owning table from the catalog, and only in the
+    /// database the log names. An entry whose CONTEXT gives the relation without a database keeps a null
+    /// <see cref="ToastRelationRef.Database"/>.
+    /// </summary>
+    public static ToastRelationRef? ToastRelationOf(string? sample)
+    {
+        if (string.IsNullOrEmpty(sample))
+        {
+            return null;
+        }
+
+        try
+        {
+            var vacuum = s_autovacuumTable.Match(sample);
+            if (vacuum.Success)
+            {
+                var table = s_toastTable.Match(vacuum.Groups[1].Value);
+                return table.Success
+                    ? new ToastRelationRef(table.Groups[1].Success ? table.Groups[1].Value : null, table.Groups[2].Value)
+                    : null;
+            }
+
+            var context = s_toastContextRelation.Match(sample);
+            return context.Success ? new ToastRelationRef(null, context.Groups[1].Value) : null;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>An autovacuum cancel's grouping key (#8822): the relation its CONTEXT's <c>automatic vacuum of table</c>
+    /// line names, database qualifier included, or null when the entry has no such line. Kept apart from
+    /// <see cref="GroupingKeyOf"/>, which would blank the relation's number.</summary>
+    private static string? AutovacuumCancelKeyOf(string maskedEntry)
+    {
+        try
+        {
+            var vacuum = s_autovacuumTable.Match(maskedEntry);
+            return vacuum.Success ? AutovacuumCancelKeyPrefix + vacuum.Groups[1].Value : null;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The message a kept plan has when it could not be read whole (text format, cut by the entry cap
     /// or a read boundary, not JSON): every such plan is one row, whatever the statement was.</summary>
     public const string WithheldPlanMessage = "plan withheld";
@@ -265,6 +347,21 @@ public static class StoreLogClassifier
         new("lock_timeout", Error, MatchKind.StartsWith, "canceling statement due to lock timeout", true,
             "a statement hit the store's own lock_timeout waiting for a lock"),
 
+        /* Counted (#9439) - log_lock_waits' own lines: `process 123 still waiting for ShareLock on ... after 1000.1 ms`, and the
+           `acquired`, `avoided deadlock` and `detected deadlock` lines that end or continue the same wait. They are the only LOG
+           messages PostgreSQL begins with `process `. One wait leaves two or more of them, so the count is lines, not waits. The waits
+           themselves (who waited, behind whom, on what, how long) are kept as rows by StoreLockWaits.Parse, which get_store_lock_waits
+           reads, so this class is only the rate. */
+        new("lock_wait", Log, MatchKind.StartsWith, "process ", false,
+            "log_lock_waits wrote a line for a session that waited on a lock past deadlock_timeout, one line when it was still waiting and one when it got the lock - get_store_lock_waits lists the waits with who held the lock"),
+
+        /* Retained (#8814) - PostgreSQL cancels a plain autovacuum when another session asks for a lock that conflicts
+           with it, which a schema upgrade or a manual VACUUM does. One is routine after a restart, so it is not a
+           shape nobody anticipated. It is retained and not counted alone because the relation its CONTEXT names is the
+           useful part: a table whose autovacuum is cancelled again and again never finishes (#5594). */
+        new("autovacuum_cancel", Error, MatchKind.StartsWith, "canceling autovacuum task", true,
+            "an autovacuum was cancelled because another session wanted a conflicting lock - routine after an upgrade, but a table cancelled again and again never finishes; the CONTEXT names the relation"),
+
         /* Retained (#3899) - a statement that ran past the slow-statement line provisioning sets on the viewer
            and mcp roles (a third of their statement_timeout, DarlingManagedRoles.SlowStatementThresholdMs), or
            past any line an operator sets. PostgreSQL writes it as LOG with the duration first and the statement
@@ -292,6 +389,29 @@ public static class StoreLogClassifier
             "a connection was told to stop - job churn and service restarts, expected"),
         new("admin_termination", Fatal, MatchKind.StartsWith, "terminating autovacuum process due to administrator command", false,
             "an autovacuum worker was told to stop - job churn and service restarts, expected"),
+
+        /* EXCLUDING (#8814) - a client that connects while the store is stopping reads this FATAL. The service stops
+           its own store with a fast shutdown whenever it stops, so every upgrade or restart writes it, and it
+           belongs with the other restart messages above rather than in `unclassified`, which is for shapes nobody
+           anticipated. FATAL-scoped and anchored at the start, like its neighbours. As with every text here it is
+           PostgreSQL's English wording, which the managed store pins with lc_messages = 'C'. */
+        new("shutdown_in_progress", Fatal, MatchKind.StartsWith, "the database system is shutting down", false,
+            "a client reached the store while it was stopping - every service restart writes it, expected"),
+
+        /* EXCLUDING (#9577) - the startup twin of the shutdown line above: a client that connects while the store is
+           starting (recovery, or the first seconds after a restart) reads this FATAL. Every managed store restart
+           writes it, once for each connection attempt made before the store accepts them, so it is counted under its
+           own class rather than left in `unclassified`. FATAL-scoped and anchored at the start, like its twin. */
+        new("startup_in_progress", Fatal, MatchKind.StartsWith, "the database system is starting up", false,
+            "a client reached the store while it was starting - every managed store restart writes it, expected"),
+
+        /* EXCLUDING (#9515) - TimescaleDB's WARNING when a hypertable is created on a `timestamp without time zone`
+           column. The store keeps UTC in plain `timestamp` columns on purpose, so the HINT that follows (use TIMESTAMPTZ)
+           does not apply, and every migration that creates a hypertable writes the pair once per time column. The HINT
+           is a continuation line of this entry, so it is counted with it and never shows up alone. WARNING-scoped and
+           anchored at the start of the message, so an ERROR that mentions the type is not filed here. */
+        new("timescale_timestamp_column", ["WARNING"], MatchKind.StartsWith, "column type \"timestamp without time zone\" used for", false,
+            "TimescaleDB's note that a hypertable time column is a plain timestamp - the store keeps UTC without a zone on purpose, expected after every upgrade"),
 
         /* EXCLUDING - the Windows fork-emulation artifact, ~170-290/day, auto-retried by PostgreSQL itself
            and documented at length behind the 1 GB shared_buffers cap (#1559, pgsql-bugs BUG #14050 /
@@ -351,6 +471,22 @@ public static class StoreLogClassifier
         int EntriesRead,
         int ContinuationLines,
         int GroupsDropped);
+
+    /// <summary>
+    /// The retained-message budget of ONE capture of ONE file, carried across the slabs the capture reads (#8904):
+    /// which retained messages the capture has kept, how many each class has kept, and which over-budget messages
+    /// it has already folded. Without it every slab would start the budget again, so a capture of eight slabs would
+    /// keep eight times <see cref="MaxRetainedGroupsPerClass"/> messages a class and count a message folded in two
+    /// slabs twice. One instance lives for one capture of one file and holds only keys, never slab text.
+    /// </summary>
+    public sealed class CaptureBudget
+    {
+        internal HashSet<(string Class, string Severity, string? Message)> Kept { get; } = [];
+
+        internal Dictionary<string, int> PerClass { get; } = new(StringComparer.Ordinal);
+
+        internal HashSet<(string Class, string Severity, string? Message)> Folded { get; } = [];
+    }
 
     /// <summary>
     /// The invariant behind every excluding rule: it names its severities explicitly and anchors its text at
@@ -443,7 +579,7 @@ public static class StoreLogClassifier
     /// classified, because a fixture legitimately ends that way and dropping it would make the pin's own
     /// last case silently untested.</para>
     /// </summary>
-    public static Census Classify(string? slab, bool detailInEnglish = true)
+    public static Census Classify(string? slab, bool detailInEnglish = true, CaptureBudget? budget = null, bool lastLineCut = false)
     {
         var entries = new List<Entry>();
         var lines = 0;
@@ -461,7 +597,7 @@ public static class StoreLogClassifier
             string? currentMessage = null;
             var currentRaw = new StringBuilder();
 
-            void Flush()
+            void Flush(bool cut = false)
             {
                 if (currentSeverity is null || currentMessage is null)
                 {
@@ -473,7 +609,7 @@ public static class StoreLogClassifier
                 var raw = currentRaw.ToString();
                 if (retained)
                 {
-                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, detailInEnglish: detailInEnglish);
+                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, cut: cut, detailInEnglish: detailInEnglish);
                 }
 
                 entries.Add(new Entry(
@@ -541,11 +677,12 @@ public static class StoreLogClassifier
                 }
             }
 
-            Flush();
+            /* The entry still open here holds the slab's last line, so it is the one a cut line can leave unfinished. */
+            Flush(lastLineCut);
         }
 
         return new Census(
-            Groups: GroupEntries(entries, out var dropped),
+            Groups: GroupEntries(entries, budget ?? new CaptureBudget(), out var dropped),
             LinesRead: lines,
             EntriesRead: entries.Count,
             ContinuationLines: continuations,
@@ -558,10 +695,10 @@ public static class StoreLogClassifier
     /// novel message is immediately its own), and an excluded class groups by class and severity alone with no
     /// text at all.
     /// </summary>
-    private static List<Group> GroupEntries(List<Entry> entries, out int dropped)
+    private static List<Group> GroupEntries(List<Entry> entries, CaptureBudget budget, out int dropped)
     {
         var counts = new Dictionary<(string Class, string Severity, string? Message), (int Count, string? Sample)>();
-        var perClass = new Dictionary<string, int>(StringComparer.Ordinal);
+        var perClass = budget.PerClass;
         var order = new List<(string Class, string Severity, string? Message)>();
 
         /* Which over-budget MESSAGES have already been folded. Needed because a folded message's own key is
@@ -570,7 +707,7 @@ public static class StoreLogClassifier
            hundred distinct messages folded, which is the opposite of what this figure is documented to mean
            in three places (this struct, CaptureSummary.MessagesFolded, and the sentence get_store_log
            renders) and would read to a human as five hundred separate problems. */
-        var folded = new HashSet<(string Class, string Severity, string? Message)>();
+        var folded = budget.Folded;
         dropped = 0;
 
         foreach (var entry in entries)
@@ -587,7 +724,10 @@ public static class StoreLogClassifier
             if (entry.Retained)
             {
                 perClass.TryGetValue(entry.EventClass, out var distinct);
-                if (distinct >= MaxRetainedGroupsPerClass)
+
+                /* A message an earlier slab of this capture kept is already inside the budget: it adds its
+                   occurrences here as a row of its own (the store sums them) and spends no new place. */
+                if (!budget.Kept.Contains(key) && distinct >= MaxRetainedGroupsPerClass)
                 {
                     /* Past the budget: fold into the class's untexted row so the OCCURRENCE is never lost,
                        and report the fold ONCE PER DISTINCT MESSAGE, not once per occurrence of it. */
@@ -610,7 +750,10 @@ public static class StoreLogClassifier
                     continue;
                 }
 
-                perClass[entry.EventClass] = distinct + 1;
+                if (budget.Kept.Add(key))
+                {
+                    perClass[entry.EventClass] = distinct + 1;
+                }
             }
 
             counts[key] = (1, entry.Retained ? entry.RawText : null);
@@ -780,6 +923,21 @@ public static class StoreLogClassifier
     }
 
     private readonly record struct Field(FieldKind Kind, string Name, int MessageStart);
+
+    /// <summary>
+    /// The field <see cref="FindField"/> reads on a line, for a reader that walks entries itself (#9439): whether it is a primary
+    /// severity (the line opens an entry), its name, where its label starts (the text before it is the log prefix) and where its
+    /// message starts. False when the line opens no field this reader knows.
+    /// </summary>
+    internal static bool TryReadField(ReadOnlySpan<char> line, out bool primary, out string name, out int labelStart, out int messageStart)
+    {
+        var field = FindField(line);
+        primary = field.Kind == FieldKind.Primary;
+        name = field.Name ?? string.Empty;
+        messageStart = field.MessageStart;
+        labelStart = field.Kind == FieldKind.None ? 0 : field.MessageStart - 3 - name.Length;
+        return field.Kind != FieldKind.None;
+    }
 
     /// <summary>
     /// The line's field: the label the line's FIRST label-shaped colon ends, when that label is a severity or a
@@ -1215,7 +1373,8 @@ public static class StoreLogClassifier
            the token, which can run past that line, and the first line alone named no form to withhold it by. */
         var masked = MaskEntry(rawText, cut, detailInEnglish);
         var kept = PrimaryMessageOf(masked) ?? PgLogTextRedactor.RedactMessage(message, cut) ?? message;
-        return (eventClass, true, GroupingKeyOf(kept), masked);
+        var key = eventClass == AutovacuumCancelClass ? AutovacuumCancelKeyOf(masked) ?? GroupingKeyOf(kept) : GroupingKeyOf(kept);
+        return (eventClass, true, key, masked);
     }
 
     /* The values PostgreSQL's prose carries, as the grouping key sees them (#3944): a single- or double-quoted run
@@ -1512,6 +1671,13 @@ public static class StoreLogClassifier
            message is the raw duration line: kept, so a sample the cap cut inside a token, which re-reads as
            withheld, cannot fold every such statement into one withheld key. */
         if (eventClass == SlowStatementClass && message is not null && !message.StartsWith("duration: ", StringComparison.Ordinal))
+        {
+            key = message;
+        }
+
+        /* A cancel stored before #8822 was keyed on the message alone, and one row held every relation's cancels. It stays
+           as it is, so the pass that brings stored rows up rewrites nothing and two rows never meet under one key. */
+        if (eventClass == AutovacuumCancelClass && message is not null)
         {
             key = message;
         }

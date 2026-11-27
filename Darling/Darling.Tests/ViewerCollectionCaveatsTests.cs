@@ -153,7 +153,7 @@ public sealed class ViewerCollectionCaveatsGateTests
         Assert.Contains("x:Name=\"PgCollectionCaveatsGrid\"", pgOverview, StringComparison.Ordinal);
 
         var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Postgres.cs");
-        var load = code[code.IndexOf("private async Task LoadPgOverviewAsync()", StringComparison.Ordinal)..];
+        var load = code[code.IndexOf("private async Task LoadPgOverviewAsync(", StringComparison.Ordinal)..];
         load = load[..load.IndexOf("private ", 10, StringComparison.Ordinal)];
         Assert.Contains("GetCollectionCaveatsAsync(_server.ServerId)", load, StringComparison.Ordinal);
         Assert.Contains("PgCollectionCaveatsExpander.Visibility", load, StringComparison.Ordinal);

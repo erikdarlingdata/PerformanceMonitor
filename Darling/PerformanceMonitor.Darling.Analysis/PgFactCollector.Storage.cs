@@ -13,41 +13,81 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgFactCollector
 {
     /* #3896: $2 is the LOOKBACK start (AnalysisContext.LatestValueStartFor), not the window start. Without it
-       the window function numbered every file row the server has retained, and a dropped database's files
-       stayed in the sum until retention aged them out. */
+       the oldest snapshot is the oldest one the server has retained, and a dropped database's files
+       stay in the sum until retention ages them out. */
+    /* #9049: the newest row per file among three snapshots of the lookback: the newest, the one just before it, and
+       the oldest. A file takes its row from the newest of the three that holds it. No index leads with the file key,
+       so the newest row per file over the whole lookback is a sort of every row in it: 6.4 million rows and 230,000
+       blocks for a server with 4,471 files sampled each minute, 2.6 seconds with four parallel workers and 6.5
+       without. The three times are scalar subqueries in an IN list, which is an index condition on
+       (server_id, collection_time) in an uncompressed chunk and a filter on the batch ranges of a compressed one, so
+       the read is 527 blocks and 13 ms at that size. Lite's DuckDbFactCollector carries the same statement. */
     public const string DatabaseSizeSql = @"
-WITH latest AS (
+WITH newest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+prev AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+oldest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time ASC
+    LIMIT 1
+),
+latest AS (
     SELECT database_name, file_name, size_mb,
            ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
     FROM file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    AND   collection_time IN ((SELECT collection_time FROM newest), (SELECT collection_time FROM prev), (SELECT collection_time FROM oldest))
     AND   size_mb > 0
 )
 SELECT SUM(size_mb) AS total_size_mb
 FROM latest
 WHERE rn = 1";
 
-    /* #5516: the cheap path for the sum DatabaseSizeSql computes. DatabaseSizeSql numbers every file row in the
-       24-hour lookback to keep the newest per file - 1,788 blocks a call. This reads only the newest snapshot
+    /* #5516: the cheap path for the sum DatabaseSizeSql computes. This reads only the newest snapshot
        (the (server_id, collection_time) index serves MAX backward, then the rows by equality) and sums its
        files.
 
        DatabaseSizeSql also answers with a file's OLDER row when the newest snapshot lacks that file (a database
        dropped or taken offline inside the lookback, or a per-database read that failed in the newest Azure SQL
-       Database sweep). No index leads with the file key, so no cheap read can find such a file; this read probes
-       instead. It lists the files of the snapshot just before the newest and of the oldest one in the lookback,
-       and reports whether either has a file the newest snapshot lacks. The caller then runs DatabaseSizeSql, so
-       the answer is the old one whenever a file has dropped out. The one case the probe cannot see is a file
-       that appears and vanishes strictly between those two snapshots and in neither of them; DatabaseSizeSql
-       would carry it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
+       Database sweep). No index leads with the file key, so no cheap read can find such a file's last row; this
+       read probes instead. It lists the files of the snapshot just before the newest and of the oldest one in the
+       lookback, and reports whether either has a file the newest snapshot lacks. The caller then runs
+       DatabaseSizeSql, which takes that file's row from the same two snapshots. A file that appears and vanishes
+       strictly between those two snapshots, and is in neither of them, is in no answer; a read of every row in the
+       lookback carries it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
        (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide). */
     /* #8570: EXCEPT, not NOT EXISTS over cur. The planner took the correlated form as a nested loop anti join of the
        probed snapshots' files against the CTE's rows, one comparison per pair: 16 million of them, 2.1 seconds, on a
@@ -56,6 +96,17 @@ WHERE rn = 1";
        collector writes (both columns are always set). The one difference is a file with a NULL name: NOT EXISTS
        never matched it, so it forced DatabaseSizeSql, while EXCEPT matches it with the newest snapshot's row of the
        same NULL name and leaves the sum to this read. */
+    /* #8980, #9049: every file_io_stats reference here and in DatabaseSizeSql carries both ends of the lookback,
+       the ones whose snapshot time comes from a scalar subquery included. The planner excludes no chunk on a value
+       it does not have yet, so a reference without them plans every file_io_stats chunk the server has (121
+       six-hour chunks over 30 days: 96 ms of planning, against 3), and its cost grows with the table's retention,
+       not the lookback. Every snapshot time lies inside the lookback, so the bounds change no answer. */
+    /* #9049: the arm matches the two edge times with an IN list of scalar subqueries, not a join to a CTE of them.
+       A join leaves the planner a choice between a nested loop into the index and a hash join over every row of the
+       lookback, and only the hash join when a chunk of the lookback is compressed (a window that ends in the past)
+       or the plan is generic: 0.96 seconds and 85,000 blocks for 6.4 million rows, against 8 ms and 402 blocks. The
+       IN list is an index condition in an uncompressed chunk and a filter on the batch ranges of a compressed one,
+       under either plan. A snapshot time that does not exist is NULL and matches no row. */
     public const string DatabaseSizeNewestSql = @"
 WITH newest AS (
     SELECT collection_time
@@ -71,32 +122,33 @@ cur AS (
     SELECT DISTINCT ON (database_name, file_name) database_name, file_name, size_mb
     FROM file_io_stats
     WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
     AND   collection_time = (SELECT collection_time FROM newest)
     AND   size_mb > 0
     ORDER BY database_name, file_name
 ),
-edge AS (
-    (
-        SELECT collection_time
-        FROM file_io_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time < (SELECT collection_time FROM newest)
-        AND   size_mb > 0
-        ORDER BY collection_time DESC
-        LIMIT 1
-    )
-    UNION
-    (
-        SELECT collection_time
-        FROM file_io_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time < (SELECT collection_time FROM newest)
-        AND   size_mb > 0
-        ORDER BY collection_time ASC
-        LIMIT 1
-    )
+prev AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+oldest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time ASC
+    LIMIT 1
 )
 SELECT
     (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
@@ -104,7 +156,9 @@ SELECT
         SELECT f.database_name, f.file_name
         FROM file_io_stats AS f
         WHERE f.server_id = $1
-        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        AND   f.collection_time IN ((SELECT collection_time FROM prev), (SELECT collection_time FROM oldest))
         AND   f.size_mb > 0
         EXCEPT
         SELECT c.database_name, c.file_name
@@ -116,17 +170,20 @@ SELECT
     /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
     /// of the window's end (#3896) — a file not seen in that span belongs to a database that no longer exists.
     /// The sum comes from the newest snapshot alone (#5516); when a file in the probed older snapshots is
-    /// missing from it, <see cref="DatabaseSizeSql"/> decides. The one accepted difference from the full read: a file
-    /// seen only in snapshots strictly between the two probed ones (the oldest in the lookback and the one just
-    /// before the newest) is not carried as a ghost, where the full read carried it for up to 24 hours. That
-    /// answer can also reappear when the lookback's oldest snapshot later falls inside the file's life; the total
-    /// has no scoring weight, and #3896 treats such a ghost as not a database anyway.
+    /// missing from it, <see cref="DatabaseSizeSql"/> decides, and takes that file's size from the probed snapshot
+    /// that holds it: the one just before the newest, else the oldest in the lookback (#9049). Two differences from
+    /// a read of every row in the lookback are accepted. A file seen only in snapshots strictly between the two
+    /// probed ones is not carried as a ghost, where such a read carries it for up to 24 hours; that answer can also
+    /// reappear when the lookback's oldest snapshot later falls inside the file's life. And a dropped file whose
+    /// last sighting falls between the oldest snapshot and the one just before the newest counts at the oldest
+    /// snapshot's size, not at its last one. The total has no scoring weight, and #3896 treats such a ghost as not a
+    /// database anyway.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             double? totalSize = null;
             var droppedOut = true;
@@ -193,7 +250,7 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(IoLatencySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -294,7 +351,7 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(TempDbSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -389,7 +446,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(FileAutogrowthSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -424,6 +481,31 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
             /* Degrades to "no facts" so one unavailable input cannot cost this server its other
                facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
                not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
+
+    /// <summary>
+    /// #8883: the TEMPDB_FILE_SETUP fact, built from tempdb's files in the newest database_size_stats collection and the newest
+    /// visible online scheduler count. One fact whose value is the number of file-setup checks the server fails; none when it fails
+    /// none, and none for a server with no tempdb rows (an Azure SQL Database). Advisory: it adds no alert. The checks are
+    /// <see cref="TempDbFileSetup"/>, shared with Lite.
+    /// </summary>
+    private async Task CollectTempDbFileSetupFactsAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            var files = await PgTempDbFileSetupReader.ReadFilesAsync(_postgres, context, FactCommandTimeoutSeconds);
+            if (files.Count == 0) return;
+
+            var schedulers = await PgTempDbFileSetupReader.ReadSchedulerCountAsync(_postgres, context, FactCommandTimeoutSeconds);
+            var fact = TempDbFileSetup.BuildFact(context, files, schedulers);
+            if (fact is not null)
+                facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other facts, and WHY is reported (#2826). */
             ReportCollectionFailure(ex, context);
         }
     }
@@ -478,7 +560,7 @@ FROM disks WHERE named OR disk_rn = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(DiskSpaceSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);

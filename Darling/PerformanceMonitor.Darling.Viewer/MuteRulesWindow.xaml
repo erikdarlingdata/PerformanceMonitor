@@ -67,7 +67,7 @@
         </Grid>
 
         <StackPanel x:Name="ActionButtonsPanel" Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,12,0,0">
-            <Button Content="_Add Rule..." Width="100" Height="28" Margin="0,0,8,0" Click="AddRule_Click"/>
+            <Button AutomationProperties.AutomationId="AddRuleButton" Content="_Add Rule..." Width="100" Height="28" Margin="0,0,8,0" Click="AddRule_Click"/>
             <Button Content="_Edit" Width="80" Height="28" Margin="0,0,8,0" Click="EditRule_Click"/>
             <Button Content="_Toggle" Width="80" Height="28" Margin="0,0,8,0" Click="ToggleRule_Click"/>
             <Button Content="_Delete" Width="80" Height="28" Margin="0,0,8,0" Click="DeleteRule_Click"/>

@@ -133,7 +133,7 @@ SELECT database_name, query_hash, query_plan_hash,
        MIN(collection_time) AS first_seen
 FROM v_query_stats
 WHERE server_id = $1
-  AND collection_time >= $2
+  AND collection_time > $2
   AND collection_time <= $3
   AND sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY database_name, query_hash, query_plan_hash";
@@ -144,7 +144,7 @@ WITH snaps AS (
            collection_time - to_milliseconds(CAST(COALESCE(total_elapsed_time_ms, 0) AS BIGINT)) AS started_at
     FROM v_query_snapshots
     WHERE server_id = $1
-      AND collection_time >= $2
+      AND collection_time > $2
       AND collection_time <= $3
       AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ), marked AS (
@@ -176,7 +176,7 @@ FROM (
     SELECT DISTINCT ON (job_name) job_name, start_time, current_duration_seconds, avg_duration_seconds, is_running_long, collection_time
     FROM v_running_jobs
     WHERE server_id = $1
-      AND collection_time >= $2
+      AND collection_time > $2
       AND collection_time <= $3
     ORDER BY job_name, collection_time DESC
 ) AS j
@@ -195,7 +195,7 @@ FROM (
            SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
     FROM v_wait_stats
     WHERE server_id = $1
-      AND collection_time >= $2
+      AND collection_time > $2
       AND collection_time <= $3
     GROUP BY wait_type
 ) AS per_spelling
@@ -207,7 +207,7 @@ LIMIT 10";
 SELECT database_name, CAST(SUM(delta_worker_time) AS BIGINT) AS window_cpu_us
 FROM v_query_stats
 WHERE server_id = $1
-  AND collection_time >= $2
+  AND collection_time > $2
   AND collection_time <= $3
   AND sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY database_name";
@@ -224,7 +224,7 @@ ORDER BY database_name";
     internal static readonly string DeadlocksSql = @"
 SELECT deadlock_time, database_name, victim_process_id, deadlock_graph_xml
 FROM " + StoredEventCopies.Deadlocks(
-        "server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''") + @" AS dl
+        "server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''") + @" AS dl
 ORDER BY deadlock_time DESC
 LIMIT 10";
 
@@ -232,7 +232,7 @@ LIMIT 10";
 SELECT event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
        contentious_object, blocked_sql_text, blocking_sql_text, blocked_login_name, blocking_login_name, blocked_host_name,
        blocking_host_name, blocking_client_app, blocking_status, blocked_process_report_xml
-FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
+FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 
@@ -1181,7 +1181,7 @@ ORDER BY collection_time DESC";
     private Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
         WithConnectionAsync(async (connection, plan) =>
         {
-            var events = plan.IsHot("attention_events") ? "attention_events" : "v_attention_events";
+            var events = plan.SourceFor("attention_events");
             async Task<List<T>> Query<T>(string sql, Func<DuckDBDataReader, T> map)
             {
                 using var command = Command(connection, sql, serverId, from, to);

@@ -173,6 +173,10 @@ public sealed partial class DarlingCollectorRunner
            sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
            at a time on that server rather than one, for the rest of the cycle. */
         StoreWriteOutcome outcome;
+        /* #9549: a store write that stalls is harm the Store Checkpointer Pressure self-alert looks for inside a checkpoint
+           sync. Two shapes: one that ends in a transport fault (the store did not answer it), whether or not the
+           re-attempt then stores the rows, and one the store answers after longer than a read's deadline. */
+        var writeClock = Stopwatch.StartNew();
         try
         {
             outcome = await StoreWriteReattempt.RunAsync(
@@ -183,11 +187,21 @@ public sealed partial class DarlingCollectorRunner
                         definition, rows, server, collectionTime, context, token),
                 rewrite: token => CopyOnAFreshConnectionAsync(
                     definition, rows, server, collectionTime, context, token),
-                onReattempt: firstAttempt => _logger?.LogWarning(
-                    firstAttempt,
-                    StoreWriteReattemptLogTemplate,
-                    definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
+                onReattempt: firstAttempt =>
+                {
+                    StoreHarmLog.Shared.NoteCollectorWriteFault(firstAttempt, definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds);
+                    writeClock.Restart();
+                    _logger?.LogWarning(
+                        firstAttempt,
+                        StoreWriteReattemptLogTemplate,
+                        definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message);
+                },
                 cancellationToken);
+        }
+        catch (Exception fault) when (StoreHarmLog.Shared.NoteCollectorWriteFault(fault, definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds))
+        {
+            /* Never entered: the filter records the fault and answers false, so the arm below handles it as it always did. */
+            throw;
         }
         catch (Exception fault) when (RollsBackBaselines(fault))
         {
@@ -196,11 +210,13 @@ public sealed partial class DarlingCollectorRunner
                baseline alone, and a COPY that failed under its row loop advanced only the rows it reached. A COPY that fails
                stores nothing, so putting them all back loses nothing: query_stats diverts its text and plans, so its COPY
                always runs inside the write's transaction, and a fault there never leaves the server committed. A fault
-               after the COPY (the dimension flush or the commit, phase Unknown) keeps the advanced baselines, as it always
-               did. */
+               after the COPY is handled where it happens (#9302): one before the commit rolls the baselines back there, and the
+               commit's own fault (phase Unknown) keeps the advanced baselines, because the server may have committed. */
             (rows as IBaselineRollback)?.RollBackBaselines();
             throw;
         }
+
+        StoreHarmLog.Shared.NoteCollectorWriteTime(definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds);
 
         if (outcome.Reattempted)
         {
@@ -424,7 +440,7 @@ public sealed partial class DarlingCollectorRunner
             return;
         }
 
-        await OversizedPlanBacklog.RecordSightingsAsync(
+        await OversizedPlanBacklogIntake.RecordAsync(
             _postgres, server.ServerId, definition.Name, observations, collectionTime, _logger, cancellationToken);
     }
 
@@ -547,7 +563,7 @@ public sealed partial class DarlingCollectorRunner
         CollectorContext context,
         CancellationToken cancellationToken)
     {
-        await using var freshConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var freshConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
         return await CopyBatchOnceAsync(
             freshConnection, definition, rows, server, collectionTime, context, cancellationToken);
     }
@@ -628,6 +644,15 @@ public sealed partial class DarlingCollectorRunner
            at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
         var totalsBatch = string.Equals(definition.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
 
+        /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V300), tallied and written exactly
+           as the query_stats ledger above is: the writer's tally of the value sent into sample_interval_seconds, one upsert on the COPY's own
+           transaction. Chosen by the table this COPY writes, so an import or backfill aimed at procedure_stats is counted too, or fails loudly. */
+        var procedureLedgerBatch = totalsBatch; /* the same table test, so the transaction the totals already open is the ledger's too */
+        if (procedureLedgerBatch)
+        {
+            writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
+        }
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -658,6 +683,13 @@ public sealed partial class DarlingCollectorRunner
         }
 
         var fenceSucceeded = false;
+
+        /* #9302: where a fault leaves the write. A fault after the COPY finished and before the commit is sent rolls the
+           transaction back, so it stored nothing and the baselines the batch advanced go back (the catch below). The COPY's
+           own faults stay with the stamped-phase arms (a start-phase fault is re-attempted with the rows it already holds, so
+           its baselines must not move here). The commit's own fault is ambiguous, because the server may have committed. */
+        var copyFinished = false;
+        var commitSent = false;
         try
         {
             /* Only the diverting collectors, Query Store (#3953) and the ledger's query_stats batches (#4605) need a
@@ -749,6 +781,11 @@ public sealed partial class DarlingCollectorRunner
                         QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
                     }
 
+                    if (procedureLedgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
                     await importer.CompleteAsync(cancellationToken);
                 }
             }
@@ -784,6 +821,8 @@ public sealed partial class DarlingCollectorRunner
                 throw;
             }
 
+            copyFinished = true;
+
             if (transaction is not null)
             {
                 if (diversionPlan.Count > 0)
@@ -800,6 +839,14 @@ public sealed partial class DarlingCollectorRunner
                         && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var absentCache))
                     {
                         absentCache.Evict(absentDigests);
+                    }
+
+                    /* #8994: a shape whose stored plan aged out renders its plan again on its next sighting. */
+                    if (absentDigests.Count > 0
+                        && definition is QueryStatsCollector
+                        && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var absentShapeCache))
+                    {
+                        absentShapeCache.Evict(absentDigests);
                     }
 
                     /* #7419: the same for a statement text the store no longer holds (its dimension row aged out). */
@@ -829,6 +876,30 @@ public sealed partial class DarlingCollectorRunner
                     await QueryStatsHourLedgerWriter.AddBatchAsync(
                         pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #9357: the procedure_stats batch's count joins its own hourly ledger on THIS transaction, with the query_stats ledger's contract:
+                   after the COPY, before the commit, no savepoint and no catch, so a fault rolls the batch back and a rolled-back COPY leaves no
+                   ledger change. A count of 0 writes nothing. */
+                if (procedureLedgerBatch)
+                {
+                    await QueryStatsHourLedgerWriter.AddProcedureStatsBatchAsync(
+                        pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
+                        writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #9147: the collection's per-database summary (QueryStatsCollectionSummary, V286), read back from the rows the store now holds
+                   for this collection_time and set, on THIS transaction right after the ledger and with its failure behaviour: no savepoint and
+                   no catch, so a fault throws out of the batch, the transaction rolls back and the rows are not stored, because rows the summary
+                   never saw would make the duration trend's summary read disagree with its raw read. Recomputed, never added, so a second batch
+                   at this collection_time, a late batch for an older collection or a re-attempt is exact. A batch of 0 rows writes nothing. */
+                if (ledgerBatch)
+                {
+                    await QueryStatsCollectionSummary.UpsertBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds,
+                        QueryStatsCollectionSummary.DatabaseNamesOf(rows),
+                        cancellationToken);
                 }
 
                 /* #6009: a watched module's modify_date, onto the rows just copied, on this transaction behind its own savepoint.
@@ -889,6 +960,16 @@ public sealed partial class DarlingCollectorRunner
                    are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
                    raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
                    rows writes nothing. Only QueryStoreCollector.Row rows are summarised; any other row type writes no side row (safe, as above). */
+                /* #9148: a query_store_stats batch stamped in a day the closed-day pass may already have built (a backfill or an import)
+                   marks that day for a rebuild, in THIS transaction behind its own savepoint, so the clutter rollups never serve the day
+                   without these rows. A live batch is stamped now and sends nothing. A fault is logged and never fails the batch. */
+                if (watermarkBatch && rowsWritten > 0)
+                {
+                    await QueryStoreClosedDayRollup.TryMarkLateCollectionDayAsync(
+                        pgConnection, transaction!, server.ServerId, storedCollectionTime, DateTime.UtcNow,
+                        ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
+                }
+
                 if (watermarkBatch && rowsWritten > 0)
                 {
                     await QueryStoreWatermarks.TryUpsertBatchAsync(
@@ -897,12 +978,31 @@ public sealed partial class DarlingCollectorRunner
                         ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
+                /* #9359: the caller's own writes (the Query Store backfill's state for this slice) join THIS transaction, so the rows and
+                   the state commit together or not at all. No savepoint and no catch, deliberately: a fault throws out of the batch, the
+                   transaction rolls back with the COPY in it, and the next pass walks the slice from a clean store. */
+                if (context.StoreTransactionWrite is { } transactionWrite)
+                {
+                    await transactionWrite(pgConnection, transaction, cancellationToken);
+                }
+
+                commitSent = true;
                 await transaction.CommitAsync(cancellationToken);
             }
 
             /* Last statement: reaching it means the commit was acknowledged. Any exit before it leaves the write's
                outcome unknown, and the fence poisons the server. */
             fenceSucceeded = true;
+        }
+        catch when (copyFinished && !commitSent)
+        {
+            /* #9302: the dimension flush, the ledger, the summary or a totals write faulted (a flush timeout after a restart
+               was the field's case). The transaction rolls back with the COPY in it, so none of this interval's rows were stored
+               while their baselines had already moved, and the executions between the two snapshots were lost. Put the baselines
+               back, as the COPY-phase arm in WriteBatchAsync does, so the next cycle's delta covers both intervals. A Query
+               Store step that fails behind its savepoint never reaches here: it is swallowed and the transaction commits. */
+            (rows as IBaselineRollback)?.RollBackBaselines();
+            throw;
         }
         finally
         {
@@ -973,6 +1073,7 @@ public sealed partial class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = CapturePlansFor(server.CapturePlans),
+            PgBufferUsagePoolCapBuffers = PgBufferUsagePoolCapBuffersForTests,
             /* #2150: stays FALSE here, and NOT because the readers are behind — this is FetchRowsAsync, the
                on-demand live fetch. It returns the rows straight to the caller and writes nothing: no store
                insert, no text fetch, no watermark. Turning it on would null query_sql_text in rows that have
@@ -996,7 +1097,14 @@ public sealed partial class DarlingCollectorRunner
         await ResolvePgExtensionSchemasAsync(context, definition, connection, _logger, cancellationToken);
         var plan = definition.BuildQuery(context);
         using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
+        /* #9062: the same local work_mem statement as the scheduled read, for a definition that asks for one. */
+        var workMemApplied = PgReadWorkMem.ApplyTo(command, definition.ReadWorkMemBytesPerEntry);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (workMemApplied)
+        {
+            await PgReadWorkMem.SkipSettingResultAsync(reader, cancellationToken);
+        }
+
         return await definition.ReadAsync(reader, context, cancellationToken);
     }
 
@@ -1138,68 +1246,17 @@ public sealed partial class DarlingCollectorRunner
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-            /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
-               stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
-               the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
-               used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
-               measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
-               the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
-               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
-               hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
-               collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
-               job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
-               widens the caller's re-read; its natural-key dedupe drops the repeats. */
-            var autoWindow = collectedSince is null;
-            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
-
-            var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
-            using var command = new NpgsqlCommand(sql, connection);
-            /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
-               here, and it silently governed a read whose measured cost exceeded it. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-               timestamptz and Postgres would convert it into the session zone on the way in. */
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
-
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            var primary = await ReadServerWatermarkAsync(connection, serverId, tableName, columnName, collectedSince, cancellationToken);
+            if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
             {
-                return dt;
+                return primary;
             }
 
-            if (autoWindow)
-            {
-                /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
-                   quiet server (no job run or trace event for hours). Before the whole slice, try the week:
-                   the SAME bounded statement with an older bound, so the chunks of seven days answer a server
-                   whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
-                   compressed ones included (5,426 blocks a call on job_history). */
-                using var widened = new NpgsqlCommand(sql, connection);
-                widened.CommandTimeout = CommandTimeoutSeconds;
-                widened.Parameters.AddWithValue(serverId);
-                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
-                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
-                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
-                if (widenedResult is DateTime widenedDt)
-                {
-                    return widenedDt;
-                }
-
-                /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
-                   unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
-                   the window the way it is for query_store's clamped callers. */
-                using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
-                fallback.CommandTimeout = CommandTimeoutSeconds;
-                fallback.Parameters.AddWithValue(serverId);
-                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
-                if (fallbackResult is DateTime fallbackDt)
-                {
-                    return fallbackDt;
-                }
-            }
+            /* #8967: while the swapped-out attention table exists, the new table holds only what was written since the swap, so its MAX
+               is NULL or short. The legacy table never changes, which makes the greater of the two exact at any copy progress. */
+            var legacy = await AttentionLegacyTableWatermark.ReadAsync(connection, serverId, columnName, CommandTimeoutSeconds, cancellationToken);
+            return primary is { } p && legacy is { } l ? (p >= l ? p : l) : primary ?? legacy;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1217,6 +1274,77 @@ public sealed partial class DarlingCollectorRunner
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, ex.Message);
         }
+        return null;
+    }
+
+    /// <summary>
+    /// The read behind <see cref="GetLastCollectedTimeAsync"/> on one open connection: the bounded probe, the widened week, then the
+    /// unbounded MAX. Throws on a store fault; the caller owns the warning and the fallback window.
+    /// </summary>
+    private static async Task<DateTime?> ReadServerWatermarkAsync(
+        NpgsqlConnection connection, int serverId, string tableName, string columnName, DateTime? collectedSince, CancellationToken cancellationToken)
+    {
+        /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
+           stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
+           the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
+           used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
+           measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
+           the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
+           the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
+           hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
+           collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
+           job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
+           widens the caller's re-read; its natural-key dedupe drops the repeats. */
+        var autoWindow = collectedSince is null;
+        var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+        var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
+        using var command = new NpgsqlCommand(sql, connection);
+        /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
+           here, and it silently governed a read whose measured cost exceeded it. */
+        command.CommandTimeout = CommandTimeoutSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+           timestamptz and Postgres would convert it into the session zone on the way in. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result is DateTime dt)
+        {
+            return dt;
+        }
+
+        if (autoWindow)
+        {
+            /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
+               quiet server (no job run or trace event for hours). Before the whole slice, try the week:
+               the SAME bounded statement with an older bound, so the chunks of seven days answer a server
+               whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
+               compressed ones included (5,426 blocks a call on job_history). */
+            using var widened = new NpgsqlCommand(sql, connection);
+            widened.CommandTimeout = CommandTimeoutSeconds;
+            widened.Parameters.AddWithValue(serverId);
+            widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+            var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+            if (widenedResult is DateTime widenedDt)
+            {
+                return widenedDt;
+            }
+
+            /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
+               unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
+               the window the way it is for query_store's clamped callers. */
+            using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
+            fallback.CommandTimeout = CommandTimeoutSeconds;
+            fallback.Parameters.AddWithValue(serverId);
+            var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+            if (fallbackResult is DateTime fallbackDt)
+            {
+                return fallbackDt;
+            }
+        }
+
         return null;
     }
 
@@ -1250,7 +1378,7 @@ public sealed partial class DarlingCollectorRunner
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
 
             /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
                non-null (query_store's clamped floor) is unchanged; null now means "bound to
@@ -1359,7 +1487,7 @@ public sealed partial class DarlingCollectorRunner
         var state = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(collectorName), cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;

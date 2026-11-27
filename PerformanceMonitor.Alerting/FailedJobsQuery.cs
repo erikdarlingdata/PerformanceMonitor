@@ -75,7 +75,8 @@ SELECT TOP (50) /* PerformanceMonitorLite */
     step_id = ISNULL(fs.step_id, jh.step_id),
     step_name = ISNULL(fs.step_name, jh.step_name),
     message = ISNULL(fs.message, jh.message),
-    utc_offset_minutes = DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())
+    utc_offset_minutes = DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),
+    run_duration = jh.run_duration
 FROM msdb.dbo.sysjobhistory AS jh
 JOIN msdb.dbo.sysjobs AS j
   ON j.job_id = jh.job_id
@@ -121,11 +122,13 @@ OPTION(RECOMPILE);";
 
     /// <summary>
     /// Maps <see cref="Sql"/>'s result rows (job_name, job_id, run_datetime, step_id, step_name,
-    /// message, utc_offset_minutes — in that ordinal order) into <see cref="FailedJobInfo"/>. Moved
+    /// message, utc_offset_minutes, run_duration — in that ordinal order) into <see cref="FailedJobInfo"/>. Moved
     /// verbatim from the two host copies; the ONE reconciled difference at extraction time: the step_id
     /// conversion adopts the Dashboard's explicit <see cref="CultureInfo.InvariantCulture"/> (Lite omitted
     /// the provider — behaviorally identical for an int column).
-    /// <para>The offset is last so the six original ordinals are untouched.</para>
+    /// <para>The offset and the run duration come last so the six original ordinals are untouched.
+    /// <c>run_duration</c> is the raw msdb HHMMSS integer of the job's outcome row (the whole run);
+    /// <see cref="RunDurationToSeconds"/> turns it into seconds.</para>
     /// </summary>
     public static async Task<List<FailedJobInfo>> ReadAsync(DbDataReader reader, CancellationToken cancellationToken)
     {
@@ -148,10 +151,25 @@ OPTION(RECOMPILE);";
                    the expression returns. */
                 UtcOffsetMinutes = reader.IsDBNull(6)
                     ? null
-                    : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture)
+                    : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture),
+                /* #8972: the outcome row's whole-run duration, so the card can say when the run failed and not
+                   only when it started. Read bare by ordinal for the same reason as the offset above. DBNull
+                   leaves the duration unknown, and the card then claims only the start. */
+                RunDurationSeconds = reader.IsDBNull(7)
+                    ? null
+                    : RunDurationToSeconds(Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture))
             });
         }
 
         return items;
     }
+
+    /// <summary>
+    /// #8972: converts msdb's <c>sysjobhistory.run_duration</c> to seconds. msdb stores the duration as a
+    /// decimal-digit HHMMSS integer, not as seconds: 2324 seconds (38 minutes 44 seconds) is stored as 3844.
+    /// The hours part is everything above the last four digits, so a run of 100 hours or more (1000000 and up)
+    /// converts correctly. This is the only place the conversion lives.
+    /// </summary>
+    public static int RunDurationToSeconds(int hhmmss)
+        => (hhmmss / 10000) * 3600 + ((hhmmss / 100) % 100) * 60 + (hhmmss % 100);
 }

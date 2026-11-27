@@ -53,19 +53,6 @@ public sealed class CheckpointLongestSyncRungTests
     /// <summary>The rung's version, read off the migration registered under <see cref="RungName"/>.</summary>
     public static int RungVersion => Rung.Version;
 
-    [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* No longer the top rung: V157 (mute-rule server_id) landed above it. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(RungVersion - 1, versions);
-    }
-
     /// <summary>
     /// ONE ALTER adding exactly two columns - nullable, no DEFAULT, no backfill, no table, no index, no view, nothing
     /// else - on the store's own plain table only.

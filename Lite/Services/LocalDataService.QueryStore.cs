@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Database;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
@@ -99,7 +100,7 @@ WITH deduped AS
     -- whose closing fetch lands after the range ends -- was dropped entirely, which is the collection lag
     -- #1841 set out to remove showing up one layer down.
     AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
     -- Pruning bounds, NOT filters: neither can exclude a row the predicate above keeps in any realistic
     -- store. They earn their place because v_query_store_stats unions the live table with the parquet
     -- archive, and bounds on collection_time are what let the reader skip archive row groups instead of
@@ -111,13 +112,15 @@ WITH deduped AS
     -- collection_time >= $2. The extra day is slack against clock skew between the monitored server's
     -- interval clock and ours.
     --
-    -- The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
-    -- collection_time exceeds its interval start by the interval's own length -- at most 1 day, since
-    -- Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however long the
-    -- collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum and 29 of
-    -- collector-outage allowance. A month-long outage that then back-collects an interval straddling an
-    -- old window's edge could still omit that one bar; the data stays in the store, and the alternative
-    -- (no ceiling) makes every historical window scan to the present.
+    -- The CEILING is a month rather than tight. A row's collection_time exceeds its interval start by the
+    -- interval's own length -- at most 1 day, since Query Store's INTERVAL_LENGTH_MINUTES accepts only
+    -- 1/5/10/15/30/60/1440 -- plus how far behind the collector was. QueryStoreCollectionCeiling bounds that
+    -- for the rows this collector writes, but the parquet archive keeps months of rows, and rows earlier
+    -- collector versions wrote can trail by longer (a wider backlog window, an uncapped replica look-back).
+    -- So 30 days is 1 day of engine maximum and 29 of collector-outage allowance. A month-long outage that
+    -- then back-collected an interval straddling an old window's edge could still omit that one bar; the
+    -- data stays in the store, and the alternative (no ceiling) makes every historical window scan to the
+    -- present.
     AND   collection_time >= $2 - INTERVAL '1 day'
     AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + @"
 )
@@ -174,7 +177,7 @@ ORDER BY bucket";
     }
         }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null, bool untilExhausted = false)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -186,6 +189,11 @@ ORDER BY bucket";
 
         async Task<List<QueryStoreRow>> ReadAsync(string relation)
         {
+        /* #9195: a window that reaches into the archive reads the view, and the newest-row and text lookups below would scan the archive's files
+           for the page's keys. The archive's newest time is read here, before the connection (a span miss takes the read lock itself). */
+        var archiveNewest = relation == "v_query_store_stats"
+            ? (await GetArchiveSpanAsync("query_store_stats", "collection_time", CancellationToken.None))?.Newest
+            : null;
         using var connection = await OpenConnectionAsync();
 
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
@@ -230,30 +238,28 @@ WITH latest AS (
        join on those two for the winning rows. Running the window over the payload sorted every column of every row
        in the window, which is the part of this read that grows with the window, and DuckDB keeps a copy of it per
        thread. The join's build side is one narrow row per interval. */
-    SELECT collection_id AS latest_id, collection_time AS latest_time
-    FROM
-    (
-        SELECT
-            collection_id,
-            collection_time,
-            ROW_NUMBER() OVER
-            (
-                PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                ORDER BY collection_time DESC, execution_count DESC
-            ) AS rn
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
-           the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
-           collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
-           Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
-           bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
-        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
-        AND   collection_time >= $2 - INTERVAL '1 day'
-        AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
-    ) w
-    WHERE rn = 1
+    /* #9195: the newest snapshot per interval by a hash aggregate on the narrow columns, not ROW_NUMBER() over them: the window sorts
+       every row of the window (about 4x the aggregate's time on 480,000 rows) and a server-wide read has the most rows. arg_max picks
+       the greatest (collection_time, execution_count), the row the window's ORDER BY collection_time DESC, execution_count DESC put first,
+       and the NULL-safe grouping is the window partition's. execution_count is nullable and DuckDB orders a NULL struct field above every
+       value, so COALESCE(execution_count, -1) sorts a NULL count lowest (a count is never below 0), which keeps the window's NULLS LAST
+       order on an execution_count tie (#9195). collection_time cannot be NULL here, the bounds below drop those rows. */
+    SELECT
+        arg_max(collection_id, (collection_time, COALESCE(execution_count, -1))) AS latest_id,
+        MAX(collection_time) AS latest_time
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
+       the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
+       collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
+       Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
+       bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
+
+    GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
 ),
 deduped AS (
     SELECT
@@ -274,7 +280,7 @@ deduped AS (
     WHERE server_id = $1
     /* #7776: the same window as the ranking above; the join on (id, time) already picks the winning snapshots, so this only has to keep them. */
     AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
     AND   collection_time >= $2 - INTERVAL '1 day'
     AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
 ),
@@ -436,7 +442,7 @@ ORDER BY p.page_ord";
             command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var candidateRows = new List<QueryStoreRow>();
-        using (var reader = await command.ExecuteReaderAsync())
+        using (var reader = await command.ExecuteProfiledReaderAsync("query-store-top-rank"))
         {
         while (await reader.ReadAsync())
         {
@@ -504,8 +510,35 @@ ORDER BY p.page_ord";
            as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
         /* #7256: with the window read from the hot table alone, a candidate's newest row is in the hot table (it has a row in the window,
            and the archive holds nothing that new), so the latest row and its text are read there. */
-        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation);
-        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values, relation);
+        var candidateKeys = candidateRows.Select(r => (r.DatabaseName, r.QueryId)).ToList();
+        /* #9195: every candidate has a row collected at or after this floor (the ranking's own), so its newest row is too. */
+        var latestFloor = startTime.AddDays(-1);
+        var latestRows = new Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>();
+        var texts = new Dictionary<(long CollectionId, DateTime CollectionTime), string?>();
+        var remainingKeys = candidateKeys;
+        if (archiveNewest is DateTime newestArchived)
+        {
+            /* #9195: a hot row newer than everything archived is the newest row of its key in the view too, so the keys the hot table answers
+               never open the archive's files, for the row or for its text. A key with no such row (its hot rows are all older than the archive's
+               newest: a backfilled slice stays in the hot table until the next archive pass) takes the view, as before. */
+            var hotRelation = PerformanceMonitorLite.Database.LiteTextDimensions.HotSource("query_store_stats");
+            var hotLatest = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateKeys, hotRelation, latestFloor);
+            var fromHot = hotLatest.Where(kv => kv.Value.CollectionTime > newestArchived).ToDictionary(kv => kv.Key, kv => kv.Value);
+            if (fromHot.Count > 0)
+            {
+                foreach (var kv in fromHot) latestRows[kv.Key] = kv.Value;
+                texts = await ReadQueryStoreTextByRowAsync(connection, serverId, fromHot.Values, hotRelation);
+                remainingKeys = candidateKeys.Where(k => !fromHot.ContainsKey(k)).ToList();
+            }
+        }
+
+        if (remainingKeys.Count > 0)
+        {
+            var viewLatest = await ReadQueryStoreLatestRowsAsync(connection, serverId, remainingKeys, relation, latestFloor);
+            foreach (var kv in viewLatest) latestRows[kv.Key] = kv.Value;
+            foreach (var kv in await ReadQueryStoreTextByRowAsync(connection, serverId, viewLatest.Values, relation)) texts[kv.Key] = kv.Value;
+        }
+
         var items = new List<QueryStoreRow>();
         foreach (var row in candidateRows)
         {
@@ -540,9 +573,23 @@ ORDER BY p.page_ord";
         return (items, candidateRows.Count);
         }
 
-        return await TopFill.RunAsync(top, RunRoundAsync);
+        /* #8570: untilExhausted is the existence test's fill (QueryStoreWindowHasRowsAsync), which ranks until a showable
+           group is found or every candidate was seen; the grid and the MCP page take the bounded one. */
+        return untilExhausted
+            ? await TopFill.RunUntilExhaustedAsync(top, RunRoundAsync)
+            : await TopFill.RunAsync(top, RunRoundAsync);
         }
     }
+
+    /// <summary>
+    /// #8570: whether the window holds at least one group the Query Store top read would show: the same read (window,
+    /// database filter, deduplication, text resolution and WAITFOR exclusion) at top 1, with a fill that does not stop
+    /// short. The bounded fill of <see cref="GetQueryStoreTopQueriesAsync"/> ranks at most <c>top + 200</c> candidates
+    /// in three rounds, so its top-1 page is empty whenever more WAITFOR groups than its last round's limit rank above
+    /// the first showable one; this answer is false only when no showable group exists in the window.
+    /// </summary>
+    public async Task<bool> QueryStoreWindowHasRowsAsync(int serverId, int hoursBack, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        => (await GetQueryStoreTopQueriesAsync(serverId, hoursBack, 1, databaseNames: databaseNames, asOfUtc: asOfUtc, untilExhausted: true)).Count > 0;
 
     /// <summary>
     /// Gets query store comparison between a current time range and a baseline range.
@@ -594,7 +641,7 @@ WITH deduped_current AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+    AND   collection_time > $2 AND collection_time <= $3" + dbClause + @"
 ),
 deduped_baseline AS (
     SELECT
@@ -614,7 +661,7 @@ deduped_baseline AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+    AND   collection_time > $4 AND collection_time <= $5" + dbClause + @"
 ),
 top_current AS (
     SELECT database_name, query_hash
@@ -885,7 +932,7 @@ WITH deduped AS
     -- collection_time while placing on the interval start disagrees at both edges, and disagrees with the
     -- bars about whether an interval is in the window at all.
     AND   COALESCE(interval_start_time_utc, collection_time) >= $5
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $6
+    AND   COALESCE(interval_start_time_utc, collection_time) < $6
     -- Pruning bounds, NOT filters: v_query_store_stats unions the live table with the parquet archive, and
     -- bounds on collection_time are what let the reader skip archive row groups instead of scanning the whole
     -- glob. Same shipped shape and reasoning as the slicer's (#1892/#1923) — the floor is free because an
@@ -1019,7 +1066,7 @@ FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_id = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
@@ -1225,7 +1272,7 @@ WITH placed AS
         -- collection_time here put a point outside the range the caller asked for, and dropped the range's
         -- final interval because its closing fetch had not happened yet.
         AND   interval_start_time_utc >= $2
-        AND   interval_start_time_utc <= $3
+        AND   interval_start_time_utc < $3
         -- Pruning bounds only; see the slicer above for why the floor is free and why the ceiling is a
         -- month rather than tight.
         AND   collection_time >= $2 - INTERVAL '1 day'
@@ -1251,7 +1298,7 @@ WITH placed AS
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time < $3
     AND   interval_start_time_utc IS NULL" + dbClause + @"
 ),
 raw AS

@@ -81,14 +81,14 @@ public sealed class CiShardHangReportTests
     /// <summary>
     /// #5587, #5616, nightly.yml: step timeouts from numbers. Lite: the four PR legs (build.yml, since removed) ran the step for 5.6 to 19.9
     /// minutes over the last 7 successful dev pushes; the nightly's hash cut is less even, so the step gets twice that
-    /// (40) in a job of 50, and 19.9 is 50% of it, under the 70% bar. Darling: the six PR legs ran 5.5 to 10.9
-    /// minutes, the step gets 22 in a job of 40, and 10.9 is 50% of it.
+    /// (40) in a job of 50, and 19.9 is 50% of it, under the 70% bar. Darling (#9015): the six nightly legs ran 12.8 to 19.7
+    /// minutes on 11-17 and 11-18, the step gets 30 in a job of 50, and the slowest leg the refreshed weights predict, 19.1 minutes, is 64% of it.
     /// </summary>
     [Fact]
     public void NightlyStepTimeouts_FollowTheMeasuredNumbers()
     {
         var yml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "nightly.yml")).Replace("\r\n", "\n");
-        foreach (var (job, stepName, maxJob) in new[] { ("lite-tests", "Run Lite tests (shard)", 50), ("darling-pg", "Run Darling PG tests", 40) })
+        foreach (var (job, stepName, maxJob) in new[] { ("lite-tests", "Run Lite tests (shard)", 50), ("darling-pg", "Run Darling PG tests", 50) })
         {
             var step = ReadStep(stepName, "nightly.yml");
             var timeout = Regex.Match(step, @"(?m)^        timeout-minutes:\s*(?<n>\d+)\s*$");

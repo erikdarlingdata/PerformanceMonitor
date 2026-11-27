@@ -97,7 +97,7 @@ public sealed partial class ViewerDataService
             SELECT latch_class
             FROM v_latch_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY latch_class
             ORDER BY SUM(delta_wait_time_ms) DESC
@@ -117,6 +117,8 @@ public sealed partial class ViewerDataService
                 END AS interval_seconds
             FROM v_latch_stats
             WHERE server_id = $1
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   latch_class IN (SELECT latch_class FROM top_latches)
@@ -126,6 +128,7 @@ public sealed partial class ViewerDataService
             collection_time,
             CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
         FROM raw
+        WHERE collection_time > $2
         ORDER BY latch_class, collection_time
         """;
 
@@ -143,7 +146,7 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time) AS mx
             FROM v_latch_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -174,7 +177,7 @@ public sealed partial class ViewerDataService
             SELECT spinlock_name
             FROM v_spinlock_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY spinlock_name
             ORDER BY SUM(delta_collisions) DESC
@@ -194,6 +197,8 @@ public sealed partial class ViewerDataService
                 END AS interval_seconds
             FROM v_spinlock_stats
             WHERE server_id = $1
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   spinlock_name IN (SELECT spinlock_name FROM top_spinlocks)
@@ -203,6 +208,7 @@ public sealed partial class ViewerDataService
             collection_time,
             CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds END AS collisions_per_second
         FROM raw
+        WHERE collection_time > $2
         ORDER BY spinlock_name, collection_time
         """;
 
@@ -218,7 +224,7 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time) AS mx
             FROM v_spinlock_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -248,7 +254,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(LatchTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
@@ -275,7 +281,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(LatchSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #3653 A7: the stored interval decides whether the two deltas are readable. 0 is the calculator's
@@ -305,7 +311,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(SpinlockTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
@@ -332,7 +338,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(SpinlockSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #3653 A7 — the same three-state read as the latch snapshot. */

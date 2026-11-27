@@ -940,6 +940,8 @@ public sealed class MeasurementContractCensusTests
            must stay so for the two reads to agree. The unknowable row (interval 0) stores a zero delta, so it is excluded by the same
            predicate, and a sum over it would add nothing either way. */
         (TimescaleSupport.WaitStatsDailyView, "delta_wait_time_ms > 0"),
+        /* #8824: the hourly wait totals are the daily ones at hour grain, with the same filter for the same reason. */
+        (TimescaleSupport.WaitStatsHourlyView, "delta_wait_time_ms > 0"),
     };
 
     /// <summary>One continuous aggregate's CREATE, as read off <see cref="TimescaleSupport"/>.</summary>

@@ -75,6 +75,9 @@ public static class QueryStoreBackgroundIndexes
     /// <summary>Name of the partial btree over the wide table's non-Regular rows (#5506).</summary>
     public const string WideNonRegularFirstExecIndexName = "collect.ix_query_store_interval_wide_nonregular_first_exec";
 
+    /// <summary>Name of the partial btree over the wide table's rows with no interval start (#9276).</summary>
+    public const string WideNullStartFirstExecIndexName = "collect.ix_query_store_interval_wide_nullstart_first_exec";
+
     /// <summary>Name of the btree that lets the one-query history read seek its query on the wide table (#5807).</summary>
     public const string WideDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_wide_db_query_first_exec";
 
@@ -173,6 +176,41 @@ public static class QueryStoreBackgroundIndexes
         + "ON collect.query_store_interval_wide (server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate + ";",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_nonregular_first_exec;",
         IndexDefinition: "(server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate);
+
+    /// <summary>
+    /// A PARTIAL btree on <c>collect.query_store_interval_wide (server_id, first_execution_time) WHERE interval_start_time_utc IS
+    /// NULL</c> (#9276), built per partition by the partitioned path, the twin of <see cref="WideNonRegularFirstExec"/>.
+    ///
+    /// <para><b>Why.</b> The Query Store top read (<c>DarlingDataReader.QueryStoreTopTableSplitSql</c>) places a window by the
+    /// interval's start, and bounds <c>first_execution_time</c> below so the <c>(server_id, first_execution_time)</c> btree
+    /// narrows the range before the heap. A row WITH an interval start has a first execution no earlier than that start (an hour
+    /// of slack), so its floor is one hour under the window. A row WITHOUT one (the legacy shape, or a catalog join miss) is
+    /// placed by <c>collection_time</c> and needs the 26 hour floor (<see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>),
+    /// and one floor for both arms was that 26 hours: about half the heap pages a first call read were rows the window then
+    /// dropped (3286 cold blocks at 24 h where an hour's floor reads 1611). With this index the NULL-start arm is one range over
+    /// the few rows that have no start, so the other arm can take the short floor.</para>
+    ///
+    /// <para><b>HOT.</b> PostgreSQL decides heap-only updates by whether an indexed column's VALUE changes (a column named in the
+    /// index predicate counts as indexed; an equal value, and NULL to NULL, counts as unchanged), not by whether the upsert's SET
+    /// list names the column. The upsert writes <c>interval_start_time_utc = EXCLUDED.interval_start_time_utc</c>, but an
+    /// interval's start does not change between fetches of the same interval: it changes only when a NULL left by a catalog join
+    /// miss is filled, which is rare. So every ordinary update stays HOT; the rare fill is one non-HOT update. The write is
+    /// unconditional, so a later fetch that carries a NULL start would also clear a start that was filled: that update is non-HOT too,
+    /// and the row moves back to the other arm, so reads stay correct. The one place the
+    /// HOT census in <c>QueryStoreIntervalWideBrinIndexLiveTests</c> exempts a predicate-only column is this pair.
+    /// <c>QueryStoreTopSplitLiveTests.TheUpsertsSetList_StaysHot_WhenTheIntervalStartIsUnchanged_AndNotWhenANullStartIsFilled</c>
+    /// proves an unchanged start is HOT and a filled NULL start is not; <c>QueryStoreBackgroundIndexesLiveTests</c> proves the
+    /// whole set list stays HOT with the start unchanged.</para>
+    ///
+    /// <para><b>Until it is built</b> the read keeps its single 26 hour floor and the statement it had before.</para>
+    /// </summary>
+    public static readonly IndexSpec WideNullStartFirstExec = new(
+        WideNullStartFirstExecIndexName,
+        "collect.query_store_interval_wide",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_nullstart_first_exec "
+        + "ON collect.query_store_interval_wide (server_id, first_execution_time) WHERE interval_start_time_utc IS NULL;",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_nullstart_first_exec;",
+        IndexDefinition: "(server_id, first_execution_time) WHERE interval_start_time_utc IS NULL");
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
@@ -298,6 +336,7 @@ public static class QueryStoreBackgroundIndexes
         WideServerFirstExec,
         LatestServerFirstExec,
         WideNonRegularFirstExec,
+        WideNullStartFirstExec,
         WideDatabaseQueryFirstExec,
         LatestDatabaseQueryFirstExec,
         StatementTextServerLastSeen,
@@ -313,6 +352,26 @@ SELECT
      FROM pg_index AS i
      WHERE i.indexrelid = to_regclass($2)) AS index_valid,
     (SELECT c.relkind::text FROM pg_class AS c WHERE c.oid = to_regclass($1)) AS table_kind;";
+
+    /// <summary>One boolean: <paramref name="indexName"/> exists and is valid. <c>to_regclass</c> answers NULL for a name that
+    /// resolves to nothing, so a store without the index answers false and raises nothing. A day-partitioned parent index is valid
+    /// once every leaf has attached its child.</summary>
+    internal const string BuiltSql =
+        "SELECT COALESCE((SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1)), FALSE);";
+
+    /// <summary>
+    /// Whether <paramref name="spec"/>'s index is built and valid on the store behind <paramref name="connection"/> (#9276), for a
+    /// read that chooses its statement by it. Run inside the read's own transaction when it has one. Never cached: the build
+    /// runs in the background after a start, and a read that finds the index gone takes the shape that needs none.
+    /// </summary>
+    public static async Task<bool> IsBuiltAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, IndexSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        await using var command = new NpgsqlCommand(BuiltSql, connection, transaction) { CommandTimeout = timeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.IndexName });
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+    }
 
     /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. $1 is the
        table's schema and $2 its name (SplitTableName), each compared as it is rather than through a concatenation, so
@@ -415,7 +474,7 @@ SELECT EXISTS
             specs,
             async (spec, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackgroundIndexes, token).ConfigureAwait(false);
                 await EnsureAsync(connection, spec, logger, token).ConfigureAwait(false);
             },
             cancellationToken);
@@ -586,7 +645,7 @@ SELECT EXISTS
     }
 
     /// <summary>Deadline for the lock wait of the short DDL the partitioned path runs, in seconds.</summary>
-    internal const int PartitionedLockTimeoutSeconds = 5;
+    internal const int PartitionedLockTimeoutSeconds = 1;
 
     /* The partitioned parent's leaf partitions ($1), each with whether it already has a child of the parent index ($2). */
     internal const string LeafStateSql = @"
@@ -611,13 +670,18 @@ ORDER BY c.relname;";
     /// attached child gets a <c>CONCURRENTLY</c> build on the leaf (an INVALID leftover of an interrupted build dropped
     /// first) and an <c>ALTER INDEX ... ATTACH PARTITION</c>. The parent turns VALID by itself when the last leaf attaches.
     /// A partition made afterwards builds its own child at ATTACH, on an empty table, so this runs to completion once.
-    /// The two short statements that take a parent-level lock run in a transaction under a 5 s <c>lock_timeout</c>; a
-    /// timeout is an error here (the delayed task logs it and the next start retries).
+    /// The two short statements that take a parent-level lock run in a transaction under a 1 s <c>lock_timeout</c> (#9313: a queued
+    /// lock request stalls every later reader and writer of that table, so each attempt is short). A
+    /// timeout is retried within the start (#9313, <see cref="LockRetryPlan"/>): a leaf whose ATTACH still times out keeps its
+    /// valid child, the later leaves go on, and one come-back pass retries it. Only a leaf still unattached after that throws
+    /// (the delayed task logs it and the next start retries). A valid unattached child is attached as it is, never rebuilt.
     /// </summary>
     internal static async Task EnsurePartitionedAsync(
         NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken,
-        Func<string, CancellationToken, Task>? beforeLeafBuild = null)
+        Func<string, CancellationToken, Task>? beforeLeafBuild = null,
+        LockRetryPlan? retryPlan = null)
     {
+        var plan = retryPlan ?? LockRetryPlan.Production;
         if (string.IsNullOrEmpty(spec.IndexDefinition))
         {
             throw new InvalidOperationException($"Index spec {spec.IndexName} has no IndexDefinition, which the partitioned path needs.");
@@ -627,10 +691,24 @@ ORDER BY c.relname;";
         var tableShortName = SplitTableName(spec.TableName).Name;
         var started = System.Diagnostics.Stopwatch.StartNew();
 
-        await ExecuteInLockTimeoutAsync(
-            connection,
-            $"CREATE INDEX IF NOT EXISTS {indexShortName} ON ONLY {spec.TableName} {spec.IndexDefinition};",
-            cancellationToken).ConfigureAwait(false);
+        /* #9313: CREATE INDEX IF NOT EXISTS takes its SHARE lock on the parent before it notices the index exists, and a queued
+           SHARE stalls every insert into the table. When the parent index exists (valid or INVALID) the statement does nothing,
+           so it is not run. */
+        bool parentIndexExists;
+        await using (var exists = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL;", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+        {
+            exists.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.IndexName });
+            parentIndexExists = (bool)(await exists.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+        }
+
+        if (!parentIndexExists)
+        {
+            await ExecuteWithLockRetryAsync(
+                connection,
+                $"CREATE INDEX IF NOT EXISTS {indexShortName} ON ONLY {spec.TableName} {spec.IndexDefinition};",
+                new LockAttempt("CREATE INDEX ON ONLY", spec.TableName, 1, 1),
+                spec.IndexName, logger, plan, new[] { spec.TableName }, cancellationToken).ConfigureAwait(false);
+        }
 
         var leaves = new List<(string Leaf, string Suffix, bool Attached)>();
         await using (var state = new NpgsqlCommand(LeafStateSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds })
@@ -647,6 +725,7 @@ ORDER BY c.relname;";
         }
 
         var built = 0;
+        var unattached = new List<(string Leaf, string Child)>();
         foreach (var (leaf, suffix, attached) in leaves)
         {
             if (attached)
@@ -695,9 +774,19 @@ ORDER BY c.relname;";
                     await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                await ExecuteInLockTimeoutAsync(
-                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
-                built++;
+                try
+                {
+                    await ExecuteWithLockRetryAsync(
+                        connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
+                        new LockAttempt("ATTACH PARTITION", leaf, 1, 1), spec.IndexName, logger, plan, new[] { leaf, childQualified, spec.IndexName }, cancellationToken).ConfigureAwait(false);
+                    built++;
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+                {
+                    /* #9313: a writer held this leaf for every attempt. Its valid child stays, and the leaves after it still get
+                       theirs. The come-back pass below tries it again once more. */
+                    unattached.Add((leaf, childQualified));
+                }
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
@@ -712,6 +801,38 @@ ORDER BY c.relname;";
             }
         }
 
+        /* #9313: the come-back pass. Each leaf whose ATTACH timed out through all its attempts gets one more bounded round,
+           after every other leaf is done and the writer that held it has had the whole first pass to finish. */
+        var stillUnattached = new List<string>();
+        foreach (var (leaf, childQualified) in unattached)
+        {
+            try
+            {
+                await ExecuteWithLockRetryAsync(
+                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
+                    new LockAttempt("ATTACH PARTITION", leaf, 1, 2), spec.IndexName, logger, plan, new[] { leaf, childQualified, spec.IndexName }, cancellationToken).ConfigureAwait(false);
+                built++;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                stillUnattached.Add(leaf);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                logger.LogInformation(
+                    "Query Store index {Index}: leaf {Leaf} was dropped by retention before its index was attached; skipping it.",
+                    spec.IndexName, leaf);
+            }
+        }
+
+        if (stillUnattached.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Query Store index {spec.IndexName} on {spec.TableName}: the ATTACH of {stillUnattached.Count} leaf index(es) "
+                + $"timed out on every attempt and is left for the next start: {string.Join(", ", stillUnattached)}. "
+                + "The other leaves are attached.");
+        }
+
         bool parentValid;
         await using (var final = new NpgsqlCommand("SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
         {
@@ -724,10 +845,117 @@ ORDER BY c.relname;";
             spec.IndexName, spec.TableName, built, started.Elapsed.TotalSeconds, parentValid ? "valid" : "INVALID");
     }
 
-    private static async Task ExecuteInLockTimeoutAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    /// <summary>One try of a short lock-taking statement: which statement, on what, which attempt, in which pass (1 first, 2 come-back).</summary>
+    internal readonly record struct LockAttempt(string Statement, string Leaf, int Attempt, int Pass);
+
+    /// <summary>
+    /// How the partitioned path retries a lock-timed-out short statement (#9313): how many attempts, the per-attempt
+    /// <c>lock_timeout</c>, the wait after each failed attempt, and a hook that runs before every attempt (tests only).
+    /// </summary>
+    internal sealed record LockRetryPlan(
+        int MaxAttempts,
+        TimeSpan LockTimeout,
+        Func<int, TimeSpan> BackoffAfterAttempt,
+        Func<LockAttempt, CancellationToken, Task>? BeforeAttempt = null)
+    {
+        /// <summary>Ten attempts of 1 s each, waiting 2, 4 and 8 s after the first three and 15 s after every later one.</summary>
+        internal static readonly LockRetryPlan Production = new(
+            10,
+            TimeSpan.FromSeconds(PartitionedLockTimeoutSeconds),
+            failedAttempt => TimeSpan.FromSeconds(failedAttempt switch { 1 => 2, 2 => 4, 3 => 8, _ => 15 }));
+    }
+
+    /* Runs one short statement under the plan's lock_timeout, up to MaxAttempts times. Only 55P03 is retried and any other
+       error goes out as it is. The last attempt's 55P03 goes out too, for the caller to turn into "leave this leaf for later". */
+    private static async Task ExecuteWithLockRetryAsync(
+        NpgsqlConnection connection, string sql, LockAttempt first, string indexName, ILogger logger, LockRetryPlan plan,
+        string[] lockTargets, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var current = first with { Attempt = attempt };
+            if (plan.BeforeAttempt is not null)
+            {
+                await plan.BeforeAttempt(current, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                await ExecuteInLockTimeoutAsync(connection, sql, plan.LockTimeout, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                var seconds = plan.LockTimeout.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                var holders = await DescribeLockHoldersAsync(connection, lockTargets, cancellationToken).ConfigureAwait(false);
+                if (attempt >= plan.MaxAttempts)
+                {
+                    logger.LogInformation(
+                        "Query Store index {Index}: lock for {Statement} on {Leaf} not granted within {Seconds} s (attempt {Attempt} of {Max}); giving up on it for now; held by: {Holders}.",
+                        indexName, first.Statement, first.Leaf, seconds, attempt, plan.MaxAttempts, holders);
+                    throw;
+                }
+
+                var wait = plan.BackoffAfterAttempt(attempt);
+                logger.LogInformation(
+                    "Query Store index {Index}: lock for {Statement} on {Leaf} not granted within {Seconds} s (attempt {Attempt} of {Max}); retrying in {Wait}s; held by: {Holders}.",
+                    indexName, first.Statement, first.Leaf, seconds, attempt, plan.MaxAttempts,
+                    wait.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture), holders);
+                if (wait > TimeSpan.Zero)
+                {
+                    await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    /* The sessions that hold a granted lock on the statement's target relations (#9313), for the timed-out attempt's log line.
+       Never reads query text: pid, backend type, application name, state, the lock modes and the transaction age only. */
+    internal const string LockHoldersSql = @"
+SELECT l.pid,
+       coalesce(a.backend_type, 'unknown'),
+       coalesce(a.application_name, ''),
+       coalesce(a.state, 'unknown'),
+       string_agg(DISTINCT l.mode, '/'),
+       coalesce(floor(extract(epoch FROM (now() - coalesce(a.xact_start, a.state_change))))::bigint, 0)
+FROM pg_locks AS l
+LEFT JOIN pg_stat_activity AS a ON a.pid = l.pid
+WHERE l.granted
+AND   l.locktype = 'relation'
+AND   l.pid <> pg_backend_pid()
+AND   l.relation IN (SELECT to_regclass(t)::oid FROM unnest($1::text[]) AS t WHERE to_regclass(t) IS NOT NULL)
+GROUP BY l.pid, a.backend_type, a.application_name, a.state, a.xact_start, a.state_change
+ORDER BY min(a.xact_start), l.pid
+LIMIT 5;";
+
+    /* Runs after the timed-out attempt's transaction has rolled back. A failed read is "not seen", never an error out of the retry. */
+    private static async Task<string> DescribeLockHoldersAsync(NpgsqlConnection connection, string[] lockTargets, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var holders = new List<string>();
+            await using var command = new NpgsqlCommand(LockHoldersSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = lockTargets });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                holders.Add(string.Create(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"pid {reader.GetInt32(0)} {reader.GetString(1)} '{reader.GetString(2)}' {reader.GetString(3)} {reader.GetInt64(5)} s {reader.GetString(4)}"));
+            }
+
+            return holders.Count == 0 ? "not seen" : string.Join(", ", holders);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return "not seen";
+        }
+    }
+
+    private static async Task ExecuteInLockTimeoutAsync(NpgsqlConnection connection, string sql, TimeSpan lockTimeout, CancellationToken cancellationToken)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{PartitionedLockTimeoutSeconds}s';", connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
+        await using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{(int)lockTimeout.TotalMilliseconds}ms';", connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

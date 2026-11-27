@@ -134,6 +134,14 @@ public static partial class DarlingWebEndpoints
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
+        // #9642: the web access groups are managed from the Viewer and these MCP tools. The web dashboard serves no page for them, so a group list is not a page read.
+        "get_web_access_groups",
+        // #9642: the five writes are group administration. A web seat reads no endpoint for them, so a web session never holds group admin.
+        "set_advanced_web_access",
+        "create_web_access_group",
+        "update_web_access_group",
+        "rotate_web_access_group_token",
+        "delete_web_access_group",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "analyze_query_plan",
@@ -192,10 +200,15 @@ public static partial class DarlingWebEndpoints
         "generate_webhook_signing_key",
         "remove_webhook_signing_key",
         "update_notification_channels",
+        /* #9636: a test send goes from the service over MCP and the web has no route for it. */
+        "send_test_notification",
         "dismiss_alert_history",
         "restore_alert_history",
         "set_quiet_window",
         "clear_quiet_window",
+        /* #9485: a change window is declared and cleared over MCP; the web serves the held requests through the investigation reads. */
+        "declare_change_window",
+        "clear_change_window",
         /* #6397: the Database State expectations are edited in the Viewer's override editor; the web has no route for them. */
         "get_database_state_expectations",
         "set_database_state_expected",
@@ -223,6 +236,11 @@ public static partial class DarlingWebEndpoints
         "add_servers",
         "edit_server",
         "remove_server",
+        /* #9641: the alert source tools make, change and drop database logins and read a registry the web has no page for. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
+        "list_alert_sources",
         "create_custom_alert_rule",
         "get_custom_alert_rule",
         "list_custom_alert_rules",
@@ -273,6 +291,8 @@ public static partial class DarlingWebEndpoints
         "set_collector_databases",
         "reset_collector_schedules",
         "get_collector_schedules",
+        /* #9417: the install check, whose reader is an operator or agent after a restart; no page read mirrors it. */
+        "get_collector_readiness",
         /* #6398: the known-pattern writes are MCP-only; the web editor has its own routes (POST/PUT/DELETE /api/known-patterns, see DarlingKnownPatternRoutes). */
         "create_known_pattern",
         "update_known_pattern",
@@ -281,12 +301,23 @@ public static partial class DarlingWebEndpoints
         "update_service_flags",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
+        /* #9644: the password key tools are MCP writes under mcp.allowServerAdmin. The web page has no route for them. */
+        "new_password_key",
+        "reset_password_key",
         "get_server_actions",
+        /* #9643: the personal token page has its own routes (/api/mcp-tokens); the MCP mint and revoke are under mcp.allowServerAdmin and the list read is MCP-only. */
+        "mint_personal_token",
+        "revoke_personal_token",
+        "get_personal_tokens",
         /* #7107: the people directory read. The Admin People tab has its own web routes (GET /api/people and PUT /api/people/{command}). */
         "get_people",
         /* #6402: the read of the fields edit_server changes; the web edit form has its own read (GET /api/admin/servers/{id}), so no /api/read page mirrors it. */
         "get_server_settings",
         "get_tool_guide",
+        /* #9388: call_tool runs another tool by name on /lean, so it reads nothing of its own and no page mirrors it. */
+        "call_tool",
+        /* #9388: find_tools searches the served tool list; no page mirrors it. */
+        "find_tools",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
         "get_investigation_evidence",
@@ -444,7 +475,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null, bool allowWindowsAuthOverUnverifiedTls = false, NpgsqlDataSource? composeReadPostgres = null)
+    internal static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null, bool allowWindowsAuthOverUnverifiedTls = false, NpgsqlDataSource? composeReadPostgres = null, bool? oidcRoleMapping = null, DarlingPersonalTokenSnapshot? personalTokenSnapshot = null, PersonalTokenSettings? personalTokens = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -612,7 +643,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
                         readScope.Scope.Uncount();
                         admission.NoteCacheHit(ReadSurface.Web, name);
-                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope, WebReplyBytes(stored) ?? 0);
                         return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, readSweepBudget);
                     }
 
@@ -644,7 +675,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                             admission.NoteCacheHit(ReadSurface.Web, name);
                         }
 
-                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope,
+                            shared.Text is { } sharedText ? WebReplyBytes(sharedText) : null);
                         return shared.Text is { } text
                             ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted, readSweepBudget)
                             : shared.Answer;
@@ -824,13 +856,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
                        ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
                        own statement_timeout and formatted it); everything else that reaches here is Ok. */
-                    var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
-                        ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
+                    var isServerError = ClassifyToolResponse(result) == ToolResponseKind.ServerError;
+                    var webSentence = isServerError ? McpHelpers.ErrorMessageOf(result) : null;
+                    var webOutcome = isServerError
+                        ? ReadOutcomeClassifier.ClassifySentence(webSentence!, context.RequestAborted)
                         : ReadOutcome.Ok;
                     var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
-                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                    /* #9433: the size of the reply, counted from the text the read holds. It is the tool's answer, before the statement
+                       sweep: the sweep only ever shortens a body, and only when the statement filter withholds text. */
+                    var webReplyBytes = WebReplyBytes(result);
+                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope, webReplyBytes);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
-                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
+                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome, webSentence), webReplyBytes);
 
                     /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
                     ThrowIfCallerGone(result, context.RequestAborted);
@@ -842,7 +879,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore, adminArm, composeReadPostgres);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore, adminArm, composeReadPostgres, oidcRoleMapping,
+            personalTokensServed: personalTokens is not null && personalTokenSnapshot is not null);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         DarlingKnownPatternRoutes.Map(app, postgres, logger);
@@ -854,6 +892,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore, adminArm);
         MapAdminServers(app, postgres);
         MapPeople(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore, adminArm);
+        MapPersonalTokens(app, ownerSource, personalTokenSnapshot, personalTokens, logger, TimeProvider.System);
         MapProposals(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, dataDetail, managedStore, adminArm);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });

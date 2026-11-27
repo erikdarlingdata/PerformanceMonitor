@@ -198,26 +198,16 @@ internal static class DarlingMcpAgentMuteDirect
         string reason, DateTime now, Func<NpgsqlConnection, NpgsqlTransaction, Task<(string Answer, MuteRule? Before, MuteRule? After)>> body,
         string changedStatus, CancellationToken ct)
     {
-        if (!seat.AgentMuteRulesAllowed)
-            return Refusal(new AgentActionRefusal(OffCode,
-                $"An agent token may not write mute or digest rules without a claim on this service: {SettingName} is false in darling.json. Nothing was written."));
-        /* #8473: the host hands the seat the store owner's source and the worker publishes it once it has connected. Until then the only other
-           source is the tool's own, whose role cannot write the journal row under managed roles, so the answer is a refusal rather than an error
-           from the insert, the same word the Level 3 tools use. A seat with no owner source at all (a test host) uses the tool's own source. */
-        if (seat.Owner is { } owner && owner.Read() is null)
-            return Refusal(new AgentActionRefusal(DarlingMcpPlanForceTools.NoOwnerSource,
-                "The service has not published its store owner connection yet, so the rule and its journal row cannot be written. Try again shortly. Nothing was written."));
+        if (SeatRefusal(seat, MuteOffMessage, MuteNoOwnerMessage) is { } seatRefusal)
+            return Refusal(seatRefusal);
         try
         {
             await using var connection = seat.Owner?.Read() is { } ownerRead ? await ownerRead.OpenConnectionAsync(ct) : await postgres.OpenConnectionAsync(ct);
             await using var transaction = await connection.BeginTransactionAsync(ct);
             /* The switch read takes the service row FOR NO KEY UPDATE, so every direct write waits its turn here: the hourly count and the
                same-match check below read the journal as the write before them left it, and two calls cannot both see room. */
-            if (await InvestigationRequestStore.DirectChangeSwitchRefusalAsync(connection, transaction, ct) is { } off)
-                return Refusal(off);
-            if (await WriteCountInLastHourAsync(connection, transaction, now, agentId, ct) >= MaxWritesPerHour)
-                return Refusal(new AgentActionRefusal(RateCode,
-                    $"This service allows each agent {MaxWritesPerHour} mute rule writes an hour without a claim, and this agent made that many in the last hour. Wait, or ask an operator. Nothing was written."));
+            if (await GuardAsync(connection, transaction, now, agentId, MuteRateMessage, ct) is { } guard)
+                return Refusal(guard);
 
             var (answer, before, after) = await body(connection, transaction);
             if (!string.Equals(StatusOf(answer), changedStatus, StringComparison.Ordinal))
@@ -233,6 +223,42 @@ internal static class DarlingMcpAgentMuteDirect
         {
             return McpHelpers.FormatError(tool, ex);
         }
+    }
+
+    private const string MuteOffMessage = $"An agent token may not write mute or digest rules without a claim on this service: {SettingName} is false in darling.json. Nothing was written.";
+
+    private const string MuteNoOwnerMessage = "The service has not published its store owner connection yet, so the rule and its journal row cannot be written. Try again shortly. Nothing was written.";
+
+    private static readonly string MuteRateMessage = $"This service allows each agent {MaxWritesPerHour} mute rule writes an hour without a claim, and this agent made that many in the last hour. Wait, or ask an operator. Nothing was written.";
+
+    /// <summary>
+    /// The checks that need no connection, for an agent's direct write (#7414, #9485): <c>mcp.allowAgentMuteRules</c> is on, and the host has
+    /// published the store owner's source (#8473: the journal row is the owner's alone, so until the worker has connected the answer is a
+    /// refusal and not an error from the insert; a seat with no owner source at all, a test host, writes on the tool's own source). The mute
+    /// rule verbs and the change window tools share it, each with its own message.
+    /// </summary>
+    internal static AgentActionRefusal? SeatRefusal(DarlingAgentActionSeat seat, string offMessage, string noOwnerMessage)
+    {
+        if (!seat.AgentMuteRulesAllowed)
+            return new AgentActionRefusal(OffCode, offMessage);
+        if (seat.Owner is { } owner && owner.Read() is null)
+            return new AgentActionRefusal(DarlingMcpPlanForceTools.NoOwnerSource, noOwnerMessage);
+        return null;
+    }
+
+    /// <summary>
+    /// The checks that read the store, run in the write's own transaction (#7414, #8473, #9485): the service's agent switch, which this takes
+    /// <c>FOR NO KEY UPDATE</c> so every direct write waits its turn, then the agent's hourly cap. The cap counts journal rows by actor, so
+    /// the mute rule verbs and the change window tools count against ONE cap per agent: twenty direct writes an hour in all, not twenty of each.
+    /// </summary>
+    internal static async Task<AgentActionRefusal?> GuardAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        string agentId, string rateMessage, CancellationToken ct)
+    {
+        if (await InvestigationRequestStore.DirectChangeSwitchRefusalAsync(connection, transaction, ct) is { } off)
+            return off;
+        return await WriteCountInLastHourAsync(connection, transaction, now, agentId, ct) >= MaxWritesPerHour
+            ? new AgentActionRefusal(RateCode, rateMessage)
+            : null;
     }
 
     /* #8473: one agent's direct writes, by the journal actor, so the hourly cap is each agent's own. */

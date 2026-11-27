@@ -31,16 +31,51 @@ public sealed class QueryStoreWideReadGuardRawRouteTests
             QueryStoreWideReadGuard.RawLimitFor(collector));
 
     [Fact]
-    public void TheLimits_AreTheFieldsWorstCostPerRow_OverTheBudget()
+    public void TheLimits_AreTheMeasuredWorstCostPerRow_OverTheBudget()
     {
-        /* 35.9 s over 12.2 M rows is about 2.9 us a row, and 45 s over that is about 15 M; 20.8 s over 19.7 M is about 1.1 us a row,
-           and 45 s over that is about 40 M. */
+        /* #9357: procedure_stats was calibrated against a cheap day and now holds the same 15 M as query_stats. */
         Assert.Equal(15_000_000, ComposeLimits.MaxRawQueryStatsRows);
-        Assert.Equal(40_000_000, ComposeLimits.MaxRawProcedureStatsRows);
-        Assert.InRange(45d / (35.9d / 12_200_000d), 15_000_000d, 15_500_000d);
-        Assert.InRange(45d / (20.8d / 19_700_000d), 40_000_000d, 43_000_000d);
+        Assert.Equal(15_000_000, ComposeLimits.MaxRawProcedureStatsRows);
         Assert.Equal(ComposeLimits.MaxRawQueryStatsRows, QueryStoreWideReadGuard.RawLimitFor("query_stats"));
         Assert.Equal(ComposeLimits.MaxRawProcedureStatsRows, QueryStoreWideReadGuard.RawLimitFor("procedure_stats"));
+    }
+
+    private static ComposeFilter FilterOn(string source, string dimension, ComposeFilterOp op, params string[] values) =>
+        new(new ComposeDimension(source, dimension, dimension, false), op, new ComposeFilterValue(values, null));
+
+    /// <summary>The refusal for an estimate of <paramref name="rows"/> over a day, judged as the panel runner does: by the collector and the
+    /// statement's own filters.</summary>
+    private static string? RefuseFiltered(long rows, string collector, params ComposeFilter[] filters) =>
+        QueryStoreWideReadGuard.RawRefusal(
+            new QueryStoreWideReadGuard.RawEstimate(rows, rows, 43), collector, Start, Start.AddDays(1),
+            QueryStoreWideReadGuard.RawLimitFor(collector, filters));
+
+    /// <summary>#9357: the estimate counts the whole collector and cannot see filters, so an estimate between the two limits refuses an
+    /// unfiltered raw procedure_stats statement and runs one carrying an eq filter (one value, or a list: the in form). A filter that
+    /// does not narrow by equality (neq, like, a range) does not count, and query_stats keeps one limit with or without a filter.</summary>
+    [Fact]
+    public void AnEqFilter_KeepsTheOldLimit_ForProcedureStatsOnly()
+    {
+        const long between = 25_000_000;
+        Assert.True(between > ComposeLimits.MaxRawProcedureStatsRows && between <= ComposeLimits.MaxRawFilteredProcedureStatsRows);
+        Assert.Equal(40_000_000, ComposeLimits.MaxRawFilteredProcedureStatsRows);
+
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats"));
+        Assert.Null(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Eq, "usp_one")));
+        Assert.Null(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "database_name", ComposeFilterOp.Eq, "db_a", "db_b")));
+        Assert.Null(RefuseFiltered(between, "procedure_stats",
+            FilterOn("procedure_stats", "object_name", ComposeFilterOp.Neq, "usp_one"), FilterOn("procedure_stats", "database_name", ComposeFilterOp.Eq, "db_a")));
+
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Neq, "usp_one")));
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Like, "usp%")));
+
+        /* A filtered statement still refuses past the old limit. */
+        Assert.NotNull(RefuseFiltered(ComposeLimits.MaxRawFilteredProcedureStatsRows + 1, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Eq, "usp_one")));
+
+        Assert.NotNull(RefuseFiltered(between, "query_stats"));
+        Assert.NotNull(RefuseFiltered(between, "query_stats", FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01")));
+        Assert.Null(RefuseFiltered(ComposeLimits.MaxRawQueryStatsRows, "query_stats", FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01")));
+        Assert.Equal(ComposeLimits.MaxRawQueryStatsRows, QueryStoreWideReadGuard.RawLimitFor("query_stats", new[] { FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01") }));
     }
 
     [Theory]
@@ -58,11 +93,26 @@ public sealed class QueryStoreWideReadGuardRawRouteTests
     [Fact]
     public void TheFieldsDailyFleetPanels_AreNeverRefused()
     {
-        /* The week's highest day of each: 12.4 M query_stats rows and 20.5 M procedure_stats rows across 43 servers. */
+        /* A day under the limit of each runs, and two days of a half-limit day still fit. */
         Assert.Null(Refuse(12_400_000, "query_stats", 1));
-        Assert.Null(Refuse(20_500_000, "procedure_stats", 1));
-        /* procedure_stats at the last full day's 19.7 M still fits two days. */
-        Assert.Null(Refuse(19_700_000, "procedure_stats", 2));
+        Assert.Null(Refuse(14_900_000, "procedure_stats", 1));
+        Assert.Null(Refuse(7_400_000, "procedure_stats", 2));
+    }
+
+    /// <summary>#9357: a procedure_stats day estimated between 15 M and the old 40 M used to run (to the statement timeout). It now
+    /// refuses with the narrower-window text, and the window it names is the longest that fits the new limit.</summary>
+    [Fact]
+    public void AProcedureStatsDay_BetweenTheNewLimitAndTheOldOne_NowRefusesWithTheNarrowerWindowText()
+    {
+        Assert.Equal(
+            "This panel needs about 20.5 million procedure statistics rows (43 servers, 1 day), over the limit of 15 million. "
+            + "Choose fewer servers or a window of 17 hours or less.",
+            Refuse(20_500_000, "procedure_stats", 1));
+        Assert.Equal(
+            "This panel needs about 30 million procedure statistics rows (43 servers, 1 day), over the limit of 15 million. "
+            + "Choose fewer servers or a window of 12 hours or less.",
+            Refuse(30_000_000, "procedure_stats", 1));
+        Assert.Null(Refuse(15_000_000, "procedure_stats", 1));
     }
 
     [Fact]
@@ -73,8 +123,8 @@ public sealed class QueryStoreWideReadGuardRawRouteTests
             + "Choose fewer servers or a window of 29 hours or less.",
             Refuse(12_200_000, "query_stats", 2));
         Assert.Equal(
-            "This panel needs about 59.1 million procedure statistics rows (43 servers, 3 days), over the limit of 40 million. "
-            + "Choose fewer servers or a window of 2 days or less.",
+            "This panel needs about 59.1 million procedure statistics rows (43 servers, 3 days), over the limit of 15 million. "
+            + "Choose fewer servers or a window of 18 hours or less.",
             Refuse(19_700_000, "procedure_stats", 3));
 
         /* A day alone over the limit leaves no window of an hour or more that fits: the message asks for fewer servers only. */

@@ -88,7 +88,7 @@ internal static class DarlingLongQueryReader
         /* #7900: the window is on the event's own time, when it happened, as get_blocking and get_deadlocks window theirs. $7 is
            the EventWindowFloor for $2, a partition-column bound with no upper limit, so the hypertable excludes its older chunks
            and an event collected after the window's end, or late after an outage, still lists. */
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   collection_time >= $7
         AND   ($5::text[] IS NULL OR database_name = ANY($5))

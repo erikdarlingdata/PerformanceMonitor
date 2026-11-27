@@ -409,7 +409,7 @@ AND   day = $2::date;";
         int pass1 = 0, pass2 = 0, failed = 0, started = 0;
         long removed;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStoreTopDaily, cancellationToken);
         removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
 

@@ -56,7 +56,8 @@
                           Style="{StaticResource DarkGrid}"
                           CanUserDeleteRows="False"
                           SelectionMode="Single"
-                          SelectionChanged="ViewsGrid_SelectionChanged">
+                          SelectionChanged="ViewsGrid_SelectionChanged"
+                          PreviewMouseLeftButtonUp="ViewsGrid_PreviewMouseLeftButtonUp">
                     <DataGrid.GroupStyle>
                         <GroupStyle>
                             <GroupStyle.HeaderTemplate>

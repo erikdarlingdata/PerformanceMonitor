@@ -539,8 +539,13 @@ public sealed partial class DarlingCollectorRunner
            Gated on the SAME AppliesTo that decides whether database_states is collected at all, rather than
            leaning on the statement's own empty-snapshot guard to no-op: on Azure SQL DB there is no snapshot
            by design, so this would otherwise run three guaranteed-no-op deletes on every cycle forever and
-           #2191's boundary would be emergent rather than stated. */
-        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+           #2191's boundary would be emergent rather than stated.
+
+           #8865: also from the database_protection cycle, because its checkdb:<database> keys orphan the
+           same way and a server with query_store collection off never runs the cycle above. Same per-server
+           hourly throttle, so a server running both collectors prunes once an hour, not twice. */
+        if ((string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+             || string.Equals(definition.Name, DatabaseProtectionCollector.Instance.Name, StringComparison.Ordinal))
             && DatabaseStateCollector.Instance.AppliesTo(server.Target))
         {
             await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(server.ServerId, cancellationToken);
@@ -571,6 +576,9 @@ public sealed partial class DarlingCollectorRunner
            which is the conservative behavior. */
         if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
         {
+            /* #9359: the clamp memory a previous process stored, before any clamp decision of this server. */
+            await SeedQueryStoreClampReportsAsync(server.ServerId, cancellationToken);
+
             var openIntervalState = await GetCollectorStateAsync(
                 server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
 
@@ -626,6 +634,10 @@ public sealed partial class DarlingCollectorRunner
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
+            /* #9529: only query_snapshots reads it. Only this path holds plans: FetchRowsAsync, the on-demand live
+               read, passes none, so it reuses nothing and fetches under the cap. */
+            SnapshotPlanCache = _snapshotPlanCache,
+            PgBufferUsagePoolCapBuffers = PgBufferUsagePoolCapBuffersForTests,
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly CapturePlansFor(server.CapturePlans) (#6771).
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
@@ -793,7 +805,7 @@ public sealed partial class DarlingCollectorRunner
 
             /* One pooled store connection for the whole body; one binary COPY per database on it
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
 
             /* #6875: the same pass budget and rotation as the enumerated driver, for the per-database connection loop. */
             var (azurePassBudget, azureOrder) = BeginPass(definition, server.ServerId, databases);
@@ -804,6 +816,9 @@ public sealed partial class DarlingCollectorRunner
 
             string? azureLastStarted = null;
             string? azureStoppedAfter = null;
+
+            /* #9359: the stored clamp entry changes the landed databases call for, written once after the loop. */
+            var azureLandedChanges = new List<QueryStoreLandedChange>();
 
             foreach (var databaseName in databases)
             {
@@ -830,6 +845,10 @@ public sealed partial class DarlingCollectorRunner
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* #9088: the raw watermark this database's cycle clamped, landed in _queryStoreClampReports only
+                   once its read and flush succeed. Mirrors Lite. */
+                DateTime? stagedClampRaw = null;
 
                 /* #5514: this database's contribution to the per-database Query Store watermark cache, staged
                    after the read and landed only once the flush returned — per iteration, like the stamp above,
@@ -1006,7 +1025,19 @@ public sealed partial class DarlingCollectorRunner
                            enumeration path emits, so the bounded history hole stays LOGGED and does
                            not become the one silent hole in a policy whose whole premise is that it
                            is visible. Mirrors Lite. */
-                        if (context.CatchupClampApplied)
+                        /* #9088: a database whose Query Store has nothing new never advances its stored watermark, so
+                           the same clamp repeats every cycle. Once an earlier successful cycle reported this raw
+                           watermark and read everything the new floor skips, the warning and the hole stay quiet. */
+                        if (context.CatchupClampApplied
+                            && context.Watermark is DateTime clampedRaw)
+                        {
+                            stagedClampRaw = clampedRaw;
+                        }
+
+                        if (context.CatchupClampApplied
+                            && !(context.Watermark is DateTime seenRaw
+                                 && WatermarkPolicy.ClampCatchup(seenRaw, collectionTime) is DateTime seenFloor
+                                 && _queryStoreClampReports.AlreadyReported(server.ServerId, databaseName, seenRaw, seenFloor)))
                         {
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -1023,7 +1054,7 @@ public sealed partial class DarlingCollectorRunner
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
                                 await RecordQueryStoreBackfillHoleAsync(
-                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                    server.ServerId, databaseName, _queryStoreClampReports.HoleFloor(server.ServerId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -1218,7 +1249,25 @@ public sealed partial class DarlingCollectorRunner
                     {
                         var storageSlice = Stopwatch.StartNew();
                         PerDatabaseWriteFaultForTests?.Invoke(databaseName);
-                        rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
+
+                        /* #8994: query_stats on Azure SQL Database always captures inline. This database's rows link to their
+                           shapes' stored plans, and the shapes it stores count only once its batch committed. */
+                        var inlineShapes = LinkInlineQueryStatsPlansByShape(server, context, batch);
+                        var batchCommitted = false;
+                        try
+                        {
+                            rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
+                            batchCommitted = true;
+                        }
+                        finally
+                        {
+                            if (inlineShapes is not null
+                                && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var inlineShapeCache))
+                            {
+                                inlineShapeCache.Settle(inlineShapes, batchCommitted, DateTime.UtcNow);
+                            }
+                        }
+
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
                     }
@@ -1321,6 +1370,10 @@ public sealed partial class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
+                        if (_queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime) is { } azureLandedChange)
+                        {
+                            azureLandedChanges.Add(azureLandedChange);
+                        }
 
                         /* #5514: the flush returned, so the staged batch is in the store and the cache may
                            advance past it. Never earlier: a watermark ahead of committed rows skips them. */
@@ -1486,6 +1539,8 @@ public sealed partial class DarlingCollectorRunner
 
             context.CurrentDatabaseName = null;
 
+            await PersistQueryStoreLandedAsync(server.ServerId, azureLandedChanges, cancellationToken);
+
             /* #3153: retire per-database state for databases this sweep did not enumerate, using the list
                it just swept. AFTER the loop on purpose - the enumeration is what makes the list
                authoritative, and a database that merely failed to READ is still enumerated, so its cursor
@@ -1644,7 +1699,7 @@ public sealed partial class DarlingCollectorRunner
                    they now borrow this one. Safe precisely because of the flushing order named above: the
                    driver reads an item and then awaits its write, so this connection is idle for the whole
                    read, which is when those fetches run. */
-                await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
 
                 /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
                    into PendingState only from onItemComplete — which the driver invokes solely after the
@@ -1657,6 +1712,13 @@ public sealed partial class DarlingCollectorRunner
                 /* Query Store per-database watermark contributions: staged at read, landed ONLY from
                    onItemComplete, i.e. after the item's COPY transaction committed. */
                 var stagedDatabaseWatermarks = new Dictionary<string, StagedDatabaseWatermark>(StringComparer.Ordinal);
+
+                /* #9088: the raw watermark each database's cycle clamped, staged at decision time and landed in
+                   _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
+                var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
+                /* #9359: the stored clamp entry changes the landed items call for, written after the driver returns. */
+                var landedClampChanges = new List<QueryStoreLandedChange>();
 
                 /* #6254: per-item state of this run: the raw stored watermark (a fallback recomputes its cutoff from it), what the read
                    saw before the ship guard filtered it, and the holes a read cut by the row cap or byte budget leaves. */
@@ -1675,7 +1737,19 @@ public sealed partial class DarlingCollectorRunner
             var cut = QueryStoreReplicaRouting.ComputeCutoff(
                 raw, collectionTime, decision?.LookBack ?? TimeSpan.Zero, decision is not null && qsRun!.State.Guard.WasCut(item));
             var clamped = cut.Cutoff;
-            if (cut.ClampFired)
+            stagedClampRaws.Remove(item);
+            if (cut.ClampFired && raw is DateTime clampedRaw)
+            {
+                stagedClampRaws[item] = clampedRaw;
+            }
+
+            /* #9088: a database with nothing new in its Query Store keeps the same stale raw watermark, so the clamp
+               repeats every cycle. Once an earlier successful cycle reported this raw watermark and read everything
+               the new floor skips, the warning and the hole stay quiet. */
+            if (cut.ClampFired
+                && !(raw is DateTime seenRaw
+                     && clamped is DateTime seenFloor
+                     && _queryStoreClampReports.AlreadyReported(server.ServerId, item, seenRaw, seenFloor)))
             {
                 _logger?.LogWarning(
                     "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -1687,10 +1761,11 @@ public sealed partial class DarlingCollectorRunner
                    database. Only query_store reaches this lambda today; the name guard
                    keeps a future enumeration collector from inheriting backfill state
                    it has no worker for. */
-                if (cut.HoleFrom is DateTime holeFrom && cut.HoleTo is DateTime holeTo
+                if (cut.HoleFrom is DateTime && cut.HoleTo is DateTime holeTo
                     && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                 {
-                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, item, holeFrom, holeTo, ct);
+                    await RecordQueryStoreBackfillHoleAsync(
+                        server.ServerId, item, _queryStoreClampReports.HoleFrom(server.ServerId, item, raw!.Value, cut), holeTo, ct);
                 }
             }
 
@@ -1996,6 +2071,13 @@ public sealed partial class DarlingCollectorRunner
                                 OnQueryStoreItemSucceeded(server.ServerId, item);
                             }
 
+                            if (_queryStoreClampReports.Land(
+                                    server.ServerId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime)
+                                is { } landedClampChange)
+                            {
+                                landedClampChanges.Add(landedClampChange);
+                            }
+
                             if (stagedDatabaseWatermarks.Remove(item, out var stagedWatermark))
                             {
                                 CommitQueryStoreDatabaseWatermark(server, item, stagedWatermark);
@@ -2130,6 +2212,10 @@ public sealed partial class DarlingCollectorRunner
                     perItemBudget: definition.PerItemWallClockBudget,
                     passBudget: passBudget);
 
+                /* #9359: the stored clamp entry changes the landed items call for. onItemComplete cannot await, so they are written once
+                   the driver returns, in one write for the server. */
+                await PersistQueryStoreLandedAsync(server.ServerId, landedClampChanges, cancellationToken);
+
                 /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
                    loop above treats its own (#2623) - and for the first time. Until this the driver handed
                    each per-item exception to onItemError, that closure logged one WARNING per database,
@@ -2208,6 +2294,7 @@ public sealed partial class DarlingCollectorRunner
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
                 List<QueryStatsPlanKey>? pendingPlanKeys = null;
+                List<QueryStatsPlanShapeKey>? pendingShapeKeys = null;
                 List<QueryStatsPlanKey>? pendingTextKeys = null;
                 /* #7419: query_stats' read advanced every candidate's delta baselines. Until the rows reach the store, a run that
                    ends rolls them back, so the next run's delta covers both intervals. */
@@ -2268,6 +2355,10 @@ public sealed partial class DarlingCollectorRunner
                 {
                     using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
 
+                    /* #9062: a read of a function that returns one row per entry (pg_stat_statements) runs behind a local work_mem
+                       statement in the same command, so its tuplestore stays in memory. The first result set is that statement's. */
+                    var workMemApplied = PgReadWorkMem.ApplyTo(command, definition.ReadWorkMemBytesPerEntry);
+
                     /* Both phases stamp from finally rather than after the await (#2816). A throwing open or
                        a drain cut short by the budget must still report the time it burned; the alternative
                        is that its milliseconds land in the residual, and the residual is the one term whose
@@ -2278,6 +2369,10 @@ public sealed partial class DarlingCollectorRunner
                     try
                     {
                         opened = await command.ExecuteReaderAsync(itemToken);
+                        if (workMemApplied)
+                        {
+                            await PgReadWorkMem.SkipSettingResultAsync(opened, itemToken);
+                        }
                     }
                     finally
                     {
@@ -2389,7 +2484,7 @@ public sealed partial class DarlingCollectorRunner
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
                     {
                         await reader.CloseAsync();
-                        pendingPlanKeys = await FetchDeferredQueryStatsPlansAsync(
+                        (pendingPlanKeys, pendingShapeKeys) = await FetchDeferredQueryStatsPlansAsync(
                             targetProvider, targetConnection, server, context, deferredRows, itemToken);
                     }
                     else if (context.PlanIdentityColumns && (object)rows is List<ProcedureStatsCollector.Row> identityRows)
@@ -2493,7 +2588,7 @@ public sealed partial class DarlingCollectorRunner
                 NpgsqlConnection openedConnection;
                 try
                 {
-                    openedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                    openedConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
                 }
                 catch
                 {
@@ -2505,6 +2600,9 @@ public sealed partial class DarlingCollectorRunner
                 var committed = false;
                 try
                 {
+                    /* #8994: the inline capture's rows link to their shapes' stored plans. Those shapes settle below with the
+                       deferred fetch's. */
+                    pendingShapeKeys ??= LinkInlineQueryStatsPlansByShape(server, context, rows);
                     rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
                     committed = true;
                 }
@@ -2517,6 +2615,13 @@ public sealed partial class DarlingCollectorRunner
                         && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
                     {
                         planCache.Settle(pendingPlanKeys, committed, DateTime.UtcNow);
+                    }
+
+                    /* #8994: the shapes this run stored settle with the identities. */
+                    if (pendingShapeKeys is not null
+                        && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var shapeCache))
+                    {
+                        shapeCache.Settle(pendingShapeKeys, committed, DateTime.UtcNow);
                     }
 
                     /* #7419: the same rule for the texts this run read. */
@@ -2579,16 +2684,18 @@ public sealed partial class DarlingCollectorRunner
 
             if (openIntervalKeys.Count > 0)
             {
-                await SaveCollectorStateAsync(
-                    server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
-
-                var others = context.PendingState
-                    .Where(entry => !openIntervalKeys.ContainsKey(entry.Key))
-                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
-                if (others.Count > 0)
+                /* #8795: both owners' keys land in ONE statement, so a run that carries the open-interval stamps and
+                   another key pays one commit rather than one per owner. */
+                var rows = new List<(string CollectorName, string Key, string Value)>(context.PendingState.Count);
+                foreach (var entry in context.PendingState)
                 {
-                    await SaveCollectorStateAsync(server.ServerId, definition.Name, others, cancellationToken);
+                    rows.Add((
+                        openIntervalKeys.ContainsKey(entry.Key) ? QueryStoreOpenIntervalState.StateCollectorName : definition.Name,
+                        entry.Key,
+                        entry.Value));
                 }
+
+                await SaveCollectorStateRowsAsync(server.ServerId, rows, cancellationToken);
             }
             else
             {

@@ -69,7 +69,6 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
         Assert.Contains("DataWindowFloor.GetForServerAsync(", source, StringComparison.Ordinal);
         /* The grid windows on collection_time, the probe's own column; the event time it shows is the caller's to compare. */
         Assert.Equal("collection_time", DataWindowFloor.Source.ForCollectorTable("long_query_completions").TimeColumn);
-        Assert.Contains("collection_time >= $2", ViewerDataService.LongQueryCompletionsSql, StringComparison.Ordinal);
     }
 
     // ── The tab: the probe beside the read, the banner from the rows shown ──

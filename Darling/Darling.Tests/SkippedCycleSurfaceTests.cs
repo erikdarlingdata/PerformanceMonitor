@@ -159,13 +159,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9,$10,$11)", connection);
         Assert.Equal("larger log_id", summary.LastMessage);
     });
 
-    /// <summary>A row outside the 24 hours is not counted; both ends of the window are inclusive.</summary>
+    /// <summary>A row outside the 24 hours is not counted. The window leaves its start out and keeps its end: a row stamped
+    /// on the start is the window before's, and a row stamped on the end is this one's.</summary>
     [Fact]
-    public Task Reader_Window_IsTwentyFourHours_InclusiveAtBothEnds() => RunAsync(async (connection, postgres, ct) =>
+    public Task Reader_Window_IsTwentyFourHours_OpenAtItsStartAndClosedAtItsEnd() => RunAsync(async (connection, postgres, ct) =>
     {
         var asOf = Whole(DateTime.UtcNow);
         await SkipAsync(connection, asOf.AddHours(-24).AddSeconds(-1), 100, "too_old", 1, "outside, before the start", ct);
-        await SkipAsync(connection, asOf.AddHours(-24), 1, "on_start", 1, "exactly the start", ct);
+        await SkipAsync(connection, asOf.AddHours(-24), 10, "on_start", 1, "exactly the start", ct);
+        await SkipAsync(connection, asOf.AddHours(-24).AddSeconds(1), 1, "just_inside", 1, "a second after the start", ct);
         await SkipAsync(connection, asOf, 2, "on_end", 1, "exactly the end", ct);
         await SkipAsync(connection, asOf.AddSeconds(1), 1000, "too_new", 1, "outside, after the end", ct);
 

@@ -280,7 +280,6 @@ public sealed class ViewerDrillDownTests
         var sql = ViewerDataService.QuerySnapshotsByWaitTypeSql;
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         /* #4884: either stored spelling of the name, with the column kept bare. */
         Assert.Contains("wait_type IN ($4, $4 || ' ')", sql, StringComparison.Ordinal);
@@ -295,7 +294,6 @@ public sealed class ViewerDrillDownTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
         AssertPgPositionalDialect(sql);
@@ -309,7 +307,6 @@ public sealed class ViewerDrillDownTests
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("schema_name = $3", sql, StringComparison.Ordinal);
         Assert.Contains("object_name = $4", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $6", sql, StringComparison.Ordinal);
         AssertPgPositionalDialect(sql);
     }

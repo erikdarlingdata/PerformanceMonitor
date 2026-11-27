@@ -74,32 +74,32 @@ public partial class ViewerServerTab
         _executionCountTrendHover?.Dispose();
     }
 
-    /// <summary>Loads the Performance Trends sub-tab: the four per-second trend reads run concurrently
-    /// (NpgsqlDataSource pools a connection each), then each result renders into its chart.</summary>
+    /// <summary>Loads the Performance Trends sub-tab: three per-second trend reads run concurrently
+    /// (NpgsqlDataSource pools a connection each), then each result renders into its chart. The query-stats
+    /// read carries two charts: its statement returns the duration rate and the execution rate of the same
+    /// <c>query_stats</c> rows, so the Query Duration and Executions charts draw from that one read (#8549).</summary>
     private async Task LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc, ViewerLoadTimer? timer = null)
     {
         timer?.Surface = "Queries > Performance Trends";
-        using var readFanOut = ViewerReadFanOut.Of(4);
+        using var readFanOut = ViewerReadFanOut.Of(3);
 
-        var queryDurationTask = _dataService.GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
+        var queryTrendsTask = _dataService.GetQueryDurationAndExecutionCountTrendsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var procDurationTask = _dataService.GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var queryStoreDurationTask = _dataService.GetQueryStoreDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        var executionCountTask = _dataService.GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
 
         /* #8549: each trend read is booked by name (Track hands the task back unchanged), so the slow one is the one the SlowLoad line names. */
-        _ = timer?.Track("query duration trend read", queryDurationTask);
+        _ = timer?.Track("query duration and execution count trend read", queryTrendsTask);
         _ = timer?.Track("procedure duration trend read", procDurationTask);
         _ = timer?.Track("Query Store duration trend read", queryStoreDurationTask);
-        _ = timer?.Track("execution count trend read", executionCountTask);
 
-        await Task.WhenAll(queryDurationTask, procDurationTask, queryStoreDurationTask, executionCountTask);
+        await Task.WhenAll(queryTrendsTask, procDurationTask, queryStoreDurationTask);
 
-        /* The four are joined; the marker read below runs alone and must not be priced against a contention
+        /* The three are joined; the marker read below runs alone and must not be priced against a contention
            count that is over — release the declared width here rather than at the closing brace, as the
            Memory and PostgreSQL tabs do (ViewerCommandTimeoutTests.NoFanOutScope_OutlivesItsJoin pins it). */
         readFanOut.Release();
 
-        /* #3653 A5: one read for the four charts, after the fan-out (the fan-out is sized at four), and
+        /* #3653 A5: one read for the four charts, after the fan-out (the fan-out is sized at three), and
            never fatal to the tab — a store that cannot answer this read still draws its series, unmarked,
            rather than drawing nothing. */
         IReadOnlyList<BaselineDiscontinuity> discontinuities;
@@ -113,10 +113,10 @@ public partial class ViewerServerTab
             discontinuities = Array.Empty<BaselineDiscontinuity>();
         }
 
-        ClientStep(timer, "query duration chart draw", () => UpdateQueryDurationTrendChart(queryDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "query duration chart draw", () => UpdateQueryDurationTrendChart(queryTrendsTask.Result.Duration, startUtc, endUtc, discontinuities));
         ClientStep(timer, "procedure duration chart draw", () => UpdateProcDurationTrendChart(procDurationTask.Result, startUtc, endUtc, discontinuities));
         ClientStep(timer, "Query Store duration chart draw", () => UpdateQueryStoreDurationTrendChart(queryStoreDurationTask.Result, startUtc, endUtc, discontinuities));
-        ClientStep(timer, "execution count chart draw", () => UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "execution count chart draw", () => UpdateExecutionCountTrendChart(queryTrendsTask.Result.Executions, startUtc, endUtc, discontinuities));
     }
 
     /// <summary>
@@ -143,7 +143,7 @@ public partial class ViewerServerTab
     /// What a routed trend chart says about what it served (#3653) — the chart-side form of the MCP payload's
     /// <c>source</c> / <c>effective_start</c> / <c>window_truncated</c> triple, rendered as the plot title the way
     /// the heatmap titles itself. Always names the tier, because a series read from the hourly rollup is a
-    /// different measurement from one read per collection (bucket-width denominator, up to two hours behind
+    /// different measurement from one read per collection (bucket-width denominator, up to three hours behind
     /// the clock) and a user comparing two loads of the same chart across the raw horizon must be able to
     /// see that the resolution changed underneath them. Names the first served point only when the series
     /// is truncated — when the tier did not hold the window's head — which is the one case where the axis

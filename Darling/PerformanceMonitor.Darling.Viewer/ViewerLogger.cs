@@ -11,6 +11,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
 using System.Threading;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -72,6 +73,8 @@ public static class ViewerLogger
 
     public static void Warn(string source, string message) => Log("WARN", source, message);
 
+    public static void Debug(string source, string message) => Log("DEBUG", source, message);
+
     public static void Error(string source, string message, Exception? ex = null)
     {
         if (ex is not null)
@@ -94,6 +97,12 @@ public static class ViewerLogger
         }
     }
 
+    /// <summary>
+    /// The one sink every method here, an exception's <c>Stack:</c> and <c>Inner[...]</c> lines included, funnels through. The
+    /// whole assembled line is cleaned with the rule Lite's <c>AppLogger</c> and Darling's file log apply
+    /// (<see cref="LogLineText.Clean"/>, #9768): a message's continuation lines are written indented rather than in column 0,
+    /// and any other control character a server's text carries is written as '.', so no text can start a forged entry.
+    /// </summary>
     private static void Log(string level, string source, string message)
     {
         if (!s_initialized)
@@ -101,7 +110,7 @@ public static class ViewerLogger
             return;
         }
 
-        s_buffer.Enqueue($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] [{source}] {message}");
+        s_buffer.Enqueue(LogLineText.Clean($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] [{source}] {message}"));
     }
 
     /// <summary>Drains the buffer to today's log file. Serialized so the timer and shutdown never collide.</summary>

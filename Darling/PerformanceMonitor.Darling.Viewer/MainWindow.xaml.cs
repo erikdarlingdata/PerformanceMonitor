@@ -215,11 +215,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _windowState.Attach(this);
         /* Each fleet tab's status line is kept for that tab and shown while it is the tab on screen. */
         AlertsHistoryContent.StatusChanged += StatusWriterFor(AlertsTab);
         JobHistoryContent.StatusChanged += StatusWriterFor(JobHistoryTabItem);
         DatabaseProtectionContent.StatusChanged += StatusWriterFor(DatabaseProtectionTabItem);
         FleetSweepsContent.StatusChanged += StatusWriterFor(FleetSweepsTabItem);
+        StoreHealthContent.StatusChanged += StatusWriterFor(StoreHealthTabItem);
         AgentAlertsContent.StatusChanged += StatusWriterFor(AgentAlertsTabItem);
         IdentityCapacityContent.StatusChanged += StatusWriterFor(IdentityCapacityTabItem);
         AvailabilityGroupsContent.StatusChanged += StatusWriterFor(AvailabilityGroupsTabItem);
@@ -508,6 +510,9 @@ public partial class MainWindow : Window
 
         /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
         FleetSweepsContent.Initialize(_dataService);
+
+        /* Store Health (#8787): a self-loading read-only control over the monitoring store's own tables and indexes. */
+        StoreHealthContent.Initialize(_dataService);
 
         /* Agent Alerts (#6874): a self-loading control over the SQL Server Agent alert setup of one server; it loads on activation and its own Refresh. */
         AgentAlertsContent.Initialize(_dataService);
@@ -1113,6 +1118,12 @@ public partial class MainWindow : Window
         {
             JobHistoryContent.BeginFirstOpen();
         }
+        else if (ReferenceEquals(MainTabs.SelectedItem, StoreHealthTabItem))
+        {
+            /* #8819: the cue goes up now, not when the lane gets to the load: another tab's refresh can hold the lane for seconds. */
+            StoreHealthContent.BeginFirstOpen();
+            StoreHealthContent.ShowRefreshPending();
+        }
 
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
@@ -1333,12 +1344,13 @@ public partial class MainWindow : Window
         /* The tab whose load this is, read once: the reader may have moved to another tab by the time the load finishes or fails, and
            its stamp or its failure belongs to this one. */
         var selected = MainTabs.SelectedItem as TabItem;
+        var loadClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
-                    /* The tab writes its own line, "<display name>: refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
+                    /* The tab writes its own line, "<display name>: refreshed …" or its plain "did not load" line, through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
@@ -1366,6 +1378,10 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();
+                    break;
+                case TabItem tab when ReferenceEquals(tab, StoreHealthTabItem):
+                    StoreHealthContent.FirstOpenRefreshStarted();
+                    await StoreHealthContent.RefreshAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
                     await IdentityCapacityContent.RefreshAsync();
@@ -1400,7 +1416,8 @@ public partial class MainWindow : Window
         {
             /* #8133: a failed fleet read must not leave the Overview saying it is loading. */
             OverviewLoadingText.Visibility = Visibility.Collapsed;
-            SetTabStatus(selected, $"refresh failed: {ex.Message}");
+            /* #9365: one warning line naming the tab, and plain words in the status bar in place of the driver's text. */
+            SetTabStatus(selected, ViewerRefreshFailure.Report(selected?.Header?.ToString() ?? "tab", null, loadClock.ElapsedMilliseconds, ex));
         }
     }
 
@@ -2567,15 +2584,14 @@ public partial class MainWindow : Window
     /// restore, and the single-instance second-launch surface, so the window can never be left hidden-but-blank.
     /// Reconciles a tray-hidden window — minimize-to-tray calls <see cref="Window.Hide"/>, which sets
     /// Visibility=Hidden; only <see cref="Window.Show"/> re-runs layout/render (a raw Win32 ShowWindow would
-    /// leave it blank, Lite #1050) — and restores a minimized window to the viewer's Maximized startup state.
+    /// leave it blank, Lite #1050) — and restores a minimized window to the state it had before it was minimized.
     /// Must run on the UI thread.
     /// </summary>
     public void SurfaceWindow()
     {
-        if (WindowState == WindowState.Minimized)
-        {
-            WindowState = WindowState.Maximized;
-        }
+        /* #9735: a minimized window goes back to the state it had before it was minimized (Maximized by default),
+           so a window that was Normal does not come back Maximized. A window that is not minimized keeps its state. */
+        WindowState = _windowState.RestoreTarget(WindowState);
 
         Show();
         ShowInTaskbar = true;
@@ -2584,6 +2600,9 @@ public partial class MainWindow : Window
         Topmost = true;
         Topmost = false;
     }
+
+    /// <summary>The last non-minimized window state, which <see cref="SurfaceWindow"/> restores to (#9735).</summary>
+    private readonly WindowStateMemory _windowState = new();
 
     /// <summary>
     /// The full-window message state. <paramref name="details"/> is the non-secret configuration block

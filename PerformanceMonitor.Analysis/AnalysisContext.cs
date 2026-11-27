@@ -35,6 +35,23 @@ public class AnalysisContext
     /// null or empty, so the filter fails open.
     /// </summary>
     public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
+
+    /// <summary>
+    /// True for an on-demand read a person or an agent is waiting on (Lite's <c>get_analysis_facts</c> and
+    /// <c>compare_analysis</c>, #9195). The plan regression inputs check then answers from the outcomes an earlier
+    /// background pass cached, and for a pair with no cached answer makes at most the live plan fetches
+    /// <see cref="InteractiveFetches"/> allows the whole call (3 fetches, 3 s). A candidate the allowance does not reach
+    /// stays in the fact and is counted unverified, as one the background pass's fetch budget never reached is. Fetched
+    /// answers are cached as the background pass's are. Default false, the background pass, which has its own budget.
+    /// Darling does not read it.
+    /// </summary>
+    public bool InteractiveRead { get; set; }
+
+    /// <summary>
+    /// The live plan fetches an interactive read may make, shared by every context of one call so that
+    /// <c>compare_analysis</c>'s two windows together stay inside one allowance (#9195). Created on first use when the caller set none.
+    /// </summary>
+    public InteractivePlanFetchAllowance? InteractiveFetches { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
@@ -256,6 +273,29 @@ public class AnalysisContext
     public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
 
     /// <summary>
+    /// Darling only (#8570): the plan XML the MISSING_INDEX / PLAN_WARNING fact read summarized this pass, as the store
+    /// returned it (text, or gzip bytes decoded), before any statement is withheld. Stamped by the fact collector once
+    /// that read finishes. Null until then, when the read failed, and on a drill-down run without a fact pass. Empty when
+    /// the read found no plan.
+    ///
+    /// <para>The plan-advisory drill-down renders the specific indexes and warnings from the same top plans the fact
+    /// counted. It reads them from here when this is set, and withholds each statement as it always has, so the
+    /// drill-down analyzes the rows the fact analyzed without a second read of the window. It runs its own read when this
+    /// is null.</para>
+    /// </summary>
+    public IReadOnlyList<string>? PlanAdvisoryPlanXmls { get; set; }
+
+    /// <summary>
+    /// Darling only (#8570): the fact sources the caller shows, set by <c>get_analysis_facts</c> when it is asked for one
+    /// source. The SQL Server collector then reads only the families whose facts carry those sources or feed their scoring,
+    /// and sets <see cref="FactSourcesNarrowed"/>. Null, the default, reads every family.
+    /// </summary>
+    public IReadOnlySet<string>? RequestedFactSources { get; set; }
+
+    /// <summary>True when the collector skipped families for <see cref="RequestedFactSources"/> (#8570).</summary>
+    public bool FactSourcesNarrowed { get; set; }
+
+    /// <summary>
     /// The queries whose timeouts (Aborted runs) or errors (Exception runs) rose, as the PLAN_REGRESSION fact read them
     /// this pass (#6267), stamped by the fact collector after that read. Null until then, and null when the read failed.
     /// The regressed-queries drill-down lists them next to the cost offenders. A pass with failures and no cost offender
@@ -317,7 +357,31 @@ public class AnalysisContext
     /// into a record this project serves to MCP clients. There is no string parameter left to do that with.</para>
     /// </summary>
     public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, Exception exception) =>
-        CollectionFailures.Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+        (_failureBuffer.Value ?? CollectionFailures).Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+
+    /// <summary>
+    /// How many family reads a collector may run at the same time on this pass (#9149). 1, the default, is the serial
+    /// pass every caller had before: the scheduled worker keeps it, because its sweeps already share the store's
+    /// connection pool. An on-demand read (<c>analyze_server</c>, <c>get_analysis_facts</c>) sets it above 1 so a
+    /// store that is a network away answers in the longest chain of reads rather than the sum of them. A collector
+    /// clamps the figure to its own ceiling.
+    /// </summary>
+    public int FamilyParallelism { get; set; } = 1;
+
+    private readonly AsyncLocal<List<CollectionFailure>?> _failureBuffer = new();
+
+    /// <summary>
+    /// Starts collecting the failures that the current async flow records into its own list instead of
+    /// <see cref="CollectionFailures"/> (#9149). Families that run at the same time use it so the list reads in family
+    /// order, as the serial pass wrote it, and not in the order the failures happened to land. The caller appends the
+    /// returned list to <see cref="CollectionFailures"/> itself, in the order it wants.
+    /// </summary>
+    public List<CollectionFailure> BufferCollectionFailuresForThisFlow()
+    {
+        var buffer = new List<CollectionFailure>();
+        _failureBuffer.Value = buffer;
+        return buffer;
+    }
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>
@@ -437,15 +501,18 @@ public sealed record CollectionFailure(string Family, string Read, CollectionFai
 /// rather than parked on a service property for the reason <c>CollectAndScoreFactsAsync</c>'s coverage is:
 /// that path has no <c>IsAnalyzing</c> guard, two on-demand callers can overlap, and a shared property would
 /// let one read the other's failures.
+///
+/// <para>#8570: <c>SourcesNarrowed</c> is true when the collector read only the families the requested sources need
+/// (<see cref="AnalysisContext.RequestedFactSources"/>), so the facts read are not the server's whole fact set.</para>
 /// </summary>
 public sealed record CollectionCaveatState(
-    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null)
+    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null, bool SourcesNarrowed = false)
 {
     /// <summary>The state the context carries after its collector ran (or threw before recording anything).</summary>
     public static CollectionCaveatState From(AnalysisContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases);
+        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases, context.FactSourcesNarrowed);
     }
 
     /// <summary>True when at least one family failed — the only case in which anything is emitted.</summary>

@@ -44,7 +44,8 @@ internal sealed record SlowReadRecord(
     long? RowCount = null,
     int? InFlight = null,
     long? WaitMs = null,
-    string? Caller = null);
+    string? Caller = null,
+    long? ReplyBytes = null);
 
 /// <summary>
 /// The slow-read record's write path (#5097). The three recorders (the MCP tool filter, the <c>/api/read/*</c> loop
@@ -80,8 +81,8 @@ public sealed class SlowReadLog
     internal const string InsertSql = @"
 INSERT INTO collect.slow_reads
 (read_time, surface, route, outcome, total_ms, server_id, window_start, window_end, arguments, arguments_truncated,
- source, source_reason, statements, statement_count, statements_truncated, error_class, row_count, in_flight, wait_ms, caller)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);";
+ source, source_reason, statements, statement_count, statements_truncated, error_class, row_count, in_flight, wait_ms, caller, reply_bytes)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);";
 
     internal const string PurgeSql = @"
 DELETE FROM collect.slow_reads WHERE read_time < $1;";
@@ -120,6 +121,9 @@ WHERE slow_read_id IN
     /// <summary>A read at or over this many milliseconds is recorded whatever its outcome.</summary>
     internal int ThresholdMs { get; }
 
+    /// <summary>(#9549) Where a read that ended at its deadline is recorded as harm: the process's log, or a test's own.</summary>
+    internal StoreHarmLog Harm { get; init; } = StoreHarmLog.Shared;
+
     /// <summary>Records dropped because the channel was full.</summary>
     internal long Dropped => Interlocked.Read(ref _dropped);
 
@@ -140,13 +144,22 @@ WHERE slow_read_id IN
         totalMs >= ThresholdMs || outcome is ReadOutcome.Timeout or ReadOutcome.Error or ReadOutcome.Limit;
 
     /// <summary>Decides, builds and enqueues one record. Never throws. <paramref name="caller"/> (#5793) is the finished
-    /// caller string from <see cref="ReadCaller"/>, never the request.</summary>
+    /// caller string from <see cref="ReadCaller"/>, never the request. <paramref name="replyBytes"/> (#9433) is the size in bytes of the reply the
+    /// caller received, null when the surface cannot say.</summary>
     internal void Offer(
         ReadScope scope, ReadSurface surface, string route, ReadOutcome outcome, long totalMs,
-        JsonObject? arguments, string? errorClass, ILogger? logger, string? caller = null)
+        JsonObject? arguments, string? errorClass, ILogger? logger, string? caller = null, long? replyBytes = null)
     {
         try
         {
+            /* #9549: a read that ended at its deadline is harm the Store Checkpointer Pressure self-alert looks for inside
+               a checkpoint sync. Kept in process memory with its time, since the row below reaches the store later and by
+               another task. */
+            if (outcome == ReadOutcome.Timeout)
+            {
+                Harm.Record(StoreHarmKind.HostReadDeadline, route, DateTime.UtcNow, totalMs);
+            }
+
             if (!ShouldRecord(outcome, totalMs))
             {
                 return;
@@ -156,7 +169,7 @@ WHERE slow_read_id IN
                compose surfaces all land here). They are judged before they are stored, so a named statement never
                reaches the table; the sweep that follows on read covers rows written before this. */
             var sweptArguments = arguments is null ? null : SensitiveStatements.Json(arguments.ToJsonString());
-            TryEnqueue(Build(scope, surface, route, outcome, totalMs, ArgumentsAfterSweep(arguments, sweptArguments), errorClass, DateTime.UtcNow, caller));
+            TryEnqueue(Build(scope, surface, route, outcome, totalMs, ArgumentsAfterSweep(arguments, sweptArguments), errorClass, DateTime.UtcNow, caller, replyBytes));
         }
         catch (Exception ex)
         {
@@ -181,7 +194,7 @@ WHERE slow_read_id IN
 
     internal static SlowReadRecord Build(
         ReadScope scope, ReadSurface surface, string route, ReadOutcome outcome, long totalMs,
-        JsonObject? arguments, string? errorClass, DateTime nowUtc, string? caller = null)
+        JsonObject? arguments, string? errorClass, DateTime nowUtc, string? caller = null, long? replyBytes = null)
     {
         var (argumentsJson, argumentsTruncated, windowStart, windowEnd) = NormaliseArguments(arguments, scope.ServerId, scope.StartedUtc);
 
@@ -238,7 +251,8 @@ WHERE slow_read_id IN
             scope.Rows,
             scope.InFlightAtStart,
             scope.WaitMs,
-            caller);
+            caller,
+            replyBytes is { } bytes ? Math.Max(bytes, 0) : null);
     }
 
     /// <summary>The arguments as stored, one policy for every surface: the server name replaced by its id, the window
@@ -454,13 +468,23 @@ WHERE slow_read_id IN
             return postgres.SqlState;
         }
 
+        /* #8570: the driver's own command timeout carries no SQLSTATE. It records the one class a tool-caught client timeout records
+           (ErrorClassOf(ReadOutcome, string)), not the wrapper's type name, so both paths agree. */
+        if (Hosting.DarlingWebFailureLog.IsStatementTimeout(ex))
+        {
+            return ClientTimeoutClass;
+        }
+
         return ex.GetType().Name;
     }
 
+    /// <summary>#8570: the <c>error_class</c> of a read the CLIENT's command timeout stopped. The store never raised 57014 for it.</summary>
+    internal const string ClientTimeoutClass = "client_timeout";
+
     /// <summary>The class of an error that arrived as a tool's caught answer rather than an exception.</summary>
-    internal static string? ErrorClassOf(ReadOutcome outcome) => outcome switch
+    internal static string? ErrorClassOf(ReadOutcome outcome, string? sentence = null) => outcome switch
     {
-        ReadOutcome.Timeout => "57014",
+        ReadOutcome.Timeout => sentence is not null && Hosting.DarlingWebFailureLog.IsClientTimeoutSentence(sentence) ? ClientTimeoutClass : "57014",
         ReadOutcome.Limit => "53400",
         _ => null,
     };
@@ -528,6 +552,7 @@ WHERE slow_read_id IN
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)record.InFlight ?? DBNull.Value });
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.WaitMs ?? DBNull.Value });
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.Caller ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.ReplyBytes ?? DBNull.Value });
                 await insert.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
             }
 

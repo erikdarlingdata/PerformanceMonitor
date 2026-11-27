@@ -114,7 +114,7 @@ public sealed class McpReadCommandTimeoutTests
     /// <summary>
     /// The STORE receivers, and only these. <c>postgres</c> is the <c>NpgsqlDataSource</c> the MCP host and
     /// the web host inject into every reader and tool; <c>_dataSource</c> is <see cref="CustomViewStore"/>'s
-    /// field; <c>owner</c> is the store owner pool from <c>StoreOwnerSource</c>, never a monitored target; <c>connection</c> is a connection opened from one of those two by
+    /// field; <c>workMemScope</c> is the short transaction <c>CollectionHealthRollupSupport.OpenWorkMemReadAsync(postgres, ...)</c> opens on a store connection for the fleet collection-health reads (#8570); <c>owner</c> is the store owner pool from <c>StoreOwnerSource</c>, never a monitored target; <c>connection</c> is a connection opened from one of those two by
     /// <c>postgres.OpenConnectionAsync</c>, asserted per file below.
     ///
     /// <para>A monitored-TARGET command matches none of these: the provider form carries a plan, a
@@ -129,7 +129,7 @@ public sealed class McpReadCommandTimeoutTests
     /// fails asking for a decision, which is the direction a guard should err in.</para>
     /// </summary>
     private static readonly Regex s_storeReceiver = new(
-        @"(?<![A-Za-z0-9_])(?:postgres|_dataSource|owner)\.CreateCommand\s*\("
+        @"(?<![A-Za-z0-9_])(?:postgres|_dataSource|owner|workMemScope)\.CreateCommand\s*\("
         + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*)?\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -655,6 +655,8 @@ public sealed class McpReadCommandTimeoutTests
     [InlineData("await using var command = new NpgsqlCommand(Sql, targetConnection);", false)]
     /* ...while a legitimately qualified store receiver still reads as one: `.` is not a name character. */
     [InlineData("await using var command = this._dataSource.CreateCommand(Sql);", true)]
+    [InlineData("await using var command = workMemScope.CreateCommand(Sql);", true)]
+    [InlineData("await using var command = targetWorkMemScope.CreateCommand(Sql);", false)]
     public void TheReceiverAllowlist_AcceptsStoreShapesAndRejectsTargetShapes(string source, bool expectedStore)
     {
         Assert.Equal(expectedStore, s_storeReceiver.IsMatch(source));

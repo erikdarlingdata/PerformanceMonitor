@@ -18,6 +18,9 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
+    /* #9743: which servers refused the blocked process threshold bootstrap, so a refusal is logged once and not on every run. */
+    internal BlockedProcessThresholdBootstrap BlockedProcessThresholdBootstrap { get; } = new();
+
     /* The session name lives in the shared definition so the ring-buffer reader and this
        lifecycle code can never disagree on it. */
     private const string BlockedProcessXeSessionName = BlockedProcessReportCollector.XeSessionName;
@@ -102,11 +105,13 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;";
     /// </summary>
     private async Task EnsureBlockedProcessXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
     {
-        /* Check blocked process threshold and configure if needed.
-           Wrapped in try/catch because sp_configure is not available on AWS RDS
-           (threshold must be set via RDS parameter groups instead). */
+        /* Check blocked process threshold and configure if needed. A server that answers is read on every run, so one that
+           fails over to a replica with a threshold of 0 behind the same connection string is configured on the next run
+           (#9743). A server that refuses it (AWS RDS has no sp_configure for it, or the login lacks ALTER SETTINGS) is asked
+           once, and once more after its connection settings change. A refusal is tolerated, logged once with the platform's
+           remedy, and not repeated. */
         var thresholdChanged = false;
-        try
+        var bootstrap = await BlockedProcessThresholdBootstrap.RunAsync(GetServerId(server), connection.ConnectionString, async () =>
         {
             using var thresholdCmd = new SqlCommand(@"
 DECLARE
@@ -135,19 +140,18 @@ END;
 SELECT @threshold;", connection);
             thresholdCmd.CommandTimeout = CommandTimeoutSeconds;
             var result = await thresholdCmd.ExecuteScalarAsync(cancellationToken);
-            var threshold = result as int? ?? 0;
+            return result as int? ?? 0;
+        }, ErrorNumbersOf);
 
-            if (threshold == 0)
-            {
-                AppLogger.Info("XeSession", $"[{server.DisplayName}] Configured blocked process threshold to 5 seconds");
-                thresholdChanged = true;
-            }
-        }
-        catch (SqlException ex)
+        if (bootstrap.Outcome == BlockedProcessThresholdOutcome.Configured)
         {
-            /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
-               is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {ex.Message}");
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] Configured blocked process threshold to 5 seconds");
+            thresholdChanged = true;
+        }
+        else if (bootstrap.Refusal is { } refusal)
+        {
+            var target = new CollectorTargetInfo { IsAwsRds = _serverManager.GetConnectionStatus(server.Id).IsAwsRds };
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] {BlockedProcessThresholdBootstrap.RefusalMessage(target, ErrorMessagesOf(refusal))}");
         }
 
         /* #5098: server_config is an on-load collector and runs before this one on a tab-open run, so its snapshot read the

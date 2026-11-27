@@ -98,7 +98,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         var plan = BlockedProcessReportCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true));
 
         Assert.Contains("sys.dm_xe_database_session_targets AS xet", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"blocked_process_report\"]", plan.Text, StringComparison.Ordinal);
     }
 

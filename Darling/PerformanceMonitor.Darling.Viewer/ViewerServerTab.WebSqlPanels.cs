@@ -125,13 +125,15 @@ public sealed record PgExtensionCensusGridRow(
 public partial class ViewerServerTab
 {
     /// <summary>Loads the Resource Semaphore sub-tab: the window aggregate and the newest snapshot, read concurrently.</summary>
-    private async Task LoadResourceSemaphoreAsync()
+    private async Task LoadResourceSemaphoreAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
+        var reads = MemoryReads;
 
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var windowTask = _dataService.GetResourceSemaphoreWindowAsync(_server.ServerId, startUtc, endUtc);
-        var latestTask = _dataService.GetResourceSemaphoreLatestAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: both reads are named on the load's clock (Memory's, which calls this), the grid builds are named client steps. */
+        var windowTask = Timed(timer, "Resource Semaphore window read", reads.SemaphoreWindow(startUtc, endUtc));
+        var latestTask = Timed(timer, "Resource Semaphore snapshot read", reads.SemaphoreLatest(startUtc, endUtc));
         await Task.WhenAll(windowTask, latestTask);
 
         /* The two reads are done: release so the engine-gap probes below, a store read each, are not priced at this width. */
@@ -139,27 +141,33 @@ public partial class ViewerServerTab
 
         var window = windowTask.Result.ConvertAll(ResourceSemaphorePressureGridRow.From);
         var latest = latestTask.Result;
-        ResourceSemaphorePressureGrid.ItemsSource = window;
-        ResourceSemaphoreGrid.ItemsSource = latest.ConvertAll(r => new ResourceSemaphoreSnapshotGridRow(r));
-        ResourceSemaphoreCollectedText.Text = HistoryTime.SnapshotCollected(latest.Count > 0 ? latest[0].CollectionTime : null, "--");
+        ClientStep(timer, "Resource Semaphore grid build", () =>
+        {
+            ResourceSemaphorePressureGrid.ItemsSource = window;
+            ResourceSemaphoreGrid.ItemsSource = latest.ConvertAll(r => new ResourceSemaphoreSnapshotGridRow(r));
+            ResourceSemaphoreCollectedText.Text = HistoryTime.SnapshotCollected(latest.Count > 0 ? latest[0].CollectionTime : null, "--");
+        });
 
-        await ShowEngineGapAsync(ResourceSemaphorePressureNoDataMessage, "memory_grant_stats", window.Count, keepsOwnEmptyText: true);
-        await ShowEngineGapAsync(ResourceSemaphoreNoDataMessage, "memory_grant_stats", latest.Count, keepsOwnEmptyText: true);
+        await Timed(timer, "Resource Semaphore engine gap read", ShowEngineGapAsync(ResourceSemaphorePressureNoDataMessage, "memory_grant_stats", window.Count, keepsOwnEmptyText: true));
+        await Timed(timer, "Resource Semaphore snapshot engine gap read", ShowEngineGapAsync(ResourceSemaphoreNoDataMessage, "memory_grant_stats", latest.Count, keepsOwnEmptyText: true));
     }
 
     /// <summary>Fills the Plan Cache by Type grid from the newest snapshot in the window.</summary>
-    private async Task RenderPlanCacheByTypeAsync(List<PlanCacheGroupRow> rows)
+    private async Task RenderPlanCacheByTypeAsync(List<PlanCacheGroupRow> rows, ViewerLoadTimer? timer = null)
     {
-        PlanCacheByTypeGrid.ItemsSource = rows;
-        await ShowEngineGapAsync(PlanCacheByTypeNoDataMessage, "plan_cache_stats", rows.Count, keepsOwnEmptyText: true);
+        ClientStep(timer, "Plan Cache by type grid build", () => PlanCacheByTypeGrid.ItemsSource = rows);
+        await Timed(timer, "Plan Cache by type engine gap read", ShowEngineGapAsync(PlanCacheByTypeNoDataMessage, "plan_cache_stats", rows.Count, keepsOwnEmptyText: true));
     }
 
     /// <summary>Fills the Sessions by Application grid from the newest per-application snapshot.</summary>
-    private async Task RenderSessionsByApplicationAsync(List<SessionStatRow> rows)
+    private async Task RenderSessionsByApplicationAsync(List<SessionStatRow> rows, ViewerLoadTimer? timer = null)
     {
-        SessionsByApplicationGrid.ItemsSource = rows;
-        /* The read has no window: it is the newest snapshot of all, so the panel says which instant that is (#3637). */
-        SessionsByApplicationCollectedText.Text = HistoryTime.SnapshotCollected(rows.Count > 0 ? rows[0].CollectionTime : null, "--");
-        await ShowEngineGapAsync(SessionsByApplicationNoDataMessage, "session_stats", rows.Count, keepsOwnEmptyText: true);
+        ClientStep(timer, "Sessions by Application grid build", () =>
+        {
+            SessionsByApplicationGrid.ItemsSource = rows;
+            /* The read has no window: it is the newest snapshot of all, so the panel says which instant that is (#3637). */
+            SessionsByApplicationCollectedText.Text = HistoryTime.SnapshotCollected(rows.Count > 0 ? rows[0].CollectionTime : null, "--");
+        });
+        await Timed(timer, "Sessions by Application engine gap read", ShowEngineGapAsync(SessionsByApplicationNoDataMessage, "session_stats", rows.Count, keepsOwnEmptyText: true));
     }
 }

@@ -593,6 +593,8 @@ public class CollectorMeasurementSeamTests
                 CollectorContext.StatementScrubTimeoutsMeasurement,
                 CollectorContext.StatementScrubUnjudgedMeasurement,
                 CollectorContext.StatementScrubMsMeasurement,
+                /* #8884: dumps that arrived since the previous stamp, measured by InstanceEvents.ObserveMemoryDumps on behalf of cpu_utilization. */
+                InstanceEvents.MemoryDumpsNewMeasurement,
                 /* #6441: SQL Server truncated the ring buffer's XML. Measured through RingBufferXml.MeasureTruncation on
                    behalf of system_health_events, long_query_completions, deadlocks and blocked_process_report, which
                    is why the consts live in RingBufferXml.cs. Written only on a truncated read. */
@@ -617,6 +619,31 @@ public class CollectorMeasurementSeamTests
                 SystemHealthEventsCollector.EventFileErrorMeasurement,
                 SystemHealthEventsCollector.EventFileBufferCutMeasurement,
                 SystemHealthEventsCollector.EventFileWildcardMeasurement,
+                /* #9528: the attempt that answered a system_health_events file read (0 when the bookmark's own file answered
+                   and the target lookup never ran) and the milliseconds the lookup, the raw reads and the XML cast took. */
+                SystemHealthEventsCollector.EventFileAttemptMeasurement,
+                SystemHealthEventsCollector.EventFileLookupMsMeasurement,
+                SystemHealthEventsCollector.EventFileReadMsMeasurement,
+                SystemHealthEventsCollector.EventFileShredMsMeasurement,
+                /* #9107: the default trace is switched off on the server. Measured by default_trace_events' own ReadAsync from a const in
+                   DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
+                   collector's const drifting from it fails here. */
+                PerformanceMonitor.Common.DefaultTraceOffNote.Label,
+                /* #9518: the server's blocked process threshold is 0, so no report can be raised and the run read nothing of its session. Measured by
+                   blocked_process_report's own ReadAsync from a const in BlockedProcessReportCollector.cs; the expectation names the label the readers
+                   parse (BlockedProcessThresholdOffNote.Label), so the collector's const drifting from it fails here. */
+                PerformanceMonitor.Common.BlockedProcessThresholdOffNote.Label,
+                /* #9508: a skipped per-relation pg_buffercache scan. Measured by pg_buffer_usage's own ReadAsync from consts in PgBufferUsageCollector.cs. */
+                PgBufferUsageCollector.ScanSkippedMeasurement,
+                PgBufferUsageCollector.PoolBuffersMeasurement,
+                PgBufferUsageCollector.CapBuffersMeasurement,
+                PgBufferUsageCollector.SummaryMissingMeasurement,
+                /* #9529: query_snapshots' plan bound, measured by its own ReadAsync from consts in QuerySnapshotsCollector.cs. Written only when the run reused,
+                   shared or capped a plan. */
+                QuerySnapshotsCollector.PlansReusedMeasurement,
+                QuerySnapshotsCollector.PlansSharedMeasurement,
+                QuerySnapshotsCollector.PlansOverCapMeasurement,
+                QuerySnapshotsCollector.LivePlansOverCapMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

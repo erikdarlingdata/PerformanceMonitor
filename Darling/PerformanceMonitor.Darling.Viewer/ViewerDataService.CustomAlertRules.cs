@@ -56,7 +56,7 @@ public sealed partial class ViewerDataService
         {
             await using var command = _dataSource.CreateCommand(CustomAlertRulesWriteProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            return await command.ExecuteScalarAsync(cancellationToken) is true;
+            return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

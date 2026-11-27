@@ -1,0 +1,192 @@
+{{- if .Values.store.provisionRoles.enabled }}
+{{- include "performancemonitor-darling.checkProvisionRoles" . }}
+{{- $p := .Values.store.provisionRoles }}
+{{- $ext := .Values.store.external }}
+{{- $viaString := ne (toString $p.login.connectionStringSecret.name) "" }}
+{{- $login := ternary $p.login.connectionStringSecret $p.login.passwordSecret $viaString }}
+# The store-roles hook Job (#8779): runs provision-roles.sql against the external store after every install and upgrade.
+# The init container prepares the script, a pgpass file and the libpq settings in a memory volume; the psql container runs
+# them. The login and role-password Secrets are mounted in the init container only, as files: no env variable or argument
+# carries a password. The psql container pulls IfNotPresent, as the bundled store does, and the default psqlImage is the bundled store's image; the init container
+# runs the Darling image and follows image.pullPolicy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "performancemonitor-darling.storeRolesJobName" . }}
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+    app.kubernetes.io/component: store-roles
+  annotations:
+    # Argo CD maps these to PostSync and BeforeHookCreation. The last run and its log stay, whether it failed or not.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int $p.waitSeconds) 300 }}
+  template:
+    metadata:
+      labels:
+        # Not the selector labels: the web and MCP Services and the Deployment select on name + instance, and this pod has
+        # no listener and no readiness probe, so it must never match them.
+        app.kubernetes.io/name: {{ include "performancemonitor-darling.name" . | trunc 50 | trimSuffix "-" }}-store-roles
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: store-roles
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: prepare
+          image: {{ include "performancemonitor-darling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --prepare-provision-roles
+            - --login
+            - {{ printf "/run/secrets/darling-login/%s" $login.key | quote }}
+            - --login-kind
+            - {{ ternary "connection-string" "password" $viaString }}
+            - --passwords
+            - /run/secrets/darling-roles
+            - --out
+            - /work
+            - --wait-seconds
+            - {{ int $p.waitSeconds | toString | quote }}
+            {{- if not $viaString }}
+            - --host
+            - {{ $ext.host | quote }}
+            - --port
+            - {{ $ext.port | toString | quote }}
+            - --database
+            - {{ $ext.database | quote }}
+            - --username
+            - {{ $ext.username | quote }}
+            - --ssl-mode
+            - {{ include "performancemonitor-darling.provisionRolesSslMode" . | quote }}
+            {{- if $ext.caSecret.name }}
+            - --root-certificate
+            - /etc/darling/store-ca/ca.crt
+            {{- end }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+            - name: login
+              mountPath: /run/secrets/darling-login
+              readOnly: true
+            - name: role-passwords
+              mountPath: /run/secrets/darling-roles
+              readOnly: true
+            {{- if $ext.caSecret.name }}
+            - name: store-ca
+              mountPath: /etc/darling/store-ca
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: provision-roles
+          image: {{ include "performancemonitor-darling.psqlImage" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/scripts/run-provision-roles.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            {{- if $ext.caSecret.name }}
+            - name: store-ca
+              mountPath: /etc/darling/store-ca
+              readOnly: true
+            {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: scripts
+          configMap:
+            name: {{ include "performancemonitor-darling.fullname" . }}
+            defaultMode: 365
+            items:
+              - key: run-provision-roles.sh
+                path: run-provision-roles.sh
+        - name: login
+          secret:
+            secretName: {{ $login.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ $login.key | quote }}
+                path: {{ $login.key | quote }}
+        - name: role-passwords
+          secret:
+            secretName: {{ $p.rolePasswordsSecret | quote }}
+            defaultMode: 288
+            items:
+              {{- range $role := list "admin" "viewer" "web" "mcp" }}
+              - key: {{ $role }}
+                path: {{ $role }}
+              {{- end }}
+        {{- if $ext.caSecret.name }}
+        - name: store-ca
+          secret:
+            secretName: {{ $ext.caSecret.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ $ext.caSecret.key | quote }}
+                path: ca.crt
+        {{- end }}
+{{- end }}

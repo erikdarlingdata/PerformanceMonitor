@@ -67,8 +67,9 @@ public sealed class DarlingMcpPlanCorrectionTools
         return array;
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_plan_corrections"), Description(
-        "Gets SQL Server automatic plan correction (APC) activity: FORCE_LAST_GOOD_PLAN recommendations/actions over the window ending at as_of, newest capture first, plus each database's automatic-tuning enablement. Rows recur per capture, not per distinct recommendation. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page. automatic_tuning ignores the window: the latest snapshot; each row's as_of says when. All timestamps are UTC. No rows and no automatic_tuning: empty (not_collected checked first). <<GUIDE>> Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. query_text is a preview by default, capped at 150 characters with query_text_truncated marking whichever rows were actually cut - pass full_text=true for the whole regressed statement on every row instead, the same opt-in get_query_store_top uses. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
+        "Automatic plan correction (APC): FORCE_LAST_GOOD_PLAN recommendations/actions in the window ending at as_of, newest capture first, plus each database's tuning state. Rows recur per capture, not per distinct recommendation. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page. budget_truncated: the 32 KB budget cut the page. automatic_tuning ignores the window: the latest snapshot; each row's as_of says when. All timestamps are UTC. No rows and no automatic_tuning: empty (not_collected checked first). <<GUIDE>> Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. query_text is a preview by default, capped at 150 characters with query_text_truncated marking whichever rows were actually cut - pass full_text=true for the whole regressed statement on every row instead, the same opt-in get_query_store_top uses. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
     public static Task<string> GetPlanCorrections(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -79,7 +80,7 @@ public sealed class DarlingMcpPlanCorrectionTools
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.One(database_name), logger, cancellationToken);
+        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.One(database_name), logger, cancellationToken, responseByteBudget: McpResponseBudget.DefaultBytes);
 
     /// <summary>
     /// #5244: the get_plan_corrections read over a LIST of databases. The MCP tool passes <c>DatabaseFilter.One(database_name)</c>
@@ -87,6 +88,8 @@ public sealed class DarlingMcpPlanCorrectionTools
     /// rows (before the cap) and the automatic-tuning snapshot (its rows only; the newest-capture anchor stays the
     /// server's). The one-name consumer on the empty path (its message) is list-aware: with a filter it says "for the database X"
     /// (one name) or "for the chosen databases" (two or more) and gives no verdict about the server's collection.
+    /// <paramref name="responseByteBudget"/> is the byte target the page is cut to, rows left off the end whole (the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/>); null keeps every row, as the web viewer's mirror does.
     /// </summary>
     internal static async Task<string> GetPlanCorrections(
         NpgsqlDataSource postgres,
@@ -98,7 +101,8 @@ public sealed class DarlingMcpPlanCorrectionTools
         DatabaseFilter databaseFilter,
         ILogger? logger,
         CancellationToken cancellationToken,
-        bool collapse = false)
+        bool collapse = false,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -111,7 +115,7 @@ public sealed class DarlingMcpPlanCorrectionTools
         try
         {
             var now = windowEnd;
-            var tuning = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, resolved.ServerId, databaseFilter, cancellationToken);
+            var tuning = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, resolved.ServerId, databaseFilter, now, cancellationToken);
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 200 over per-cycle re-captures gave every window the same ~16-hour
                reach, and `total_recommendations` published that page as the window's count. */
@@ -161,14 +165,14 @@ public sealed class DarlingMcpPlanCorrectionTools
                 recommendation_state_reason = r.RecommendationStateReason,
                 recommendation_reason = r.RecommendationReason,
                 score = r.Score,
-                estimated_gain_seconds = r.EstimatedGainSeconds,
+                estimated_gain_seconds = McpHelpers.RoundTo(r.EstimatedGainSeconds, 2), // #8815: two places, as the neighbouring reads write seconds
                 last_good_plan_forcing_type = r.LastGoodPlanForcingType,
                 last_good_plan_is_forced = r.LastGoodPlanIsForced,
                 last_good_plan_force_failure_reason = r.LastGoodPlanForceFailureReason,
                 regressed_plan_execution_count = r.RegressedPlanExecutionCount,
-                regressed_plan_cpu_time_average_ms = r.RegressedPlanCpuTimeAverageMs,
+                regressed_plan_cpu_time_average_ms = McpHelpers.RoundTo(r.RegressedPlanCpuTimeAverageMs, 2),
                 last_good_plan_execution_count = r.LastGoodPlanExecutionCount,
-                last_good_plan_cpu_time_average_ms = r.LastGoodPlanCpuTimeAverageMs,
+                last_good_plan_cpu_time_average_ms = McpHelpers.RoundTo(r.LastGoodPlanCpuTimeAverageMs, 2),
                 valid_since = r.ValidSinceUtc?.ToString("o"),
                 last_refresh = r.LastRefreshUtc?.ToString("o"),
                 execute_action_initiated_by = r.ExecuteActionInitiatedBy,
@@ -179,48 +183,65 @@ public sealed class DarlingMcpPlanCorrectionTools
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
             });
 
-            var payload = new
+            /* The latest snapshot whatever its age: on a readable secondary the collector no longer writes one, so the rows are
+               the last primary-role capture, and the note says so and how old they are. The age is measured at the window's
+               end (as_of when given), so a read of a past instant is not graded against the present. */
+            var automaticTuningNote = QueryStoreSnapshotStaleness.Join(
+                tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
+                tuning.Count > 0
+                    ? QueryStoreSnapshotStaleness.Note(
+                        DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
+                        tuningSchedule.Enabled, tuningSchedule.IntervalMinutes, "the as_of on each automatic_tuning row")
+                    : null);
+
+            var recommendationRows = (collapse ? WithSeenKeys(recommendations, page).Cast<object?>() : recommendations.Cast<object?>()).ToList();
+
+            /* The newest capture rows that fit the response budget: rows are left off the end whole, never cut, and every field that
+               describes the page (the count and the span) is that of the rows it kept. `truncated` is true for either cut, the row limit or
+               the budget; budget_truncated is the budget alone. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
-                   apart from the window floor, so the reach is the instant. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
-                database_name = databaseFilter.Describe(),
-                automatic_tuning = tuning.Select(t => new
+                var payload = new
                 {
-                    database_name = t.DatabaseName,
-                    force_last_good_plan_desired_state = t.DesiredState,
-                    force_last_good_plan_actual_state = t.ActualState,
-                    force_last_good_plan_reason = t.Reason,
-                    as_of = t.CollectionTime.ToString("o"),
-                }),
-                /* The latest snapshot whatever its age: on a readable secondary the collector no longer writes one, so the rows are
-                   the last primary-role capture, and the note says so and how old they are. The age is measured at the window's
-                   end (as_of when given), so a read of a past instant is not graded against the present. */
-                automatic_tuning_note = QueryStoreSnapshotStaleness.Join(
-                    tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
-                    tuning.Count > 0
-                        ? QueryStoreSnapshotStaleness.Note(
-                            DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
-                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes)
-                        : null),
-                /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
-                   the window's tail, so the oldest stamp IS the reach; null when the window held no
-                   recommendation rows and only the tuning snapshot answered. */
-                recommendations_returned = page.Count,
-                truncated,
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
-                order = "collection_time_desc",
-                recommendations = collapse ? WithSeenKeys(recommendations, page) : (object)recommendations,
-            };
-            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                       apart from the window floor, so the reach is the instant. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                    database_name = databaseFilter.Describe(),
+                    automatic_tuning = tuning.Select(t => new
+                    {
+                        database_name = t.DatabaseName,
+                        force_last_good_plan_desired_state = t.DesiredState,
+                        force_last_good_plan_actual_state = t.ActualState,
+                        force_last_good_plan_reason = t.Reason,
+                        as_of = t.CollectionTime.ToString("o"),
+                    }),
+                    automatic_tuning_note = automaticTuningNote,
+                    /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
+                       the window's tail, so the oldest stamp IS the reach; null when the window held no
+                       recommendation rows and only the tuning snapshot answered. */
+                    recommendations_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest capture first", "recommendation rows",
+                            "Pass as_of at oldest_returned_collection_time to read on from there, or narrow the page with database_name.")
+                        : null,
+                    /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                    oldest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.CollectionTime)),
+                    newest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.CollectionTime)),
+                    order = "collection_time_desc",
+                    recommendations = recommendationRows.Take(kept),
+                };
+                var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+                return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            }
+
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

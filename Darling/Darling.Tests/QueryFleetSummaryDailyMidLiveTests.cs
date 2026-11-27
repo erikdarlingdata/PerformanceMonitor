@@ -288,11 +288,19 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         Assert.Empty(old.Except(routed));
         Assert.Empty(routed.Except(old));
 
-        /* The tool's reply, end to end. */
+        /* The tool's reply, end to end. The tool refuses an as_of after the real clock, and the pinned-clock job pins this class to an instant
+           up to a day AHEAD of it (23:30 and 00:30 UTC), where the window's end is still to come. The routes above ran for that instant; the
+           tool's own call cannot, and it plans on the real clock anyway, so it is compared only for a window that has already ended. */
+        if (t.End > DateTime.UtcNow)
+        {
+            return plan;
+        }
+
         var json = await DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, Hash, t.HoursBack,
             as_of: t.End.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) + "Z", limit: 200, cancellationToken: ct);
         using var doc = JsonDocument.Parse(json);
         Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
+        Assert.True(doc.RootElement.TryGetProperty("servers", out _), json);
         var reply = doc.RootElement.GetProperty("servers").EnumerateArray()
             .Select(r => (r.GetProperty("server_name").GetString(), r.GetProperty("database_name").GetString(), r.GetProperty("execution_count").GetInt64(),
                 r.GetProperty("cpu_ms").GetDouble(), r.GetProperty("elapsed_ms").GetDouble(),
@@ -494,6 +502,27 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
             for (var i = 1; i <= serverCount; i++)
             {
                 await DarlingMcpTestData.RegisterServerAsync(c, -858000 - i, "p8570-" + i, ct);
+            }
+
+            /* #9149: V284's covering hash index lets the hourly-only statement answer from the index alone once a vacuum has set the visibility map of
+               the rollup's pages, and then it reads a fraction of the pages this test counts it on. An autovacuum between the refresh and the EXPLAIN
+               does that on a slow runner. No autovacuum on the rollups' relations keeps the old statement on a heap fetch per row, as #8725 does for
+               the Query Store twin. A table option set on the hypertable is copied to the chunks created after it, so it goes on before the seed. */
+            await using (var relations = new NpgsqlCommand(@"SELECT 'collect.query_stats'
+                UNION ALL SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates", c))
+            await using (var reader = await relations.ExecuteReaderAsync(ct))
+            {
+                var tables = new List<string>();
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+
+                await reader.CloseAsync();
+                foreach (var table in tables)
+                {
+                    await Exec(c, $"ALTER TABLE {table} SET (autovacuum_enabled = false)", ct);
+                }
             }
 
             await Exec(c, $@"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,

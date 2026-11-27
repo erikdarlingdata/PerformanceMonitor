@@ -130,6 +130,17 @@ public partial class DuckDbInitializer
     /// <summary>Whether the sentinel connection is open.</summary>
     internal bool SentinelOpenForTests => Volatile.Read(ref _sentinel) is not null;
 
+    /// <summary>
+    /// Reads one DuckDB setting on the sentinel connection itself (#9553), so a test can tell the connection
+    /// <see cref="InitializeAsync"/> holds from the fresh ones <see cref="CreateConnection"/> hands out.
+    /// </summary>
+    internal string? ReadSentinelSettingForTests(string setting)
+    {
+        using var command = _sentinel!.CreateCommand();
+        command.CommandText = $"SELECT CAST(current_setting('{setting}') AS VARCHAR)";
+        return command.ExecuteScalar()?.ToString();
+    }
+
     /// <summary>Whether this initializer has been disposed. Set under the health gate, so a reopen sees it.</summary>
     private void MarkDisposed()
     {

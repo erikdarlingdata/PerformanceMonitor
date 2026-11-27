@@ -12,13 +12,14 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
-/// #6186: the retry schedule for a collector the monitored server refuses on every run (a PERMISSIONS run), shared by Darling's
-/// scheduler and Lite's. A refusal that repeats with the same answer is a standing condition, not a fresh failure each interval,
-/// so the collector is tried less often while it repeats: the first <see cref="FreeRefusals"/> refusals run at the normal interval
-/// (a grant being applied can look like one), then each further identical refusal doubles the wait, up to
+/// #6186: the retry schedule for a collector that fails the same way on every run, shared by Darling's scheduler and Lite's. Both
+/// record a refusal from the monitored server (a PERMISSIONS run), and a statement that times out run after run under one fixed
+/// answer, <see cref="TimedOutAnswer"/> (#8891). Either one repeating with the same answer is a standing condition, not a fresh
+/// failure each interval, so the collector is tried less often while it repeats: the first <see cref="FreeRefusals"/> run at
+/// the normal interval (a grant being applied can look like one), then each further identical one doubles the wait, up to
 /// <see cref="MaxDelay"/> (or the collector's own interval when that is longer: a backoff never makes a collector run MORE often).
-/// The collector is never stopped for good, so a granted permission is picked up at the next try. The first run that is not a
-/// refusal, or a refusal with a different answer, goes back to the normal interval.
+/// The collector is never stopped for good, so a granted permission is picked up at the next try. The first run that ends some
+/// other way, or with a different answer, goes back to the normal interval.
 /// </summary>
 public sealed class RefusedCollectorBackoff
 {
@@ -27,6 +28,13 @@ public sealed class RefusedCollectorBackoff
 
     /// <summary>The longest wait a 1-minute collector backs off to.</summary>
     public static readonly TimeSpan MaxDelay = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The answer a timed-out run is recorded under (#8891). Fixed, because the timeout's own message carries the run's elapsed
+    /// time and would read as a new answer on every run, so the streak would never build. The leading control character keeps
+    /// it apart from any refusal text a server returns.
+    /// </summary>
+    public const string TimedOutAnswer = "\u0001command timeout";
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);

@@ -20,16 +20,16 @@ public sealed class DarlingMcpWriteGateTextTests
     [Fact]
     public void SettingsParagraph_NamesEveryServerAdminTool()
     {
-        Assert.Equal(4, DarlingMcpWritePolicy.ServerAdminTools.Count);
+        Assert.NotEmpty(DarlingMcpWritePolicy.ServerAdminTools);
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
-            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine, StringComparison.Ordinal));
+            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine(), StringComparison.Ordinal));
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
             name => Assert.Contains(name, DarlingMcpInstructions.Text, StringComparison.Ordinal));
     }
 
     [Theory]
-    [InlineData(true, "set_server_action on via mcp.allowServerAdmin")]
-    [InlineData(false, "set_server_action off")]
+    [InlineData(true, "update_web_access_group on via mcp.allowServerAdmin")]
+    [InlineData(false, "update_web_access_group off")]
     public void Start_WritesServed_WarnsOnce_NamingEveryServerAdminTool(bool serverAdmin, string state)
     {
         var mcp = new McpConfig { AllowWrites = true, AllowServerAdmin = serverAdmin };

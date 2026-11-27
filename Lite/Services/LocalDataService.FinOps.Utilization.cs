@@ -20,12 +20,16 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
-    /// <summary>True when the hot table (not its archive view) holds a row for the server. <paramref name="table"/> is a literal from this file, never user text.</summary>
-    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId)
+    /// <summary>True when the hot table (not its archive view) holds a row for the server: any row, or with
+    /// <paramref name="collectedAtOrBeforeUtc"/> a row whose collection_time is at or before it, which is the row a newest-snapshot
+    /// read bounded at that instant answers from. <paramref name="table"/> is a literal from this file, never user text.</summary>
+    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId, DateTime? collectedAtOrBeforeUtc = null)
     {
         using var probe = connection.CreateCommand();
-        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1)";
+        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1" + (collectedAtOrBeforeUtc.HasValue ? " AND collection_time <= $2" : "") + ")";
         probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (collectedAtOrBeforeUtc is { } bound)
+            probe.Parameters.Add(new DuckDBParameter { Value = bound });
         return Convert.ToBoolean(await probe.ExecuteScalarAsync());
     }
 
@@ -54,10 +58,10 @@ public partial class LocalDataService
     /// <summary>
     /// Computes utilization efficiency from cpu_utilization_stats + memory_stats (last 24 hours).
     /// </summary>
-    public async Task<UtilizationEfficiencyRow?> GetUtilizationEfficiencyAsync(int serverId)
+    public async Task<UtilizationEfficiencyRow?> GetUtilizationEfficiencyAsync(int serverId, CancellationToken cancellationToken = default)
     {
         using var _q = TimeQuery("GetUtilizationEfficiencyAsync", "utilization efficiency stats");
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
@@ -151,8 +155,8 @@ LEFT JOIN grants g ON true";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
-        using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return null;
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
 
         var avgCpu = reader.IsDBNull(0) ? 0m : Convert.ToDecimal(reader.GetValue(0));
         var maxCpu = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
@@ -217,9 +221,9 @@ LEFT JOIN grants g ON true";
     /// zone's calendar day, so its label reads in the same clock as every other time on the page. The days are the seven of
     /// <see cref="ProvisioningTrendWindow"/>: the six whole days before today and today so far, whose row is marked partial.
     /// </summary>
-    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null)
+    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
         var zone = dayZone ?? TimeZoneInfo.Utc;
@@ -238,7 +242,7 @@ WHERE server_id = $1
 AND   collection_time >= $2";
             newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
-            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+            latestTime = await newestCommand.ExecuteScalarAsync(cancellationToken) is DateTime latest ? latest : null;
         }
 
         if (latestTime is not DateTime newest)
@@ -344,8 +348,8 @@ ORDER BY c.day";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<ProvisioningTrendRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             var avgCpu = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1));
             var maxCpu = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
@@ -404,9 +408,9 @@ ORDER BY c.day";
     /// <paramref name="dayZone"/> counts days (see <see cref="DisplayDays"/>): the selected time display's zone from the tab,
     /// UTC when null.
     /// </summary>
-    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24, TimeZoneInfo? dayZone = null)
+    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24, TimeZoneInfo? dayZone = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
         var cutoff = nowUtc.AddHours(-hoursBack);
@@ -423,7 +427,7 @@ AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, a
 AND   collection_time >= $2";
             newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
-            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+            latestTime = await newestCommand.ExecuteScalarAsync(cancellationToken) is DateTime latest ? latest : null;
         }
 
         if (latestTime is not DateTime newest)
@@ -462,8 +466,8 @@ ORDER BY d.day";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<MemoryGrantEfficiencyRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new MemoryGrantEfficiencyRow
             {

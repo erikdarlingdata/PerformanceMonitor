@@ -93,6 +93,7 @@ public sealed class DarlingMcpForcedPlanTools
         "first_seen is the first capture in the window that shows the force. Query Store keeps no force time, so the real force can be up to one collector pass earlier (5 minutes by default). " +
         "Runs are counted from first_seen, and only from the Query Store intervals the collector stored.";
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_forced_plans"), Description(
         "Whether each Query Store force works: one entry per plan forced in its database's newest capture in the window, with a state and the evidence. " +
         "States: FAILING (the engine counts a force failure or names a reason), IGNORED (another plan of the query ran after the force was first seen), WORKING (the forced plan ran, or a variant of it did, and no other plan did), " +
@@ -258,6 +259,7 @@ public sealed class DarlingMcpForcedPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_hints"), Description(
         "Which Query Store hints are in place: one entry per hint in its database's newest capture in the window, with the query, the hint text, where it came from, whether the engine records a failure, and the query's text. <<GUIDE>> " +
         "A Query Store hint (sys.sp_query_store_set_hints, SQL Server 2022 and later, Azure SQL) changes a query's plan as a forced plan does, and nothing else Darling reads shows one set or cleared. " +

@@ -97,6 +97,20 @@ public sealed class AlertThresholdKeyBehaviourTests
         AlertThresholdKey.LongRunningQueryThresholdMinutes => new Fix(
             h => h.Settings.LongRunningQueryEnabled = true, 45,
             Probe: (h, server) => $"{h.Adapter.LastLrqArgs?.ThresholdMinutes}|{Surface(h, server)}"),
+        AlertThresholdKey.TempDbLogSpaceThresholdPercent => new Fix(
+            h => h.Settings.TempDbLogSpaceEnabled = true, 95,
+            Drive: async (engine, h, server) =>
+            {
+                for (var i = 1; i <= AlertEngine.TempDbLogSpaceBreachSamples; i++)
+                {
+                    h.Adapter.TempDb = new TempDbSpaceInfo
+                    {
+                        TotalReservedMb = 100, UnallocatedMb = 900, LogTotalMb = 1000, LogUsedMb = 900, LogUsedPercent = 90,
+                        CollectionTimeUtc = Harness.SampleBase.AddMinutes(i),
+                    };
+                    await engine.EvaluateServerAsync(SnapshotFor(server));
+                }
+            }),
         AlertThresholdKey.TempDbSpaceThresholdPercent => new Fix(
             h => h.Settings.TempDbSpaceEnabled = true, 95,
             Drive: async (engine, h, server) =>

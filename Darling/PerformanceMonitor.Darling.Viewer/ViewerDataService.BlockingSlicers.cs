@@ -55,7 +55,7 @@ public sealed partial class ViewerDataService
                 COUNT(DISTINCT blocked_spid) AS distinct_blocked,
                 COUNT(DISTINCT database_name) AS distinct_databases
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -70,7 +70,7 @@ public sealed partial class ViewerDataService
                 COUNT(DISTINCT blocked_spid) AS distinct_blocked,
                 COUNT(DISTINCT database_name) AS distinct_databases
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+            WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY 1
@@ -93,7 +93,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var eventCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));
@@ -125,7 +125,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS deadlock_count
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         GROUP BY 1
@@ -142,7 +142,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var count = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));

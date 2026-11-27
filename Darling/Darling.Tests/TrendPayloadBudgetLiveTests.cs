@@ -121,6 +121,26 @@ public sealed class TrendPayloadBudgetLiveTests
             Assert.True(overBudget.Count == 0,
                 $"over the {ResponseBudgetCeilingBytes:N0}-byte response budget at default arguments: {string.Join("; ", overBudget)}");
 
+            /* #8881: the log's size, reuse wait and holder are stated once for the window, not on every point, and the seeded log reading
+               is what the answer above was sized with. */
+            var tempDbDay = JsonDocument.Parse(await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName, 24)).RootElement;
+            Assert.Equal(2048d, tempDbDay.GetProperty("log_total_mb").GetDouble());
+            Assert.Equal("ACTIVE_TRANSACTION", tempDbDay.GetProperty("log_reuse_wait_desc").GetString());
+            Assert.Equal("ACTIVE_TRANSACTION", tempDbDay.GetProperty("log_truncation_holdup_reason").GetString());
+            Assert.Equal(57, tempDbDay.GetProperty("log_holder_session_id").GetInt32());
+            Assert.Equal("etl_login", tempDbDay.GetProperty("log_holder_login_name").GetString());
+            Assert.Contains("session 57", tempDbDay.GetProperty("log_holder_note").GetString(), StringComparison.Ordinal);
+            foreach (var point in tempDbDay.GetProperty("trend").EnumerateArray())
+            {
+                Assert.True(point.TryGetProperty("peak_log_used_mb", out _));
+                Assert.True(point.TryGetProperty("peak_log_used_percent", out _));
+                Assert.False(point.TryGetProperty("log_total_mb", out _));
+                Assert.False(point.TryGetProperty("log_reuse_wait_desc", out _));
+                Assert.False(point.TryGetProperty("log_truncation_holdup_reason", out _));
+                Assert.False(point.TryGetProperty("log_holder_session_id", out _));
+                Assert.False(point.TryGetProperty("log_holder_login_name", out _));
+            }
+
             /* The large-server shape the issue extrapolated to 30 MB: the last four hours also hold 300 tenant
                databases' 600 files. 609 series are active and ranked, and the answer is still five lines and
                the fold — the payload does not grow with the number of files. */
@@ -363,14 +383,23 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, $2 + n * interval '1 minute
        40 + (n % 30), 10 + (n % 5)
 FROM generate_series(0, $5) AS n", 7_000_000L, weekStart, WeekMinutes);
 
+        /* #8881: every row carries a real tempdb log reading, as a field server that collects the log sends it: the log's used space
+           and percent move, the size and the reuse wait and holdup reason repeat on every row, and the newest row has a holder (the
+           holder columns are captured only while the log is 50 percent used or more, so it is the one row that has them). */
         await Plant(@"
 INSERT INTO tempdb_stats
     (collection_id, collection_time, server_id, server_name,
      user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb,
-     total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+     total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb,
+     log_total_mb, log_used_mb, log_used_percent, log_reuse_wait_desc, log_truncation_holdup_reason,
+     holder_session_id, holder_login_name, holder_program_name, holder_begin_time, holder_log_bytes_used)
 SELECT $1 + n, $2 + n * interval '1 minute', $3, $4,
        100 + (n % 50), 50 + (n % 20), 25 + (n % 10),
-       175 + (n % 80), 825 - (n % 80), 5 + (n % 10), 55 + (n % 3), 12 + (n % 5)
+       175 + (n % 80), 825 - (n % 80), 5 + (n % 10), 55 + (n % 3), 12 + (n % 5),
+       2048, 1100 + (n % 400) + (n % 7) * 0.13, round((1100 + (n % 400) + (n % 7) * 0.13) / 2048 * 100, 2),
+       'ACTIVE_TRANSACTION', 'ACTIVE_TRANSACTION',
+       CASE WHEN n = $5 THEN 57 END, CASE WHEN n = $5 THEN 'etl_login' END, CASE WHEN n = $5 THEN 'nightly load' END,
+       CASE WHEN n = $5 THEN $2 + n * interval '1 minute' - interval '14 minutes' END, CASE WHEN n = $5 THEN 734003200 END
 FROM generate_series(0, $5) AS n", 8_000_000L, weekStart, WeekMinutes);
 
         await Plant(@"

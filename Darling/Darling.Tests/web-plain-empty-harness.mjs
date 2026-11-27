@@ -76,6 +76,11 @@ out.planCapture = describe(panelEmptyStrip({}, {
   kind: "empty", status: "precondition", message: "This server cannot capture execution plans yet. Unsatisfied precondition(s): capture_threshold = -1 | extension_available = false",
   hints: { reason: "plan_capture_not_ready", unsatisfied_count: 2 },
 }));
+/* #8912: Aurora cannot put the query id in log_line_prefix, so the plan grid says it is an engine limit and not a setting. */
+out.planAttributionLimit = describe(panelEmptyStrip({}, {
+  kind: "empty", status: "not_collected", message: "Plan attribution is an engine limit on Aurora PostgreSQL, not a setting you can change. The long text for a client.",
+  hints: { reason: "plan_attribution_engine_limit" },
+}));
 /* A reply with no structured reason keeps its own text, with nothing behind a click. */
 out.noReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: "No query statistics in this window.", hints: null }));
 out.unknownReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: "Plain text.", hints: { reason: "something_new" } }));

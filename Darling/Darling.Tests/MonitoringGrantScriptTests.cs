@@ -677,13 +677,71 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Fact]
+    public async Task Verb_ForAHostWithNoAuth_OffWindows_PrintsTheSqlLoginScript()
+    {
+        async Task<(int Code, string Out, string Err)> Run(bool isWindows, params string[] args)
+        {
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var code = await DarlingCliCommands.GrantScriptAsync(
+                args, output, error, TestContext.Current.CancellationToken,
+                readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: isWindows);
+            return (code, output.ToString(), error.ToString());
+        }
+
+        // #9844: a Linux or Compose service connects with a SQL login, so the host form without --auth prints the SQL login script.
+        var named = await Run(false, "--host", "sql01", "--username", "DarlingMonitor");
+        Assert.Equal(0, named.Code);
+        Assert.Equal("", named.Err);
+        Assert.Contains("CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'<strong password>'", named.Out);
+        Assert.DoesNotContain("FROM WINDOWS", named.Out);
+        Assert.DoesNotContain("NT SERVICE", named.Out);
+
+        // No --username: the placeholder login and its note.
+        var placeholder = await Run(false, "--host", "sql01");
+        Assert.Equal(0, placeholder.Code);
+        Assert.Contains($"CREATE LOGIN [{MonitoringGrantScript.PlaceholderLogin}] WITH PASSWORD = N'<strong password>'", placeholder.Out);
+        Assert.Contains("The server entry names no SQL login", placeholder.Out);
+        Assert.DoesNotContain("FROM WINDOWS", placeholder.Out);
+
+        // The same line on Windows prints the Windows account script, and an explicit --auth wins on either platform.
+        var windows = await Run(true, "--host", "sql01");
+        Assert.Equal(0, windows.Code);
+        Assert.Contains("FROM WINDOWS", windows.Out);
+        Assert.DoesNotContain("WITH PASSWORD", windows.Out);
+        Assert.Equal(windows.Out, (await Run(true, "--host", "sql01", "--auth", "integrated")).Out);
+        Assert.Equal(windows.Out, (await Run(false, "--host", "sql01", "--auth", "integrated")).Out);
+        Assert.Equal(named.Out, (await Run(true, "--host", "sql01", "--auth", "sql", "--username", "DarlingMonitor")).Out);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Verb_ForAHostWithAServiceAccountAndNoAuth_PrintsTheWindowsScriptForIt(bool isWindows)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        // A typed --service-account names the Windows account to grant, so with no --auth it keeps integrated on every platform.
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--service-account", @"CORP\gmsa-darling$" }, output, error, TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: isWindows);
+
+        Assert.Equal(0, code);
+        Assert.Equal("", error.ToString());
+        Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
+        Assert.DoesNotContain("WITH PASSWORD", output.ToString());
+        Assert.DoesNotContain(MonitoringGrantScript.PlaceholderLogin, output.ToString());
+    }
+
+    [Fact]
     public async Task Verb_ReadsTheServiceAccountFromTheCaller_ForWindowsAuth()
     {
         var output = new StringWriter();
 
         var code = await DarlingCliCommands.GrantScriptAsync(
             new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
-            readServiceAccount: () => @"CORP\gmsa-darling$", machineName: "DARLING01", domainName: "CORP");
+            readServiceAccount: () => @"CORP\gmsa-darling$", machineName: "DARLING01", domainName: "CORP", isWindows: true);
 
         Assert.Equal(0, code);
         Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
@@ -696,7 +754,7 @@ public sealed class MonitoringGrantScriptTests
 
         var code = await DarlingCliCommands.GrantScriptAsync(
             new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
-            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: true);
 
         Assert.Equal(0, code);
         Assert.Contains("PLACEHOLDER", output.ToString());
@@ -771,4 +829,299 @@ public sealed class MonitoringGrantScriptTests
         /* RDS lets its master user grant only the three job reads in msdb, so the RDS form carries no GRANT on cdc_jobs. */
         Assert.DoesNotContain(StatementLines(RdsScript()), g => g.Contains("cdc_jobs", StringComparison.Ordinal));
     }
+
+    /* ---------------- #8798: the optional per-database SELECT for the column_stats collector ---------------- */
+
+    private const string ColumnStatsText =
+        "Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. "
+        + "Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.";
+
+    private static string ColumnStatsScript(string[]? databases, bool finOps = false) =>
+        MonitoringGrantScript.Build(
+            MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps, azureSqlDatabase: false, columnStatsDatabases: databases);
+
+    [Fact]
+    public void ColumnStatsBlock_OnlyForListedDatabases()
+    {
+        var script = ColumnStatsScript(new[] { "SalesDb", "Hr" });
+
+        Assert.Contains("EXECUTE [SalesDb].sys.sp_executesql", script);
+        Assert.Contains("EXECUTE [Hr].sys.sp_executesql", script);
+        Assert.Contains("GRANT SELECT TO ", script);
+        /* One block per listed database and no cursor over sys.databases: the grant never defaults to every database. */
+        Assert.DoesNotContain("database_cursor", script);
+        Assert.DoesNotContain("EXECUTE [Other]", script);
+        /* The login is created in the database when missing, as the FinOps block does. */
+        Assert.Contains("CREATE USER '' + QUOTENAME(@login)", script);
+        /* A listed database that does not exist is skipped with a message, never run in the previous database. */
+        Assert.Contains("IF DB_ID(N'SalesDb') IS NULL", script);
+    }
+
+    [Fact]
+    public void AzureSqlDatabase_ListedGivesTheDatabaseLevelSelect_NoListGivesNone()
+    {
+        var principal = MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor", "x.database.windows.net"));
+        var plain = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true);
+        var listed = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true, columnStatsDatabases: new[] { "SalesDb", "Hr*/Db" });
+
+        Assert.DoesNotContain("GRANT SELECT TO ", plain);
+        Assert.Equal(plain, MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true, columnStatsDatabases: new[] { " " }));
+        Assert.StartsWith(plain, listed, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT TO [pm_monitor];", listed);
+        Assert.Contains("SalesDb", listed);
+        /* A database name cannot end the comment it is named in. */
+        Assert.DoesNotContain("Hr*/Db", listed);
+        Assert.DoesNotContain("sp_executesql", listed);
+    }
+
+    [Fact]
+    public void MissingSelectWarning_MakesTheUserBeforeTheGrant()
+    {
+        var note = MonitoringGrantScript.DescribeMissingColumnStatsSelect(new[] { "SalesDb" }, "pm_monitor")!;
+
+        var create = note.IndexOf("CREATE USER [pm_monitor] FOR LOGIN [pm_monitor]", StringComparison.Ordinal);
+        Assert.True(create >= 0, note);
+        Assert.True(create < note.IndexOf("GRANT SELECT TO [pm_monitor]", StringComparison.Ordinal), note);
+        Assert.Null(MonitoringGrantScript.DescribeMissingColumnStatsSelect(Array.Empty<string>(), "pm_monitor"));
+    }
+
+    [Fact]
+    public void NoList_NoBlock()
+    {
+        var plain = MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), false, false);
+        foreach (var databases in new string[]?[] { null, Array.Empty<string>(), new[] { "", "  " } })
+        {
+            var script = ColumnStatsScript(databases);
+
+            Assert.DoesNotContain("column_stats", script);
+            Assert.DoesNotContain("GRANT SELECT TO ", script);
+            Assert.Equal(plain, script);
+        }
+    }
+
+    [Fact]
+    public void Block_SaysBothSentencesPlainly()
+    {
+        var script = ColumnStatsScript(new[] { "SalesDb" });
+
+        Assert.Contains("/* " + ColumnStatsText + " */", script);
+        Assert.Contains("This grant lets the monitoring login read every row of the databases listed here.", script);
+        Assert.Contains("never copies column values, and it never reads histograms or filter expressions.", script);
+    }
+
+    [Fact]
+    public void NamesAreQuoted()
+    {
+        var script = ColumnStatsScript(new[] { "We]ird'Db", "dup", "DUP" });
+
+        Assert.Contains("EXECUTE [We]]ird'Db].sys.sp_executesql", script);
+        Assert.Contains("DB_ID(N'We]ird''Db')", script);
+        Assert.Single(script.Split("EXECUTE [dup].sys.sp_executesql").Skip(1).ToArray());
+        Assert.DoesNotContain("EXECUTE [DUP]", script);
+    }
+
+    [Fact]
+    public void ColumnStatsEntry_IsTheDatabaseLevelSelect_AndTheConnectionTestAsksNothingServerWide()
+    {
+        var entry = Assert.Single(MonitoringGrantScript.All, e => e.Set == GrantSet.ColumnStats);
+
+        Assert.Equal(GrantScope.ListedDatabases, entry.Scope);
+        Assert.Equal("GRANT SELECT TO ", entry.GrantPrefix);
+        Assert.DoesNotContain(entry, MonitoringGrantScript.RequiredServerGrants);
+    }
+
+    [Fact]
+    public void Cli_ParsesColumnStatsDatabases()
+    {
+        /* One name per occurrence, taken whole: a name may hold a comma or a space; a repeat is kept once. */
+        Assert.True(DarlingCliCommands.TryParseGrantScriptArgs(
+            new[] { "--host", "sql01", "--column-stats-databases", "SalesDb", "--column-stats-databases", "Sales, Archive", "--column-stats-databases", "salesdb" },
+            out var parsed, out _));
+        Assert.Equal(new[] { "SalesDb", "Sales, Archive" }, parsed!.ColumnStatsDatabases);
+
+        Assert.True(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01" }, out var none, out _));
+        Assert.Null(none!.ColumnStatsDatabases);
+
+        Assert.False(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--column-stats-databases" }, out _, out var error));
+        Assert.Contains("needs a value", error);
+        Assert.False(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--column-stats-databases", " " }, out _, out var empty));
+        Assert.Contains("--column-stats-databases", empty);
+        Assert.Contains("--column-stats-databases", DarlingCliCommands.GrantScriptUsageText());
+    }
+
+    [Fact]
+    public async Task Verb_PrintsTheColumnStatsBlock_OnlyWhenTheOptionIsGiven()
+    {
+        var withList = new StringWriter();
+        var without = new StringWriter();
+        Assert.Equal(0, await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--auth", "sql", "--username", "pm", "--column-stats-databases", "SalesDb" }, withList, new StringWriter(), default));
+        Assert.Equal(0, await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--auth", "sql", "--username", "pm" }, without, new StringWriter(), default));
+
+        Assert.Contains("EXECUTE [SalesDb].sys.sp_executesql", withList.ToString());
+        Assert.DoesNotContain("column_stats", without.ToString());
+    }
+
+    [Fact]
+    public async Task ConnectionTest_NoColumnStatsEntries_WhenListNull()
+    {
+        var commands = new System.Collections.Generic.List<string>();
+        var connection = new FakeGrantConnection(commands, text => AllHeld());
+
+        var note = await DarlingServerConnector.ProbeMissingGrantsAsync("x", false, null, default, _ => connection);
+
+        Assert.Null(note);
+        Assert.Single(commands);
+        Assert.DoesNotContain("N'SELECT'", commands[0]);
+    }
+
+    [Fact]
+    public async Task ConnectionTest_ReportsMissingSelect_ForListedDatabase()
+    {
+        var commands = new System.Collections.Generic.List<string>();
+        var connection = new FakeGrantConnection(commands, text => text.Contains("N'DATABASE', N'SELECT'", StringComparison.Ordinal)
+            ? Row(("d0", 0), ("d1", 1))
+            : AllHeld());
+
+        var note = await DarlingServerConnector.ProbeMissingGrantsAsync(
+            "x", false, null, default, _ => connection, columnStatsDatabases: new[] { "SalesDb", "OkDb" });
+
+        Assert.NotNull(note);
+        Assert.Contains("column_stats", note);
+        Assert.Contains("[SalesDb]", note);
+        Assert.DoesNotContain("OkDb", note);
+        Assert.Contains("SELECT", note);
+        Assert.Contains("HAS_PERMS_BY_NAME(N'SalesDb', N'DATABASE', N'SELECT')", commands[1]);
+        Assert.Contains("HAS_PERMS_BY_NAME(N'OkDb', N'DATABASE', N'SELECT')", commands[1]);
+    }
+
+    [Fact]
+    public async Task ConnectionTest_NothingToSay_WhenEveryListedDatabaseHoldsSelect()
+    {
+        var connection = new FakeGrantConnection(new System.Collections.Generic.List<string>(), text => text.Contains("N'DATABASE', N'SELECT'", StringComparison.Ordinal)
+            ? Row(("d0", 1))
+            : AllHeld());
+
+        Assert.Null(await DarlingServerConnector.ProbeMissingGrantsAsync(
+            "x", false, null, default, _ => connection, columnStatsDatabases: new[] { "SalesDb" }));
+    }
+
+    [Fact]
+    public void TheCaller_PassesTheListedDatabases_OnlyWhenColumnStatsIsEnabledWithAnExplicitScope()
+    {
+        var on = new ScheduleOverride(null, "column_stats", null, null, true, new[] { "SalesDb" });
+        var onNoScope = new ScheduleOverride(null, "column_stats", null, null, true, Array.Empty<string>());
+        var offWithScope = new ScheduleOverride(null, "column_stats", null, null, false, new[] { "SalesDb" });
+
+        Assert.Equal(new[] { "SalesDb" }, DarlingCommandExecutor.ResolveColumnStatsGrantDatabases(7, new[] { on }));
+        /* An empty scope collects every database; the connection test never checks every database. */
+        Assert.Null(DarlingCommandExecutor.ResolveColumnStatsGrantDatabases(7, new[] { onNoScope }));
+        Assert.Null(DarlingCommandExecutor.ResolveColumnStatsGrantDatabases(7, new[] { offWithScope }));
+        /* Off by default: no schedule rows at all. */
+        Assert.Null(DarlingCommandExecutor.ResolveColumnStatsGrantDatabases(7, Array.Empty<ScheduleOverride>()));
+    }
+
+    private static System.Data.DataTable AllHeld()
+    {
+        var columns = MonitoringGrantScript.RequiredServerGrants.Count;
+        var table = new System.Data.DataTable();
+        for (var i = 0; i < columns; i++)
+        {
+            table.Columns.Add("g" + i, typeof(int));
+        }
+
+        table.Columns.Add("who", typeof(string));
+        table.Columns.Add("no_user_dbs", typeof(long));
+        var row = table.NewRow();
+        for (var i = 0; i < columns; i++)
+        {
+            row[i] = 1;
+        }
+
+        row[columns] = "pm_monitor";
+        row[columns + 1] = 0L;
+        table.Rows.Add(row);
+        return table;
+    }
+
+    private static System.Data.DataTable Row(params (string Name, int Value)[] values)
+    {
+        var table = new System.Data.DataTable();
+        foreach (var (name, _) in values)
+        {
+            table.Columns.Add(name, typeof(int));
+        }
+
+        var row = table.NewRow();
+        for (var i = 0; i < values.Length; i++)
+        {
+            row[i] = values[i].Value;
+        }
+
+        table.Rows.Add(row);
+        return table;
+    }
+
+#pragma warning disable CS8765
+    private sealed class FakeGrantConnection(System.Collections.Generic.List<string> commands, Func<string, System.Data.DataTable> answer) : System.Data.Common.DbConnection
+    {
+        public override string ConnectionString { get; set; } = "";
+        public override string Database => "";
+        public override string DataSource => "";
+        public override string ServerVersion => "";
+        public override System.Data.ConnectionState State => System.Data.ConnectionState.Open;
+        public override void ChangeDatabase(string databaseName) { }
+        public override void Close() { }
+        public override void Open() { }
+        public override Task OpenAsync(System.Threading.CancellationToken cancellationToken) => Task.CompletedTask;
+        protected override System.Data.Common.DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel) => throw new NotSupportedException();
+        protected override System.Data.Common.DbCommand CreateDbCommand() => new FakeGrantCommand(this, commands, answer);
+    }
+
+    private sealed class FakeGrantCommand(System.Data.Common.DbConnection connection, System.Collections.Generic.List<string> commands, Func<string, System.Data.DataTable> answer) : System.Data.Common.DbCommand
+    {
+        public override string CommandText { get; set; } = "";
+        public override int CommandTimeout { get; set; }
+        public override System.Data.CommandType CommandType { get; set; }
+        public override bool DesignTimeVisible { get; set; }
+        public override System.Data.UpdateRowSource UpdatedRowSource { get; set; }
+        protected override System.Data.Common.DbConnection? DbConnection { get; set; } = connection;
+        protected override System.Data.Common.DbParameterCollection DbParameterCollection { get; } = new FakeGrantParameters();
+        protected override System.Data.Common.DbTransaction? DbTransaction { get; set; }
+        public override void Cancel() { }
+        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        public override object? ExecuteScalar() => throw new NotSupportedException();
+        public override void Prepare() { }
+        protected override System.Data.Common.DbParameter CreateDbParameter() => throw new NotSupportedException();
+        protected override System.Data.Common.DbDataReader ExecuteDbDataReader(System.Data.CommandBehavior behavior)
+        {
+            commands.Add(CommandText);
+            return answer(CommandText).CreateDataReader();
+        }
+    }
+
+    private sealed class FakeGrantParameters : System.Data.Common.DbParameterCollection
+    {
+        public override int Count => 0;
+        public override object SyncRoot => this;
+        public override int Add(object value) => throw new NotSupportedException();
+        public override void AddRange(Array values) => throw new NotSupportedException();
+        public override void Clear() { }
+        public override bool Contains(object? value) => false;
+        public override bool Contains(string value) => false;
+        public override void CopyTo(Array array, int index) { }
+        public override System.Collections.IEnumerator GetEnumerator() => Array.Empty<object>().GetEnumerator();
+        public override int IndexOf(object? value) => -1;
+        public override int IndexOf(string parameterName) => -1;
+        public override void Insert(int index, object value) => throw new NotSupportedException();
+        public override void Remove(object value) { }
+        public override void RemoveAt(int index) { }
+        public override void RemoveAt(string parameterName) { }
+        protected override System.Data.Common.DbParameter GetParameter(int index) => throw new NotSupportedException();
+        protected override System.Data.Common.DbParameter GetParameter(string parameterName) => throw new NotSupportedException();
+        protected override void SetParameter(int index, System.Data.Common.DbParameter value) { }
+        protected override void SetParameter(string parameterName, System.Data.Common.DbParameter value) { }
+    }
+#pragma warning restore CS8765
 }

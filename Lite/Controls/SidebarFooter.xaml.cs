@@ -38,6 +38,7 @@ public partial class SidebarFooter : UserControl
     public event RoutedEventHandler? ImportSettingsClick;
     public event RoutedEventHandler? ViewLogClick;
     public event RoutedEventHandler? OpenLogFolderClick;
+    public event RoutedEventHandler? StoreHealthClick;
     public event RoutedEventHandler? AboutClick;
 
     /// <summary>The Import Data menu item, which the window disables and relabels while an import runs.</summary>
@@ -122,5 +123,6 @@ public partial class SidebarFooter : UserControl
     private void ImportSettings_Click(object sender, RoutedEventArgs e) => ImportSettingsClick?.Invoke(this, e);
     private void ViewLog_Click(object sender, RoutedEventArgs e) => ViewLogClick?.Invoke(this, e);
     private void OpenLogFolder_Click(object sender, RoutedEventArgs e) => OpenLogFolderClick?.Invoke(this, e);
+    private void StoreHealth_Click(object sender, RoutedEventArgs e) => StoreHealthClick?.Invoke(this, e);
     private void About_Click(object sender, RoutedEventArgs e) => AboutClick?.Invoke(this, e);
 }

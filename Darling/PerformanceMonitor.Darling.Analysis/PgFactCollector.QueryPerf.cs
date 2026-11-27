@@ -33,7 +33,9 @@ public sealed partial class PgFactCollector
        server's current maxdop setting can produce right now is impossible under today's configuration,
        so it provably predates whatever change set that configuration and must not be counted. A
        current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
-       impossible, so the count is unchanged in both of those cases. */
+       impossible, so the count is unchanged in both of those cases. The setting is the newest capture at
+       or before $3, the analysis window's end, so a pass over an earlier window is held to the setting
+       that window had. */
     public static string QueryStatsSql => @"
 WITH current_maxdop AS
 (
@@ -41,6 +43,7 @@ WITH current_maxdop AS
     FROM server_config
     WHERE server_id = $1
     AND   configuration_name = 'max degree of parallelism'
+    AND   capture_time <= $3
     ORDER BY capture_time DESC
     LIMIT 1
 )
@@ -87,7 +90,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -215,28 +218,51 @@ svr AS
 ),
 latest AS
 (
+    -- #9492: each plan's newest row by an aggregate, not by numbering every row of the window. ROW_NUMBER over
+    -- the window sorted each chunk's rows, held every chunk's sort until the merge ended, and so cost memory in
+    -- step with the window; max over an array whose leading elements are the row's time and id keeps one array
+    -- per plan. Arrays compare element by element, so the largest array is the newest row, and on two rows at
+    -- the newest time the larger collection_id (the pair is unique, so a NULL field after it never decides the
+    -- winner and comes back NULL). Every field is a bigint or a timestamp, which rides as epoch microseconds
+    -- and is read back exactly: the column is timestamp without time zone, which holds microseconds.
     SELECT
+        database_name,
         query_hash,
         query_plan_hash,
-        database_name,
-        execution_count,
-        creation_time,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC
-        ) AS rn
+        max(ARRAY[
+            (extract(epoch FROM collection_time) * 1000000)::bigint,
+            collection_id,
+            execution_count,
+            (extract(epoch FROM creation_time) * 1000000)::bigint,
+            min_worker_time,
+            max_worker_time,
+            min_grant_kb,
+            max_grant_kb,
+            min_spills,
+            max_spills
+        ]) AS w
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
+    GROUP BY database_name, query_hash, query_plan_hash
+),
+newest_rows AS
+(
+    SELECT
+        database_name,
+        query_hash,
+        query_plan_hash,
+        w[3] AS execution_count,
+        timestamp 'epoch' + w[4] * interval '1 microsecond' AS creation_time,
+        w[5] AS min_worker_time,
+        w[6] AS max_worker_time,
+        w[7] AS min_grant_kb,
+        w[8] AS max_grant_kb,
+        w[9] AS min_spills,
+        w[10] AS max_spills
+    FROM latest
 )
 SELECT
     min_worker_time,
@@ -250,10 +276,16 @@ SELECT
     database_name,
     query_hash,
     query_plan_hash
-FROM latest, svr
-WHERE rn = 1
+FROM newest_rows, svr
+WHERE TRUE
 " + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
+
+    /// <summary>
+    /// #8570: the two parallel-plan costs at zero for the rest of the transaction that runs <see cref="ParameterSensitivitySql"/>
+    /// (the Viewer's Query Store keys read sets the same two, #8549).
+    /// </summary>
+    public const string ParameterSensitivityParallelCostsSql = "SET LOCAL parallel_setup_cost TO 0; SET LOCAL parallel_tuple_cost TO 0";
 
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
@@ -266,9 +298,18 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            /* #8570: the statement decompresses and aggregates every query_stats row of the server's window, and the planner's
+               default parallel costs keep it serial. On a 168-hour field read, zero setup and tuple costs gave a Gather with 2
+               workers and took the warm read to under half its serial time, the same rows. The transaction holds this one
+               statement, so the two costs return to the session's own values when it ends (a role or database setting still
+               holds for every other read). */
+            await using var transaction = await connection.BeginTransactionAsync(context.CancellationToken);
+            await using (var set = new NpgsqlCommand(ParameterSensitivityParallelCostsSql, connection, transaction) { CommandTimeout = FactCommandTimeoutSeconds })
+                await set.ExecuteNonQueryAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection, transaction) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -385,7 +426,10 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// slice, then <c>plan_agg</c> over it. <see cref="PlanRegressionSuffix"/> is shared with
     /// <see cref="PlanRegressionTableSql"/>, so the two reads cannot drift above <c>plan_agg</c>.
     /// </summary>
-    private const string PlanRegressionRawPrefix = @"
+    private const string PlanRegressionRawPrefix = PlanRegressionRawHead + PlanRegressionRawTail;
+
+    /// <summary><see cref="PlanRegressionRawPrefix"/> up to the end of the snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionRawHead = @"
 WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
@@ -456,7 +500,9 @@ WITH deduped AS
     -- would be a silent under-count and a worse bug than the one this fixes. Do not delete as dead
     -- weight -- it is doing all the pruning.
     AND   collection_time >= $3
-    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+";
+
+    private const string PlanRegressionRawTail = @"    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
 plan_agg AS
 (
@@ -470,13 +516,14 @@ plan_agg AS
         plan_id,
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
-        SUM(execution_count) AS execs,
-        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
-        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #8570: every sum in double precision, as the daily read takes them (PlanRegressionDailySql's plan_agg says why).
+        SUM(execution_count::DOUBLE PRECISION) AS execs,
+        SUM(avg_cpu_time_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS cpu_per_exec,
+        SUM(avg_duration_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS dur_per_exec,
         -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
         -- interval has no avg_rowcount, so a missing count can never read as a small one.
         CASE WHEN COUNT(*) = COUNT(avg_rowcount)
-             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+             THEN SUM(avg_rowcount::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0)
         END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
@@ -495,7 +542,10 @@ plan_agg AS
     /// </summary>
     public const string PlanRegressionTableSql = PlanRegressionTablePrefix + PlanRegressionSuffix;
 
-    private const string PlanRegressionTablePrefix = @"
+    private const string PlanRegressionTablePrefix = PlanRegressionTableHead + PlanRegressionTableTail;
+
+    /// <summary><see cref="PlanRegressionTablePrefix"/> up to the end of the snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionTableHead = @"
 WITH plan_agg AS
 (
     -- #3953: the table twin. query_store_interval_latest already holds each interval's latest snapshot -- the
@@ -515,13 +565,14 @@ WITH plan_agg AS
         plan_id,
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
-        SUM(execution_count) AS execs,
-        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
-        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #8570: every sum in double precision, as the daily read takes them (PlanRegressionDailySql's plan_agg says why).
+        SUM(execution_count::DOUBLE PRECISION) AS execs,
+        SUM(avg_cpu_time_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS cpu_per_exec,
+        SUM(avg_duration_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS dur_per_exec,
         -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
         -- interval has no avg_rowcount, so a missing count can never read as a small one.
         CASE WHEN COUNT(*) = COUNT(avg_rowcount)
-             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+             THEN SUM(avg_rowcount::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0)
         END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
@@ -531,9 +582,39 @@ WITH plan_agg AS
     AND   last_execution_time >= $2
     AND   collection_time >= $3
     AND   first_execution_time >= $4
-    GROUP BY database_name, query_id, plan_id, replica_role
+";
+
+    private const string PlanRegressionTableTail = @"    GROUP BY database_name, query_id, plan_id, replica_role
 ),
 ";
+
+    /// <summary>
+    /// <see cref="PlanRegressionSql"/> for a pass anchored at an instant (<c>AnalysisContext.AsOfUtc</c>). $4 is the window's end:
+    /// no snapshot stored after it is read, so each interval answers with the newest snapshot the store held at that instant.
+    /// </summary>
+    internal const string PlanRegressionAsOfSql = PlanRegressionRawHead + @"    AND   collection_time <= $4
+" + PlanRegressionRawTail + PlanRegressionSuffix;
+
+    /// <summary>
+    /// <see cref="PlanRegressionTableSql"/> for a pass anchored at an instant. $5 is the window's end. The table holds one snapshot
+    /// of each interval, the newest, so an interval whose snapshot was stored after the window's end is left out whole.
+    /// </summary>
+    internal const string PlanRegressionTableAsOfSql = PlanRegressionTableHead + @"    AND   collection_time <= $5
+" + PlanRegressionTableTail + PlanRegressionSuffix;
+
+    /// <summary>
+    /// <see cref="PlanRegressionDailySql"/> for a pass anchored at an instant. $7 is the window's end, the bound of the interval
+    /// table half; the caller hands $3 only the days that were whole by that instant.
+    /// </summary>
+    internal const string PlanRegressionDailyAsOfSql = PlanRegressionDailyHead + @"        AND   l.collection_time <= $7::timestamp
+" + PlanRegressionDailyTail + PlanRegressionSuffix;
+
+    /// <summary>
+    /// <see cref="PlanRegressionDailyBlocksSql"/> for a pass anchored at an instant (#9225). The window's end is $9: $7 and $8 are the day and
+    /// block lists, which the anchored read of whole days does not carry.
+    /// </summary>
+    internal const string PlanRegressionDailyBlocksAsOfSql = PlanRegressionDailyBlocksHead + @"        AND   l.collection_time <= $9::timestamp
+" + PlanRegressionDailyTail + PlanRegressionSuffix;
 
     /// <summary>
     /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
@@ -560,13 +641,34 @@ WITH plan_agg AS
     /// </summary>
     internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
 
-    private const string PlanRegressionDailyPrefix = @"
+    /// <summary>
+    /// <see cref="PlanRegressionDailySql"/> reading whole valid blocks for the days they cover (#9225), and the daily rows for the others.
+    /// Everything else is the same statement, so the rows and their order are the same. $7 the days no block covers (date[]), $8 the block
+    /// starts (date[]). The read takes it only when <see cref="PlanRegressionBlock.ReadValidBlocksAsync"/> found a block it may use.
+    /// </summary>
+    internal const string PlanRegressionDailyBlocksSql = PlanRegressionDailyBlocksHead + PlanRegressionDailyTail + PlanRegressionSuffix;
+
+    private const string PlanRegressionDailyPrefix = PlanRegressionDailyHead + PlanRegressionDailyTail;
+
+    /// <summary><see cref="PlanRegressionDailyPrefix"/> up to the end of the interval table half's snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionDailyHead = PlanRegressionDailyHeadTop + "$3" + PlanRegressionDailyDaysEnd + PlanRegressionDailyLiveHalf;
+
+    /// <summary>
+    /// #9225: <see cref="PlanRegressionDailyHead"/> for the read that takes whole valid blocks (<see cref="PlanRegressionBlock"/>): the daily half
+    /// reads only the days no block covers ($7, date[]) and the block half reads the blocks ($8, date[]). $3 stays every built day, which the
+    /// live half's watermark lookup needs. Used only when at least one block is valid, so a store without the block table never plans it.
+    /// </summary>
+    private const string PlanRegressionDailyBlocksHead = PlanRegressionDailyHeadTop + "$7" + PlanRegressionDailyDaysEnd + PlanRegressionBlockHalf + PlanRegressionDailyLiveHalf;
+
+    /// <summary>The start of <c>plan_agg</c> up to the daily half's day list, which is the one place the block read differs.</summary>
+    private const string PlanRegressionDailyHeadTop = @"
 WITH plan_agg AS
 (
     -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
-    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half by its day
-    -- (last_execution_time::date): a day not built is all live, and a built day keeps only its rows at or above its
-    -- watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next midnight).
+    -- from the interval table with the daily builder's own aggregate, taken in double precision (#8570). A row is in
+    -- exactly one half by its day (last_execution_time::date): a day not built is all live, and a built day keeps only its
+    -- rows at or above its watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next
+    -- midnight).
     SELECT
         database_name,
         query_id,
@@ -574,33 +676,63 @@ WITH plan_agg AS
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
         SUM(execs) AS execs,
-        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
-        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        SUM(cpu_us_sum) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum) / NULLIF(SUM(execs), 0) AS dur_per_exec,
         -- #5631: rows per call. A day with no rowcount_sum (an interval had none, or the day awaits its rebuild after the
         -- column was added) makes the whole plan's figure NULL, the same rule the other two reads apply.
         CASE WHEN COUNT(*) = COUNT(rowcount_sum)
-             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+             THEN SUM(rowcount_sum) / NULLIF(SUM(execs), 0)
         END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM
     (
+        -- #8570: both halves hand plan_agg their sums in double precision. A numeric sum keeps a large state for every
+        -- group, and over a busy server's plans those states outgrow the hash limit at PlanRegressionWorkMemSql and spill
+        -- to disk, in plan_agg and in the live half's own GROUP BY. Every sum ends as a double: the totals are divided into
+        -- per-call figures, and the suffix only compares the call count with 25 and multiplies it by a per-call double. A
+        -- call count is a whole number far below 2^53, so its double sum is exact.
         SELECT
             d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
-            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+            d.execs::DOUBLE PRECISION AS execs, d.cpu_us_sum::DOUBLE PRECISION AS cpu_us_sum,
+            d.dur_us_sum::DOUBLE PRECISION AS dur_us_sum, d.rowcount_sum::DOUBLE PRECISION AS rowcount_sum,
+            d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
-        AND   d.day = ANY($3::date[])
+        AND   d.day = ANY(";
 
+    private const string PlanRegressionDailyDaysEnd = @"::date[])
+";
+
+    /// <summary>
+    /// The block half (#9225). $8 the block starts (date[]). A block row is the sum of 4 whole built days at the grain <c>plan_agg</c> groups by, so
+    /// it stands where those days' daily rows stood, and is handed over in double precision as they are. Its rows figure is NULL when any of its
+    /// days has none, as <c>plan_agg</c> makes it across days.
+    /// </summary>
+    private const string PlanRegressionBlockHalf = @"
+        UNION ALL
+
+        SELECT
+            b.database_name, b.query_id, b.plan_id, b.replica_role, b.query_plan_hash,
+            b.execs::DOUBLE PRECISION AS execs, b.cpu_us_sum::DOUBLE PRECISION AS cpu_us_sum,
+            b.dur_us_sum::DOUBLE PRECISION AS dur_us_sum, b.rowcount_sum::DOUBLE PRECISION AS rowcount_sum,
+            b.last_exec, b.is_forced_plan, b.force_failure_count
+        FROM plan_regression_block AS b
+        WHERE b.server_id = $1::integer
+        AND   b.block_start = ANY($8::date[])
+";
+
+    /// <summary>The interval table half of <c>plan_agg</c>, up to the end of its snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionDailyLiveHalf = @"
         UNION ALL
 
         SELECT
             l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
-            SUM(l.execution_count),
-            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
-            SUM(l.avg_duration_us::numeric * l.execution_count),
-            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
+            SUM(l.execution_count::DOUBLE PRECISION),
+            SUM(l.avg_cpu_time_us::DOUBLE PRECISION * l.execution_count),
+            SUM(l.avg_duration_us::DOUBLE PRECISION * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::DOUBLE PRECISION * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
             MAX(l.last_execution_time),
             bool_or(l.is_forced_plan),
             MAX(l.force_failure_count)
@@ -609,7 +741,9 @@ WITH plan_agg AS
         AND   l.last_execution_time >= $2::timestamp
         AND   l.collection_time >= $5::timestamp
         AND   l.first_execution_time >= $4::timestamp
-        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
+";
+
+    private const string PlanRegressionDailyTail = @"        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
         -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
         -- A scalar lookup ($6 is aligned with $3; a day not built finds no watermark and keeps every row), so the test
         -- stays a filter on the scan, as #5448's <> ALL($3) was, and adds no join whose strategy rests on an array estimate.
@@ -622,18 +756,20 @@ WITH plan_agg AS
 
     /// <summary>
     /// The work memory for every PLAN_REGRESSION read (#5812, bound 2): the daily read's snapshot transaction and the short
-    /// transaction each exact-bound read (table or raw) now runs in (M2). Set with <c>SET LOCAL</c> so it ends with
-    /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
-    /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
-    /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
-    /// memory instead: two hash aggregates of about 35MB to 42MB each, under the hash limit of twice work_mem
-    /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
-    /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
-    /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
-    /// The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may take up to 6 x 64MB,
-    /// doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the plant peaked near 37MB
-    /// in each of two hash aggregates. Across the fleet, scheduled reads run inside each server's sweep, so the ceiling is that
-    /// times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
+    /// transaction each exact-bound read (table or raw) runs in (M2). Set with <c>SET LOCAL</c> so it ends with that
+    /// transaction and touches no other statement on the pooled connection. The daily read groups every built day's totals
+    /// plus the live rows by plan, with every sum in double precision (#8570). It was measured at 64MB on two plants of
+    /// 123,600 plans and 15 built days, with no temp writes on either. Where each plan ran on about three of the days (about
+    /// 408,000 rows, the shape of a busy production server), the hash aggregates for <c>plan_agg</c>, <c>plan_dedup</c> and
+    /// the live half peaked at about 41MB, 33MB and 9MB; where every plan ran every day (about 1,980,000 rows), at about
+    /// 33MB, 29MB and 29MB. At the default 4MB the planner sorts them and the sorts go to disk as external merges, and at
+    /// 32MB the every-day plant still spills a sort, so 64MB is the bound, and it holds every hash under work_mem itself.
+    /// Numeric sums would need about 133MB for the same <c>plan_agg</c> and spill at this bound. A hash or sort takes memory
+    /// only as it grows, so a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every
+    /// bound on one plant). The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may
+    /// take up to 6 x 64MB, doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the
+    /// plants' largest node peaked near 41MB. Across the fleet, scheduled reads run inside each server's sweep, so the
+    /// ceiling is that times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
     /// <c>get_analysis_facts</c> reads that miss the candidate cache run outside the sweep gate and add to it; size
     /// <c>MaxConcurrentSweeps</c> against the store's memory before raising this bound.
     /// </summary>
@@ -665,7 +801,8 @@ WITH plan_agg AS
     /// tomorrow, so on a store that is current the first unbuilt day is the day after tomorrow and the floor is today's
     /// watermark: the live half reads the last two or three hours of first executions, not the open days.
     /// </summary>
-    internal static DateTime PlanRegressionLiveFloorWithWatermarks(DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays)
+    internal static DateTime PlanRegressionLiveFloorWithWatermarks(
+        DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, TimeSpan? unbuiltReach = null)
     {
         var through = new Dictionary<DateOnly, DateTime>();
         foreach (var b in builtDays)
@@ -685,13 +822,62 @@ WITH plan_agg AS
             cursor = cursor.AddDays(1);
         }
 
-        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        /* #9225: how far below the first unbuilt day a live row's first execution can sit. A day (the longest an interval spans) unless the
+           caller resolved the server's longest interval length, which is shorter on a server that keeps hourly intervals. */
+        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue) - (unbuiltReach ?? QueryStoreIntervalWide.IntervalSpanMargin);
         return DateTime.SpecifyKind(unbuilt < floor ? unbuilt : floor, DateTimeKind.Unspecified);
+    }
+
+    /// <summary>
+    /// The live floor the daily read binds (#9225). The floor is one interval length below the first unbuilt day, where it was a whole day.
+    /// A live row's last execution is at or after that day's midnight and its first execution is at most one interval earlier
+    /// (<see cref="QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync"/>). A whole day below read the floor day's entire partition and
+    /// threw away every row of it but the few that cross midnight (no index finds those), which is most of what a read anchored a few
+    /// hours back read. The server's interval length is looked up only when the unbuilt day sets the floor: a partial built day's
+    /// watermark that is already lower sets it exactly, and a server whose length cannot be trusted keeps the whole day.
+    /// </summary>
+    internal static async Task<DateTime> ResolvePlanRegressionLiveFloorAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime windowFloor,
+        IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, DateTime end, DateTime utcNow, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var wholeDay = PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays);
+        var days = builtDays.Select(b => b.Day).ToHashSet();
+        var cursor = DateOnly.FromDateTime(windowFloor);
+        while (days.Contains(cursor))
+        {
+            cursor = cursor.AddDays(1);
+        }
+
+        var firstUnbuilt = cursor.ToDateTime(TimeOnly.MinValue);
+        if (wholeDay < firstUnbuilt.AddDays(-1))
+        {
+            return wholeDay;
+        }
+
+        /* The trust test lists the server's databases from the wide table, which keeps WideHorizonDays. A day at or below that horizon
+           (counting the day the floor reaches into) may have databases only the 15-day latest table still holds, so the test cannot
+           vouch for them: the whole day stays. */
+        if (firstUnbuilt - QueryStoreIntervalWide.IntervalSpanMargin < utcNow.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays))
+        {
+            return wholeDay;
+        }
+
+        var reach = await QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync(
+            connection, transaction, serverId, firstUnbuilt, end, commandTimeoutSeconds, cancellationToken);
+        return PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays, reach);
     }
 
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
     /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
     internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
+
+    /// <summary>Test seam (#9225): receives the live floor the daily read binds, so a test asserts the value the collector sends and not
+    /// a count taken through <c>pg_stat_statements</c>. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<DateTime>?> TestOnlyLiveFloorBound = new();
+
+    /// <summary>Test seam (#9225): receives the block starts the daily read takes and the built days it still reads from the daily
+    /// rows, so a test counts the daily rows the read asks for. Not called when no built day is read. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<IReadOnlyList<DateOnly>, IReadOnlyList<DateOnly>>?> TestOnlyBlockPlan = new();
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -807,7 +993,9 @@ candidates AS
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
-    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+    -- #9353: then the row's own key, so rows that tie on both keys come out in one order and the same 100 stay (Lite's statement ends
+    -- the same way). One row per (database, query, replica). A NULL replica_role, every standalone server, sorts last.
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
     LIMIT 100
 ),
 latest_plan AS
@@ -875,7 +1063,8 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = c.database_name
   AND x.query_id = c.query_id
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
+-- #9353: the candidates' tail again, so the rows leave in the order the 100 were cut by.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", c.database_name, c.query_id, c.replica_role NULLS LAST";
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -904,7 +1093,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         NpgsqlTransaction? snapshot = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionWorkMemSql, set here only,
                on whichever transaction holds it (the daily read's snapshot or the exact-bound read's own). */
@@ -941,6 +1130,9 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
             var builtDays = new List<PlanRegressionDaily.BuiltDay>();
+            /* A pass anchored at an instant reads nothing stored after its window's end: its statements carry that bound,
+               and it takes day totals only for the days that were whole by then. */
+            var anchored = context.AsOfUtc is not null;
             if (readsTable)
             {
                 /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
@@ -951,6 +1143,15 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                     connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
                     ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                if (anchored)
+                {
+                    /* A day's totals are built from the newest snapshot of each of its intervals. One skew margin after the
+                       day's watermark every one of those snapshots is stored, so the totals are what the store held at the
+                       window's end; a later day is read from the interval table, under the bound. */
+                    var wholeBy = AsNaive(context.TimeRangeEnd).AddDays(-PlanRegressionSkewMarginDays);
+                    builtDays = builtDays.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
+                }
+
                 if (builtDays.Count == 0)
                 {
                     /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
@@ -962,6 +1163,24 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 {
                     await afterBuiltDays(context.CancellationToken);
                 }
+            }
+
+            /* #9225: the whole valid blocks, in the same snapshot, and the built days no block covers. A store without the
+               block table, or with no block valid yet, answers none and the statement is the daily one as before. */
+            var blockStarts = new List<DateOnly>();
+            var leftoverDays = new List<DateOnly>();
+            if (snapshot is not null && builtDays.Count > 0)
+            {
+                var validBlocks = await PlanRegressionBlock.ReadValidBlocksAsync(
+                    connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                (blockStarts, leftoverDays) = PlanRegressionBlock.Select(builtDays, validBlocks);
+            }
+
+            var readsBlocks = blockStarts.Count > 0;
+            if (snapshot is not null && builtDays.Count > 0)
+            {
+                TestOnlyBlockPlan.Value?.Invoke(blockStarts, leftoverDays);
             }
 
             var readsDays = builtDays.Count > 0;
@@ -980,7 +1199,10 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                monitor sent before #7463 are left out here too. Asked in the read's own transaction, before the read. */
             var regressionSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
                 connection, snapshot, FactCommandTimeoutSeconds,
-                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
+                readsDays ? (readsBlocks ? (anchored ? PlanRegressionDailyBlocksAsOfSql : PlanRegressionDailyBlocksSql)
+                    : anchored ? PlanRegressionDailyAsOfSql : PlanRegressionDailySql)
+                : anchored ? (readsTable ? PlanRegressionTableAsOfSql : PlanRegressionAsOfSql)
+                : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
             using var cmd = new NpgsqlCommand(regressionSql, connection, snapshot)
             { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -993,13 +1215,37 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
                     Value = builtDays.Select(b => b.Day).ToArray()
                 });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays));
+                /* #9225: one interval length below the first unbuilt day, not a day, where the server's interval length can be trusted. */
+                var liveFloor = await ResolvePlanRegressionLiveFloorAsync(
+                    connection, snapshot, context.ServerId, windowFloor, builtDays, AsNaive(context.TimeRangeEnd), DateTime.UtcNow, FactCommandTimeoutSeconds, context.CancellationToken);
+                TestOnlyLiveFloorBound.Value?.Invoke(liveFloor);
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, liveFloor);
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
                 cmd.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp,
                     Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
                 });
+                if (readsBlocks)
+                {
+                    /* #9225: $7 the days no block covers, $8 the block starts. */
+                    cmd.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                        Value = leftoverDays.ToArray()
+                    });
+                    cmd.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                        Value = blockStarts.ToArray()
+                    });
+                }
+
+                if (anchored)
+                {
+                    /* The window's end: the bound of the anchored statement's interval table half ($7, or $9 after the block lists). */
+                    cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, AsNaive(context.TimeRangeEnd));
+                }
             }
             else
             {
@@ -1009,6 +1255,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 {
                     /* $4, the table's partitioning column: the same value, bare, for the same reason. */
                     cmd.Parameters.AddWithValue(collectionBound);
+                }
+
+                if (anchored)
+                {
+                    /* The window's end, the last parameter of the two anchored statements ($4 raw, $5 table). */
+                    cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
                 }
             }
 
@@ -1432,7 +1684,7 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -1477,76 +1729,146 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
-/* #8570: the presence guard is answered once per distinct digest, not once per snapshot row. query_stats holds one
-   row per query per snapshot, so a window of 85,000 rows carries a few hundred distinct digests, and a correlated
-   EXISTS in the rank's WHERE probed query_plan_dim's primary key once per row (85,451 index probes, 375,000 buffer
-   hits and 0.3 to 1.4 s on a 52-million-row dimension) before the rank kept ten. The digests of rows with no plan
-   of their own are probed here, one primary-key lookup each. The LIMIT 1 in the lateral lookup is what keeps it
-   a lookup: without it the planner may turn the EXISTS into a hash of the whole dimension or a join that reads
-   it. The rank below joins the answer back by digest. The guard's meaning is unchanged: a row has a plan when
-   its own column or its dimension row carries one (the dimension's text column or, since #2069, its gzip bytes),
-   and a digest whose dimension row is gone has none. The rank still picks each plan's costliest row among the
-   rows that have a plan. */
-WITH probed AS
+/* #8570: the dimension is read only for the rows the fetch may return. query_stats holds one row per query per
+   snapshot, so a four-hour window carries tens of thousands of rows and as many distinct plan digests, and a probe
+   of query_plan_dim's primary key per row or per digest is that many random reads of a table of tens of millions of
+   rows on a cold cache (30,000 probes and 25 s of a 26 s read). The rank orders each plan's rows without the
+   dimension; the probes then walk the plans' costliest rows in cost order and stop at the tenth that has a plan.
+   A row has a plan when its own column or its dimension row carries one (the dimension's text column or its gzip
+   bytes, #2069), and a digest whose dimension row is gone has none. Each plan is represented by its costliest row
+   that has a plan, so a plan whose costliest row has none is ranked again over all its rows (misses, demoted). */
+WITH grp AS
 (
-    SELECT w.digest
+    /* #9495: the rows of the window are grouped before they are ranked. Every step below reads only a row's plan key,
+       its query_plan_xml and query_plan_digest, and its cost, so rows that share those three are interchangeable
+       except for cost, and only the costliest of them can matter. A seven-day window holds every snapshot row of the
+       server, and ranking them all spilled to disk; the groups are a few percent as many. A NULL cost sorts first
+       under DESC, so a group that holds any NULL-cost row takes that NULL, as the row would have ranked. */
+    SELECT
+        f.database_name,
+        f.query_hash,
+        COALESCE(f.query_plan_hash, f.plan_handle) AS plan_key,
+        f.query_plan_xml,
+        f.query_plan_digest,
+        CASE WHEN bool_or(f.delta_worker_time IS NULL) THEN NULL ELSE max(f.delta_worker_time) END AS delta_worker_time
+    /* #8570: the group reads the table's own thin columns and the plan's digest, not the plan. A plan under the 2 KB
+       TOAST limit sits inline in the dimension row, so a join to the dimension here would carry every snapshot row
+       with its whole plan (on 67,200 rows of 1.4 KB plans, 26 MB and 21 MB written to disk against 4.5 MB). */
+    FROM query_stats AS f
+    WHERE f.server_id = $1
+    AND   f.collection_time >= $2
+    AND   f.collection_time <= $3
+    AND   (f.query_plan_xml IS NOT NULL OR f.query_plan_digest IS NOT NULL)
+    /* #8570: the own column stays in this filter. 'query_plan_digest IS NOT NULL' alone implies the partial index
+       ix_query_stats_digest_floor (collection_time only, rows with a digest), and the planner takes it over
+       idx_query_stats_time (server_id, collection_time): it walks the window's rows of every server and fetches
+       each one's heap page to test server_id (25,400 pages on a store of 18 servers, against 5,600 through the
+       server index, for one server's 86,000-row window). */
+    GROUP BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle), f.query_plan_xml, f.query_plan_digest
+),
+cand AS MATERIALIZED
+(
+    SELECT
+        g.query_plan_xml,
+        g.query_plan_digest,
+        g.delta_worker_time,
+        /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot row of a
+           cached plan resolves to the same plan XML. Without this rank the hottest plan fills all ten slots and is
+           parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count multiply by its snapshot
+           count and the two facts cover one to three plans instead of ten. The plan's costliest row with a plan
+           stands for it, and the limit counts distinct plans. A plan is a statement's plan in one database:
+           query_plan_hash is a shape hash that two statements with one shape share, as does one statement in two
+           databases, and a hashless row's plan_handle is shared by every statement in its batch, so database_name
+           and query_hash stay in the key. plan_id numbers the key so the steps below can match on it: the key's
+           columns can be NULL, and an equality join on them would not match a NULL to a NULL. */
+        DENSE_RANK() OVER (ORDER BY g.database_name, g.query_hash, g.plan_key) AS plan_id,
+        ROW_NUMBER() OVER (PARTITION BY g.database_name, g.query_hash, g.plan_key ORDER BY g.delta_worker_time DESC) AS plan_rank
+    FROM grp AS g
+),
+hits AS MATERIALIZED
+(
+    /* Each plan's costliest row, in cost order, probed one at a time until ten have a plan. The sorted, fenced
+       subquery feeds the lateral lookup row by row, so the limit stops the probes at the tenth hit. The LIMIT 1
+       keeps each probe a primary-key lookup: without it the planner may hash the whole dimension. */
+    SELECT t.plan_id, t.query_plan_xml, t.query_plan_digest, t.delta_worker_time
     FROM
     (
-        SELECT DISTINCT f.query_plan_digest AS digest
-        FROM query_stats AS f
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
-        AND   f.query_plan_xml IS NULL
-        AND   f.query_plan_digest IS NOT NULL
-    ) AS w,
-    LATERAL
+        SELECT c.plan_id, c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+        FROM cand AS c
+        WHERE c.plan_rank = 1
+        ORDER BY c.delta_worker_time DESC
+        OFFSET 0
+    ) AS t
+    LEFT JOIN LATERAL
     (
-        SELECT 1
+        SELECT 1 AS found
         FROM query_plan_dim AS p
-        WHERE p.digest = w.digest
+        WHERE t.query_plan_xml IS NULL
+        AND   p.digest = t.query_plan_digest
         AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
         LIMIT 1
-    ) AS has_plan
+    ) AS has_plan ON true
+    WHERE t.query_plan_xml IS NOT NULL OR has_plan.found IS NOT NULL
+    ORDER BY t.delta_worker_time DESC
+    LIMIT 10
+),
+misses AS MATERIALIZED
+(
+    /* The plans that are not hits and may still place: every one when there are fewer than ten hits, else those
+       whose costliest row costs at least the tenth hit or has no cost. Such a plan may still place through a cheaper
+       row that has a plan, or through a costliest row tied with the tenth hit that the walk did not reach. A plan
+       whose costliest row costs less cannot place: none of its rows costs more. A NULL cost sorts first, so the
+       tenth hit's cost is the hits' lowest that is not NULL (min skips NULLs), and a plan whose costliest row has no
+       cost was probed before it. When the tenth hit has no cost either, a missed plan can at best tie it, and the
+       per-row order breaks that tie arbitrarily too: none qualifies, so rows with no cost, however many, are not
+       probed again. */
+    SELECT c.plan_id
+    FROM cand AS c
+    CROSS JOIN (SELECT count(*) AS hit_count, min(h.delta_worker_time) AS floor_cost FROM hits AS h) AS w
+    WHERE c.plan_rank = 1
+    AND   c.plan_id NOT IN (SELECT h.plan_id FROM hits AS h)
+    AND   (w.hit_count < 10
+           OR (w.floor_cost IS NOT NULL AND (c.delta_worker_time IS NULL OR c.delta_worker_time >= w.floor_cost)))
+),
+demoted AS
+(
+    /* Each missed plan's costliest row that has a plan, over all its rows. */
+    SELECT DISTINCT ON (c.plan_id) c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+    FROM
+    (
+        SELECT c.plan_id, c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+        FROM cand AS c
+        WHERE c.plan_id IN (SELECT m.plan_id FROM misses AS m)
+        OFFSET 0
+    ) AS c
+    LEFT JOIN LATERAL
+    (
+        SELECT 1 AS found
+        FROM query_plan_dim AS p
+        WHERE c.query_plan_xml IS NULL
+        AND   p.digest = c.query_plan_digest
+        AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
+        LIMIT 1
+    ) AS has_plan ON true
+    WHERE c.query_plan_xml IS NOT NULL OR has_plan.found IS NOT NULL
+    ORDER BY c.plan_id, c.delta_worker_time DESC
 )
 SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
 (
-    SELECT query_plan_xml, query_plan_digest, delta_worker_time
+    SELECT u.query_plan_xml, u.query_plan_digest, u.delta_worker_time
     FROM
     (
-        SELECT
-            f.query_plan_xml,
-            f.query_plan_digest,
-            f.delta_worker_time,
-            /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot
-               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-               every statement in its batch, so database_name and query_hash stay in the key. */
-            ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
-        FROM query_stats AS f
-        /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
-           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
-           put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
-           dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
-           1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
-           by their digest after the limit. */
-        LEFT JOIN probed AS pr ON pr.digest = f.query_plan_digest
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
-        AND   (f.query_plan_xml IS NOT NULL OR pr.digest IS NOT NULL)
-    ) AS ranked
-    WHERE plan_rank = 1
-    ORDER BY delta_worker_time DESC
+        SELECT h.query_plan_xml, h.query_plan_digest, h.delta_worker_time FROM hits AS h
+        UNION ALL
+        SELECT m.query_plan_xml, m.query_plan_digest, m.delta_worker_time FROM demoted AS m
+    ) AS u
+    ORDER BY u.delta_worker_time DESC
     LIMIT 10
 ) AS r
-/* #2069: a plan written since V54 lives as gzip bytes (query_plan_gz) with the text column NULL, so the
-   projection carries BOTH forms and the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). */
+/* #2069: a plan in gzip bytes (query_plan_gz) has the text column NULL, so the projection carries BOTH forms and
+   the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). The ten winners' content is read here, by
+   their digest, after the limit. */
 LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
 ORDER BY r.delta_worker_time DESC";
 
@@ -1566,7 +1888,7 @@ ORDER BY r.delta_worker_time DESC";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken))
             {
                 using var command = new NpgsqlCommand(PlanAdvisorySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
                 command.Parameters.AddWithValue(context.ServerId);
@@ -1583,6 +1905,10 @@ ORDER BY r.delta_worker_time DESC";
                         planXmls.Add(planXml);
                 }
             }
+
+            /* #8570: the plan-advisory drill-down of this pass renders its indexes and warnings from these rows instead of
+               reading the window a second time. */
+            context.PlanAdvisoryPlanXmls = planXmls;
 
             // Connection released above; parse off the store (CPU-only, no DB).
             if (planXmls.Count == 0)

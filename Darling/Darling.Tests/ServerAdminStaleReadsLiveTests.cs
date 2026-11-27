@@ -107,9 +107,11 @@ VALUES (11, 'keep-host', 'keep-host', 'integrated', TRUE, 'sqlserver'),
             Assert.Equal(1L, await CountAsync(owner, "SELECT count(*) FROM collect.servers WHERE server_id = 12 AND is_enabled", ct));
             Assert.Equal(new[] { "Orders" }, await ListedNamesAsync(owner, ct));
 
-            /* disable_server flips the definition too. */
+            /* disable_server flips the definition too: the server stays in the list, reading Disabled (#9087). */
             await ExecAsync(owner, "UPDATE config.config_monitored_servers SET is_enabled = FALSE WHERE server_id = 11", ct);
-            Assert.Empty(await ListedNamesAsync(owner, ct));
+            Assert.Equal(new[] { "Orders" }, await ListedNamesAsync(owner, ct));
+            using var disabled = JsonDocument.Parse(await DarlingMcpDataTools.ListServers(owner, ct));
+            Assert.Equal("Disabled", Assert.Single(disabled.RootElement.GetProperty("servers").EnumerateArray()).GetProperty("status").GetString());
         }
     }
 

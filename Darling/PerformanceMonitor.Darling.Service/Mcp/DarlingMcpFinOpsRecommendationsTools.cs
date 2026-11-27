@@ -34,6 +34,7 @@ public sealed class DarlingMcpFinOpsRecommendationsTools
     private const string RecommendationsGuide =
         " est_savings_usd_month is a rough monthly USD estimate rounded to cents; null when the check gives none or no monthly cost is set (monthly_cost_usd null, cost_reason 'monthly cost not set'). severity and confidence are High, Medium or Low. finding and detail are English text with numbers in invariant format (1,234.5; a percent reads '20 %'). skipped_checks names each check whose read failed: its rows are absent, not clean. An empty recommendations list with no skipped_checks means no check found anything. secondary_replica_note is null unless this server holds a secondary copy of some database in an availability group, and then names how many were left out: idle, dev/test, TDE and compression findings leave those databases out (the primary reports them), and the low IO latency finding keeps them.";
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_finops_recommendations"), Description(
         "FinOps recommendations for one server: the cost and right-sizing findings the desktop Recommendations tab shows, High severity first. Mixed fixed windows ending now (CPU 24 hours and 7 days; memory, jobs and file I/O 7 days; edition and database facts from the latest snapshot); UTC; no hours_back, limit or as_of. At most about 21 rows. <<GUIDE>>" + RecommendationsGuide)]
     public static async Task<string> GetFinOpsRecommendations(

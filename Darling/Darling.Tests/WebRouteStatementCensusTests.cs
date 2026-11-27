@@ -48,7 +48,9 @@ public sealed class WebRouteStatementCensusTests
         "DarlingWebEndpoints.cs",
         "FrontDoor/DarlingFrontDoorWebProxy.cs",
         "Hosting/DarlingHealthHostService.cs",
+        "Hosting/DarlingMetricsHostService.cs",
         "Mcp/DarlingMcpHostService.cs",
+        "Mcp/DarlingWebHostService.cs",
     };
 
     /// <summary>The routes that put no tool string on the wire, by the route argument as written in the source.</summary>
@@ -57,9 +59,11 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/ping\""] = "liveness, no data",
         ["\"/livez\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
         ["\"/readyz\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
-        ["\"/api/{**rest}\""] = "the front door's one catch-all (#6840), which exists only on a front door and maps no dashboard route. It answers four routes itself, none with statement text: /api/ping (liveness), /api/session (the seat's capabilities plus front_door and can_own), /api/front-door (store names, health and server counts) and /api/front-door/locate (a store name, a server name, or an ambiguity message). Every other /api path is sent to one store's dashboard, whose own routes ran the sweep before answering, and the proxy copies that answer through unchanged",
+        ["\"/metrics\""] = "the metrics port: an in-memory snapshot, no store read per scrape (#9013)",
+        ["\"/api/{**rest}\""] = "the front door's one catch-all (#6840), which exists only on a front door and maps no dashboard route. It answers five routes itself, none with statement text: /api/ping (liveness), /api/session (the seat's capabilities plus front_door and can_own), /api/me (the calling session's own identity, seat and expiry), /api/front-door (store names, health and server counts) and /api/front-door/locate (a store name, a server name, or an ambiguity message). It also answers every /api/mcp-tokens path with a fixed 404 and sends it to no store (#8737). Every other /api path is sent to one store's dashboard, whose own routes ran the sweep before answering, and the proxy copies that answer through unchanged",
         ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",
+        ["\"/api/me\""] = "the calling session's own identity, seat and expiry: no statement text",
         ["\"/api/agent-setup/access\""] = "two booleans from the store login's privilege checks, no text (#6264)",
         ["\"/api/investigation-export\""] = "streams the file the shared export wrote, whose every line the credential-statement check already judged (InvestigationFeedbackExport.Line); a refused line refuses the whole download through the sweep's refusal (#6236)",
         ["\"/api/catalog\""] ="the compose vocabulary (labels; no statement or plan column, pinned by the L8 catalog census)",
@@ -76,6 +80,8 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/servers/{id:int}\""] = "server registry",
         ["\"/api/servers/{id:int}/actions/{action}\""] = "writes one action switch; the answer is a status, server name and on or off (#6269)",
         ["\"/api/people/{command}\""] = "writes one person, sign-in or grant; the answer is a status, a message and the row ids (#7107)",
+        ["\"/api/mcp-tokens\""] = "the caller's own personal MCP tokens (names, roles, times, state; never a hash) and, on the one POST, the freshly minted value once; no statement text (#8737)",
+        ["\"/api/mcp-tokens/{id}/revoke\""] = "revokes one personal MCP token; the answer is 204 or a fixed refusal, no text from the store (#8737)",
         ["\"/api/proposals/{id:guid}/first-press\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
         ["\"/api/proposals/{id:guid}/confirm\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
@@ -97,6 +103,8 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/server-tags/{id:int}/servers\""] = "server tags",
         ["MapMcp()"] = "the MCP transport: every tool result passes the MCP output filter (pinned by the MCP filter tests)",
         ["MapMcp(\"/core\")"] = "the MCP transport, core profile: every tool result passes the MCP output filter",
+        ["MapMcp(\"/lean\")"] = "the MCP transport, lean profile: every tool result, including one run through call_tool, passes the MCP output filter",
+        ["DarlingMcpToolTypes.ToolNamesModulePath"] = "the registered MCP tool names as a static script module, built from the tool registry at startup: no store read, no collected text (#9490)",
     };
 
     /// <summary>

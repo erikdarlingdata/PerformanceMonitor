@@ -45,7 +45,7 @@ internal static class RdsCopyWriter
            by the store session's offset. */
         var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RdsIntake, cancellationToken);
 
         var writer = new PgCollectorRowWriter();
         var written = 0;

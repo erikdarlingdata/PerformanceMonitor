@@ -72,7 +72,7 @@ public sealed class LegacyPinResolverLiveTests
 
         /* No pin: refused, and nothing reads the value. */
         var unpinned = await ReadAlphaAsync(owner, ct);
-        var refused = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(unpinned, out _, ring));
+        var refused = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(unpinned, out _, ring));
         Assert.Contains("is in the old format", refused.Message, StringComparison.Ordinal);
 
         /* The pin the upgrade writes: the value's hash and the hash of the connection as the row holds it. */
@@ -91,7 +91,7 @@ public sealed class LegacyPinResolverLiveTests
         /* A direct change of the host by the owner: the pin no longer matches the row. */
         await ExecAsync(owner, $"UPDATE config_monitored_servers SET host = 'moved-host.example.test' WHERE server_id = {ServerId}", ct);
         var moved = await ReadAlphaAsync(owner, ct);
-        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(moved, out _, ring));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(moved, out _, ring));
 
         /* Back at the pinned host the pin matches again; a different stored value does not match the pin. */
         await ExecAsync(owner, $"UPDATE config_monitored_servers SET host = 'alpha-host.example.test' WHERE server_id = {ServerId}", ct);
@@ -102,7 +102,7 @@ public sealed class LegacyPinResolverLiveTests
             ct,
             ("other", NpgsqlDbType.Text, DarlingSecrets.Protect("another-p@ss-not-real")));
         var changed = await ReadAlphaAsync(owner, ct);
-        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(changed, out _, ring));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(changed, out _, ring));
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public sealed class LegacyPinResolverLiveTests
 
         await ExecAsync(owner, $"UPDATE config_monitored_servers SET host = 'moved-host.example.test' WHERE server_id = {ServerId}", ct);
         var movedRow = await ReadAlphaAsync(owner, ct);
-        var refused = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(movedRow, out _, ring));
+        var refused = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(movedRow, out _, ring));
         Assert.Contains("saved for a different connection, or was changed", refused.Message, StringComparison.Ordinal);
     }
 

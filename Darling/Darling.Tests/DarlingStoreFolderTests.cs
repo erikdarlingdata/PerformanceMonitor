@@ -1711,7 +1711,7 @@ public sealed class DarlingStoreContentsGateTests
 
     private static int Icacls(params string[] arguments)
     {
-        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }.InLocalFolder();
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
@@ -1831,6 +1831,8 @@ public sealed class DarlingStoreContentsGateTests
         }
     }
 
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheRefusalsRepairCommands_AreFourInOrder_AndCoverTheFolderAndEverythingBelowIt()
     {
@@ -2194,7 +2196,7 @@ public sealed class DarlingStoreContentsGateTests
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-            });
+            }.InLocalFolder());
             process!.StandardOutput.ReadToEnd();
             process.WaitForExit();
 
@@ -2222,7 +2224,7 @@ public sealed class DarlingStoreContentsGateTests
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
-        });
+        }.InLocalFolder());
         process!.StandardOutput.ReadToEnd();
         process.WaitForExit();
     }

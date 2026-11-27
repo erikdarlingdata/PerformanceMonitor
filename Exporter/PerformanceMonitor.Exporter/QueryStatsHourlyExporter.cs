@@ -50,11 +50,11 @@ public static class QueryStatsHourlyExporter
             }
 
             using var copyCommand = duckConnection.CreateCommand();
-            // Same output shape/ordering as today's TableExporter path: source_store first,
-            // then ORDER BY (server_name, hour).
+            // Same output shape/ordering as the TableExporter path: source_store first, then ORDER BY (server_name, hour)
+            // and every other column, so rows of one hour always come out in the same order.
             copyCommand.CommandText =
                 "COPY (SELECT source_store, * EXCLUDE (source_store) FROM query_stats_hourly_rollup " +
-                "ORDER BY server_name, hour) " +
+                $"ORDER BY {TotalOrder.ForTable(duckConnection, "query_stats_hourly_rollup", "server_name", "hour")}) " +
                 $"TO '{outputPath.Replace("'", "''")}' ({DuckDbSession.ParquetCopyOptions})";
             copyCommand.ExecuteNonQuery();
 

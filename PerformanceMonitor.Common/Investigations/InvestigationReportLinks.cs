@@ -129,7 +129,7 @@ public static class InvestigationReportLinks
         }
         catch (JsonException ex)
         {
-            return "not valid JSON: " + ex.Message;
+            return JsonParseError.Bare(ex);
         }
 
         if (root is not JsonArray items)

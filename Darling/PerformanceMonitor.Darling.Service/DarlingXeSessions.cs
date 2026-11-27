@@ -419,7 +419,7 @@ public static class DarlingXeSessions
 
             try
             {
-                var blockedProcessStarted = await EnsureBlockedProcessOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                var blockedProcessStarted = await EnsureBlockedProcessOnPremAsync(connection, server, runner, runner.RingBufferMaxEvents, logger, cancellationToken);
                 if (blockedProcessStarted)
                 {
                     outcome?.Started.Add(BlockedProcessReportCollector.Instance.Name);
@@ -781,11 +781,14 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
 
     /// <summary>Ensures the blocked-process session. Returns true when it started a stopped session or created a missing one (#8528), false when the session was running.</summary>
     private static async Task<bool> EnsureBlockedProcessOnPremAsync(
-        SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
+        SqlConnection connection, ServerRuntime server, DarlingCollectorRunner runner, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
-        /* Blocked process threshold bootstrap — sp_configure is unavailable on AWS RDS
-           (parameter groups there), hence the tolerant catch (mirrors Lite). */
-        try
+        /* Blocked process threshold bootstrap. A server that answers is read on every ensure, so one that fails over to a replica
+           with a threshold of 0 behind the same connection string is configured on the next ensure (#9743). A server that refuses it
+           is asked once per process and once more after its connection settings change: sp_configure is unavailable on AWS RDS
+           (parameter groups there), and a login without ALTER SETTINGS is refused too. The refusal is tolerated, logged once with
+           the platform's remedy, and not repeated (mirrors Lite). */
+        var bootstrap = await runner.BlockedProcessThresholdBootstrap.RunAsync(server.ServerId, server.ConnectionString, async () =>
         {
             using var thresholdCmd = new SqlCommand(@"
 DECLARE
@@ -814,17 +817,16 @@ END;
 SELECT @threshold;", connection);
             thresholdCmd.CommandTimeout = 60;
             var result = await thresholdCmd.ExecuteScalarAsync(cancellationToken);
-            if ((result as int? ?? 0) == 0)
-            {
-                logger?.LogInformation("[{Server}] Configured blocked process threshold to 5 seconds", server.Config.DisplayName);
-            }
-        }
-        catch (SqlException ex)
+            return result as int? ?? 0;
+        }, ErrorNumbersOf);
+
+        if (bootstrap.Outcome == BlockedProcessThresholdOutcome.Configured)
         {
-            /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
-               is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
-            logger?.LogInformation("[{Server}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {Message}",
-                server.Config.DisplayName, ex.Message);
+            logger?.LogInformation("[{Server}] Configured blocked process threshold to 5 seconds", server.Config.DisplayName);
+        }
+        else if (bootstrap.Refusal is { } refusal)
+        {
+            logger?.LogInformation("[{Server}] {Message}", server.Config.DisplayName, BlockedProcessThresholdBootstrap.RefusalMessage(server.Target, ErrorMessagesOf(refusal)));
         }
 
         ServerSessionState state;
@@ -873,11 +875,22 @@ WHERE ses.name = @session_name;", connection))
     private static async Task<bool> EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
     {
         ServerSessionState state;
-        using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling"), connection))
+        async Task<object?> ProbeAsync(bool committedRead, CancellationToken token)
         {
+            using var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling", committedRead), connection);
             cmd.CommandTimeout = 60;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AlwaysOnXeSessions.AttentionXeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return await cmd.ExecuteScalarAsync(token);
+        }
+
+        {
+            /* #9675: the first probe is a dirty read, so it can read another entry's session, still being created on the same instance,
+               as another definition. A mismatch is read again, committed, before anything is dropped. */
+            var result = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+                await ProbeAsync(committedRead: false, cancellationToken),
+                token => ProbeAsync(committedRead: true, token),
+                AlwaysOnXeSessions.AttentionMismatchConfirmPause,
+                cancellationToken);
             state = ServerSessionStateOf(result);
 
             /* #5640 (L4): the name is ours, so a session of it with other events, actions or targets is an older definition of our
@@ -894,9 +907,15 @@ WHERE ses.name = @session_name;", connection))
 
                 server.AttentionXeDefinitionReplaced = true;
                 logger?.LogWarning("[{Server}] The attention XE session {Session} has a definition other than this version's (events, actions or targets): dropping it and creating it again", server.Config.DisplayName, AlwaysOnXeSessions.AttentionXeSessionName);
-                using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
-                dropCmd.CommandTimeout = 60;
-                await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                await AlwaysOnXeSessions.DropAttentionMismatchAsync(
+                    async token =>
+                    {
+                        using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                        dropCmd.CommandTimeout = 60;
+                        await dropCmd.ExecuteNonQueryAsync(token);
+                    },
+                    token => ProbeAsync(committedRead: true, token),
+                    cancellationToken);
 
                 /* The dropped session is created again below. */
                 state = ServerSessionState.Absent;
@@ -1121,6 +1140,25 @@ WHERE ses.name = @session_name;", connection))
         }
 
         return numbers;
+    }
+
+    /// <summary>
+    /// The messages of the SQL errors a failure carries, in the order the server sent them: its own and those of the exceptions it
+    /// wraps. A SqlException's Message joins them with line breaks, so the blocked process threshold refusal line names each one
+    /// from here (#9818). The shared project has no SqlClient, so each app reads them off its own exception.
+    /// </summary>
+    internal static List<string> ErrorMessagesOf(Exception? ex)
+    {
+        var messages = new List<string>();
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql)
+            {
+                messages.AddRange(sql.Errors.Cast<SqlError>().Select(e => e.Message));
+            }
+        }
+
+        return messages;
     }
 
     /// <summary>

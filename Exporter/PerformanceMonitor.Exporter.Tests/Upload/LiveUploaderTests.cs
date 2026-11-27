@@ -147,6 +147,11 @@ public class LiveS3UploaderTests : IDisposable
     }
 }
 
+/// <summary>
+/// Runs against a real Azure Blob emulator, only when <c>DARLING_EXPORT_TEST_AZURE_CS</c> holds its connection string (Azurite's blob endpoint,
+/// for example). The account can have any name and key: the expected <c>azure://</c> log text takes the account name from the connection string,
+/// so a lab that does not want Azurite's published <c>devstoreaccount1</c> key can use its own account. Otherwise every test here is skipped.
+/// </summary>
 public class LiveAzureBlobUploaderTests : IDisposable
 {
     private const string ConnectionStringVar = "DARLING_EXPORT_TEST_AZURE_CS";
@@ -189,7 +194,7 @@ public class LiveAzureBlobUploaderTests : IDisposable
 
         var manifestBlob = await admin.GetBlobClient("exports/store_a/_manifests/store_a__run.json").DownloadContentAsync();
         Assert.Equal("{\"manifest\":true}", manifestBlob.Value.Content.ToString());
-        Assert.Contains($"azure://devstoreaccount1/{_container}/exports/store_a/_manifests/store_a__run.json", log.ToString());
+        Assert.Contains($"azure://{admin.AccountName}/{_container}/exports/store_a/_manifests/store_a__run.json", log.ToString());
     }
 
     [Fact]

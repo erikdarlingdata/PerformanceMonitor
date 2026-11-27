@@ -69,7 +69,7 @@ public static class DarlingPgAutovacuumReader
                 last_vacuum, last_autovacuum, last_analyze, last_autoanalyze, autovacuum_count
             FROM pg_autovacuum_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, collection_time DESC
         ),

@@ -59,8 +59,8 @@ public sealed class IdentityCapacityCritBandsTheServerTests
             databaseProtectionOverdue: overdue,
             identityCapacity: identity);
 
-    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
-    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2, 0);
+    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
+    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2, 0, 0);
     private static readonly IReadOnlyList<FleetAgentAlertGap> OneGap = new[] { new FleetAgentAlertGap("x", "Agent alert 823 is missing.") };
 
     [Fact]
@@ -109,13 +109,13 @@ public sealed class IdentityCapacityCritBandsTheServerTests
             DeadlockWindow = TimeSpan.FromHours(1),
             BlockingWindow = TimeSpan.FromHours(1),
             LastCollectionTime = Now.AddSeconds(-30),
-            IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 1, 1),
+            IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 1, 1, 1),
         };
         card.ApplyFreshness(Now);
         Assert.Equal(HealthSeverity.Critical, card.OverallMetricSeverity);
         Assert.Equal(FleetHealthBand.Critical, FleetRollup.ClassifyBand(card));
 
-        card.IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 1, 0);
+        card.IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 1, 0, 0);
         Assert.NotEqual(HealthSeverity.Critical, card.OverallMetricSeverity);
     }
 
@@ -178,7 +178,7 @@ public sealed class IdentityCapacityCritBandsTheServerTests
 
         var plain = Item(1, "a-plain");
         var agent = Item(2, "b-agent", gaps: new[] { new AgentAlertGap("x", "Agent alert 823 is missing.", Array.Empty<string>(), Array.Empty<int>()) });
-        var warnIdentity = Item(3, "c-warn-identity", identity: new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 2, 0));
+        var warnIdentity = Item(3, "c-warn-identity", identity: new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 2, 0, 0));
         var all = new[] { plain, agent, warnIdentity };
 
         /* The band and the dot stay Healthy: nothing here re-bands the server. */
@@ -206,17 +206,52 @@ public sealed class IdentityCapacityCritBandsTheServerTests
     public void TheIdentityReason_SaysEachCountTruthfully_OnEverySurface()
     {
         /* One column at its limit and four near it: not "5 columns at the bar". */
-        var mixed = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 5, 1);
+        var mixed = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 5, 1, 1);
         var service = DarlingFleetReader.BuildReason(Card(1, "mixed", identity: mixed));
         Assert.Contains("Identity capacity critical (1 column at its limit, 4 near it)", service, StringComparison.Ordinal);
         Assert.DoesNotContain("at the bar", service, StringComparison.Ordinal);
 
-        var viewer = ViewerCard(identity: new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 5, 1));
+        var viewer = ViewerCard(identity: new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 5, 1, 1));
         Assert.Equal(service, FleetRollup.BuildReason(viewer));
 
-        Assert.Equal("Identity capacity critical (2 columns at their limit)", ServerHealthClassifier.IdentityCapacityReason(2, 2));
-        Assert.Equal("Identity capacity critical (1 column at its limit)", ServerHealthClassifier.IdentityCapacityReason(1, 1));
-        Assert.Equal("Identity capacity 1 column at the warning bar", ServerHealthClassifier.IdentityCapacityReason(1, 0));
+        Assert.Equal("Identity capacity critical (2 columns at their limit)", ServerHealthClassifier.IdentityCapacityReason(2, 2, 2));
+        Assert.Equal("Identity capacity critical (1 column at its limit)", ServerHealthClassifier.IdentityCapacityReason(1, 1, 1));
+        Assert.Equal("Identity capacity 1 column at the warning bar", ServerHealthClassifier.IdentityCapacityReason(1, 0, 0));
+    }
+
+    [Fact]
+    public void ACriticalColumnWithValuesLeft_IsNearItAndNeverAtItsLimit_OnEverySurface()
+    {
+        /* A column at 92.8 percent with 153,994,682 values left is in the critical band: the clause still reads critical, and the column is near its limit. */
+        var near = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 1, 1, 0);
+        var service = DarlingFleetReader.BuildReason(Card(1, "near", identity: near));
+        Assert.Contains("Identity capacity critical (1 column near its limit)", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("at its limit", service, StringComparison.Ordinal);
+        var viewer = ViewerCard(identity: new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 1, 1, 0));
+        Assert.Equal(service, FleetRollup.BuildReason(viewer));
+
+        /* A column with no values left is at its limit. */
+        var full = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 1, 1, 1);
+        Assert.Contains("Identity capacity critical (1 column at its limit)", DarlingFleetReader.BuildReason(Card(1, "full", identity: full)), StringComparison.Ordinal);
+
+        /* One of each together, and two near ones with none at the limit. */
+        Assert.Equal("Identity capacity critical (1 column at its limit, 1 near it)", ServerHealthClassifier.IdentityCapacityReason(2, 2, 1));
+        Assert.Equal("Identity capacity critical (2 columns near their limit)", ServerHealthClassifier.IdentityCapacityReason(2, 2, 0));
+        Assert.Equal("Identity capacity critical (1 column at its limit, 3 near it)", ServerHealthClassifier.IdentityCapacityReason(4, 2, 1));
+    }
+
+    [Theory]
+    [InlineData("2147483647", 100.0, true)]
+    [InlineData("1993488965", 92.8, false)]
+    [InlineData(null, 100.0, true)]
+    [InlineData(null, 99.0, false)]
+    public void AColumnIsAtItsLimitOnlyWithNoValuesLeft(string? lastValue, double storedPercent, bool atLimit)
+    {
+        var fact = new IdentityColumnFact(
+            "Sales", "dbo", "Orders", "Id", "int", 10,
+            lastValue is null ? null : System.Numerics.BigInteger.Parse(lastValue, System.Globalization.CultureInfo.InvariantCulture), 1, 1, storedPercent,
+            Now, null, null);
+        Assert.Equal(atLimit, fact.AtLimit);
     }
 
     [Fact]

@@ -12,6 +12,7 @@
  *   #/fleet             — Fleet Overview (default)
  *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
  *   #/sweeps            — Fleet Sweep reports: the sweep-with-memory timeline (#3466)
+ *   #/store-health      — the monitoring store's own table and index health (#8787)
  *   #/server/{name}     — one server's detail (Overview)
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
@@ -40,12 +41,14 @@
 
 import { el, mount, apiGet, apiGetFleetShell, setPollRender, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
 import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
+import { initAccountMenu, getMe } from "./account-menu.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
+import { renderStoreHealth } from "./pages/store-health.js";
 import { renderAdmin } from "./pages/admin.js";
-import { renderServer } from "./pages/server.js";
+import { renderServer, holdsRenamedServerRoute } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderInvestigations, requestIdFromQuery } from "./pages/investigations.js";
@@ -66,6 +69,7 @@ import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
+import { renderMcpTokens } from "./pages/mcp-tokens.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initNavCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList, paintStoreServerLists } from "./sidebar.js";
@@ -96,6 +100,8 @@ export function currentRoute() {
   if (h === "#/finops" || h.startsWith("#/finops/")) return finopsRoute(h.slice("#/finops".length).replace(/^\//, ""));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
   if (h === "#/sweeps" || h === "#/sweeps/") return { name: "sweeps" };
+  /* #8787: the monitoring store's own table and index health. Fleet-wide, so not a scoped route. */
+  if (h === "#/store-health" || h === "#/store-health/") return { name: "storeHealth" };
   /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
      The query rides INSIDE the hash (a static SPA route), so it is split off here and parsed by the page.
      Checked before #/alerts only for symmetry; the two prefixes cannot collide. */
@@ -148,6 +154,8 @@ export function currentRoute() {
   if (h === "#/manage-query-tags") return { name: "manageQueryTags" };
   if (h === "#/query-tag-usage") return { name: "queryTagUsage" };
   if (h === "#/job-history" || h === "#/job-history/") return { name: "jobHistory" };
+  /* #8737: the personal MCP token page, reached from the account menu; it has no sidebar link. */
+  if (h === "#/mcp-tokens" || h === "#/mcp-tokens/") return { name: "mcpTokens" };
   return { name: "fleet" };
 }
 
@@ -272,6 +280,7 @@ export const ROUTE_RENDERERS = {
   finops: (m, r, o) => renderFinops(m, r.param, r.tab, o),
   ag: (m, r, o) => renderAg(m, o),
   sweeps: (m, r, o) => renderSweeps(m, o),
+  storeHealth: (m) => renderStoreHealth(m),
   alerts: (m) => renderAlerts(m),
   investigations: (m, r) => renderInvestigations(m, r.request),
   proposals: (m, r, o) => renderProposals(m, r.proposal, o),
@@ -290,6 +299,7 @@ export const ROUTE_RENDERERS = {
   manageQueryTags: (m) => renderManageQueryTags(m),
   queryTagUsage: (m) => renderQueryTagUsage(m),
   jobHistory: (m) => renderJobHistory(m),
+  mcpTokens: (m) => getMe().then((me) => renderMcpTokens(m, me)),
   fleet: (m, r, o) => renderFleet(m, o),
 };
 
@@ -322,7 +332,9 @@ function route(opts) {
      and starts a fresh read count, so a read left behind cannot hold the new page's poll, Refresh button, tab-return
      refresh or render-time back-off. The poll and the Refresh button re-render the SAME page (`poll: true`): that page
      aborts its own older load, as before, and the count carries on. */
-  if (!(opts && opts.poll === true)) beginPageScope();
+  /* #9220: a first visit by a partial server name moves to the server's own name with the panel reads it already has out: those reads are
+     for the page that stays, so this one route change does not end them. */
+  if (!(opts && opts.poll === true) && !holdsRenamedServerRoute()) beginPageScope();
 
   if (frontDoor() && gateStore(opts)) return;
 
@@ -359,6 +371,7 @@ function navKeyFor(r) {
   if (r.name === "manageQueryTags") return "manage-query-tags";
   if (r.name === "queryTagUsage") return "query-tag-usage";
   if (r.name === "jobHistory") return "job-history";
+  if (r.name === "storeHealth") return "store-health";
   return r.name;
 }
 
@@ -503,6 +516,8 @@ const STORE_SIZE_TTL_MS = 5 * 60 * 1000;
 const NON_OK_COLLECTION_STATES = new Set(["starting", "degraded", "stopped"]);
 let statusFleet = null;
 let statusSeat = null;
+/* #9203: the dashboard's own build line, as /api/session says it (the same words the Viewer's About shows). Null until it has said one. */
+let statusBuild = null;
 let statusCollection = null;
 let storeSizeBytes = null;
 let storeSizeStale = false;
@@ -572,15 +587,22 @@ async function refreshStatusExtras() {
     refreshStoreSize(Date.now()),
   ]);
   statusSeat = seatLabel(session);
+  statusBuild = session && typeof session.build === "string" && session.build !== "" ? session.build : null;
   statusCollection = state;
   renderStatusBar();
+}
+
+/* The quiet build item, last on the bar so it sits in the same place on every page. */
+function buildItem() {
+  return el("span", { class: "sb-item sb-build muted", text: statusBuild, title: "The build of the service serving this page" });
 }
 
 function renderStatusBar() {
   if (!statusbar) return;
   const d = statusFleet;
   if (!d) {
-    mount(statusbar, el("span", { class: "sb-item muted", text: "Fleet unavailable" }));
+    const unavailable = el("span", { class: "sb-item muted", text: "Fleet unavailable" });
+    mount(statusbar, statusBuild ? [unavailable, el("span", { class: "sb-sep", text: "·" }), buildItem()] : unavailable);
     return;
   }
   let healthy = 0;
@@ -621,6 +643,7 @@ function renderStatusBar() {
   const updated = statusPageUpdatedAt != null ? new Date(statusPageUpdatedAt).toISOString() : d.generated_at;
   items.push(el("span", { class: "sb-item sb-updated", text: "Updated " + localTime(updated) }));
   items.push(el("span", { class: "sb-item", id: "refresh-hint" }));
+  if (statusBuild) items.push(buildItem());
 
   const children = [];
   items.forEach((item, i) => {
@@ -658,10 +681,12 @@ function updateStatusBar(d) {
    "don't waste a read against a page you opened to read once" rather than "don't discard an edit". hashchange
    still routes there normally on first load / a fresh alert link.
    Query Tag Usage (#6793): its figures are 24 hour totals and the fleet read can take minutes on a large store, so a 60 s
-   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it. */
+   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it.
+   Store Health (#8787): one read takes seconds of catalog work, and the page has its own Refresh button.
+   My MCP tokens (#8737): a re-draw would drop the token value shown once after a create, and the form's open input. */
 function isNoPollRoute(routeName) {
   return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage" || routeName === "queryTagUsage";
+    || routeName === "triage" || routeName === "queryTagUsage" || routeName === "storeHealth" || routeName === "mcpTokens";
 }
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
@@ -960,6 +985,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
+  initAccountMenu(document.getElementById("account-menu"), document.getElementById("topbar-account")).catch(() => {});
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
   initNavCollapse(document.getElementById("nav-collapse"), document.getElementById("nav-links"));

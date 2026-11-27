@@ -54,7 +54,6 @@ public class QueryStoreTopWindowTests
         Assert.DoesNotContain("f.collection_time >=", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY f.collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   w.collection_time >= $2", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

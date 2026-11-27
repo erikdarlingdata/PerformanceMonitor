@@ -44,7 +44,7 @@ Rules, in order:
      admin merges it, after the train covered it).
   4. A draft runs (#7717): agent pull requests open as drafts and need their first build and test run on CI, not on the
      laptop. The draft flag does not gate the run. It narrows the scope (rule 7).
-  5. Areas: base other than dev, a push, a path no area knows, an empty list, or a list the API may have cut: all.
+  5. Areas: base other than dev, a push, a build input or CI file no area knows (rule 11), an empty list, or a list the API may have cut: all.
      Only documentation: docs-only. Otherwise Darling files give the Darling suite, Lite files the Lite suite, and
      each side keeps its cross-reading classes of the other.
   6. Areas classes (#6734): every changed file is documentation or a .cs file under Darling/Darling.Tests or Lite.Tests
@@ -69,6 +69,9 @@ Rules, in order:
      a new product file, a constant or enum of a shared project), the diff could not be read, no class is selected, or a class
      list is longer than the runner's environment variable allows. There is no drift rule: a changed or new test file is
      always picked. The map is never a reason for a red run.
+     A changed file under Lite/ or Darling/PerformanceMonitor.Darling.Service/ that declares MCP tools (#9779) also picks that suite's
+     description-measuring classes (McpToolGuideTests, McpToolsListBudgetTests, the McpToolGuideHeads* family), for a ready pull
+     request, a dev push and a draft alike: nothing in the map or the changed symbols links a description edit to them.
  10. A dev push with the nightly map (#7819) picks its classes as rule 8 does, from the files of the pushed commit (pr.yml lists
      HEAD^1..HEAD when the push is one commit on top of `before` and not forced; any other push gets an unknown/ path, so rule 5).
      The full suite runs on dev once an hour instead: a workflow_dispatch run, which has no file list, runs every area, as does a
@@ -82,6 +85,18 @@ Rules, in order:
      unreadable map, or a sample that selects nothing or too many classes, makes that leg run the Guard classes instead and
      say why; it never fails for the map. A scripts file together with a file of any other area is rule 5 as before, and so
      is a workflow file (.github/workflows/*, which build.yml's root filter knows).
+
+  11. A file no area knows that is no build input (#9441): a generated reference file (docs/darling/store-tables.csv, docs/codemap.*),
+     a tool under tools/ (its own job builds it), a workflow other than the CI's own (actionlint checks it), a SQL script under
+     .github/sql or upgrades/. It selects only the classes that read it as text: the classes whose source names it
+     (ci-select.py's classes_naming_files) and the classes the nightly map saw read it (text_pattern_classes). A quiet file no
+     class reads selects nothing; a change of quiet files only that nothing reads is docs-only (no build). The rest of the change
+     selects as the rules above say, and a ready pull request's map_select does not answer FULL for the file (its `quiet` set). The
+     readers join the draft, ready and test-only selections. When the rest of the plan runs a suite in scope but not in full and a
+     reader is in that suite, or the reader scan fails, it is rule 5. Kept as rule 5, because they can change what every test
+     does: `unknown/` paths (a file list that cannot be trusted), the CI scripts (rule 9), pr.yml, build.yml and fork-ci-result.yml,
+     the restore and build inputs (csproj, props, targets, sln, lock files, global.json, nuget.config, KEEP_FULL, .editorconfig,
+     the test build project and the quarantine list; a project file under tools/ is a repro with its own job, so not one).
 
 Standard library only. Run: python -I .github/scripts/ci-plan.py --event pull_request --base dev --files-file FILE
 """
@@ -122,7 +137,7 @@ DEV_PUSH_MAX_LEGS = 10
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 
-# Weights are wall-seconds per class (darling-shard-weights.json). A class a table does not know weighs the mean.
+# Weights are wall-seconds per class (darling-shard-weights.json). A class a table does not know weighs the mean of its kind.
 DARLING_WEIGHTS = os.path.join(HERE, "darling-shard-weights.json")
 LITE_WEIGHTS = os.path.join(HERE, "lite-shard-weights.json")
 # Lite's estimate when lite-shard-weights.json is missing (it is new in #6656): the full suite, and the reads subset.
@@ -165,6 +180,14 @@ def _load_ci_select():
     return mod
 
 
+def _load_shard_pack():
+    spec = importlib.util.spec_from_file_location("lite_shard_pack", os.path.join(HERE, "lite-shard-pack.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True  # no __pycache__ beside the scripts in a checkout
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # ---------------------------------------------------------------------------------------------------------
 # The gate: does this run do any work?
 # ---------------------------------------------------------------------------------------------------------
@@ -196,6 +219,33 @@ def unknown_paths(rules, files: "list[str]") -> "list[str]":
     docs = set(rules._hits(rules.build["docs"], files))
     known = set(rules._hits(patterns, files))
     return [f for f in files if f not in docs and f not in known]
+
+
+# The CI's own workflows: a change to one can change what every pull request runs, so a file no area knows that is one of these
+# keeps rule 5. Any other workflow is checked by actionlint (the `actionlint` output) and by the classes that name it (#9441).
+CI_WORKFLOWS = (".github/workflows/pr.yml", ".github/workflows/build.yml", ".github/workflows/fork-ci-result.yml")
+# Files of the repository that only a build tool or the runner reads, not the product or a test: the compiler settings and the
+# test build's own project (a .csproj and the other restore inputs are handled by ci-select.py's restore_input).
+CI_BUILD_FILES = (".editorconfig", ".github/ci-quarantine.txt", ".github/ci-test-build.proj")
+
+
+def keeps_full(f: str) -> bool:
+    """True for a file no area knows that still plans every area (#9441): the workflow's own list of unknown paths (`unknown/`,
+    a file list that cannot be trusted), the CI scripts and workflows, and the build inputs (ci-select.py's KEEP_FULL,
+    restore_input and _BUILD_INPUT_PATHS). A project file under tools/ is a repro of its own with its own job (pr.yml's
+    compaction-repro), not an input of the test build, so it is not one. Every other file no area knows is a quiet file."""
+    if f.startswith(("unknown/", SCRIPTS_TREE)) or f in CI_WORKFLOWS or f in CI_BUILD_FILES or f in _CS._BUILD_INPUT_PATHS:
+        return True
+    if f.startswith("tools/"):
+        return False
+    return _CS.restore_input(f) or any(_CS.matches(p, f) for p in _CS.KEEP_FULL)
+
+
+def _reader_scan(files: "list[str]") -> "dict[str, list[str]]":
+    """{suite: simple names of the test classes whose source names one of the files} (ci-select.py's classes_naming_files). Matched by
+    path only (common=0): a file name a test holds in a literal counts only when the folder it sits in is among the literals too,
+    so tools/CompactionRepro/Program.cs does not select every class that names a Program.cs of the product."""
+    return _CS.classes_naming_files(files, common=0)[0]
 
 
 def _real(catalog: "dict | None", suite: str, names: "list[str]", mapped: "dict | tuple" = ()) -> "list[str]":
@@ -330,14 +380,16 @@ def _map_age(selection: dict) -> str:
     return f"map built {built:%Y-%m-%d %H:%M} UTC, {hours:.1f} hours old"
 
 
-def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: dict, event: str = "pull_request"
-                ) -> "tuple[dict[str, list[str]] | None, str]":
+def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: dict, event: str = "pull_request",
+                quiet: "list[str] | None" = None) -> "tuple[dict[str, list[str]] | None, str]":
     """(picks, why) for a pull request that is ready for review (#7728): the classes map_select picks from the nightly map,
     plus the classes of the test files it changed, plus the Darling Stage=Guard classes. picks is None, with the reason,
     when the pull request must run as rule 5 says (see the module docstring, rule 8). Never raises: any failure is FULL.
     selection: {map: the parsed map or None, error: why there is none, now: the clock (tests), shared_diff: the -U0 diff text
     of the shared-project files, named: map_select's `named`}. A dev push (#7819, rule 10) is given to map_select as a pull
-    request into dev would be: the pushed commit's files are the change; `event` only names the run in `why`."""
+    request into dev would be: the pushed commit's files are the change; `event` only names the run in `why`.
+    quiet: the files of the change no CI area knows and that are not build inputs (#9441): map_select selects the classes that read
+    them as text and does not answer FULL for them."""
     age = _map_age(selection)
     who = "a ready pull request" if event == "pull_request" else f"a dev {event}"
     try:
@@ -346,7 +398,8 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
             return None, selection.get("error") or "no test map was given"
         sel = _CS.map_select(test_map, files, [], catalog["classes"], event="pull_request", base_ref=base,
                              now=selection.get("now"), max_age_days=MAP_MAX_AGE_HOURS / 24.0, named=selection.get("named"),
-                             shared_diff=selection.get("shared_diff"), listed=catalog.get("listed"), **_CS.selection_args(rules))
+                             shared_diff=selection.get("shared_diff"), listed=catalog.get("listed"), quiet=set(quiet or ()),
+                             **_CS.selection_args(rules))
         if sel["full"]:
             return None, f"{sel['reason']} ({age})"
         table = catalog.get("files") or {}
@@ -372,9 +425,11 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
 
 
 def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None, draft: bool = False,
-             selection: "dict | None" = None, named: "dict[str, list[str]] | None" = None, named_error: str = "") -> dict:
+             selection: "dict | None" = None, named: "dict[str, list[str]] | None" = None, named_error: str = "",
+             readers_of: "Callable[[list[str]], dict[str, list[str]]] | None" = None) -> dict:
     """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727).
-    selection: the nightly map and what the pick reads (#7728, see ready_picks); None leaves that rule off."""
+    selection: the nightly map and what the pick reads (#7728, see ready_picks); None leaves that rule off.
+    readers_of: answers {suite: class names} for the quiet files of a change (#9441); None scans the test sources."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
     # #7819: a dev push with the nightly map goes through the rules below as a ready pull request does (rule 10). Any other event
     # that is not a pull request (the hourly workflow_dispatch run, a push without the map) runs every area.
@@ -387,11 +442,14 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
     if len(files) >= FILES_API_CAP:
         return {**everything, "reason": f"{len(files)} files may be a cut-off list, so every area runs."}
     odd = unknown_paths(rules, files)
-    if odd:
+    quiet: "list[str]" = []
+    if odd and not any(keeps_full(f) for f in odd):
+        quiet = odd  # #9441: files no area knows and no build reads: they select only the classes that read them, below
+    elif odd:
         docs = set(rules._hits(rules.build["docs"], files))
         # #7743: documentation plus files under .github/scripts/ that no area knows is the CI scripts area. Any other mix keeps the rule.
         if not all(f.startswith(SCRIPTS_TREE) for f in odd) or any(f not in docs and f not in odd for f in files):
-            return {**everything, "reason": f"no area knows {odd[0]}, so every area runs."}
+            return {**everything, "reason": f"no area knows {next(f for f in odd if keeps_full(f))}, so every area runs."}
         picks = scripts_only_picks(catalog if catalog is not None else load_catalog())
         if picks is None:
             return {**everything, "reason": f"{odd[0]} is a CI script, but the catalog has no Guard class to run, so every area runs."}
@@ -401,12 +459,58 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
                 "darling_classes": picks["darling"], "lite_classes": picks["lite"], "scripts_only": True, "self_test": self_test,
                 "reason": "CI scripts only: script tests, build, Guard, and one map-selected leg." if self_test
                           else "CI scripts only: script tests, build and Guard."}
+    all_files = files
+    readers: "dict[str, list[str]]" = {"darling": [], "lite": []}
+    if quiet:
+        cat = catalog if catalog is not None else load_catalog()
+        try:
+            found = (readers_of or _reader_scan)(quiet)
+            # The classes the nightly map saw read one of the files as text join the scan's, whatever the map's age: a pattern is
+            # about the test source, not the product code. (Its "reads the tree" classes do not: they would run for any file.)
+            seen = _CS.text_pattern_classes((selection or {}).get("map"), quiet, rules.build["docs"])
+            for suite in readers:
+                runs = {c for c, t in cat["classes"].get(suite, {}).items() if _CS.NO_TESTS_TRAIT not in t}
+                names = list(found.get(suite, [])) + sorted(seen.get(suite, ()))
+                readers[suite] = _real(cat, suite, [c for c in dict.fromkeys(names) if c in runs])
+        except Exception as exc:  # a scan that fails is never a reason for a red run
+            return {**everything, "reason": f"the scan for test classes that read {quiet[0]} failed ({type(exc).__name__}), so every area runs."}
+        quiet_set = set(quiet)
+        files = [f for f in files if f not in quiet_set]
+        catalog = cat
+
+    def done(res: dict) -> dict:
+        """The plan for the change without its quiet files, plus the classes that read them (#9441)."""
+        if not quiet:
+            return res
+        what = quiet[0] + (f" and {len(quiet) - 1} more" if len(quiet) > 1 else "")
+        if not any(readers.values()):
+            if res["areas"] in ("docs-only", "none") and rest_docs:
+                return {"areas": "docs-only", "darling_scope": "none", "lite_scope": "none",
+                        "reason": f"only documentation and files no area knows ({what}) changed, and no test class reads them."}
+            return {**res, "reason": f"{res['reason']} No area knows {what} and no test class reads it, so it adds no class."}
+        if res["areas"] in ("docs-only", "none", "classes"):
+            out = {"areas": "classes", "reason": res["reason"] if res["areas"] == "classes" or not rest_docs
+                   else "the rest of the change is documentation."}
+            for suite in ("darling", "lite"):
+                have = list(res.get(f"{suite}_classes", []))
+                names = have + [c for c in readers[suite] if c not in have]
+                out[f"{suite}_classes"] = names
+                out[f"{suite}_scope"] = "classes" if names else "none"
+            out["reason"] += (f" No area knows {what}, so it adds only the classes that read it "
+                              f"({len(readers['darling'])} Darling, {len(readers['lite'])} Lite).")
+            return out
+        # One suite or both run in scope. A reader in a suite that is not in full scope would be missed, so that is every area.
+        for suite in ("darling", "lite"):
+            if readers[suite] and res[f"{suite}_scope"] != "full":
+                return {**everything, "reason": f"{what} is read by {suite.capitalize()} test classes this plan does not run in full, so every area runs."}
+        return res
 
     a = rules.areas(files)
     area_names = ("root", "core", "lite", "darling")
-    if a["all_count"] == a["docs_count"] and not any(a[n] for n in area_names):
-        return {"areas": "docs-only", "darling_scope": "none", "lite_scope": "none",
-                "reason": "only documentation changed."}
+    rest_docs = a["all_count"] == a["docs_count"] and not any(a[n] for n in area_names)
+    if rest_docs:
+        return done({"areas": "docs-only", "darling_scope": "none", "lite_scope": "none",
+                     "reason": "only documentation changed."})
 
     cs = _CS
     darling_full = a["gate_darling"] or a["darling_full"] or a["core"] or a["root"]
@@ -427,11 +531,11 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
             for suite, scope in (("darling", darling_scope), ("lite", lite_mode)):
                 if scope != "none":
                     picks[suite] += [c for c in guard_classes(cat, suite) if c not in picks[suite]]
-            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
-                    "lite_scope": "classes" if picks["lite"] else "none",
-                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
-                    "reason": "only documentation and test classes changed, so those classes run with the Stage=Guard classes of each "
-                              "suite in its scope."}
+            return done({"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                         "lite_scope": "classes" if picks["lite"] else "none",
+                         "darling_classes": picks["darling"], "lite_classes": picks["lite"],
+                         "reason": "only documentation and test classes changed, so those classes run with the Stage=Guard classes of each "
+                                   "suite in its scope."})
     if darling_scope == "full" and lite_mode == "full":
         areas = "all"
     elif darling_scope == "full":
@@ -446,22 +550,22 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         picks, why, extra = ((None, named_error, 0) if named_error else
                              draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode, named))
         if picks:
-            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
-                    "lite_scope": "classes" if picks["lite"] else "none",
-                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
-                    "reason": "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope"
-                              + (f", and the {extra} classes whose source names a changed file (#7734)" if extra else "")
-                              + "; the full suite runs when it is marked ready for review."}
+            return done({"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                         "lite_scope": "classes" if picks["lite"] else "none",
+                         "darling_classes": picks["darling"], "lite_classes": picks["lite"],
+                         "reason": "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope"
+                                   + (f", and the {extra} classes whose source names a changed file (#7734)" if extra else "")
+                                   + "; the full suite runs when it is marked ready for review."})
         reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
     if not draft and selection is not None and areas != "none":
-        picks, why = ready_picks(rules, files, base, catalog if catalog is not None else load_catalog(), selection, event)
+        picks, why = ready_picks(rules, all_files, base, catalog if catalog is not None else load_catalog(), selection, event, quiet)
         if picks:
-            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
-                    "lite_scope": "classes" if picks["lite"] else "none",
-                    "darling_classes": picks["darling"], "lite_classes": picks["lite"], "reason": why}
+            return done({"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                         "lite_scope": "classes" if picks["lite"] else "none",
+                         "darling_classes": picks["darling"], "lite_classes": picks["lite"], "reason": why})
         who = "A ready pull request" if event == "pull_request" else f"A dev {event}"
         reason += f" {who} picks its classes from the nightly test map, but {why}, so it runs as rule 5 says."
-    return {"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode, "reason": reason}
+    return done({"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode, "reason": reason})
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -538,8 +642,9 @@ def suite_minutes(names: "list[str]", weights: "dict[str, float]", fallback: flo
         return 0.0
     if not weights:
         return fallback
-    mean = sum(weights.values()) / len(weights)
-    return sum(weights.get(n, mean) for n in names) / 60.0
+    # #9262: a class the table does not know weighs the mean of its own kind (lite-shard-pack.py's rule, the one the packers use).
+    fill = _load_shard_pack().missing_class_weight(weights)
+    return sum(weights[n] if n in weights else fill(n) for n in names) / 60.0
 
 
 def estimate(catalog: dict, darling_scope: str, lite_scope: str, picks: "dict | None" = None) -> "tuple[float, float]":
@@ -569,7 +674,8 @@ def leg_count(test_minutes: float, event: str = "pull_request", narrowed: bool =
 def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
          rules, catalog: "dict | None" = None, draft: bool = False, selection: "dict | None" = None,
          named: "dict[str, list[str]] | None" = None, named_error: str = "",
-         self_test_map: "Callable[[], tuple[object, str]] | None" = None, now=None) -> "dict[str, str]":
+         self_test_map: "Callable[[], tuple[object, str]] | None" = None, now=None,
+         readers_of: "Callable[[list[str]], dict[str, list[str]]] | None" = None) -> "dict[str, str]":
     """self_test_map: a function answering (the parsed nightly map or None, why there is none) for the self-test leg of a CI scripts
     change (#7743); it is called only then. None uses the map of `selection`. now: the clock, for tests."""
     outcome, why = gate(event, head_ref, labels)
@@ -583,7 +689,7 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
 
     picks_from_map = selection is not None and event in ("pull_request", "push") and not draft and not _all_docs(rules, files)
     catalog = catalog if catalog is not None else (load_catalog() if draft or picks_from_map or _may_narrow(files) else None)
-    c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection, named, named_error)
+    c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection, named, named_error, readers_of)
     out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
@@ -654,12 +760,14 @@ def parse_labels(text: str) -> "list[str]":
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
-def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str = "pull_request") -> dict:
+def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str = "pull_request",
+                    files: "list[str] | None" = None) -> dict:
     """The input of ready_picks for a pull request run (#7728): the map file the workflow downloaded, or why there is none, and
     the two things map_select reads from the pull request's own change. The checkout is the pull request's merge commit, so its
     change is `HEAD^1..HEAD`. A dev push (#7819) checks out the pushed commit, whose change against its first parent is the same
     range; pr.yml has already made sure the push is that one commit. A map that cannot be read, or a diff that cannot be read,
-    leaves `map` None: the run is FULL."""
+    leaves `map` None: the run is FULL. `files` (the change's file list) adds to `named` the classes that measure served MCP tool
+    descriptions when a changed file declares MCP tools (#9779)."""
     out: dict = {"map": None, "error": map_error or "no test map was downloaded", "now": None, "shared_diff": None, "named": None}
     if not map_path or not os.path.isfile(map_path):
         return out
@@ -679,7 +787,8 @@ def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str 
             out["error"] = "the pull request's diff could not be read"
             return out
         tokens, _tests = _CS.changed_symbols(text)
-        out["named"] = _CS.named_classes(_CS.symbol_matches(tokens, set(), _CS.test_file_index(root), None))
+        out["named"] = _CS.with_description_classes(
+            _CS.named_classes(_CS.symbol_matches(tokens, set(), _CS.test_file_index(root), None)), files or [], root)
         out["shared_diff"] = text
     except Exception as exc:  # never red because of the map
         out["error"] = f"the pull request's diff could not be read ({type(exc).__name__})"
@@ -787,13 +896,16 @@ def main(argv: "list[str]") -> int:
     selection = None
     # A ready pull request and a dev push (#7819) pick their classes from the map; the hourly workflow_dispatch run has no file list.
     if args.event in ("pull_request", "push") and args.map is not None and not draft:
-        selection = build_selection(args.map, args.map_error, event=args.event)
+        selection = build_selection(args.map, args.map_error, event=args.event, files=files)
     named, named_error = None, ""
     if args.event == "pull_request" and draft:
         # #7734: a draft also runs the classes whose source names a changed product file. A scan that fails runs the pull request as
         # one that is ready for review (every class its areas select), never red.
         try:
             named, _path_only = _CS.classes_naming_files(files)
+            # #9779: a changed file that declares MCP tools also runs the classes that measure served descriptions.
+            named = {s: list(dict.fromkeys(list(named.get(s, [])) + sorted(v)))
+                     for s, v in (_CS.with_description_classes(named, files) or {}).items()}
         except Exception as exc:
             named_error = f"the scan for test classes that name a changed file failed ({type(exc).__name__}: {str(exc)[:80]})"
     def self_test_map() -> "tuple[object, str]":

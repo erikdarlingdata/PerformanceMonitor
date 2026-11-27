@@ -291,7 +291,8 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     [Fact]
     public void TheTopQueriesCard_DrawsTheLeftOutSentenceAfterTheWindowNote_AndBeforeTheGrid()
     {
-        const string WindowNote = "The window reaches further back than this server's raw query_stats retains, so the older part of it was not read.";
+        /* #9116: the page says the raw statistics table in its own words (plain-text.js). */
+        const string WindowNote = "The window reaches further back than this server's raw query statistics retains, so the older part of it was not read.";
         const string LeftOut = "2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old.";
         var rows = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" });
         string Reply(bool withWindowNote, bool withLeftOut)
@@ -301,7 +302,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
             {
                 o["window_truncated"] = true;
                 o["effective_start"] = "2026-01-02T00:00:00.0000000";
-                o["truncation_note"] = WindowNote;
+                o["truncation_note"] = WindowNote.Replace("raw query statistics", "raw query_stats", StringComparison.Ordinal);
             }
 
             if (withLeftOut)

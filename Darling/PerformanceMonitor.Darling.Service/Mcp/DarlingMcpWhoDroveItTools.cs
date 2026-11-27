@@ -38,6 +38,7 @@ public sealed class DarlingMcpWhoDroveItTools
 
     /* ───────────────────────── get_cpu_by_database ───────────────────────── */
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_cpu_by_database"), Description(
         "Ranks databases by CPU over a window ending at as_of, each with its share of the server total and its heaviest statement. " +
         "cpu_ms is the plan cache's per-statement CPU (query_stats deltas, as get_top_queries_by_cpu sums them) per database; share is of the CPU of EVERY database, not of the page. " +
@@ -110,13 +111,20 @@ public sealed class DarlingMcpWhoDroveItTools
                         }), cancellationToken, start);
             }
 
-            var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
+            /* #8570: the window notice, the procedure CPU and the statement texts each need only the page, so they run together, each its own
+               command on its own pooled connection, and the call waits on the slowest of the three rather than their sum. All three are
+               awaited before any is used, so a failed read never leaves another running past the call. */
+            var noticeRead = CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
+            var proceduresRead = DarlingWhoDroveItReader.ReadProcedureCpuAsync(
+                postgres, resolved.ServerId, start, windowEnd, page.Select(r => r.DatabaseName).ToArray(), procRoute.Hourly, procRoute.Ceiling, cancellationToken);
+            var textsRead = DarlingWhoDroveItReader.ReadStatementTextAsync(
+                postgres, resolved.ServerId, start, windowEnd, page.Where(r => r.TopQueryHash != null).Select(r => r.TopQueryHash!).Distinct().ToArray(), cancellationToken);
+            await Task.WhenAll(noticeRead, proceduresRead, textsRead);
+            var notice = await noticeRead;
+            var procedures = await proceduresRead;
+            var texts = await textsRead;
 
             var serverCpuUs = page[0].ServerCpuUs;
-            var procedures = await DarlingWhoDroveItReader.ReadProcedureCpuAsync(
-                postgres, resolved.ServerId, start, windowEnd, page.Select(r => r.DatabaseName).ToArray(), procRoute.Hourly, procRoute.Ceiling, cancellationToken);
-            var texts = await DarlingWhoDroveItReader.ReadStatementTextAsync(
-                postgres, resolved.ServerId, start, windowEnd, page.Where(r => r.TopQueryHash != null).Select(r => r.TopQueryHash!).Distinct().ToArray(), cancellationToken);
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
 
@@ -181,6 +189,7 @@ public sealed class DarlingMcpWhoDroveItTools
     internal const int DefaultStatements = 3;
     internal const int MaxStatements = 10;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_load_by_caller"), Description(
         "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, with requests, CPU, elapsed time, shares of the window and top statements. " +
         "Each request counts once, at the largest CPU any capture saw. Shares are of the window, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
@@ -228,7 +237,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints()), cancellationToken, start);
+                        notice.AsHints()), cancellationToken, start, snapshotCollector: "query_snapshots");
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -301,6 +310,7 @@ public sealed class DarlingMcpWhoDroveItTools
     /// <summary>How far either side of a pile-up the nearest DMV blocking snapshot may be, in seconds. The blocking snapshot collector runs about every 30 seconds, so two cycles.</summary>
     internal const int BlockingToleranceSeconds = 60;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_pileups"), Description(
         "Lists the capture times when min_sessions or more sessions ran the same query_hash at once, most sessions first, with the wait types at that capture and the head blocker from the DMV blocking snapshot NEAREST that time. " +
         "head_blocker comes from a separate collector, so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near); null with a note means no blocking was recorded near the capture. " +
@@ -348,7 +358,7 @@ public sealed class DarlingMcpWhoDroveItTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No capture {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints()), cancellationToken, start);
+                        notice.AsHints()), cancellationToken, start, snapshotCollector: "query_snapshots");
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

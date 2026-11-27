@@ -1515,7 +1515,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
     /// </summary>
     internal async Task SeedTempDbAsync(double reservedMb, double unallocatedMb,
         double userObjectMb = 0, double internalObjectMb = 0, double versionStoreMb = 0,
-        double? maxSizeMb = null)
+        double? maxSizeMb = null, double? logUsedPercent = null, string? logHoldup = null, int? holderSessionId = null, string? holderLogin = null,
+        int logFromRow = 0, string? holderProgram = null, int? holderOpenMinutes = null, long? holderLogBytesUsed = null)
     {
         if (userObjectMb == 0) userObjectMb = reservedMb * 0.6;
         if (internalObjectMb == 0) internalObjectMb = reservedMb * 0.3;
@@ -1532,8 +1533,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
 INSERT INTO tempdb_stats
     (collection_id, collection_time, server_id, server_name,
      user_object_reserved_mb, internal_object_reserved_mb,
-     version_store_reserved_mb, total_reserved_mb, unallocated_mb, max_size_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+     version_store_reserved_mb, total_reserved_mb, unallocated_mb, max_size_mb,
+     log_total_mb, log_used_mb, log_used_percent, log_reuse_wait_desc, log_truncation_holdup_reason, holder_session_id, holder_login_name,
+     holder_program_name, holder_begin_time, holder_log_bytes_used)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
 
             var t = TestPeriodStart.AddMinutes(i * 15);
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
@@ -1546,6 +1549,19 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
             cmd.Parameters.Add(new DuckDBParameter { Value = reservedMb });
             cmd.Parameters.Add(new DuckDBParameter { Value = unallocatedMb });
             cmd.Parameters.Add(new DuckDBParameter { Value = maxSizeMb.HasValue ? maxSizeMb.Value : (object)DBNull.Value });
+            /* A row before logFromRow is stored the way every row was before v83: no log columns at all. */
+            var hasLog = logUsedPercent.HasValue && i >= logFromRow;
+            var holderRow = i >= logFromRow;
+            cmd.Parameters.Add(new DuckDBParameter { Value = hasLog ? 1000.0 : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hasLog ? logUsedPercent!.Value * 10 : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hasLog ? logUsedPercent!.Value : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hasLog ? "ACTIVE_TRANSACTION" : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow ? (object?)logHoldup ?? DBNull.Value : DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow && holderSessionId.HasValue ? holderSessionId.Value : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow ? (object?)holderLogin ?? DBNull.Value : DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow ? (object?)holderProgram ?? DBNull.Value : DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow && holderOpenMinutes.HasValue ? t.AddMinutes(-holderOpenMinutes.Value) : (object)DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = holderRow && holderLogBytesUsed.HasValue ? holderLogBytesUsed.Value : (object)DBNull.Value });
 
             await cmd.ExecuteNonQueryAsync();
         }

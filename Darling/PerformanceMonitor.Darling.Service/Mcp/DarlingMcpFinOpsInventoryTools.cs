@@ -19,6 +19,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -48,6 +49,8 @@ public sealed class DarlingMcpFinOpsInventoryTools
     private const string InventoryGuide =
         " server_inventory: health_score 0-100 weights CPU 40%, memory 30% and storage 30%, and is the same score the Utilization view shows for that server, from the same inputs (the 24-hour p95 CPU, the buffer pool's share of physical memory in the newest memory row, the free share of the newest database-size snapshot); each call reads the newest rows when it runs, so two calls made across a collection can differ by what that collection changed, and with no CPU sample in the 24 hours, or no memory sample collected, there is no score (health_score_note says why). health_band is good at 80 and above, fair at 60 and above, else poor. annual_cost_usd is monthly × 12; with no monthly cost set, monthly_cost_usd and annual_cost_usd are null and cost_reason says 'monthly cost not set'. license_warning flags Standard edition over 24 CPUs or 128 GB. On Azure SQL Database, memory and sockets are the host's and are null. Times are UTC except sqlserver_start_time_local, the server's own clock. Servers without a collected properties snapshot are not listed. A server that was removed from the configuration is left out of the rows and of total_servers unless include_removed is true. A field with no value is left out of its row. hardware_note host_scoped is spelled out in hardware_note_legend. truncated means total_servers > servers_returned; raise limit (max 200).";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_finops_inventory"), Description(
         "FinOps Server Inventory for the whole fleet: one row per server with a collected properties snapshot. Fixed windows: CPU 24 hours, idle databases 7 days; no server_name, hours_back or as_of. Views: server_inventory. An unknown view is refused with the valid list. <<GUIDE>>" + InventoryGuide)]
     public static async Task<string> GetFinOpsInventory(
@@ -79,6 +82,13 @@ public sealed class DarlingMcpFinOpsInventoryTools
 
             if (inventory.Count == 0)
             {
+                /* #8942: on a store with no SQL Server target no server_properties snapshot is coming, so "yet" would promise one. The answer is the
+                   engine status the other gated reads use. */
+                if (await DarlingEngineCapability.FleetNotCollectedMessageAsync(postgres, "server_properties", cancellationToken) is { } engineGap)
+                {
+                    return McpHelpers.Status("not_collected", $"{engineGap} Server inventory covers SQL Server servers only.");
+                }
+
                 return McpHelpers.Status("empty",
                     include_removed
                         ? "No registered server has a collected server_properties snapshot yet, so there is no inventory to show."

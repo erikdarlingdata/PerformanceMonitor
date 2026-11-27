@@ -17,7 +17,7 @@ namespace Darling.Tests;
 /// #4699: the stderr log tail's resume marker against a REAL target with <c>logging_collector = on</c>,
 /// <c>log_destination = 'stderr'</c>, <c>log_min_messages</c> at LOG or lower and a UTC <c>log_timezone</c>.
 /// Set <c>DARLING_TEST_PG_LOGROTATE</c> to that target's connection string (a superuser or pg_monitor plus
-/// pg_read_server_files). Each test runs the shipped query through the collector's own read and carries the
+/// EXECUTE on pg_read_file(text, bigint, bigint)). Each test runs the shipped query through the collector's own read and carries the
 /// staged state into the next cycle the way the runner does after a successful write.
 /// </summary>
 [Collection("pg-log-rotation")]

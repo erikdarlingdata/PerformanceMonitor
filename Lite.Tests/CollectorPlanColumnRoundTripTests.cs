@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
@@ -106,7 +107,7 @@ public sealed class CollectorPlanColumnRoundTripTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
-    /// Appends one row through the exact runner path (prefix columns + WritePayload + EndRow) against a
+    /// Writes one row through the runner's own batch write (prefix columns + WritePayload + EndRow) against a
     /// freshly initialized DuckDB, then asserts each named column read back its expected plan text. EndRow
     /// throwing here would mean the Schema.cs table column count/order drifted from WritePayload.
     /// </summary>
@@ -118,19 +119,9 @@ public sealed class CollectorPlanColumnRoundTripTests : IClassFixture<SharedDuck
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
-        using (var appender = connection.CreateAppender(definition.TargetTable))
-        {
-            var appenderRow = appender.CreateRow();
-            if (definition.IncludesCollectionId)
-            {
-                appenderRow.AppendValue(1L);
-            }
-            appenderRow.AppendValue(context.CollectionTime).AppendValue(42).AppendValue("s");
-
-            var writer = new AppenderCollectorRowWriter { CurrentRow = appenderRow };
-            definition.WritePayload(row, writer, context);
-            appenderRow.EndRow();   /* throws if the appended column count != table column count */
-        }
+        /* The runner's own write (#9241): a table that carries a Lite-only digest column is written through a stage, because the
+           positional appender wants a value for every column. A payload that drifts from the table still throws here. */
+        RemoteCollectorService.WriteBatch(connection, definition, new List<TRow> { row }, 42, "s", context.CollectionTime, context);
 
         foreach (var (column, expected) in columns)
         {

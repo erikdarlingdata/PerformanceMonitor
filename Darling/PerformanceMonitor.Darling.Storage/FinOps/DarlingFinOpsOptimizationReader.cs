@@ -408,7 +408,7 @@ FROM latest l CROSS JOIN peak p";
     /// picked: <c>per_spelling</c> sums per stored name, <c>per_wait</c> merges the spellings on
     /// <c>rtrim(wait_type)</c> (once per group, not per row), and the category is read from the clean name, so both
     /// spellings always land in the same category. $1 server_id, $2 cutoff.</summary>
-    public const string WaitCategorySummarySql = @"
+    public static readonly string WaitCategorySummarySql = @"
 WITH per_spelling AS (
     SELECT
         wait_type,
@@ -431,18 +431,7 @@ per_wait AS (
 ),
 categorized AS (
     SELECT
-        CASE
-            WHEN wait_type = 'SOS_SCHEDULER_YIELD' THEN 'CPU'
-            WHEN wait_type IN ('CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER', 'HTDELETE', 'HTBUILD', 'HTREPARTITION') THEN 'Parallelism'
-            WHEN wait_type ILIKE 'PAGEIOLATCH%'
-            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
-            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
-            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
-            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
-            WHEN wait_type ILIKE 'LATCH_%'
-            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
-            ELSE 'Other'
-        END AS category,
+        " + WaitCategorySql.CaseExpression("wait_type") + @" AS category,
         wait_type,
         wait_time_ms,
         waiting_tasks
@@ -587,7 +576,8 @@ SELECT
     LEFT(t.query_text, 200) AS query_preview,
     t.query_text AS full_query_text,
     MAX(GREATEST(r.inline_plan, CASE WHEN r.has_row_without_inline_plan THEN p.query_plan_xml END)) AS query_plan_xml,
-    MAX(p.query_plan_gz) AS query_plan_gz,
+    /* #9802: the largest stored plan, in the form PostgreSQL 16 and 17 run too, which have no max(bytea). */
+    {ByteaMaxSql.Before}p.query_plan_gz{ByteaMaxSql.After} AS query_plan_gz,
     t.query_hash
 FROM top AS t
 JOIN resolved AS r

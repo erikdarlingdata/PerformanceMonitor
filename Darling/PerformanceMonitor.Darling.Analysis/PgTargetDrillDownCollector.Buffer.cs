@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -100,9 +101,12 @@ totals AS (
     SELECT
         max(collection_time)                                                                   AS captured_at,
         CAST(coalesce(max(pool_buffers_total), 0) AS bigint)                                   AS pool_buffers_total,
-        CAST(coalesce(max(pool_buffers_used), 0) AS bigint)                                    AS pool_buffers_used,
-        CAST(count(*) AS integer)                                                              AS relations_in_capture,
+        CAST(max(pool_buffers_used) AS bigint)                                                 AS pool_buffers_used,
+        CAST(count(buffers) AS integer)                                                        AS relations_in_capture,
         CAST(coalesce(SUM(buffers), 0) AS bigint)                                              AS buffers_listed,
+        /* #9508: a capture over the pool cap is one totals row (buffers NULL) whose dirty_buffers is the whole pool's
+           dirty count, so on that capture this is pool-wide while buffers_listed is 0. Kept that way on purpose: it is
+           what dirty_share_of_pool needs to stay a true share of the pool. */
         CAST(coalesce(SUM(dirty_buffers), 0) AS bigint)                                        AS dirty_buffers_listed,
         CAST(coalesce(SUM(buffers) FILTER (WHERE relation_kind IN ('r', 'm')), 0) AS bigint)   AS heap_buffers,
         CAST(coalesce(SUM(buffers) FILTER (WHERE relation_kind = 'i'), 0) AS bigint)           AS index_buffers,
@@ -130,7 +134,7 @@ SELECT
     t.cold_buffers
 FROM capture AS c
 CROSS JOIN totals AS t
-ORDER BY c.buffers DESC, c.relation_name NULLS LAST, c.database_name NULLS LAST
+ORDER BY c.buffers DESC NULLS LAST, c.relation_name NULLS LAST, c.database_name NULLS LAST
 LIMIT $4";
 
     /// <summary>
@@ -207,10 +211,12 @@ AND   e.extension_name = 'pg_buffercache'";
     {
         var top = new List<PgTargetBufferResident>(BufferTopRelationCap);
         DateTime? capturedAt = null;
-        long poolTotal = 0, poolUsed = 0, listed = 0, dirtyListed = 0, heap = 0, index = 0, toast = 0, cold = 0;
+        long poolTotal = 0, listed = 0, dirtyListed = 0, heap = 0, index = 0, toast = 0, cold = 0;
         var relationsInCapture = 0;
+        /* #9508: null when the capture has no used count (a totals-only row on a target with no pg_buffercache_summary()), never a 0 that reads as an empty pool. */
+        long? poolUsed = null;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
         using (var cmd = new NpgsqlCommand(PgTargetBufferCompositionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
         {
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -225,7 +231,7 @@ AND   e.extension_name = 'pg_buffercache'";
             {
                 capturedAt = reader.IsDBNull(7) ? null : reader.GetDateTime(7);
                 poolTotal = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8));
-                poolUsed = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9));
+                poolUsed = reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9));
                 relationsInCapture = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
                 listed = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11));
                 dirtyListed = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12));
@@ -233,6 +239,13 @@ AND   e.extension_name = 'pg_buffercache'";
                 index = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14));
                 toast = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15));
                 cold = reader.IsDBNull(16) ? 0 : Convert.ToInt64(reader.GetValue(16));
+
+                /* #9508: a capture whose per-relation scan was skipped is one totals-only row (buffers NULL): the pool totals
+                   above are its, and it is no relation. */
+                if (reader.IsDBNull(4))
+                {
+                    continue;
+                }
 
                 var relationName = reader.IsDBNull(1) ? null : reader.GetString(1);
                 var relationNameLength = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
@@ -283,8 +296,9 @@ AND   e.extension_name = 'pg_buffercache'";
             PoolBuffersTotal: poolTotal,
             PoolBuffersUsed: poolUsed,
             PoolBytes: poolTotal * PgSettingValue.DefaultBlockBytes,
-            PoolFill: Share(poolUsed, poolTotal),
+            PoolFill: poolUsed is { } used ? Share(used, poolTotal) : null,
             BuffersListed: listed,
+            // On a capture over the pool cap (#9508) this is the pool's own dirty count, not a sum of listed relations.
             DirtyBuffersListed: dirtyListed,
             DirtyShareOfPool: Share(dirtyListed, poolTotal),
             HeapShare: Share(heap, listed),

@@ -41,6 +41,7 @@ public sealed class StatementFilterPlanReaderSourceScanTests
         ["ResolveQueryStorePlanAsync"] = 1,
         ["ReadQueryStorePlanByIdAsync"] = 1,
         ["GetQuerySnapshotPlanXmlAsync"] = 1,
+        ["GetQuerySnapshotPlansAsync"] = 1,
         ["GetBlockingPlanXmlAsync"] = 1,
         ["GetDeadlockVictimPlanXmlAsync"] = 1,
     };

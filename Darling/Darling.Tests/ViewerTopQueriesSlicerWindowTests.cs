@@ -66,4 +66,30 @@ public sealed class ViewerTopQueriesSlicerWindowTests
         Assert.Equal(new DateTime(2026, 10, 23, 9, 0, 0, DateTimeKind.Utc), sent.StartUtc);
         Assert.Equal(WindowEnd, sent.EndUtc);
     }
+
+    /// <summary>
+    /// A selection that begins inside the strip starts on a bar's left edge, and that bar counts a row stamped on the edge. The grid
+    /// reads leave out a row stamped on their start, so the selection hands them a start one microsecond (the store's precision)
+    /// earlier and the row on the edge is read.
+    /// </summary>
+    [Fact]
+    public void ASelectionInsideTheStrip_HandsTheGridReadsAStartOneMicrosecondEarlier()
+    {
+        var sent = ClickChip("1h");
+
+        Assert.True(sent.StartUtc > WindowStart);
+        Assert.Equal(sent.StartUtc.AddTicks(-TimeSpan.TicksPerMicrosecond), sent.ReadStartUtc);
+    }
+
+    /// <summary>
+    /// "All" selects the loaded window, which the grid's own load reads without a row stamped on its start: the selection's read
+    /// start is the window's start, so it reads the rows the load read.
+    /// </summary>
+    [Fact]
+    public void ASelectionOfTheWholeStrip_HandsTheGridReadsTheWindowStart()
+    {
+        var sent = ClickChip("All");
+
+        Assert.Equal(WindowStart, sent.ReadStartUtc);
+    }
 }

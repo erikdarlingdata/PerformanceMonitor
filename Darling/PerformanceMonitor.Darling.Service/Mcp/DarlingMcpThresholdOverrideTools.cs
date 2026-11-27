@@ -67,6 +67,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent; single-table grants only reach a store when the script " +
         "runs again) as a superuser. Managed and compose stores grant it themselves on start. Call again after the script has run.";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_alert_threshold_override"), Description(
         "Sets or clears a threshold for ONE server (or one database on it), or for a server TAG, leaving the global value alone. Changes the " +
         "monitoring store only; the service picks it up within its reload interval. <<GUIDE>> " +
@@ -500,6 +501,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         "client_timeouts.critical_per_minute" => s.ClientTimeoutsCriticalPerMinute,
         "long_running_query.threshold_minutes" => s.LongRunningQueryThresholdMinutes,
         "tempdb_space.threshold_percent" => s.TempDbSpaceThresholdPercent,
+        "tempdb_log_space.threshold_percent" => s.TempDbLogSpaceThresholdPercent,
         "low_disk.threshold_percent" => s.LowDiskThresholdPercent,
         "low_disk.threshold_gb" => s.LowDiskThresholdGb,
         "low_disk.critical_free_percent" => s.DiskCriticalFreePercent,

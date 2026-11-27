@@ -107,7 +107,7 @@ WITH raw AS
         MAX(total_queued_request_count) AS total_queued_request_count
     FROM v_cpu_scheduler_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY server_id, collection_time
 )
@@ -132,7 +132,7 @@ ORDER BY 1";
     internal static string CpuSchedulerSnapshotSql => $@"
 WITH newest AS
 (
-    {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+    {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time > $2 AND collection_time <= $3", newestOnly: true)}
 )
 SELECT
     collection_time,

@@ -15,6 +15,7 @@ using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
@@ -79,6 +80,52 @@ public sealed class DarlingStoreLoginsTests
         var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict);
         Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, mcp.Source);
         Assert.Equal(McpLogin, mcp.ConnectionString);
+
+        /* #9013: the metrics port only reads, so it takes the read-only viewer login this start provisioned, not the web one. */
+        var metrics = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict);
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, metrics.Source);
+        Assert.Equal(ViewerLogin, metrics.ConnectionString);
+        Assert.Null(metrics.Warning);
+    }
+
+    /// <summary>
+    /// #9013: on a compose store that this start did not provision, the metrics port takes the viewer credential an earlier start
+    /// left even when a web one exists too, and falls back to the web one only when there is no viewer one; the web dashboard keeps
+    /// preferring its own web credential. A configured webConnectionString still wins for the metrics port.
+    /// </summary>
+    [Fact]
+    public void OnTheMetricsSurface_TheViewerLogin_ComesBeforeTheWebLogin_AndAConfiguredOneStillWins()
+    {
+        var verdict = NotProvisioned("refusal");
+
+        var metrics = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.Trusted("EarlierWeb1"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreViewerFromEarlierStart, metrics.Source);
+        Assert.Equal(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(Owner, "viewer", "EarlierViewer1"), metrics.ConnectionString);
+        Assert.Equal(DarlingStoreLogins.EarlierViewerWarning(verdict.NotProvisionedReason, DarlingStoreLogins.Surface.Metrics), metrics.Warning);
+
+        var web = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.Trusted("EarlierWeb1"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal("web", new NpgsqlConnectionStringBuilder(web.ConnectionString).Username);
+
+        var webOnly = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.Trusted("EarlierWeb1"), EarlierComposeCredential.None("no viewer credential file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRoleFromEarlierStart, webOnly.Source);
+        Assert.Equal("web", new NpgsqlConnectionStringBuilder(webOnly.ConnectionString).Username);
+
+        var neither = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web file"), EarlierComposeCredential.None("no viewer file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, neither.Source);
+        Assert.Contains("no web file", neither.Warning, StringComparison.Ordinal);
+        Assert.Contains("no viewer file", neither.Warning, StringComparison.Ordinal);
+
+        var configured = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Metrics, Owner, WebLogin, inContainer: true, Provisioned());
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, configured.Source);
+        Assert.Equal(WebLogin, configured.ConnectionString);
     }
 
     [Fact]
@@ -808,6 +855,47 @@ public sealed class DarlingStoreLoginsTests
         }
     }
 
+    /// <summary>
+    /// #9013: the metrics port resolves the web dashboard's login, but its lines name the metrics port, and never say it is not
+    /// started (it listens; only the refresh cannot log in) or that writes are refused (it only reads). The web dashboard's lines
+    /// for the same paths keep their own text.
+    /// </summary>
+    [Fact]
+    public async Task OnTheMetricsSurface_TheLoginLinesNameTheMetricsPort_NotTheWebDashboard()
+    {
+        var name = "DARLING_TEST_9013_UNSET_" + Guid.NewGuid().ToString("N");
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        try
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+            var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = "env:" + name };
+
+            var metricsLog = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Metrics, postgres, metricsLog, CancellationToken.None));
+            Assert.Contains("Error: The metrics port cannot read the store this attempt: postgres.webConnectionString", metricsLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("not started", metricsLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("web dashboard", metricsLog.Joined, StringComparison.Ordinal);
+
+            var webLog = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, webLog, CancellationToken.None));
+            Assert.Contains("Error: The web dashboard not started this attempt: postgres.webConnectionString", webLog.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
+
+        /* The viewer login an earlier start left: the metrics port reads with it, and its warning says nothing about refused changes. */
+        var verdict = NotProvisioned("refusal");
+        var metrics = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreViewerFromEarlierStart, metrics.Source);
+        Assert.StartsWith("The metrics port connects to the store as the read-only viewer role", metrics.Warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("refused", metrics.Warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("web dashboard", metrics.Warning, StringComparison.Ordinal);
+    }
+
     /* ─────────────────────────── which store is the service's own ─────────────────────────── */
 
     [Fact]
@@ -1011,6 +1099,140 @@ public sealed class DarlingStoreLoginsTests
     /* ─────────────────────────── the custom-alert evaluator's login (#3970) ─────────────────────────── */
 
     [Fact]
+    public void ConfiguredCustomAlertLogin_IsTheWebLoginTheOperatorNamed()
+    {
+        // #9700: a bring-your-own store runs the evaluator on postgres.webConnectionString, and on nothing else.
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = WebLogin };
+        Assert.Equal(WebLogin, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ConfiguredCustomAlertLogin_WithTheSettingUnset_IsNull_NeverTheOwner(string? webConnectionString)
+    {
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = webConnectionString };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_WithAnUnresolvableReference_IsNull_NeverTheOwner()
+    {
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = "env:DARLING_TEST_NO_SUCH_WEB_LOGIN_9700",
+        };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Theory]
+    [InlineData("Host=store;Port=5432;Username=web;Password=LeadSecretQ7;Database=darling;NoSuchKeywordQ7=1")]
+    [InlineData("Host=store;Port=5432;Username=web;Password=LeadSecretQ7;TailSecretQ7;Database=darling")]
+    public void ConfiguredCustomAlertLogin_WithAStringNpgsqlCannotUse_IsNull_AndTheLogNamesTheSettingNotThePassword(string webConnectionString)
+    {
+        // The worker creates a data source from this string. An unparseable one would throw out of the worker and stop the service,
+        // and the host's log of that exception can quote part of the password.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = webConnectionString };
+
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("postgres.webConnectionString", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("LeadSecretQ7", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("TailSecretQ7", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_OnTheOwnerUser_WarnsOnce_AndStillReturnsTheLogin()
+    {
+        // The web host's warning does not show when web.enabled is off, so the evaluator's resolver says it.
+        var logger = new CapturingTestLogger();
+        var ownerAsWeb = "Host=store;Port=5432;Username=darling;Password=OtherSecret4;Database=darling";
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = ownerAsWeb };
+
+        Assert.Equal(ownerAsWeb, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("custom alert evaluator", logger.Joined, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("owner login", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_OnADifferentUserThanTheOwner_WarnsNothing()
+    {
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = WebLogin };
+
+        Assert.Equal(WebLogin, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public async Task ConfiguredCustomAlertLoginAsync_WhenTheStoreCannotBeSignedInTo_IsNull_AndTheWarningNamesTheSettingAndLoginNotThePassword()
+    {
+        // #9760: nothing listens on the port, so the sign-in fails the way a store that refuses the login does. The evaluator opens
+        // a connection only when a rule is due, so without this sign-in the first sign of the problem is a rule that never fires.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = $"Host=127.0.0.1;Port={DarlingManagedPostgresTests.FindFreeTcpPort()};Username=web;Password=SignInSecretQ9;Database=darling;Timeout=5",
+        };
+
+        Assert.Null(await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(postgres, logger, CancellationToken.None));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("postgres.webConnectionString", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("web login", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("127.0.0.1", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("provision-roles.sql", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("SignInSecretQ9", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConfiguredCustomAlertLoginAsync_WhenTheServiceIsStopping_IsNull_AndSaysNothing()
+    {
+        // A start that is being cancelled is not a refusal: the store did not say no.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = $"Host=127.0.0.1;Port={DarlingManagedPostgresTests.FindFreeTcpPort()};Username=web;Password=StopSecretQ9;Database=darling;Timeout=5",
+        };
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+
+        Assert.Null(await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(postgres, logger, stopping.Token));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheEvaluatorReadyLine_NamesTheLogin_TheInterval_AndNeverThePassword(bool fromWebConnectionString)
+    {
+        // #9760: an operator reading the line must learn which login the evaluator runs as, not the code's name for its pool.
+        var logger = new CapturingTestLogger();
+
+        DarlingStoreLogins.LogCustomAlertEvaluatorReady(
+            logger, "Host=store;Port=5432;Username=rules_web;Password=ReadySecretQ9;Database=darling", 60, fromWebConnectionString);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
+        Assert.Contains("rules_web login", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("60s", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadySecretQ9", logger.Joined, StringComparison.Ordinal);
+        Assert.Equal(fromWebConnectionString, logger.Joined.Contains("postgres.webConnectionString", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CustomAlertViewer_WithNoVerdictPublished_IsNull()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
@@ -1196,7 +1418,8 @@ public sealed class DarlingStoreLoginsTests
             + @"config\.Postgres\.ConnectionString, _logger, stoppingToken\);\s*\}",
             gate);
 
-        Assert.Equal(2, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
+        // The third assignment is #9700's bring-your-own branch: the configured web login, never the owner.
+        Assert.Equal(3, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
         Assert.DoesNotContain("customAlertViewerConnString = config.Postgres.ConnectionString", gate, StringComparison.Ordinal);
     }
 

@@ -116,11 +116,12 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
         await con.OpenAsync(TestContext.Current.CancellationToken);
 
         /* A time-ordered archive like the archiver writes, built from the real table's own columns so the file has
-           the real shape: 18,000 rows, plus 40 extra slices of the first intervals, which are the split rows. */
+           the real shape: 18,000 rows, plus 40 extra slices of the first intervals, which are the split rows. A slice carries its
+           sibling's count plus one, so it is never an exact copy of it (#9352: an exact copy is dropped, not summed). */
         await ExecAsync(con, $"CREATE TEMP TABLE gen AS SELECT * FROM {await GeneratedSourceAsync(con)}");
         await ExecAsync(con,
             "INSERT INTO gen SELECT * REPLACE (CAST(collection_id + 10000000 AS BIGINT) AS collection_id, " +
-            "CAST(3 AS BIGINT) AS execution_count) FROM gen WHERE collection_id < 40");
+            "CAST(execution_count + 1 AS BIGINT) AS execution_count) FROM gen WHERE collection_id < 40");
         await ExecAsync(con,
             $"COPY (SELECT * FROM gen ORDER BY collection_time, collection_id) TO '{sql}' ({ParquetCompaction.ArchiveCopyOptions})");
 
@@ -209,6 +210,8 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
                 "query_plan_text" => "repeat('<ShowPlanXML><RelOp NodeId=\"0\"/></ShowPlanXML>', 40) || q",
                 "execution_count" => "1 + hash(i) % 50",
                 _ when type.Contains("VARCHAR", StringComparison.OrdinalIgnoreCase) => "'v' || (q % 50)",
+                /* The query text digest column (#9241) is a BLOB, which a number cannot be cast to. */
+                _ when type.Equals("BLOB", StringComparison.OrdinalIgnoreCase) => "unhex(sha256('d' || (q % 50)))",
                 _ when type.Equals("BOOLEAN", StringComparison.OrdinalIgnoreCase) => "false",
                 _ when type.Contains("TIMESTAMP", StringComparison.OrdinalIgnoreCase) => "TIMESTAMP '2026-10-01 00:00:00'",
                 _ when type.Equals("DOUBLE", StringComparison.OrdinalIgnoreCase) => $"(hash(i + {index}) % 100000) / 7.0",

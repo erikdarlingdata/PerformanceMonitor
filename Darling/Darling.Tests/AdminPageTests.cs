@@ -15,6 +15,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>Source pins for the read-only Admin page: the three reads and their params, each tab's columns, the nav entry and the route.</summary>
+[Trait("Stage", "Guard")]
 public sealed class AdminPageTests
 {
     private static string Page() =>

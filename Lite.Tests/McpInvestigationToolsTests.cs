@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// writes nothing; a proposed note lands pending; the window and journal truncation words are honest; the unsupported-format
 /// refusals name Lite. (The OpenedSince and wait facts are not ported: Lite has no wait tool in this slice.)
 /// </summary>
+[Collection("app-logger-statics")]
 public sealed class McpInvestigationToolsTests : IDisposable
 {
     private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\",\"basis\":\"verified\"}]";
@@ -64,6 +65,168 @@ public sealed class McpInvestigationToolsTests : IDisposable
 
     private InvestigationBriefComposer Composer() => new(
         new DuckDbInvestigationBriefSourceReader(_db), new McpDataDetailSetting(McpDataDetail.Full), LiteInvestigationBriefTools.Tools);
+
+    /// <summary>The real store, except that a test can make the brief write, the release or the refusal write throw, or cancel a token
+    /// when the brief write starts (#9511: a lock timeout on any of them is the field failure).</summary>
+    private sealed class FaultingStore(DuckDbInvestigationStore inner) : IInvestigationRequestStore
+    {
+        public Exception? SetBriefThrows { get; set; }
+        public bool SetBriefReturnsFalse { get; set; }
+        public Exception? ReleaseThrows { get; set; }
+        public Exception? RefusalThrows { get; set; }
+        public CancellationTokenSource? CancelOnSetBrief { get; set; }
+        public int Releases { get; private set; }
+
+        public Task<bool> SetBriefAsync(Guid requestId, Guid claimId, short briefFormat, string briefJson, CancellationToken cancellationToken = default)
+        {
+            CancelOnSetBrief?.Cancel();
+            if (SetBriefThrows is not null) throw SetBriefThrows;
+            if (SetBriefReturnsFalse) return Task.FromResult(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            return inner.SetBriefAsync(requestId, claimId, briefFormat, briefJson, cancellationToken);
+        }
+
+        public Task<bool> ReleaseAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+        {
+            Releases++;
+            if (ReleaseThrows is not null) throw ReleaseThrows;
+            return inner.ReleaseAsync(requestId, claimId, cancellationToken);
+        }
+
+        public Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson, CancellationToken cancellationToken = default)
+        {
+            if (RefusalThrows is not null) throw RefusalThrows;
+            return inner.RecordRefusalAsync(requestId, agentId, operation, reason, detailJson, cancellationToken);
+        }
+
+        public Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default) => inner.OpenOrJoinAsync(alert, cancellationToken);
+        public Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default) => inner.ClaimAsync(requestId, agentId, cancellationToken);
+        public Task<InvestigationSubmitOutcome> SubmitAsync(InvestigationReportSubmission report, CancellationToken cancellationToken = default) => inner.SubmitAsync(report, cancellationToken);
+        public Task<InvestigationRenewResult> RenewAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default) => inner.RenewAsync(requestId, claimId, cancellationToken);
+        public Task<string?> ClaimHolderAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default) => inner.ClaimHolderAsync(requestId, claimId, cancellationToken);
+        public Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>> RouteUseAsync(CancellationToken cancellationToken = default) => inner.RouteUseAsync(cancellationToken);
+        public Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default) => inner.RequestExistsAsync(requestId, cancellationToken);
+        public Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId, CancellationToken cancellationToken = default) => inner.ReadRequestAsync(requestId, cancellationToken);
+        public Task<InvestigationReportsRead> ReadReportsAsync(Guid? requestId, int? serverId, DateTime sinceUtc, int limit, int journalLimit, CancellationToken cancellationToken = default) => inner.ReadReportsAsync(requestId, serverId, sinceUtc, limit, journalLimit, cancellationToken);
+        public Task<IReadOnlyList<InvestigationRequestRow>> ListAsync(string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default) => inner.ListAsync(state, serverId, family, limit, cancellationToken);
+        public Task<IReadOnlyList<InvestigationOpenedRow>> OpenedSinceAsync(DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken = default) => inner.OpenedSinceAsync(sinceUtc, routeIds, limit, cancellationToken);
+        public Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default) => inner.SweepAsync(cancellationToken);
+    }
+
+    private static List<string> ErrorLines(Guid requestId) =>
+        AppLogger.DrainBufferedLines()
+            .Where(line => line.Contains("ERROR", StringComparison.Ordinal) && line.Contains(requestId.ToString(), StringComparison.Ordinal))
+            .ToList();
+
+    private static StoreLockTimeoutException LockTimeout() => new(TimeSpan.FromSeconds(5), [], "test");
+
+    /// <summary>#9511: the brief write times out on the store lock after the claim row is written. The agent gets an error with no
+    /// claim_id, so the claim is released and journaled, or a re-claim would answer already_claimed for the whole lease.</summary>
+    [Fact]
+    public async Task BriefWriteFailure_ReleasesTheClaim_JournalsAnswerFailed_LogsTheStep_AndAReclaimSucceeds()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        var faulting = new FaultingStore(_store) { SetBriefThrows = LockTimeout() };
+        AppLogger.DrainBufferedLines();
+
+        var failed = Root(await McpInvestigationTools.ClaimAsync(faulting, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+
+        Assert.Equal("error", failed.GetProperty("status").GetString());
+        Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
+
+        var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+        Assert.Equal("claimed", again.GetProperty("status").GetString());
+    }
+
+    /// <summary>#9511: the store_brief branch, where the write returns false because the claim no longer holds the request. The claim is
+    /// released and journaled as brief_failed, and the step is logged.</summary>
+    [Fact]
+    public async Task BriefNotStored_ReleasesTheClaim_JournalsBriefFailed_LogsTheStep_AndAReclaimSucceeds()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        var faulting = new FaultingStore(_store) { SetBriefReturnsFalse = true };
+        AppLogger.DrainBufferedLines();
+
+        var failed = Root(await McpInvestigationTools.ClaimAsync(faulting, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+
+        Assert.Equal("error", failed.GetProperty("status").GetString());
+        Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'"));
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
+
+        var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+        Assert.Equal("claimed", again.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task AnswerBuildFailure_AfterTheBriefIsStored_ReleasesTheClaim_JournalsAnswerFailed_AndAReclaimSucceeds()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        AppLogger.DrainBufferedLines();
+
+        var failed = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct,
+            parseBrief: _ => throw new InvalidOperationException("answer build failed")));
+
+        Assert.Equal("error", failed.GetProperty("status").GetString());
+        Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step build_answer", StringComparison.Ordinal));
+
+        var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+        Assert.Equal("claimed", again.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ACancelAfterTheClaim_ReleasesIt_AndIsNotLoggedAsAnError()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var faulting = new FaultingStore(_store) { CancelOnSetBrief = cts };
+        AppLogger.DrainBufferedLines();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            McpInvestigationTools.ClaimAsync(faulting, Composer(), openedId.ToString(), "agent-a", null, null, cts.Token));
+
+        Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
+        Assert.Empty(ErrorLines(openedId));
+        Assert.Equal("0", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason LIKE 'claim:%failed'"));
+
+        var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+        Assert.Equal("claimed", again.GetProperty("status").GetString());
+    }
+
+    /// <summary>The release takes the same write lock and can time out the same way. The agent still sees the first error, and both are logged.</summary>
+    [Fact]
+    public async Task AFailedRelease_AfterABriefWriteFailure_KeepsTheFirstError_AndLogsBoth()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        var faulting = new FaultingStore(_store)
+        {
+            SetBriefThrows = new InvalidOperationException("brief write failed first"),
+            ReleaseThrows = new InvalidOperationException("release failed second"),
+        };
+        AppLogger.DrainBufferedLines();
+
+        var failed = Root(await McpInvestigationTools.ClaimAsync(faulting, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+
+        Assert.Equal("error", failed.GetProperty("status").GetString());
+        var message = failed.GetProperty("message").GetString()!;
+        Assert.Contains("brief write failed first", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("release failed second", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("the claim was released", message, StringComparison.Ordinal);
+        Assert.Equal(1, faulting.Releases);
+
+        var lines = ErrorLines(openedId);
+        Assert.Contains(lines, l => l.Contains("brief write failed first", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("release failed second", StringComparison.Ordinal));
+        /* The refusal is still journaled after the failed release. */
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
+    }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
@@ -239,6 +402,51 @@ public sealed class McpInvestigationToolsTests : IDisposable
             $"FROM investigation_notes WHERE source_request_id = '{id}'"));
         /* root_cause_found is false only for needs_person. */
         Assert.Equal("false", Scalar($"SELECT root_cause_found::VARCHAR FROM investigation_reports WHERE request_id = '{id}'"));
+    }
+
+    /* #8983: the report read keeps the newest requests that fit the response budget, each whole with its report and journal rows,
+       and says how many it left out; a window that fits is the same reply as the read without a budget. */
+    [Fact]
+    public async Task GetInvestigationReports_OverTheBudget_KeepsTheNewestRequestsWhole_AndSaysWhatItLeftOut()
+    {
+        const int total = 45;
+        var composer = Composer();
+        var ids = new List<Guid>();
+        for (var i = 0; i < total; i++)
+        {
+            var id = (await _store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 100 + i, "srv-" + i.ToString(CultureInfo.InvariantCulture), "blocking", "Blocking", _now,
+                    new[] { "key-" + i.ToString(CultureInfo.InvariantCulture) }, null, 1000, 10000, LeaseMinutes: 15, ExpiryMinutes: 240), Ct)).RequestId!.Value;
+            Exec($"UPDATE investigation_requests SET opened_at = TIMESTAMP '{DateTime.UtcNow.AddMinutes(i - total).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' WHERE request_id = '{id}'");
+            var claim = Root(await McpInvestigationTools.ClaimAsync(_store, composer, id.ToString(), "agent-a", null, null, Ct));
+            var submitted = Root(await McpInvestigationTools.SubmitAsync(_store, id.ToString(), claim.GetProperty("claim_id").GetString()!, 1,
+                "real", $"case-{i:D3} " + new string('x', 1500), Evidence, "summary", null, null, Ct));
+            Assert.Equal("reported", submitted.GetProperty("status").GetString());
+            ids.Add(id);
+        }
+
+        var json = await McpInvestigationTools.GetInvestigationReports(_servers, _store, composer, null, null, 24, Ct);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+        var root = Root(json);
+        var kept = root.GetProperty("requests_returned").GetInt32();
+        Assert.InRange(kept, 1, total - 1);
+        var newestFirst = ids.AsEnumerable().Reverse().Take(kept).ToList();
+        Assert.Equal(newestFirst, root.GetProperty("requests").EnumerateArray().Select(r => r.GetProperty("request_id").GetGuid()).ToList());
+        Assert.Equal(newestFirst.OrderBy(g => g).ToList(), root.GetProperty("reports").EnumerateArray().Select(r => r.GetProperty("request_id").GetGuid()).OrderBy(g => g).ToList());
+        var journal = root.GetProperty("journal").EnumerateArray().ToList();
+        foreach (var id in newestFirst)
+            Assert.Equal(Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{id}'"),
+                journal.Count(j => j.GetProperty("request_id").GetString() == id.ToString()).ToString(CultureInfo.InvariantCulture));
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+        var note = root.GetProperty("budget_note").GetString()!;
+        Assert.Contains($"{total - kept:#,0} were left out", note, StringComparison.Ordinal);
+        Assert.Contains("server_name or request_id, or a smaller hours_back", note, StringComparison.Ordinal);
+
+        /* A window that fits is the same reply as the read without a budget, with no budget fields. */
+        var small = await McpInvestigationTools.GetInvestigationReports(_servers, _store, composer, null, ids[total - 1].ToString(), 24, Ct);
+        Assert.Equal(await McpInvestigationTools.ReportsAsync(_servers, _store, McpDataDetail.Full, null, ids[total - 1].ToString(), 24, Ct), small);
+        Assert.False(Root(small).TryGetProperty("budget_note", out _));
     }
 
     /* The window and the journal say when they held more than the page: 101 requests in the window is truncated, 100 is

@@ -152,6 +152,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var logger = new ListLogger();
 
         await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON collect.query_store_interval_wide_legacy USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await NoAutovacuumAsync(connection, LegacyTable, ct);
         await InsertManyAsync(connection, ct);
 
         var deadlockMs = (int)await CountAsync(connection, "SELECT setting::bigint FROM pg_settings WHERE name = 'deadlock_timeout'", ct);

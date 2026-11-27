@@ -524,12 +524,24 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(vsPlot);
         _tempDbHover?.Add(vsPlot, "Version Store");
 
+        /* #8881: the tempdb log's used space, drawn only where the store has a reading. A row stored before the log columns, or on an engine
+           without the function, is NaN, which ScottPlot leaves as a gap: never a zero, which would read as an empty log. */
+        var logUsed = TempDbLogSeries.Values(data.Select(d => d.LogUsedMb).ToList());
+        if (logUsed is not null)
+        {
+            var logPlot = TempDbChart.Plot.Add.TimeSeries(times, logUsed);
+            logPlot.LegendText = "Log Used";
+            logPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TempDbLog"));
+            ChartStyle.StyleScatter(logPlot);
+            _tempDbHover?.Add(logPlot, "Log Used");
+        }
+
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
-        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max() }.Max();
+        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max(), logUsed is null ? 0 : TempDbLogSeries.Max(logUsed) }.Max();
         SetChartYLimitsWithLegendPadding(TempDbChart, 0, maxVal);
 
         ShowChartLegend(TempDbChart);
@@ -1580,6 +1592,12 @@ public partial class ServerTab : UserControl
         chart.Refresh();
     }
 
+    /// <summary>One plain line in the chart card's subtitle, as the tempdb chart's log holder line (#8881); null or empty clears it and the card takes no room for it.</summary>
+    private static void SetCardNote(ScottPlot.WPF.WpfPlot chart, string? text)
+    {
+        if (CardOf(chart) is { } card) card.Subtitle = text ?? string.Empty;
+    }
+
     /// <summary>The blocking charts name the collector that answered ("blocked-process-report" or "DMV snapshot") in their card's subtitle; null or no recognised source clears it.</summary>
     private static void SetCardSourceNote(ScottPlot.WPF.WpfPlot chart, IEnumerable<string?>? sources)
     {
@@ -1602,7 +1620,7 @@ public partial class ServerTab : UserControl
         {
             if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
             {
-                ApplyTheme(chart);
+                ChartStyle.Restyle(chart); // #9109: colours only, the load's axis limits and ticks stay
                 chart.Refresh();
             }
         }

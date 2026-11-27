@@ -90,7 +90,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             /* #5825: a resolution that was sent, failed or muted also writes its three V187 columns. Every other row keeps
                the twelve-column insert it always had. */
             var resolution = record.ResolutionOutcome is not null;
@@ -172,7 +172,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
     public async Task RecordCustomAlertResolutionAsync(
         int serverId, string serverName, string metricName, string detailText, System.Threading.CancellationToken cancellationToken = default)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, cancellationToken);
         using var command = new NpgsqlCommand(
             "SELECT config.record_custom_alert_resolution($1, $2, $3, $4)", connection)
             { CommandTimeout = _commandTimeoutSeconds };
@@ -278,7 +278,7 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
         int sidValue, string? alertKey, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
         DateTime? sinceUtc, DateTime? untilUtc, bool countMuted)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
 
         var fires = new System.Collections.Generic.List<AlertHistoryFire>();
         using (var fireCommand = new NpgsqlCommand(@"
@@ -378,7 +378,7 @@ LIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { C
             return null;
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, cancellationToken);
         using var command = new NpgsqlCommand(@"
 SELECT alert_time, current_value, detail_text, context_json, MIN(alert_time) OVER () AS first_fired
 FROM config_alert_log
@@ -429,7 +429,7 @@ LIMIT $4", connection) { CommandTimeout = _commandTimeoutSeconds };
         var since = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc - OpenEngineAlerts.Window), DateTimeKind.Unspecified);
         var until = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc), DateTimeKind.Unspecified);
         AlertAttachedToDto? newest = null;
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
         foreach (var (metric, resolutionTitle) in OpenEngineAlerts.Families)
         {
             using var command = new NpgsqlCommand(@"
@@ -491,7 +491,7 @@ AND   NOT EXISTS (SELECT 1 FROM config_alert_log AS r
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 SELECT MAX(alert_time)
 FROM config_alert_log
@@ -503,7 +503,7 @@ AND   metric_name = $2" + extraFilter
                    special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
-                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = _commandTimeoutSeconds };
+                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3"), connection) { CommandTimeout = _commandTimeoutSeconds };
             command.Parameters.AddWithValue(sid.Value);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)

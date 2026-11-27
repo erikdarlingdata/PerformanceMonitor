@@ -98,6 +98,8 @@ export async function refreshStores() {
       last_ok_utc: typeof s.last_ok_utc === "string" ? s.last_ok_utc : null,
       admin_writes_off: s.admin_writes_off === true,
       managed_store: s.managed_store === true,
+      /* #9203: the build of the store's own service, when it said one; null otherwise (never a word like "unknown"). */
+      service_build: typeof s.service_build === "string" && s.service_build !== "" ? s.service_build : null,
     }));
   applyStoreSession(peekSession());
   return true;
@@ -179,7 +181,7 @@ function paintPicker() {
     "select",
     { id: "store-picker-select", class: "store-picker-select", "aria-label": "Store", "aria-describedby": "store-picker-note" },
     stores.map((s) => {
-      const opt = el("option", { value: s.name, text: s.health === "ok" ? s.name : s.name + " (" + healthLabel(s.health) + ")" });
+      const opt = el("option", { value: s.name, text: s.health === "ok" ? s.name : s.name + " (" + healthLabel(s.health) + ")", title: s.service_build });
       if (s.name === currentStore()) opt.selected = true;
       return opt;
     })

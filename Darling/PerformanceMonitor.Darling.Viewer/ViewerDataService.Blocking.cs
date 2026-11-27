@@ -200,7 +200,7 @@ public sealed partial class ViewerDataService
             blocking_open_transaction_count
         FROM blocked_process_reports
         WHERE server_id = $1
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   collection_time >= $5
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
@@ -244,7 +244,7 @@ public sealed partial class ViewerDataService
             blocking_tran_log_bytes_used
         FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ORDER BY event_time DESC
@@ -336,7 +336,7 @@ public sealed partial class ViewerDataService
         SELECT EXISTS (
             SELECT 1
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -352,7 +352,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        return await command.ExecuteScalarAsync(cancellationToken) is true;
+        return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is true;
     }
 
     /// <summary>
@@ -392,7 +392,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         DateTime? collectorCoverage;
         DateTime? earliestReport;
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             await reader.ReadAsync(cancellationToken);
             collectorCoverage = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -442,7 +442,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(BlockedProcessThresholdOnSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         await reader.ReadAsync(cancellationToken);
         return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
     }
@@ -455,27 +455,27 @@ public sealed partial class ViewerDataService
     /// The caller takes the earlier of the two,
     /// through <see cref="BlockingThresholdCoverage.Combine"/>, which also folds in the threshold's history.
     /// $1 server, $2 window start, $3 window end, $4 database filter, $5 the event-window floor on collection time. Both run
-    /// reads are bounded, the first run in <c>[$2, $3]</c> and the newest run before $2, and ride
+    /// reads are bounded, the first run in <c>($2, $3]</c> and the newest run at or before $2, and ride
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
     /// </summary>
     public const string BlockingChartXeStartSql = """
         SELECT
             CASE WHEN EXISTS (SELECT 1
                               FROM collect.collection_log AS p
-                              WHERE p.server_id = $1 AND p.collector_name = 'blocked_process_report' AND p.collection_time < $2
+                              WHERE p.server_id = $1 AND p.collector_name = 'blocked_process_report' AND p.collection_time <= $2
                               ORDER BY p.collection_time DESC
                               LIMIT 1)
                  THEN $2::timestamp
                  ELSE (SELECT c.collection_time
                        FROM collect.collection_log AS c
                        WHERE c.server_id = $1 AND c.collector_name = 'blocked_process_report'
-                       AND   c.collection_time >= $2 AND c.collection_time <= $3
+                       AND   c.collection_time > $2 AND c.collection_time <= $3
                        ORDER BY c.collection_time
                        LIMIT 1)
             END,
             (SELECT MIN(b.event_time)
              FROM v_blocked_process_reports AS b
-             WHERE b.server_id = $1 AND b.event_time >= $2 AND b.event_time <= $3
+             WHERE b.server_id = $1 AND b.event_time > $2 AND b.event_time <= $3
              AND   b.collection_time >= $5
              AND   ($4::text[] IS NULL OR b.database_name = ANY($4)))
         """;
@@ -491,7 +491,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerBlockedProcessRow
@@ -554,7 +554,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(MapDmvRow(reader));
@@ -615,14 +615,14 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<BlockingPairRow>();
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using (var command = connection.CreateCommand())
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.CommandText = BlockingPairRowsSql;
             AddBlockingParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
                 rows.Add(PgBlockingPairRowQuery.Read(reader));
         }

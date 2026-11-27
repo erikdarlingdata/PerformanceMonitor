@@ -67,7 +67,7 @@ public static class DarlingPgReplicationStatsReader
             SELECT *
             FROM pg_replication_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         totals AS (

@@ -484,11 +484,12 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
         {
             await SeedAgAsync(c, end.AddMinutes(-1));
             /* SecDb also gains the largest lock-wait time, so the contention anomaly (node-local, never filtered) has a
-               secondary-copy database to name. */
+               secondary-copy database to name. The detector's window leaves its end out, so the newer snapshot is a minute
+               before it. */
             foreach (var (db, grownMb, lockWaitMs) in new[] { ("SecDb", 900m, 900_000L), ("StandDb", 500m, 200_000L) })
             {
                 await SeedObjectAsync(c, end.AddDays(-1), db, 100m);
-                await SeedObjectAsync(c, end, db, 100m + grownMb, lockWaitMs);
+                await SeedObjectAsync(c, end.AddMinutes(-1), db, 100m + grownMb, lockWaitMs);
             }
             for (var d = 1; d <= 5; d++)
                 await ExecAsync(c, "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1,$2,$3,'n',$2,10,0)",

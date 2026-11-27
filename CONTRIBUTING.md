@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to the SQL Server Performance Monitor! This guide will help you understand the project structure, set up your development environment, and submit high-quality contributions.
 
+New here? Start with the code map: [docs/CODEMAP.md](docs/CODEMAP.md), also as [docs/codemap.html](docs/codemap.html) and [docs/codemap.json](docs/codemap.json) for tools.
+
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
@@ -267,6 +269,8 @@ until all four are there.
    previous one. Miss it and a fully-migrated store probes one rung short, so the connect-time gate refuses
    a store that is in fact current — permanently, because no later upgrade changes the answer.
 
+A PR that adds a table or a view to the `collect` schema also adds its row to `docs/darling/store-tables.csv`. The row says what the relation holds and whether a copy of the store needs it. `StoreTableInventoryLiveTests` builds a store and lists the relations in `collect`. It fails until the file matches.
+
 #### Rung numbering: `max(dev) + 1`, never pre-reserved
 
 The applier ascends and skips anything already stamped
@@ -363,7 +367,24 @@ Collector queries specifically:
 - **`OPTION(RECOMPILE)` on collector queries.** These run with parameters whose selectivity
   varies enormously between a first-run catch-up window and a steady-state minute, and a plan
   cached from one is wrong for the other. A statement added to an existing batch needs its own
-  hint — one on a neighbouring statement does not cover it.
+  hint. One on a neighbouring statement does not cover it.
+
+  One narrow exception (#9539): some statements can drop the hint. Such a statement takes no
+  parameters, bar the one named below, and the server's own setup (its availability groups,
+  databases and files) sets how many rows it reads. A lab run on two engine versions must
+  prove the change. Without the hint, the statement uses less CPU at idle and under load, and
+  returns the same rows. A plan compiled at idle and then reused under load must also cost
+  less than the hinted statement. The comment at the statement gives those numbers.
+
+  Today the exception covers the `ag_replica_states` and `ag_database_replica_states` staging
+  statements, the `file_io_stats` statement used when no databases are excluded, and the on-prem
+  `query_snapshots` statement used when no databases are excluded (#9683). That last one is the
+  single parameterized statement the exception names. Its held-plan parameters sit in a `CASE`
+  and an `IN` list that pick a plan state, never in a seek or a row filter, so no cached plan
+  can return other rows. Its bar is the same lab run on two engine versions, with the added
+  states of requests sharing one plan key, many distinct plans and held keys. A statement that
+  takes a parameter in a predicate keeps the hint. So does a statement that reads rows that
+  grow with blocking or load (waiting tasks, blocked sessions, the plan cache).
 - **Comments explain WHY, at length.** This codebase's comments carry measurements, issue
   numbers, and the failure the line prevents. A comment restating the code is noise; one
   recording "this threshold was 300s and the fleet's median gap is 299s, so it discarded half

@@ -537,6 +537,14 @@ internal static class McpHelpers
     public static readonly IReadOnlyList<string> QueryStoreExecutionTypes = new[] { "Regular", "Aborted", "Exception" };
 
     /// <summary>
+    /// #9341: why a Query Store ranking is empty over a window whose collector runs stored rows. The ranking places a window by each
+    /// interval's start time, so an interval collected inside the window that started before it, such as an hourly interval that is
+    /// still open, is not in it yet. Shared so both SKUs say it in the same words.
+    /// </summary>
+    public const string QueryStoreNoIntervalInWindow =
+        "The window holds no Query Store interval yet. A window is placed by each interval's start time, so an hourly interval that is still open, or one that started before the window, is not in it. Try a wider window with hours_back.";
+
+    /// <summary>
     /// The <c>empty</c> answer for an <c>execution_type</c> filter that matched nothing while the same read
     /// without it returns rows. Most queries never abort, so this is the common answer to an Aborted or
     /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none
@@ -1118,7 +1126,26 @@ internal static class McpHelpers
     /// sentence in the envelope; nothing else spells the sentence, so the words a web card shows and the
     /// words an MCP client reads cannot drift.
     /// </summary>
-    public static string ErrorSentence(string operation, Exception ex) => $"Error during {operation}: {ex.Message}";
+    public static string ErrorSentence(string operation, Exception ex) =>
+        IsClientTimeout(ex)
+            ? $"Error during {operation}: {CommandTimeoutToken}: {ex.Message}"
+            : $"Error during {operation}: {ex.Message}";
+
+    /// <summary>
+    /// The stable token <see cref="ErrorSentence"/> puts right after the operation when the read was stopped by the CLIENT's own command
+    /// timeout (#8570). A read's driver timeout (30 s) fires before the role's <c>statement_timeout</c> (60 s), so the store never reports
+    /// SQLSTATE 57014 for it: the driver throws a <see cref="TimeoutException"/> (bare, or wrapped by the driver's own exception) whose
+    /// message is driver prose, and the sentence a tool builds from it matched nothing a web surface could classify. The token is a word the
+    /// service's sentence matcher anchors on, the same way it anchors on a SQLSTATE, so a tool-caught client timeout answers as a timeout.
+    /// </summary>
+    public const string CommandTimeoutToken = "command timeout";
+
+    /// <summary>True for a <see cref="TimeoutException"/>, bare or wrapped by the database driver's own exception (a
+    /// <see cref="System.Data.Common.DbException"/>, which is what Npgsql's exception derives from). The same two shapes the service's
+    /// live-exception classifier treats as a statement timeout. A <see cref="TimeoutException"/> inside any OTHER wrapper is not one: an
+    /// HttpClient request that timed out is a <see cref="TaskCanceledException"/> over a <see cref="TimeoutException"/>, and it is no store timeout.</summary>
+    internal static bool IsClientTimeout(Exception ex) =>
+        ex is TimeoutException || (ex is System.Data.Common.DbException && ex.InnerException is TimeoutException);
 
     /// <summary>
     /// The ONE wire shape a tool REFUSAL takes, on both SKUs — <see cref="FormatError"/>'s twin for the fourth

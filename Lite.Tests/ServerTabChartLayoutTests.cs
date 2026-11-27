@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// through its own update method. Every chart the tab holds is found by walking the tree, so a new chart is measured with no
 /// change here. Each failure is reported by tab and chart name.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabChartLayoutTests
 {
     private readonly ITestOutputHelper _output;

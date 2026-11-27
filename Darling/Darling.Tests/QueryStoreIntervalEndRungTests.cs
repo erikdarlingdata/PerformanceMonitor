@@ -55,15 +55,9 @@ public sealed class QueryStoreIntervalEndRungTests
     /// <summary>The rung is registered in a dense ladder. The "I am the top rung" half of this claim moved to
     /// <c>CheckpointLongestSyncRungTests</c> (V156, #4834) with the top.</summary>
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("query-store-interval-end", V155.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>

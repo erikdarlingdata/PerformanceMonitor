@@ -90,7 +90,7 @@ public sealed partial class ViewerDataService
             string? TopAppName, int? TopAppConnections, string? TopHostName, int? TopHostConnections, DateTime LatestCollectionTime)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(14) != 1)

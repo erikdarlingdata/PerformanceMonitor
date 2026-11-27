@@ -42,6 +42,7 @@
                     <ComboBoxItem Content="Low-Impact"/>
                     <ComboBoxItem Content="Balanced"/>
                     <ComboBoxItem Content="Aggressive"/>
+                    <ComboBoxItem Content="Off"/>
                 </ComboBox>
             </StackPanel>
 

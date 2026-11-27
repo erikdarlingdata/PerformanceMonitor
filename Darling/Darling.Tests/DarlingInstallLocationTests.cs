@@ -163,6 +163,8 @@ public class DarlingInstallLocationTests
     /// reporter's Windows Server 2019 gives an operator by default, so this pins 5.1 compatibility of the
     /// guard's syntax at the same time.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TestPathIsAtOrUnder_DecidesTheBoundary_AsShipped()
     {
@@ -226,6 +228,8 @@ public class DarlingInstallLocationTests
     /// classifies normalized paths, so it no longer carries a <c>\\?\</c> carve-out of its own and would call a
     /// bare <c>\\?\C:\...</c> a share. Keeping the composition here is the point — the pair is the unit.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void GetNetworkPathKind_SeparatesAShareFromAnExtendedLengthLocalPath_AsShipped()
     {
@@ -270,6 +274,8 @@ public class DarlingInstallLocationTests
     /// <c>UNC</c> would leave a share spelled that way looking like the local path <c>unc\server\share</c> —
     /// re-opening exactly the hole this closes, for the operator least likely to be checked on.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ConvertExtendedLengthPath_RewritesBothSpellings_AsShipped()
     {
@@ -330,6 +336,8 @@ public class DarlingInstallLocationTests
     /// for — so it must fall through rather than short-circuit. It works because 0 is falsy in PowerShell,
     /// which is worth pinning rather than trusting to stay true.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot()
     {
@@ -408,6 +416,8 @@ function Get-PSDrive {
     /// <para>Windows-only in practice, like every test in this class: it shells out to
     /// <c>powershell.exe</c>.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheInstallerAndTheService_ReachTheSameVerdict_OverOneTable()
     {
@@ -503,6 +513,8 @@ function Get-CimInstance {
     /// tests are running on. It passes trivially on an unrelocated box, which is fine — its job is to fail the
     /// moment the two stop reading the same thing.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheInstallerAndTheService_ReadTheProfileRoot_FromTheSamePlace()
     {
@@ -636,6 +648,8 @@ function Get-CimInstance {
     /// service's own account in a source folder is a finding. Pinned at both call sites and run against a tree whose
     /// pg-runtime the service owns.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheSourceBuildChecks_TrustNoServiceAccount()
     {
@@ -678,6 +692,8 @@ function Get-CimInstance {
     /// runs from. With no registered service, or one that runs from another folder, the refusal keeps the
     /// fresh-folder wording, whatever the folder holds.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheExistingInstallRefusal_GivesTheNumberedSteps_AndAFreshFolderKeepsTheFreshWording()
     {
@@ -728,6 +744,8 @@ function Get-CimInstance {
     /// #5627: inside C:\Program Files the steps and the fresh wording say a new, empty folder with a DIFFERENT name
     /// under C:\Program Files, and never tell the user to extract into the folder they are in.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheSteps_InsideProgramFiles_AskForADifferentFolderName()
     {
@@ -756,6 +774,8 @@ function Get-CimInstance {
     /// the folder, a relative path and a folder sharing only a name prefix are not listed, and a darling.json that
     /// names nothing inside keeps the plain delete step.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheLastStep_NamesEveryConfiguredPathUnderTheOldFolder_AndKeepsTheFolderUntilTheyMove()
     {
@@ -816,6 +836,8 @@ function Get-CimInstance {
     /// #5627: when the service's SID cannot be worked out, the walk says so on one line and the objects that account
     /// owns are listed as before. A plain ASCII name produces no line.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheServiceSids_SayWhenTheSidCannotBeWorkedOut()
     {
@@ -839,6 +861,8 @@ function Get-CimInstance {
     /// account's. The lock gives the service read and execute there, and the walk reads the folder with inherited
     /// grants, so it names the grant with the service deleted, on another logon, and on its virtual account.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockTrustedSet_NamesAModifyGrantTheServiceHoldsOnTheInstallFolder_InEveryServiceState()
     {
@@ -874,6 +898,8 @@ function Get-CimInstance {
     /// separator). A service registered elsewhere, none, or a path that could not be read all get the fresh-folder
     /// wording.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheRefusalAdvice_GivesTheSteps_OnlyWhenTheServiceRunsFromThisFolder()
     {
@@ -912,6 +938,8 @@ function Get-CimInstance {
     /// refusal and every step still print, no left-out value is printed, the printed ones are quoted, and the last
     /// step keeps the old folder and asks for darling.json to be checked.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheConfiguredPaths_LeaveOutValuesThatAreNotPaths_AndTheStepsStillPrintQuoted()
     {
@@ -999,6 +1027,8 @@ function Get-CimInstance {
     /// compared exactly (a trailing dot, a longer name or a '..' step matches nothing), the listed files count only in
     /// the install folder itself, and the key folder counts only when it is handed in.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheServiceWrittenList_MatchesOnlyTheNamesTheServiceWrites()
     {
@@ -1079,6 +1109,8 @@ function Get-CimInstance {
     /// declined to trust. The plain backup name keeps matching. Run under Windows PowerShell 5.1 and PowerShell 7, with
     /// both scripts.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -1138,8 +1170,6 @@ function Get-CimInstance {
     /// <c>New-Object</c> is the part most likely to differ between them).
     /// </summary>
     [Theory]
-    [InlineData("install-darling.ps1", "powershell.exe")]
-    [InlineData("upgrade-darling.ps1", "powershell.exe")]
     [InlineData("install-darling.ps1", "pwsh")]
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding(string scriptName, string shell)
@@ -1182,6 +1212,14 @@ function Get-CimInstance {
         Assert.Contains(@"second=BUILTIN\Users on C:\Pm\Other", answers);
     }
 
+    // #9686: Starts powershell.exe to run the lines taken from the Windows install and upgrade scripts, and only Windows has it.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    public void TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding_UnderWindowsPowerShell(string scriptName, string shell)
+        => TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding(scriptName, shell);
+
     /// <summary>
     /// #5649: the pre-lock walk trusts the service account (as grantee and as owner) on EVERY file in the install root
     /// whose name starts with darling.json.bak-, the glob the hardening covers, so a backup an operator named by hand
@@ -1189,6 +1227,8 @@ function Get-CimInstance {
     /// grantee on that file still refuses, the service on any other root file still refuses, a folder with that name is
     /// not a file the service writes, and a file below the root is not in the root.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWalk_TrustsTheServiceOnAnyHandNamedBackupInTheRoot_AndNothingWider()
     {
@@ -1297,6 +1337,8 @@ function Get-CimInstance {
     /// a folder, a path that could not be read or listed, darling.json itself, the folder) keeps the standard advice
     /// alone, even beside a backup-named file whose name makes the text of other findings look like a backup's. Both scripts.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
@@ -1383,6 +1425,8 @@ function Get-CimInstance {
     /// a folder named like a backup, a hard-linked backup) does not. The walk reports each finding's kind and whether the
     /// item it listed is a file, so no text is parsed and no second look at the disk happens.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheWalksRecords_DecideTheBackupNote_AndNoTextIsParsed()
     {
@@ -1455,6 +1499,8 @@ function Get-CimInstance {
     /// too), and so is a backup whose name differs only by case under Turkish culture rules ('I' and 'i' fold
     /// differently there, so a culture-sensitive match would drop DARLING.JSON.BAK-B or keep a look-alike).
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheServiceWrittenRootFiles_LeaveOutHardLinks_AndMatchTheBackupPrefixByOrdinalNameUnderAnyCulture()
     {
@@ -1573,6 +1619,8 @@ function Get-CimInstance {
     /// at 5.1) and the walk, the root-file list and the path test must each still see it. Run under Windows PowerShell
     /// 5.1 and PowerShell 7, with both scripts.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -1653,6 +1701,8 @@ function Get-CimInstance {
     /// before that loop, with the fix named (an ordinary copy), even when the count cannot be read because another
     /// process holds the file. The probe runs the refusal block as shipped, with Fail recording instead of exiting.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheInstaller_RefusesADarlingJsonWithMoreThanOneName_BeforeItHardensAnything()
     {
@@ -1723,6 +1773,8 @@ function Get-CimInstance {
     /// The probe gives a hard-linked backup an explicit BUILTIN\Users write grant behind its own protection, runs the lock
     /// and requires the grant to be untouched and the file named in what the lock returns.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheInstallTreeLock_ReportsAHardLinkedBackupWithAnUntrustedGrant_AndLeavesItsPermissionsAlone()
     {
@@ -1797,6 +1849,8 @@ function Get-CimInstance {
     /// be named in what the lock returns and to leave their other name's grant as it was, while the plain file is still
     /// reset. Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows need the Windows system folder ([Environment]::SystemDirectory), which is empty off Windows.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -1930,6 +1984,8 @@ function Get-CimInstance {
     /// reports 1 with a count of 2, keeps its owner under both names; a junction reports its attributes and is not followed
     /// (the folder it points to keeps its owner). Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2017,6 +2073,8 @@ function Get-CimInstance {
     /// Administrators needs an elevated token (CI's runner is one); a filtered token reports the root as needing an elevated
     /// session and changes no owner. Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2104,6 +2162,8 @@ function Get-CimInstance {
     /// after, it is still protected from inheritance, no Users entry has appeared on it, and (with an elevated token, which sets the owner) the lock does not list it as open.
     /// Both scripts' copies of the lock.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
@@ -2219,6 +2279,8 @@ function Get-CimInstance {
     /// The junction itself is a name in the tree and gets its own owner (result 0). A path that no longer exists is result 2 (error 2), an owner the system refuses is result 4, and with no root open every
     /// path is result 5. The root itself, a plain file, a folder and a differently-cased spelling of the root are inside.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2283,6 +2345,8 @@ function Get-CimInstance {
     /// with a second name outside), both made through <c>\\?\</c> paths. Without the extended spelling Windows drops the dot and
     /// the step would open <c>dn</c> twice.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2325,6 +2389,8 @@ function Get-CimInstance {
     /// the same before the step and after it (an elevated token has both and has them off; one that is not elevated has neither,
     /// so turning them on reports false and nothing changes).
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows read the Windows identity (WindowsPrincipal), which only Windows has.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2377,6 +2443,8 @@ function Get-CimInstance {
     /// open and not given an owner (the plain name beside it is). The owner step needs the two privileges, which only an
     /// elevated token holds; a token without them lists the root with the privilege names and changes no owner.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2441,6 +2509,8 @@ function Get-CimInstance {
     /// without elevation: setting Administrators as owner is then refused (result 4); on an elevated token it succeeds, and the
     /// grant is removed either way.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2490,6 +2560,8 @@ function Get-CimInstance {
     /// needs an elevated token and a file system that supports it; the case is skipped, with that reason, where it cannot be set
     /// up. The privilege call is replaced as in the test above.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -2585,8 +2657,6 @@ function Get-CimInstance {
     /// below a UNC root still gives its names.
     /// </summary>
     [Theory]
-    [InlineData("install-darling.ps1", "powershell.exe")]
-    [InlineData("upgrade-darling.ps1", "powershell.exe")]
     [InlineData("install-darling.ps1", "pwsh")]
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo(string scriptName, string shell)
@@ -2629,6 +2699,14 @@ function Get-CimInstance {
         Assert.Contains("drive.normal=[sub|darling.json]", answers);
         Assert.Contains("drive.dot=[$null]", answers);
     }
+
+    // #9686: Starts powershell.exe to run the lines taken from the Windows install and upgrade scripts, and only Windows has it.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    public void TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo_UnderWindowsPowerShell(string scriptName, string shell)
+        => TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo(scriptName, shell);
 
     private static void AppendStepFunctions(StringBuilder probe, string? script = null)
     {
@@ -2823,6 +2901,8 @@ function Get-CimInstance {
     /// remain: a root write grant still refuses, and on its own it is the ONLY line. Without the derived service
     /// SID (the old trust call, no service name) the same tree lists every service-owned object.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockTrustedSet_TrustsTheProductsOwnServiceSid_RegisteredOrNot_ButStillRefusesARootWrite()
     {
@@ -2878,6 +2958,8 @@ function Get-CimInstance {
     /// holds Modify on, re-run with the service on its virtual account, on another logon account, and deleted.
     /// Passes in all three. The other-logon case holds the grant under that other account, as the lock gives it.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockTrustedSet_PassesALockedTreeTheServiceOwns_OnTheVirtualAccount_AnotherLogon_AndDeleted()
     {
@@ -2907,6 +2989,8 @@ function Get-CimInstance {
     /// different <c>NT SERVICE\</c> account is still listed, by that account's name and not by ours, with the
     /// service registered or not.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockTrustedSet_StillRefusesATreeOwnedByADifferentServiceSid()
     {
@@ -2941,6 +3025,8 @@ function Get-CimInstance {
     /// is named, with the service deleted, on another logon, or on its virtual account. One it owns inside the
     /// listed places passes.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockTrustedSet_TrustsTheServiceAccountOnlyWhereTheServiceWrites()
     {
@@ -3004,6 +3090,8 @@ function Get-CimInstance {
     /// exe alone with a clean root - the "also check the exe" requirement. The admin running this script must
     /// never be a finding on its own, since Get-DarlingPreLockTrustedSids adds them.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_CatchesAnInheritedGrant_AndIsSilentOnceHardened()
     {
@@ -3097,6 +3185,8 @@ function Get-CimInstance {
     /// Authenticated Users: Modify, a real broad grant that must still be caught. Case (c) pins the exclusion
     /// to exactly the four documented SIDs, regardless of what this box's Program Files happens to carry.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_IsSilentOnRealInheritOnlyTemplates_ButStillCatchesARealBroadGrant()
     {
@@ -3213,6 +3303,8 @@ function Get-CimInstance {
     /// way every real caller of the check does, and also pins that the root itself no longer carries a write grant
     /// for the service at all.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_TrustsTheAccountTheLockItselfGranted_OnAnAlreadyLockedTree()
     {
@@ -3292,6 +3384,8 @@ function Get-CimInstance {
     /// <see cref="NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot"/> already uses, to hand
     /// back a fully-trusted DACL with only the OWNER outside the trusted set.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl()
     {
@@ -3336,6 +3430,8 @@ function Get-CimInstance {
     /// ACEs get different inheritance flags so the ACL keeps them apart, as Windows did on the box, and the
     /// probe counts them first so the test cannot pass on a single merged ACE.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_NamesAPrincipalOnce_WhenTwoOfItsAcesGrantWrite()
     {
@@ -3382,6 +3478,8 @@ function Get-CimInstance {
     /// untrusted principal, must be reported even when the root's own DACL is perfectly clean; a clean
     /// recursive tree must stay silent; a junction below the root is reported, not silently skipped.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_Recurses_AndCatchesAChildTheRootDoesNotShow()
     {
@@ -3460,6 +3558,8 @@ function Get-CimInstance {
     /// The current user stands in for "a direct member" since <c>Get-DarlingPreLockTrustedSidsForRerun</c>'s
     /// probe process always runs as an actual member of that group on a dev/CI box.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreLockWritableExtractionCheck_TrustsADirectAdministratorsMember_AsOwner()
     {
@@ -3485,6 +3585,8 @@ function Get-CimInstance {
     /// same message as step 1b2. L4: the logon account is readable but will not resolve to a SID (a
     /// stand-in for an unreachable-domain gMSA) - names the account instead of showing a raw SID later.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void GetDarlingPreLockTrustedSidsForRerun_FailsWithANamedReason_RatherThanSilentlyDroppingTheAccount()
     {
@@ -3525,6 +3627,8 @@ function Get-CimInstance {
 
     /// <summary>#4043 round-1 review, H1: the zip-staging folder's ACL is protected - SYSTEM and
     /// Administrators only, full control, inheritance removed, Administrators as owner.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ProtectDarlingStagingFolder_LocksTheFolderToSystemAndAdministratorsOnly()
     {
@@ -3575,6 +3679,8 @@ function Get-CimInstance {
     /// a TEMP folder with an explicit one of its own: three rules where two were expected. The entry is planted here
     /// directly, BUILTIN\Users with Modify, so every box reproduces it, elevated or not. An earlier version of this
     /// test left it to the creator's default DACL to supply one, and CI's runner supplies none that way.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ProtectDarlingStagingFolder_StripsExplicitEntriesAlreadyOnTheFolder()
     {
@@ -3619,6 +3725,8 @@ function Get-CimInstance {
     /// checks, so a tree hiding a swapped binary behind a folder that refuses listing read as clean. The running
     /// account is denied List Folder on one child and trusted everywhere else, so the one thing the walk can say
     /// about that child is that it could not look inside. Both scripts, since each ships its own copy.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
@@ -3751,6 +3859,8 @@ function Get-CimInstance {
     /// EXPLICITLY, behind its own protection, is not something a folder lock can override, so it must come back
     /// in the result for the warning to name, not be silently passed over.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheInstallTreeLock_ClosesTheInheritedGrant_KeepsProtectedFiles_AndReportsWhatItCannotClose()
     {
@@ -3950,6 +4060,8 @@ function Get-CimInstance {
     /// case and with a trailing backslash, and requires the same answers for each, on any machine that has 8.3 names. The
     /// trust answers are exact: only the service's own folders and its two kinds of root file, nothing else.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -4095,6 +4207,8 @@ function Get-CimInstance {
     /// names on the volume; without them those forms are left out and the test is skipped at the end, after the trailing
     /// backslash and case forms have been checked.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -4199,6 +4313,8 @@ function Get-CimInstance {
     /// backslashes) is not looked up and counts as Incomplete, so the refusal advice never waits on a remote host. A
     /// value inside the folder is still listed. Both scripts, both shells.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -4261,6 +4377,8 @@ function Get-CimInstance {
     /// however the operator typed it. This runs the two resolving lines as shipped and then asks
     /// <c>Test-DarlingSamePath</c> the way those refusals do.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
     [InlineData("pwsh")]
@@ -4335,6 +4453,8 @@ function Get-CimInstance {
     /// they did before the canonical form existed: the same text in another case, or with a trailing backslash, is the
     /// same folder; a child is under its parent; a sibling and a different folder are not.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows compare drive-letter paths with backslashes, which are paths on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
     [InlineData("upgrade-darling.ps1", "powershell.exe")]
@@ -4385,6 +4505,8 @@ function Get-CimInstance {
     /// folder on disk (volume serial number and file index), so a junction to the install folder reads as the install
     /// folder. A folder that does not exist, or another folder, is not the same.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
     [InlineData("pwsh")]
@@ -4440,6 +4562,8 @@ function Get-CimInstance {
     /// each refusal is what stops it. The block is cut out of the script (from the self-overwrite refusal up to the zip
     /// handling) and run with a stand-in <c>Fail</c> that records which message was raised.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
     [InlineData("pwsh")]
@@ -4507,6 +4631,8 @@ function Get-CimInstance {
     /// exist yet is resolved through the part of its path that does. The check is cut out of the script, after the typed-path
     /// check, and run with a profile root of its own.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
     [InlineData("pwsh")]
@@ -4576,6 +4702,8 @@ function Get-CimInstance {
     /// spelling, so an install folder typed as a junction to the registered folder is the registered folder, while another
     /// folder is still refused. The check is cut out of the script and run with a stand-in <c>Fail</c>.
     /// </summary>
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
     [InlineData("pwsh")]
@@ -4738,7 +4866,7 @@ function Get-CimInstance {
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            };
+            }.InLocalFolder();
             Process? process;
             try { process = Process.Start(startInfo); }
             catch (System.ComponentModel.Win32Exception) { return null; }

@@ -36,6 +36,7 @@ public sealed class TuningHourlyCreateLiveTests
         PgTableTuning.LegacyRowIndexName,
         PgTableTuning.QueryStatsRestartRowIndexName,
         PgTableTuning.ProcedureStatsRestartRowIndexName,
+        ProcedureStatsNameIndex.IndexName,
         "idx_store_metrics_kind_name_time",
     };
 
