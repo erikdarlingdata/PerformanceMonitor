@@ -4077,7 +4077,7 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
         [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
         # LocalSystem already has full control through the root. Any other account gets Modify on this one file, so the service can
         # delete it. The grant goes on the temp file, because the first write moves it into place and a moved file keeps its own DACL.
-        # Later writes use File.Replace, which keeps the DACL of the file it replaces, so the grant lasts for the whole run. upgrade-run.json
+        # Later writes use File.Replace (or an in-place write, #9850), which keep the DACL of the file they replace, so the grant lasts for the whole run. upgrade-run.json
         # is on Get-DarlingServiceWrittenNames, so the install-tree lock keeps this grant and makes the service the owner, and the pre-lock
         # walk of a re-run trusts it. This grant is still needed for a run that stops before the lock runs, and for an install whose older
         # install-darling.ps1 did not list the file, because nothing else gives the service Modify on it.
@@ -4087,7 +4087,26 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
                 $warning = "the service account '$serviceAccount' could not be given Modify on $path (icacls exit $LASTEXITCODE), so the service may not be able to remove it. It records the file on every pass and keeps one row for the run."
             }
         }
-        if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::Replace($temp, $path, [NullString]::Value) }
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            # #9850: File.Replace fails while another handle holds the old file without delete sharing, and on a lab box it failed
+            # for the in_progress record with "Unable to remove the file to be replaced" while the service ran. The service's own
+            # reader opens with ReadWrite and Delete sharing and a handle like that does not stop Replace, so the holder was not
+            # found. Replace stays first (it swaps the whole file at once), and when it throws the bytes are written into the
+            # old file itself with ReadWrite and Delete sharing: that works for every holder that lets writers in, and an
+            # in-place write keeps the file's DACL, so the grant above still lasts. The bytes go in before the length is cut, so
+            # a reader that opens the file mid-write sees the new record or a record it logs once and reads again at its next pass.
+            try { [System.IO.File]::Replace($temp, $path, [NullString]::Value) }
+            catch {
+                $replaceReason = $_.Exception.Message
+                try {
+                    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+                    $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                    try { $stream.Write($bytes, 0, $bytes.Length); $stream.SetLength($bytes.Length); $stream.Flush($true) }
+                    finally { $stream.Dispose() }
+                }
+                catch { throw "$replaceReason Writing into the file in place failed too: $($_.Exception.Message)" }
+            }
+        }
         else { [System.IO.File]::Move($temp, $path) }
         return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning }
     }
@@ -4097,6 +4116,16 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
     finally {
         if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# #9850: the warning for a run record write that failed. It names the record that is missing. Only the final record carries the run's
+# result, so only its failure leaves the store with nothing to show for how the run ended: the in_progress record is written again
+# after the copy and the final one when the run ends. $record is 'in_progress' or 'final'.
+function Get-DarlingUpgradeRunWriteWarning([string]$record, [string]$reason) {
+    if ($record -eq 'final') {
+        return "The final upgrade run record could not be written ($reason), so the store will not show this run's result."
+    }
+    return "The in_progress upgrade run record could not be written ($reason). The upgrade goes on, and the record is written again after the copy and when the run ends."
 }
 
 # The run record on disk, as an ordered hashtable, or $null when there is no file or it is not a run record.
@@ -4702,7 +4731,7 @@ $script:UpgradeStopCheck = $null
 $script:UpgradeRollbackFolder = $null
 $upgradeRunWrite = Write-DarlingUpgradeRunFile $InstallRoot $script:UpgradeRun $script:UpgradeRunAccount
 if ($upgradeRunWrite.Ok) { Note "Upgrade run $($script:UpgradeRun['run_id']) started (in_progress), recorded in $(Join-Path $InstallRoot 'upgrade-run.json')." }
-else { Warn "The upgrade run record could not be written ($($upgradeRunWrite.Reason)). The upgrade goes on, and the store will not show this run." }
+else { Warn (Get-DarlingUpgradeRunWriteWarning 'in_progress' $upgradeRunWrite.Reason) }
 if ($upgradeRunWrite.Warning) { Warn $upgradeRunWrite.Warning }
 
 # ============================ stop, back up, prune, copy, start ============================
@@ -4989,7 +5018,7 @@ Good "New build in place."
 $installedBuild = Get-DarlingBuildVersion (Join-Path $InstallRoot $serviceExeName)
 if ($installedBuild) { $script:UpgradeRun['target_build'] = $installedBuild }
 $upgradeRunWrite = Write-DarlingUpgradeRunFile $InstallRoot $script:UpgradeRun $script:UpgradeRunAccount
-if (-not $upgradeRunWrite.Ok) { Warn "The upgrade run record could not be rewritten after the copy ($($upgradeRunWrite.Reason))." }
+if (-not $upgradeRunWrite.Ok) { Warn (Get-DarlingUpgradeRunWriteWarning 'in_progress' $upgradeRunWrite.Reason) }
 
 if ($configHashBefore) {
     $configHashAfter = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash } else { $null }
@@ -5196,7 +5225,7 @@ finally {
         $upgradeFirstError = $script:UpgradeRunFirstError
         if (-not $script:UpgradeRunSucceeded -and -not $upgradeFirstError -and $Error.Count -gt 0) { $upgradeFirstError = "$($Error[0].Exception.Message)" }
         $upgradeRunEnd = Close-DarlingUpgradeRun $InstallRoot $script:UpgradeRun $script:UpgradeRunSucceeded $script:UpgradeStopCheck $script:UpgradeRollbackFolder $upgradeFirstError $script:UpgradeRunAccount
-        if ($upgradeRunEnd -and -not $upgradeRunEnd.Ok) { Warn "The upgrade run record could not be finished ($($upgradeRunEnd.Reason))." }
+        if ($upgradeRunEnd -and -not $upgradeRunEnd.Ok) { Warn (Get-DarlingUpgradeRunWriteWarning 'final' $upgradeRunEnd.Reason) }
     }
     # H1's staging copy (#4043 round-1 review): best-effort, and expected to be a no-op on the folder
     # -Source path, where $zipStagingFolder is never set. Administrators owns it and holds full control (see
