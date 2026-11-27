@@ -11,6 +11,7 @@ using System.IO;
 using System.Threading.Tasks;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
