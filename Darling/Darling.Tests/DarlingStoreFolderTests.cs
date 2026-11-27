@@ -176,6 +176,7 @@ public sealed class DarlingStoreFolderScriptTests
     public void AFolderThatCannotBeListed_IsRefused_NeverTreatedAsEmpty()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
 
         var answers = RunWindowsPowerShell(Probe($$"""
             $folder = Join-Path $base 'denied'
@@ -200,6 +201,7 @@ public sealed class DarlingStoreFolderScriptTests
     public void TheDataDirectoryPgLogServerKeyAndLogs_AreRefusedUnlessTrustedAndReadable()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs and junctions are Windows-only.");
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
 
         var answers = RunWindowsPowerShell(Probe($$"""
             $system = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
@@ -803,6 +805,7 @@ public sealed class DarlingStoreFolderScriptTests
     public void TheWalk_SkipsAFileOrFolderThatIsGoneMidWalk_AndStillReportsOneItCannotRead()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
 
         var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
             $s = New-Store 'gone' $true
@@ -2526,6 +2529,7 @@ public sealed class DarlingStoreContentsGateTests
     public void ADataDirectoryThatCannotBeListed_IsRefused_NeverTreatedAsEmpty()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
         var store = NewStore();
         var data = Path.Combine(store, "pg");
         var me = WindowsIdentity.GetCurrent().User!;
