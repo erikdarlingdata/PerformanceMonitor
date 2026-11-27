@@ -563,8 +563,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* Decide the effective bind PURELY, then map the reason -> severity here (Round-4 #7: the caller,
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
-        var bind = ResolveMcpBind(config.Mcp, config.Postgres);
-        LogBindReason(config.Mcp, bind.Reason);
+        var (shared, loginProbe) = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+            DarlingStoreLogins.Surface.Mcp, config.Postgres, DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin => ToShared(ResolveMcpBind(config.Mcp, config.Postgres.Managed, DarlingHostBinding.IsRunningInContainer, dedicatedLogin)),
+            stoppingToken);
+        var bind = new McpBindDecision((McpBindMode)(int)shared.Mode, (McpBindReason)(int)shared.Reason);
+        LogBindReason(config.Mcp, bind.Reason, loginProbe);
 
         try
         {
@@ -2446,6 +2450,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback (LogCritical).</summary>
         AllowFromInvalid,
+
+        /// <summary>#9894: the MCP login passed the name check, but the probe found it a superuser or a member of the store owner role — fail-closed to loopback (LogCritical).</summary>
+        LoginPrivileged,
+
+        /// <summary>#9894: the probe of the MCP login could not run — fail-closed to loopback (LogCritical).</summary>
+        LoginProbeFailed,
     }
 
     /// <summary>The (mode, reason) pair returned by <see cref="ResolveMcpBind"/>.</summary>
@@ -2484,6 +2494,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// </summary>
     internal static McpBindDecision ResolveMcpBind(McpConfig mcp, PostgresConfig postgres, bool? inContainer = null)
     {
+        /* The host start does not use this overload: it resolves with the probe (DarlingHostBinding.ResolveBindWithLoginProbeAsync). */
         ArgumentNullException.ThrowIfNull(postgres);
         return ResolveMcpBind(
             mcp, postgres.Managed, inContainer,
@@ -2592,9 +2603,13 @@ public sealed class DarlingMcpHostService : BackgroundService
     internal static LogLevel? MapBindReasonSeverity(McpBindReason reason)
         => DarlingHostBinding.MapBindReasonSeverity((DarlingHostBinding.BindReason)(int)reason);
 
+    /// <summary>The MCP decision as the shared one (the enums mirror 1:1, see <see cref="ResolveMcpBind(McpConfig, bool, bool?, bool)"/>).</summary>
+    private static DarlingHostBinding.BindDecision ToShared(McpBindDecision decision) =>
+        new((DarlingHostBinding.BindMode)(int)decision.Mode, (DarlingHostBinding.BindReason)(int)decision.Reason);
+
     /// <summary>Emits the <see cref="ResolveMcpBind"/> reason at its mapped severity (Round-4 #7). Silent for
     /// the non-degrade reasons (the network-exposed line is logged at start with the real bind).</summary>
-    private void LogBindReason(McpConfig mcp, McpBindReason reason)
+    private void LogBindReason(McpConfig mcp, McpBindReason reason, DarlingStoreLogins.LoginProbeResult? loginProbe = null)
     {
         var level = MapBindReasonSeverity(reason);
         if (level is null)
@@ -2633,6 +2648,16 @@ public sealed class DarlingMcpHostService : BackgroundService
             case McpBindReason.DedicatedLoginRequired:
                 /* #9894 */
                 _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true));
+                break;
+
+            case McpBindReason.LoginPrivileged:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.PrivilegedLoginText(DarlingStoreLogins.Surface.Mcp));
+                break;
+
+            case McpBindReason.LoginProbeFailed:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.LoginProbeFailedText(DarlingStoreLogins.Surface.Mcp, loginProbe?.ErrorClass));
                 break;
 
             default:

@@ -795,14 +795,29 @@ internal static class DarlingStoreLogins
         }
     }
 
+    /// <summary>What the user names alone say about a surface's own login on a store the service does not manage (#9894).</summary>
+    internal enum LoginNameCheck
+    {
+        /// <summary>No login of its own: the dedicated connection string is unset, blank, cannot resolve, is malformed, names no user, or names the owner's user.</summary>
+        NotDedicated,
+
+        /// <summary>The dedicated string names a user, and the owner's string names a different one.</summary>
+        Dedicated,
+
+        /// <summary>The dedicated string names a user, but the owner's string names none (peer or socket authentication, or a default user), so
+        /// the names cannot prove the two differ. Never "dedicated" on names alone: the host's probe of the login decides.</summary>
+        OwnerUserUnknown,
+    }
+
     /// <summary>
-    /// #9894: whether a surface of a store the service does not manage has its own login to connect with: its dedicated connection
-    /// string (<c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>) is set, resolves, and names a user other than
-    /// the owner's (<c>postgres.connectionString</c>). The bind decision outside a container exposes the surface only then. The user
-    /// names are compared the way <see cref="ConfiguredLoginWarning"/> compares them (ordinal), and a reference that cannot resolve or a
-    /// malformed string counts as no dedicated login: the host start logs the resolve failure itself, and the surface stays on loopback.
+    /// #9894: what the user names say about whether a surface of a store the service does not manage has its own login: its dedicated
+    /// connection string (<c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>) is set, resolves, and names a user, and
+    /// the owner's (<c>postgres.connectionString</c>) names a different one. The user names are compared the way
+    /// <see cref="ConfiguredLoginWarning"/> compares them (ordinal). A reference that cannot resolve or a malformed string counts as no
+    /// dedicated login: the host start logs the resolve failure itself, and the surface stays on loopback. An owner string that names no
+    /// user is <see cref="LoginNameCheck.OwnerUserUnknown"/>, never a pass.
     /// </summary>
-    internal static bool HasDedicatedLogin(Surface surface, PostgresConfig postgres)
+    internal static LoginNameCheck CheckLoginNames(Surface surface, PostgresConfig postgres)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -810,7 +825,7 @@ internal static class DarlingStoreLogins
         var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
         if (string.IsNullOrWhiteSpace(raw))
         {
-            return false;
+            return LoginNameCheck.NotDedicated;
         }
 
         string configured;
@@ -820,13 +835,116 @@ internal static class DarlingStoreLogins
         }
         catch (InvalidOperationException)
         {
-            return false;
+            return LoginNameCheck.NotDedicated;
         }
 
-        return !string.IsNullOrWhiteSpace(configured)
-            && TryReadLoginUsers(configured, postgres.ConnectionString, out var configuredUser, out var ownerUser)
-            && !string.IsNullOrEmpty(configuredUser)
-            && !string.Equals(configuredUser, ownerUser, StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(configured)
+            || !TryReadLoginUsers(configured, postgres.ConnectionString, out var configuredUser, out var ownerUser)
+            || string.IsNullOrEmpty(configuredUser))
+        {
+            return LoginNameCheck.NotDedicated;
+        }
+
+        if (string.IsNullOrEmpty(ownerUser))
+        {
+            return LoginNameCheck.OwnerUserUnknown;
+        }
+
+        return string.Equals(configuredUser, ownerUser, StringComparison.Ordinal) ? LoginNameCheck.NotDedicated : LoginNameCheck.Dedicated;
+    }
+
+    /// <summary>
+    /// #9894: whether the names alone prove a surface has its own login (<see cref="LoginNameCheck.Dedicated"/>). The name-level rule every
+    /// caller that does not connect (the CLI, a report) applies. The host start applies the probe on top of it
+    /// (<see cref="DarlingHostBinding.ResolveBindWithLoginProbeAsync"/>).
+    /// </summary>
+    internal static bool HasDedicatedLogin(Surface surface, PostgresConfig postgres) =>
+        CheckLoginNames(surface, postgres) == LoginNameCheck.Dedicated;
+
+    /// <summary>What the probe of a surface's login found (#9894).</summary>
+    internal enum LoginProbeVerdict
+    {
+        /// <summary>Neither a superuser nor a member of the role that owns the store's <c>config</c> schema: the login a network-facing surface may use.</summary>
+        Unprivileged,
+
+        /// <summary>A superuser, or a member of the store owner role (under whatever name), so exposure is refused.</summary>
+        Privileged,
+
+        /// <summary>The probe could not connect, or the query failed or found no <c>config</c> schema: exposure is refused until a start can run it.</summary>
+        Failed,
+    }
+
+    /// <summary>The probe's answer. <see cref="ErrorClass"/> is set for <see cref="LoginProbeVerdict.Failed"/> only, and holds a type name and
+    /// SQLSTATE, never the connection string or a password.</summary>
+    internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null);
+
+    /// <summary>The seconds the probe waits to connect, and for its one command. Short, so a start never waits on it for long.</summary>
+    private const int LoginProbeSeconds = 10;
+
+    /// <summary>The query the probe runs, with the store's schema as <c>$1</c>: whether the connected login is a superuser, and whether it is a
+    /// member of the role that owns that schema (the migrations create the store's schemas as the owner login).</summary>
+    private const string LoginProbeSql =
+        "SELECT r.rolsuper, pg_has_role(current_user, n.nspowner, 'MEMBER') "
+        + "FROM pg_roles AS r CROSS JOIN pg_namespace AS n WHERE r.rolname = current_user AND n.nspname = $1";
+
+    /// <summary>PURE: the probe's two answers as a verdict. Either one true is <see cref="LoginProbeVerdict.Privileged"/>.</summary>
+    internal static LoginProbeResult ClassifyLoginProbe(bool isSuperuser, bool isOwnerMember) =>
+        new(isSuperuser || isOwnerMember ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
+
+    /// <summary>PURE: the error class a failed probe reports: the exception type, plus the SQLSTATE when the store refused it.</summary>
+    internal static string DescribeProbeFailure(Exception failure)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        return failure switch
+        {
+            PostgresException pg => $"{nameof(PostgresException)} SQLSTATE {pg.SqlState}",
+            { InnerException: TimeoutException } => nameof(TimeoutException),
+            _ => failure.GetType().Name,
+        };
+    }
+
+    /// <summary>
+    /// #9894: connects once with a surface's own login (unpooled, bounded by <see cref="LoginProbeSeconds"/>) and asks the store whether it is a
+    /// superuser or a member of the store owner role. The name check cannot see either, because a superuser or an owner-role member can carry
+    /// any name. Never throws for a connection or query failure: that is <see cref="LoginProbeVerdict.Failed"/> with its error class. A
+    /// cancellation while the service stops propagates.
+    /// </summary>
+    internal static async Task<LoginProbeResult> ProbeSurfaceLoginAsync(Surface surface, PostgresConfig postgres, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var (_, setting, _) = Describe(surface);
+        try
+        {
+            var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
+            var builder = new NpgsqlConnectionStringBuilder(DarlingSecretSource.Resolve(raw ?? "", setting))
+            {
+                Pooling = false,
+                Timeout = LoginProbeSeconds,
+                CommandTimeout = LoginProbeSeconds,
+            };
+            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(LoginProbeSql, connection)
+            {
+                Parameters = { new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema } },
+            };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return new LoginProbeResult(LoginProbeVerdict.Failed, "the config schema was not found");
+            }
+
+            return ClassifyLoginProbe(reader.GetBoolean(0), reader.GetBoolean(1));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new LoginProbeResult(LoginProbeVerdict.Failed, DescribeProbeFailure(ex));
+        }
     }
 
     /* #9894: the surfaces whose container line has been logged, so a supervisor retry does not repeat it. */
@@ -886,6 +1004,36 @@ internal static class DarlingStoreLogins
             + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
             + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
             + "and make sure that login is not the owner's.";
+    }
+
+    /// <summary>
+    /// #9894: the line for a surface whose own login the probe found to be a superuser or a member of the store owner role. Outside a
+    /// container the surface then stays on loopback. Critical.
+    /// </summary>
+    internal static string PrivilegedLoginText(Surface surface)
+    {
+        var (what, setting, role) = Describe(surface);
+        var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} is a superuser "
+            + "or a member of the role that owns the store, so network exposure is refused and it binds loopback-only. "
+            + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
+            + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
+            + "and make sure that login is not a superuser and not a member of the store owner role.";
+    }
+
+    /// <summary>
+    /// #9894: the line for a surface whose own login could not be checked before it was exposed: the probe could not connect, or its query
+    /// failed. The surface stays on loopback. Critical. <paramref name="errorClass"/> is the exception type and SQLSTATE, never the
+    /// connection string.
+    /// </summary>
+    internal static string LoginProbeFailedText(Surface surface, string? errorClass)
+    {
+        var (what, setting, role) = Describe(surface);
+        var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} could not be "
+            + $"checked first ({errorClass ?? "no error class"}), so network exposure is refused and it binds loopback-only. "
+            + "Before a network-facing surface is exposed the service connects with that login and confirms it is not a superuser and not a member of the "
+            + $"store owner role. Make sure {setting} connects (the {role} role provision-roles.sql creates), then restart the service.";
     }
 
     /// <summary>

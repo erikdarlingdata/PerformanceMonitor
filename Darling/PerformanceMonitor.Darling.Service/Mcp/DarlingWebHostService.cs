@@ -846,8 +846,13 @@ public sealed class DarlingWebHostService : BackgroundService
         var network = web.Network;
 
         /* Decide the effective bind PURELY (shared ladder), then map the reason -> severity here. */
-        var bind = ResolveWebBind(web, config.Postgres);
-        LogBindReason(web, bind.Reason);
+        /* #9894: on a store the service does not manage, outside a container, a surface that would listen on the network connects once with its own
+           login before the listener starts, and is exposed only if that login is neither a superuser nor a member of the store owner role. */
+        var (bind, loginProbe) = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+            DarlingStoreLogins.Surface.Web, config.Postgres, DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin => ResolveWebBind(web, config.Postgres.Managed, DarlingHostBinding.IsRunningInContainer, dedicatedLogin),
+            stoppingToken);
+        LogBindReason(web, bind.Reason, loginProbe);
 
         try
         {
@@ -3600,7 +3605,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 
     /// <summary>Emits the <see cref="DarlingHostBinding.ResolveBind"/> reason at its mapped severity. Silent for
     /// the non-degrade reasons (the network-exposed line is logged at start with the real bind).</summary>
-    private void LogBindReason(WebConfig web, DarlingHostBinding.BindReason reason)
+    private void LogBindReason(WebConfig web, DarlingHostBinding.BindReason reason, DarlingStoreLogins.LoginProbeResult? loginProbe = null)
     {
         var level = DarlingHostBinding.MapBindReasonSeverity(reason);
         if (level is null)
@@ -3637,6 +3642,16 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             case DarlingHostBinding.BindReason.DedicatedLoginRequired:
                 /* #9894 */
                 _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Web, refusing: true));
+                break;
+
+            case DarlingHostBinding.BindReason.LoginPrivileged:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.PrivilegedLoginText(DarlingStoreLogins.Surface.Web));
+                break;
+
+            case DarlingHostBinding.BindReason.LoginProbeFailed:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.LoginProbeFailedText(DarlingStoreLogins.Surface.Web, loginProbe?.ErrorClass));
                 break;
 
             default:

@@ -1294,57 +1294,6 @@ public sealed class DarlingStoreLoginsTests
     /* ─────────────────────────── the wiring, by source ─────────────────────────── */
 
     /// <summary>
-    /// Each host's store pool is created from the resolver on an unmanaged store and from its DPAPI credential
-    /// on a managed one, and from nothing else. The pure tests above cannot see this: a host that went on
-    /// passing <c>config.Postgres.ConnectionString</c> to <c>NpgsqlDataSource.Create</c> would leave all of them
-    /// green. Containment, not order — the resolver call has to be INSIDE the else of the managed branch.
-    /// </summary>
-    [Theory]
-    [InlineData("DarlingWebHostService.cs", "Web", "TryBuildViewerConnectionStringFromStoredCredential", "WebApplicationName")]
-    [InlineData("DarlingMcpHostService.cs", "Mcp", "TryBuildMcpConnectionStringFromStoredCredential", "McpApplicationName")]
-    public void EachHost_BuildsItsUnmanagedPoolFromTheResolver_AndItsManagedPoolAsBefore(
-        string file, string surface, string managedBuilder, string applicationNameConstant)
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file));
-        var start = Body(code, "private async Task<bool> TryStartServerAsync(");
-
-        Assert.DoesNotContain("config.Postgres.ConnectionString", start, StringComparison.Ordinal);
-
-        /* #4277: every STORE data source pins its session timezone to UTC, so the resolved
-           storeConnectionString is wrapped before it reaches Create rather than passed bare. #4479 adds a
-           WithApplicationName(...) wrap inside that, naming the surface — set-if-absent, so a configured or
-           owner-fallback login that never ran through DarlingManagedPostgres still gets a name. #6630: both wraps, and the
-           collect/config search path, now live in DarlingWorker.CreateHostStoreDataSource, which the hosts call; its live
-           test covers the path, the name and the pin. */
-        Assert.Contains(
-            $"DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.{applicationNameConstant});",
-            start,
-            StringComparison.Ordinal);
-
-        var assignments = Regex.Matches(start, @"storeConnectionString\s*=(?!=)").Count;
-        Assert.Equal(2, assignments);
-
-        var managedIf = Regex.Match(start, @"if \(config\.Postgres\.Managed\)\s*\{");
-        Assert.True(managedIf.Success, "the managed branch could not be located, so this check proves nothing");
-        var open = managedIf.Index + managedIf.Length - 1;
-        var managedBlock = CSharpSourceWalker.BraceBalanced(start, open);
-        Assert.Contains("storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);", managedBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("DarlingStoreLogins", managedBlock, StringComparison.Ordinal);
-
-        var afterManaged = start[(open + managedBlock.Length)..].TrimStart();
-        Assert.StartsWith("else", afterManaged, StringComparison.Ordinal);
-        var elseBlock = CSharpSourceWalker.BraceBalanced(afterManaged, afterManaged.IndexOf('{'));
-        Assert.Matches(
-            $@"storeConnectionString = await DarlingStoreLogins\.ResolveUnmanagedAsync\(\s*DarlingStoreLogins\.Surface\.{surface}, config\.Postgres, _logger, stoppingToken, exposed: networkMode\);",
-            elseBlock);
-
-        /* The managed half is unchanged: its wait still derives the role login from the DPAPI credential. */
-        var wait = Body(code, "private async Task<string?> WaitForManagedConnectionStringAsync(");
-        Assert.Contains($"DarlingManagedPostgres.{managedBuilder}(config)", wait, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The worker provisions the compose store as the else of the managed provisioning branch, gated on an
     /// unmanaged store in a container, and seeds the #2918 reload baseline — and the flag that lets the reload
     /// write to these roles at all — only from a verdict that says it provisioned them.

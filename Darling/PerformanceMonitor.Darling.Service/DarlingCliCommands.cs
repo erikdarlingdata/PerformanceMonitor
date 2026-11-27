@@ -4676,6 +4676,19 @@ public static partial class DarlingCliCommands
     };
 
     /// <summary>
+    /// #9894: whether the host keeps an endpoint on loopback only because the own store gives it no login of its own: the resolver's
+    /// <c>DedicatedLoginRequired</c>, which holds whenever the listen is a network address, whatever else is missing from the block.
+    /// The name-level rule, since the CLI does not connect to the store.
+    /// </summary>
+    internal static bool DedicatedLoginRefusesExposure(DarlingConfig config, bool mcp) =>
+        mcp
+            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres).Reason == DarlingMcpHostService.McpBindReason.DedicatedLoginRequired
+            : DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres).Reason == DarlingHostBinding.BindReason.DedicatedLoginRequired;
+
+    private static bool DedicatedLoginRefusesExposure(EndpointKind endpoint, DarlingConfig config) =>
+        DedicatedLoginRefusesExposure(config, endpoint == EndpointKind.Mcp);
+
+    /// <summary>
     /// The firewall half of a toggle (defense-in-depth, never the boundary — pg_hba/token + the in-app CIDR
     /// check are). Only acts when the endpoint's darling.json network block opts into LAN exposure (a non-loopback
     /// listen, via the shared <see cref="DarlingNetwork.IsExposedListenAddress"/>). Uses the SAME scoped,
@@ -4704,16 +4717,24 @@ public static partial class DarlingCliCommands
             ? DarlingMcpHostService.McpFirewallRuleName(port)
             : DarlingWebHostService.WebFirewallRuleName(port);
 
-        var exposed = DarlingNetwork.IsExposedListenAddress(listen);
+        /* #9894: a rule is planned for a surface the host will expose. On a store the service does not manage the host keeps a surface on
+           loopback when it has no login of its own, so ENABLE plans nothing for it, by the resolver's name-level answer (the CLI does not
+           connect). A disable still sweeps by the listen address: a rule opened before the refusal began is removed. */
+        var dedicatedLoginRefuses = enable && DedicatedLoginRefusesExposure(endpoint, config);
+        var exposed = DarlingNetwork.IsExposedListenAddress(listen) && !dedicatedLoginRefuses;
         var plan = ClassifyFirewallPlan(exposed, IsElevated());
 
         output.WriteLine();
         if (plan == EndpointFirewallPlan.LoopbackNoAction)
         {
-            output.WriteLine(enable
-                ? "Firewall: this endpoint has no LAN-exposure block, so it binds LOOPBACK ONLY — no firewall change is " +
-                  "needed. To expose it on the LAN, run --configure-network (which writes the listen/allowFrom/token block)."
-                : "Firewall: this endpoint is loopback-only — there is no scoped firewall rule to remove.");
+            output.WriteLine(dedicatedLoginRefuses
+                ? "Firewall: the service keeps this endpoint on LOOPBACK ONLY, so no firewall change is needed. "
+                  + DarlingStoreLogins.DedicatedLoginRequiredText(
+                      endpoint == EndpointKind.Mcp ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web, refusing: true)
+                : enable
+                    ? "Firewall: this endpoint has no LAN-exposure block, so it binds LOOPBACK ONLY — no firewall change is " +
+                      "needed. To expose it on the LAN, run --configure-network (which writes the listen/allowFrom/token block)."
+                    : "Firewall: this endpoint is loopback-only — there is no scoped firewall rule to remove.");
             return;
         }
 
