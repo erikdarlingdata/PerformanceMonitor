@@ -217,42 +217,67 @@ A hard end does not break the store. DuckDB replays its write-ahead log at the n
 
 #### Upgrade a headless Lite
 
-The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. These steps are for a portable ZIP in a fixed folder that a scheduled task starts. Nothing of yours is in that folder. The server list is in `%ProgramData%\PerformanceMonitorLite\config`. The settings, the store, the archive and the logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user. A new ZIP touches none of them. The `config` folder beside the exe holds the default `collection_schedule.json` and `ignored_wait_types.json`, which Lite copies into the data folder only when the file is missing there. To upgrade:
+The **About** button needs a window, so a headless Lite does not update itself. A few seconds after each start it writes one line with `[Update]` in it to the log, which is in [Where the logs are](#where-the-logs-are). When a newer release exists, the line reads `Update v<version> is available.`, and it says how to update. When none exists, it reads `No update is available. This build is <version>, and the latest release is v<version>.` A check that fails writes `The update check failed: <reason>.` at Warning level, and a check that is turned off writes `The update check is off (check_for_updates_on_startup is false).` The latest release is never a nightly, because a nightly is a prerelease. A nightly can therefore name a latest release that is older than the nightly itself, and that is expected. These steps are for a portable ZIP in a fixed folder that a scheduled task starts. Nothing of yours is in that folder. The server list is in `%ProgramData%\PerformanceMonitorLite\config`. The settings, the store, the archive and the logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user. A new ZIP touches none of them. The `config` folder beside the exe holds the default `collection_schedule.json` and `ignored_wait_types.json`, which Lite copies into the data folder only when the file is missing there. To upgrade:
 
-1. Run the stop task. Wait until it is no longer running, and check that its last result is 0. See [Stop it](#stop-it).
-2. Copy the program folder to a rollback folder. Delete an older `<folder>.previous` first, or `Copy-Item` puts the new copy inside it:
+1. Download the new portable ZIP and the `SHA256SUMS.txt` of the same release into one folder, and check the ZIP against that file, as in [Check the download](#check-the-download). A nightly has its own `SHA256SUMS.txt` on its release page. Do this before you stop Lite, so a bad download costs no downtime:
 
    ```powershell
+   $zip = (Resolve-Path -Path '<zip>').Path
+   (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+   Select-String -Path (Join-Path (Split-Path $zip) 'SHA256SUMS.txt') -SimpleMatch -Pattern (Split-Path $zip -Leaf)
+   ```
+
+   The two hex strings must match. If they differ, delete the ZIP, download it again, and do not go on.
+
+2. Run the stop task. Wait until it is no longer running, and check that its last result is 0. See [Stop it](#stop-it).
+3. Copy the program folder to a rollback folder. Delete an older `<folder>.previous` first, or `Copy-Item` puts the new copy inside it. The `if` makes the delete do nothing when there is no older copy:
+
+   ```powershell
+   if (Test-Path -Path '<folder>.previous') { Remove-Item -Path '<folder>.previous' -Recurse -Force }
    Copy-Item -Path '<folder>' -Destination '<folder>.previous' -Recurse
    ```
 
-3. Unzip the new portable ZIP over the folder, as an account that can write to it. Without `-Force`, `Expand-Archive` stops at the first file that already exists:
+4. Optional: copy the data folder, to keep a way back past a schema raise. The first start of the new build can raise the schema version of `monitor.duckdb`, and the program copy from step 3 does not undo that. Do this before step 6. `<data>` is `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user, written out in full. The copy takes as much disk as the data folder holds. See [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc) for what the data folder holds:
+
+   ```powershell
+   if (Test-Path -Path '<data>.previous') { Remove-Item -Path '<data>.previous' -Recurse -Force }
+   Copy-Item -Path '<data>' -Destination '<data>.previous' -Recurse
+   ```
+
+5. Unzip the new portable ZIP over the folder, as an account that can write to it. Without `-Force`, `Expand-Archive` stops at the first file that already exists:
 
    ```powershell
    Expand-Archive -Path '<zip>' -DestinationPath '<folder>' -Force
    ```
 
-4. Run the scheduled task that starts Lite with `--headless`.
-5. Check which build runs. The start line in the log, `Starting PerformanceMonitorLite v<version>`, holds the whole version of the build. A build from before that change wrote only the numeric version, such as `v3.14.0.0`, so two nightlies of one version read alike. The product version of the exe holds the whole version too:
+6. Run the scheduled task that starts Lite with `--headless`.
+7. Check which build runs. The start line in the log, `Starting PerformanceMonitorLite v<version>`, holds the whole version of the build. A build from before that change wrote only the numeric version, such as `v3.14.0.0`, so two nightlies of one version read alike. The product version of the exe holds the whole version too:
 
    ```powershell
    (Get-Item '<folder>\PerformanceMonitorLite.exe').VersionInfo.ProductVersion
    ```
 
-   A release reads `3.14.0`. A nightly reads `3.14.0-nightly.<date>.<run number>`. The command reads the file on disk, so it names the running build only after step 4. Lite also writes one row for every start to `build-history.json` in the data folder, newest first. The `Build` field of the first row is the build of the latest start.
+   A release reads `3.14.0`. A nightly reads `3.14.0-nightly.<date>.<run number>`. The command reads the file on disk, so it names the running build only after step 6. Lite also writes one row for every start to `build-history.json` in the data folder, newest first. The `Build` field of the first row is the build of the latest start.
 
-To upgrade an install that `Setup.exe` made, run the new `Setup.exe` as the dedicated user in place of steps 2 and 3. The rollback below is for the portable ZIP.
+To upgrade an install that `Setup.exe` made, run the new `Setup.exe` as the dedicated user in place of steps 1, 3 and 5. `SHA256SUMS.txt` has no line for `Setup.exe`, and the rollback below is for the portable ZIP. Step 4 still applies.
 
-`-Force` replaces the files that the ZIP holds and leaves every other file where it is, so a file that only an older build had stays. Lite's own code loads nothing from a plugins or lib folder. To keep only the new build's files in the folder, run `Remove-Item -Path '<folder>\*' -Recurse -Force` after step 2 and before step 3, and keep the folder itself so that the dedicated user keeps its access to it. The copy from step 2 holds the old files, including a default file that you changed in `config`.
+`-Force` replaces the files that the ZIP holds and leaves every other file where it is, so a file that only an older build had stays. Lite's own code loads nothing from a plugins or lib folder. To keep only the new build's files in the folder, run `Remove-Item -Path '<folder>\*' -Recurse -Force` after step 3 and before step 5, and keep the folder itself so that the dedicated user keeps its access to it. The copy from step 3 holds the old files, including a default file that you changed in `config`.
 
-To roll back the program, run the stop task and check its last result, as in step 1. Then put the files from the copy back, and run the scheduled task that starts Lite:
+To roll back the program, run the stop task and check its last result, as in step 2. Then put the files from the copy back:
 
 ```powershell
 Remove-Item -Path '<folder>\*' -Recurse -Force
 Copy-Item -Path '<folder>.previous\*' -Destination '<folder>' -Recurse
 ```
 
-The data folder is not in the program folder, so the rollback leaves it as it is. A new build can raise the schema version of `monitor.duckdb` at its first start. A build that is older than the schema version of the store does not open it. It refuses, and it leaves the file unchanged. A row in `build-history.json` with a `SchemaAfter` above its `SchemaBefore` is a start that raised it. To keep a way back past such a start, stop Lite and copy `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user before the first start of the new build, as in [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc). To roll back past it, put that copy back with the old program files. What Lite collected after the copy is not in it.
+The data folder is not in the program folder, so the rollback leaves it as it is. A build that is older than the schema version of the store does not open it. It refuses, and it leaves the file unchanged. A row in `build-history.json` with a `SchemaAfter` above its `SchemaBefore` is a start that raised the schema. To roll back past such a start, you need the copy from step 4. Put it back in the same way before you start Lite. What Lite collected after the copy is not in it:
+
+```powershell
+Remove-Item -Path '<data>\*' -Recurse -Force
+Copy-Item -Path '<data>.previous\*' -Destination '<data>' -Recurse
+```
+
+Then run the scheduled task that starts Lite.
 
 Suppose you start the new version with `--headless` while the old version still runs in the same session. The new version asks the old one to shut down, and then it takes over. A headless start never shows the "close it and continue?" dialog. If the old version runs as an administrator and the new one does not, the new one cannot close it. It writes the reason to the log and exits. Stop the old one first.
 
