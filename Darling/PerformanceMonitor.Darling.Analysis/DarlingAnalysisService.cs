@@ -403,11 +403,17 @@ public sealed class DarlingAnalysisService
 
         /* #9879: an on-demand pass gives its heavy family reads a stated time, counted from here so the reads ahead of the
            family stage come out of it too. The scheduled pass (the one caller that persists caveats) has no budget: its
-           findings are what a reply points to for a family this one left out. */
+           findings are what a reply points to for a family this one left out. A budget of zero or less has ended before
+           the pass starts, so it is fired here and now, not left to a timer that fires a moment later. */
         var familyBudget = persistCollectionCaveats ? null : OnDemandFamilyBudget;
         using var familyDeadline = new CancellationTokenSource();
         if (familyBudget is { } budget)
-            familyDeadline.CancelAfter(budget);
+        {
+            if (budget <= TimeSpan.Zero)
+                familyDeadline.Cancel();
+            else
+                familyDeadline.CancelAfter(budget);
+        }
 
         var context = new AnalysisContext
         {

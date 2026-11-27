@@ -64,7 +64,9 @@ public sealed class AnalyzeServerFamilyTimeBudgetTests
         await _slowReadStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
         Assert.False(pass.IsCompleted);
         deadline.Cancel();
-        await pass.WaitAsync(TestContext.Current.CancellationToken);
+
+        /* The bound only turns a stage that ignores the deadline into a failure, where it would otherwise never return. */
+        await pass.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { "A", "B", "C" }, facts.Select(f => f.Key));
         Assert.Equal(new[] { CollectionFailure.FamilyOf(nameof(CollectSlowThingFactsAsync)) }, context.FamiliesLeftOutForTime);
@@ -86,7 +88,8 @@ public sealed class AnalyzeServerFamilyTimeBudgetTests
         var context = new AnalysisContext { FamilyParallelism = parallelism, FamilyDeadline = deadline.Token };
         var facts = new List<Fact>();
 
-        await PgFactCollector.RunFamiliesAsync(context, facts, Families(), IsTheSlowFamily);
+        await PgFactCollector.RunFamiliesAsync(context, facts, Families(), IsTheSlowFamily)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Equal(0, _slowReadCalls);
         Assert.Equal(new[] { "A", "B", "C" }, facts.Select(f => f.Key));
