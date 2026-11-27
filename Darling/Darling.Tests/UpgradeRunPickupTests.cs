@@ -33,6 +33,8 @@ public sealed class UpgradeRunPickupTests
     {
         public int Warnings;
 
+        public readonly System.Collections.Generic.List<string> Informations = new();
+
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
         public bool IsEnabled(LogLevel logLevel) => true;
@@ -42,6 +44,10 @@ public sealed class UpgradeRunPickupTests
             if (logLevel == LogLevel.Warning)
             {
                 Warnings++;
+            }
+            else if (logLevel == LogLevel.Information)
+            {
+                Informations.Add(formatter(state, exception));
             }
         }
     }
@@ -369,5 +375,78 @@ public sealed class UpgradeRunPickupTests
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
+    }
+
+    /* #9841: a succeeded run's file stays until it is verified, failed or a week old, so a pass records the same run in the same state
+       every five minutes. The "recorded in the store" line is said once for that run and state. */
+    [Theory]
+    [InlineData(UpgradeRunPickupOutcome.Recorded)]
+    [InlineData(UpgradeRunPickupOutcome.RecordedAndRemoved)]
+    public void ThePassesThatRecordTheSameRunInTheSameState_SayItOnce(UpgradeRunPickupOutcome outcome)
+    {
+        var logger = new CountingLogger();
+        var pickup = new UpgradeRunPickup(logger);
+        var run = Guid.NewGuid();
+
+        for (var pass = 0; pass < 5; pass++)
+        {
+            pickup.LogRecordedOnce(new UpgradeRunPickupResult(outcome, run, "succeeded"));
+        }
+
+        var line = Assert.Single(logger.Informations);
+        Assert.Contains(run.ToString(), line, StringComparison.Ordinal);
+        Assert.Contains("succeeded", line, StringComparison.Ordinal);
+    }
+
+    /* #9841: the line returns when the state moves (in_progress, succeeded, then verified, the order a run takes) and when a different run
+       is recorded, such as a rollback's own run, and each of those is then said once as well. */
+    [Fact]
+    public void ANewStateOrANewRun_IsSaidAgain_AndOnlyOnce()
+    {
+        var logger = new CountingLogger();
+        var pickup = new UpgradeRunPickup(logger);
+        var upgrade = Guid.NewGuid();
+        var rollback = Guid.NewGuid();
+
+        foreach (var (run, state, outcome) in new[]
+        {
+            (upgrade, "in_progress", UpgradeRunPickupOutcome.Recorded),
+            (upgrade, "in_progress", UpgradeRunPickupOutcome.Recorded),
+            (upgrade, "succeeded", UpgradeRunPickupOutcome.Recorded),
+            (upgrade, "succeeded", UpgradeRunPickupOutcome.Recorded),
+            (upgrade, "verified", UpgradeRunPickupOutcome.RecordedAndRemoved),
+            (upgrade, "verified", UpgradeRunPickupOutcome.RecordedAndRemoved),
+            (rollback, "succeeded", UpgradeRunPickupOutcome.Recorded),
+            (rollback, "succeeded", UpgradeRunPickupOutcome.Recorded),
+        })
+        {
+            pickup.LogRecordedOnce(new UpgradeRunPickupResult(outcome, run, state));
+        }
+
+        Assert.Equal(4, logger.Informations.Count);
+        Assert.Contains("in_progress", logger.Informations[0], StringComparison.Ordinal);
+        Assert.Contains("succeeded", logger.Informations[1], StringComparison.Ordinal);
+        Assert.Contains("verified", logger.Informations[2], StringComparison.Ordinal);
+        Assert.Contains(rollback.ToString(), logger.Informations[3], StringComparison.Ordinal);
+    }
+
+    /* #9841: a pickup that recorded nothing says nothing here: no file, a file that does not parse, and a file that was recorded but could
+       not be removed (its own warning says so). A later pass that does record is still said once. */
+    [Fact]
+    public void APickupThatRecordedNothing_SaysNothing_AndAPassWithNoFileBetweenTwoRecordsDoesNotRepeatTheLine()
+    {
+        var logger = new CountingLogger();
+        var pickup = new UpgradeRunPickup(logger);
+        var run = Guid.NewGuid();
+
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.NoFile, null, null));
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.Malformed, null, null));
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.RecordedNotRemoved, run, "verified"));
+        Assert.Empty(logger.Informations);
+
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.RecordedAndRemoved, run, "verified"));
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.NoFile, null, null));
+        pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.RecordedAndRemoved, run, "verified"));
+        Assert.Single(logger.Informations);
     }
 }
