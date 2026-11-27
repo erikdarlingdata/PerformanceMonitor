@@ -839,7 +839,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
             /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
                and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
-            var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+            var (replicaHost, replicaError, replicaErrorKind) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
             /* #6459: an Azure SQL Database has no readable-replica Query Store read, so the setting is saved and never used. The
                replica is not opened (nothing to test), and the result says so, so the operator is told at save time and not left
                to notice that read_source never fills in. */
@@ -879,6 +879,7 @@ FROM pg_catalog.pg_control_system() AS s";
                 HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
                 QueryStoreReplica: replicaHost,
                 QueryStoreReplicaError: replicaError,
+                QueryStoreReplicaErrorKind: replicaErrorKind,
                 QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored,
                 MissingGrantsNote: missingGrants);
         }
@@ -903,8 +904,30 @@ FROM pg_catalog.pg_control_system() AS s";
                    the shared sentence that says so follows the driver's text. */
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)),
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
-                TransportFailure: IsTransportFailure(ex));
+                TransportFailure: IsTransportFailure(ex),
+                ErrorKind: FailureKindOf(ex));
         }
+    }
+
+    /// <summary>
+    /// #9693: what a failure is called when its text cannot be shown: the SQL Server error number, the PostgreSQL SqlState, or the
+    /// exception's type when it has neither. None of the three holds anything a caller typed, so a reply that withholds a driver's
+    /// text because it repeats a typed secret still says which failure it was.
+    /// </summary>
+    internal static string FailureKindOf(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        if ((ex as SqlException ?? ex.InnerException as SqlException) is { } sql)
+        {
+            return "SQL Server error " + sql.Number.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if ((ex as PostgresException ?? ex.InnerException as PostgresException) is { } pg)
+        {
+            return "SqlState " + pg.SqlState;
+        }
+
+        return ex.GetType().Name;
     }
 
     /// <summary>
@@ -1047,18 +1070,18 @@ FROM pg_catalog.pg_control_system() AS s";
     /// #6254: opens the server's Query Store replica connection the way collection opens it: the string comes from
     /// <see cref="ResolveQueryStoreReplicaConnectionString"/> (the same builder: the replica host, <c>ApplicationIntent=ReadOnly</c>,
     /// the server's login and authentication) and the connection is the SQL Server target provider's own <see cref="SqlConnection"/>.
-    /// Returns <c>(null, null)</c> for a server with no replica, a PostgreSQL target or an Azure SQL Database, <c>(host, null)</c> when the
-    /// replica opened, and <c>(host, error)</c> when it did not (a refused login, an unreachable host, a password the builder would not
-    /// release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// Returns no host for a server with no replica, a PostgreSQL target or an Azure SQL Database, the host alone when the
+    /// replica opened, and the host with the error and its kind (<see cref="FailureKindOf"/>) when it did not (a refused login, an
+    /// unreachable host, a password the builder would not release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
     /// </summary>
-    internal static async Task<(string? Host, string? Error)> ProbeQueryStoreReplicaAsync(
+    internal static async Task<(string? Host, string? Error, string? ErrorKind)> ProbeQueryStoreReplicaAsync(
         MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
         Func<string, System.Data.Common.DbConnection>? createConnection = null)
     {
         if (config.IsPostgres || isAzureSqlDatabase
             || PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica) is not { } host)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         try
@@ -1066,12 +1089,12 @@ FROM pg_catalog.pg_control_system() AS s";
             var connectionString = ResolveQueryStoreReplicaConnectionString(config, isAzureSqlDatabase, logger);
             if (connectionString is null)
             {
-                return (null, null);
+                return (null, null, null);
             }
 
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            return (host, null);
+            return (host, null, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1079,7 +1102,7 @@ FROM pg_catalog.pg_control_system() AS s";
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)));
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)), FailureKindOf(ex));
         }
     }
 
@@ -1291,7 +1314,12 @@ public sealed record ConnectionProbeResult(
        DarlingServerConnector.IsTransportFailure). False for a success, a server-sent error such as a login failure, any other exception
        (a secret that could not be read) and a PostgreSQL target. A failed Strict connection test gives the Strict hint only when it is
        true. Trailing and defaulted, like the fields above. */
-    bool TransportFailure = false)
+    bool TransportFailure = false,
+    /* #9693: what the failure is called when its text is withheld (DarlingServerConnector.FailureKindOf): the SQL Server error number,
+       the PostgreSQL SqlState or the exception's type, for the primary and for the Query Store replica. Null for a success and for a
+       result built without one. Trailing and defaulted, like the fields above. */
+    string? ErrorKind = null,
+    string? QueryStoreReplicaErrorKind = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

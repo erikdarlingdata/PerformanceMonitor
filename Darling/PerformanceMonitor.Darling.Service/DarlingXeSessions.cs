@@ -826,7 +826,7 @@ SELECT @threshold;", connection);
         }
         else if (bootstrap.Refusal is { } refusal)
         {
-            logger?.LogInformation("[{Server}] {Message}", server.Config.DisplayName, BlockedProcessThresholdBootstrap.RefusalMessage(server.Target, refusal.Message));
+            logger?.LogInformation("[{Server}] {Message}", server.Config.DisplayName, BlockedProcessThresholdBootstrap.RefusalMessage(server.Target, ErrorMessagesOf(refusal)));
         }
 
         ServerSessionState state;
@@ -1140,6 +1140,25 @@ WHERE ses.name = @session_name;", connection))
         }
 
         return numbers;
+    }
+
+    /// <summary>
+    /// The messages of the SQL errors a failure carries, in the order the server sent them: its own and those of the exceptions it
+    /// wraps. A SqlException's Message joins them with line breaks, so the blocked process threshold refusal line names each one
+    /// from here (#9818). The shared project has no SqlClient, so each app reads them off its own exception.
+    /// </summary>
+    internal static List<string> ErrorMessagesOf(Exception? ex)
+    {
+        var messages = new List<string>();
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql)
+            {
+                messages.AddRange(sql.Errors.Cast<SqlError>().Select(e => e.Message));
+            }
+        }
+
+        return messages;
     }
 
     /// <summary>

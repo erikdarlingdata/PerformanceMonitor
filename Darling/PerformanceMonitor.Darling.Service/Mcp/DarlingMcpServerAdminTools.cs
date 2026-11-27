@@ -103,8 +103,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>
     /// The reply for a failed connection test. Every reply to an MCP or web client carries one fixed sentence naming
     /// the host and port the caller sent, and nothing the driver said: the driver's text goes to the service log
-    /// only, with the typed secrets redacted, line breaks and other control characters replaced, and the length
-    /// capped. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
+    /// only, with line breaks and other control characters replaced and the length capped. A driver text that repeats a
+    /// typed secret is withheld whole, in the log and in the reply (<see cref="WithheldText"/>, #9693), and any other text
+    /// is passed on as the driver wrote it. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
     /// at the service host's own command line by the person who administers it; that caller gets the driver's text.
     /// </summary>
     internal static string ConnectFailureReply(
@@ -113,10 +114,11 @@ public sealed partial class DarlingMcpServerAdminTools
         /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
            stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
         var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
-        var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
+        var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)"
+            : RepeatsTypedSecret(probe.Error, secrets) ? WithheldText("The driver's text", probe.ErrorKind) : probe.Error;
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
-           full redacted text for the person at the service host's own command line. */
+           full text for the person at the service host's own command line. */
         logger?.LogWarning("Connection test to {Target} failed: {DriverText}",
             Hosting.DarlingHttpRefusalLog.Sanitize(target, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
         /* #9674: a Strict test that failed on something other than a login says what Strict needs, because the driver's text does not. The
@@ -1843,8 +1845,8 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <summary>
     /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
     /// none. A replica that would not open is a note and never a refusal: the primary answered, the server is saved, and collection reads
-    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, redacted and bounded,
-    /// as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
+    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, bounded, and withheld
+    /// whole when it repeats a typed secret, as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
     /// </summary>
     internal static string? QueryStoreReplicaReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealError, params string?[] secrets)
@@ -1855,7 +1857,9 @@ ON CONFLICT (server_id) DO NOTHING";
             return line;
         }
 
-        var driverText = RedactEditSecret(probe.QueryStoreReplicaError, secrets);
+        var driverText = RepeatsTypedSecret(probe.QueryStoreReplicaError, secrets)
+            ? WithheldText("The driver's text", probe.QueryStoreReplicaErrorKind)
+            : probe.QueryStoreReplicaError;
         logger?.LogWarning("Query Store replica test for {Target} failed: {DriverText}",
             Hosting.DarlingHttpRefusalLog.Sanitize(probe.QueryStoreReplica, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
         return revealError

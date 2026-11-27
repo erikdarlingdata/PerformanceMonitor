@@ -171,6 +171,22 @@ public static partial class DarlingCliCommands
     /// <summary>The refusal for a carriage return that is not part of a line ending.</summary>
     internal const string LoginPasswordHasStrayReturnText = StrictStdinPassword.HasStrayReturnText;
 
+    /// <summary>The longest password SQL Server takes for a login, in characters (UTF-16 code units). The SQL Server driver refuses
+    /// a longer one when the connection is built, for SQL authentication and for a service-principal secret alike.</summary>
+    internal const int SqlServerMaxPasswordCharacters = 128;
+
+    /// <summary>The refusal for a password longer than SQL Server takes. It names the limit and never the password.</summary>
+    internal const string SqlServerPasswordTooLongText =
+        "SQL Server takes a password of at most 128 characters, and this one is longer.";
+
+    /// <summary>
+    /// PURE: the refusal for a password meant for a SQL Server target that is longer than SQL Server takes (#9693), or null. A
+    /// PostgreSQL target has no such limit: its driver sends any password the reader takes, and a token used as a password there
+    /// (an RDS IAM token) is several hundred characters, so the limit is never applied to one.
+    /// </summary>
+    internal static string? SqlServerPasswordRefusal(string? password, bool targetIsPostgres) =>
+        !targetIsPostgres && password is { Length: > SqlServerMaxPasswordCharacters } ? SqlServerPasswordTooLongText : null;
+
     /// <summary>
     /// Reads the one password line (#9689). At a terminal (<paramref name="inputRedirected"/> false) it is the hidden prompt.
     /// From a pipe or a file it reads <paramref name="stdin"/> as BYTES, never through the console's own text decoding, so the
@@ -224,6 +240,23 @@ public static partial class DarlingCliCommands
         {
             return DarlingMcpServerAdminTools.PasswordCharactersText;
         }
+    }
+
+    /// <summary>
+    /// PURE: the reason a run must stop when <paramref name="password"/> is longer than SQL Server takes and a line of
+    /// <paramref name="plan"/> would set it for a SQL Server (#9693), or null. Lines that skip or leave a password unchanged, and
+    /// lines for a PostgreSQL server, never stop a run. The reason names the limit and how many servers, never the password.
+    /// </summary>
+    internal static string? LoginPasswordTooLongReason(IEnumerable<LoginPasswordPlanLine> plan, string password)
+    {
+        var servers = plan
+            .Where(l => l.Action == LoginPasswordAction.Set && SqlServerPasswordRefusal(password, l.Server.IsPostgres) is not null)
+            .Select(l => l.Server.ServerId)
+            .Distinct()
+            .Count();
+        return servers == 0
+            ? null
+            : $"{SqlServerPasswordTooLongText} {CountOf(servers, "server that would get it is", "servers that would get it are")} SQL Server.";
     }
 
     /// <summary>
@@ -538,12 +571,20 @@ public static partial class DarlingCliCommands
 
         output.WriteLine();
         var toSet = plan.Where(l => l.Action == LoginPasswordAction.Set).ToList();
+
+        /* #9693: a password longer than SQL Server takes can never open a SQL Server connection, so it is not saved for one. The
+           run stops before anything is written, PostgreSQL servers included, because one run saves one password for the login. */
+        var tooLongReason = LoginPasswordTooLongReason(plan, password);
         var tail = $"{CountOf(plan.Count(l => l.Action == LoginPasswordAction.Unchanged), "password", "passwords")} unchanged, "
             + $"{CountOf(plan.Count(l => l.Action == LoginPasswordAction.Skip), "password", "passwords")} skipped.";
         if (args.DryRun)
         {
             output.WriteLine($"Dry run: a run would set {CountOf(toSet.Count, "saved password", "saved passwords")}. {tail} Nothing was changed.");
-            if (toSet.Count > 0 && !ring.Status.CanSeal)
+            if (tooLongReason is not null)
+            {
+                output.WriteLine($"A run would stop before it saved anything: {tooLongReason}");
+            }
+            else if (toSet.Count > 0 && !ring.Status.CanSeal)
             {
                 output.WriteLine($"A run would stop before it saved anything: {ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason}");
             }
@@ -553,6 +594,12 @@ public static partial class DarlingCliCommands
             }
 
             return CollectorToggleExitCode.Success;
+        }
+
+        if (tooLongReason is not null)
+        {
+            error.WriteLine($"No password was saved. {tooLongReason}");
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         if (toSet.Count > 0 && !ring.Status.CanSeal)

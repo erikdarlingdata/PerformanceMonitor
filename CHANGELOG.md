@@ -100,6 +100,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **A Linux systemd install page** ([#9712], [#9719])
 - **`--set-login-password` saves one login's password again for every server that uses it** ([#9748])
 - **The linux-x64 tarball ships a systemd unit, install and upgrade scripts and a Linux config sample** ([#9741])
+- **Darling `--edit-server` changes a registered server, and the start-up warning gives the command** ([#9765])
 
 ### Changed
 
@@ -250,6 +251,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`add_servers` and `--add-server` name each key they do not read, with the key that was likely meant** ([#9785])
 - **Darling and Lite refuse control characters in a server's name, host, database and login** ([#9791])
 - **The upgrade start builds every missing large Darling index when the builds fit in 300 seconds** ([#9804])
+- **The hourly host rollup behind top queries builds each hour with a hash aggregate** ([#9807])
 
 ### Fixed
 
@@ -8581,6 +8583,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9759]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9759
 [#9763]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9763
 [#9764]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9764
+[#9765]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9765
 [#9767]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9767
 [#9770]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9770
 [#9771]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9771
@@ -8598,3 +8601,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9804]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9804
 [#9805]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9805
 [#9806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9806
+[#9807]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9807
