@@ -2,7 +2,8 @@
 # #9686: the linux-x64 tarball installed under systemd the way docs/darling/linux.md says, step by step, on a machine that
 # has systemd (ubuntu-latest, or a lab machine). Every other Linux check runs the container image, so the tarball, the
 # `darling` user, the folders of Step 5 and the unit of Step 8 are run nowhere else (#9678 was a log folder those steps never
-# created). The leg follows the quick start's steps by hand until the tarball ships install and upgrade scripts (#9688).
+# created). The leg follows the page's numbered steps by hand. The tarball's install-darling.sh and upgrade-darling.sh (#9688)
+# do steps 5 to 8 and the upgrade themselves, and this leg does not run them.
 #
 # What differs from the page, and why:
 #   Step 2  the page installs the .NET runtime with apt. The leg uses the dotnet already on the machine, and names its path
@@ -244,7 +245,7 @@ pass "step 3: the store has the darling role and database, both extensions and b
 step="step 5"
 installing=1
 mkdir -p /opt/darling
-tar -xzf "${tarball}" -C /opt/darling --no-same-owner
+tar -xzf "${tarball}" -C /opt/darling --no-same-owner --no-same-permissions
 
 useradd --system --no-create-home --shell /usr/sbin/nologin darling
 mkdir -p /etc/darling/darling-keys
@@ -253,7 +254,7 @@ chown root:darling /etc/darling
 chmod 750 /etc/darling
 chown darling:darling /etc/darling/darling-keys
 chmod 700 /etc/darling/darling-keys
-chown -R darling:darling /usr/share/PerformanceMonitorDarling
+chown darling:darling /usr/share/PerformanceMonitorDarling/logs
 chmod 700 /usr/share/PerformanceMonitorDarling/logs
 
 version="$(/opt/darling/PerformanceMonitor.Darling.Service --version)" || fail "/opt/darling/PerformanceMonitor.Darling.Service --version failed"
