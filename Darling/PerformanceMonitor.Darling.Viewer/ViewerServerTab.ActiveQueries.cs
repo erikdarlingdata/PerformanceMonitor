@@ -382,7 +382,7 @@ public partial class ViewerServerTab
            or miss one it does: ask the probe about the window drawn here (fromUtc, not the toolbar's start), beside the
            rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
            the same window (a deep link reaches both, and the two writes agree). */
-        var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
+        var dataStartTask = Timed(timer, "data start", _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc));
         var dataReadTask = Timed(timer, "grid read", _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;

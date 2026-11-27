@@ -90,6 +90,14 @@ public sealed class ViewerLoadTimer
         return task;
     }
 
+    /// <summary><see cref="Track{T}"/> for a read whose result wraps its rows (a record that carries a list beside other facts), so
+    /// <paramref name="rowsOf"/> says how many rows it holds and the slow-load line counts them (#9887).</summary>
+    internal Task<T> Track<T>(string phase, Task<T> task, Func<T, long?> rowsOf)
+    {
+        _ = Watch(phase, StartRead(phase, task, () => task.IsCompletedSuccessfully ? rowsOf(task.Result) : null), task);
+        return task;
+    }
+
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
