@@ -16,9 +16,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// <see cref="QueryTagRebuildMerge"/> (#9705): a rebuild hands it a server's sighting rows in heap order, one at a time, and
-/// it must give each key the tag <see cref="QueryTagResolver"/> gives over the key's rows in order, or say the key needs
-/// its rows in order. Pure: no store.
+/// <see cref="QueryTagRebuildMerge"/> (#9705): a rebuild hands it a server's slim rows and then its sightings in heap order, one
+/// at a time. A key that has a sighting must get the tag <see cref="QueryTagResolver"/> gives over the key's sightings in
+/// order, or be named as needing them in order, whatever its slim rows say. A key with no sighting must get the tag the
+/// resolver gives over its slim rows in <see cref="QueryTagRebuildMerge.SlimRowOrder"/>. Pure: no store.
 /// </summary>
 public sealed class QueryTagRebuildMergeTests
 {
@@ -264,5 +265,215 @@ public sealed class QueryTagRebuildMergeTests
         Assert.True(tagged > 500, $"only {tagged} keys got a tag");
         Assert.Equal(QueryTagResolution.None, QueryTagResolver.Resolve(Server, Array.Empty<QueryTagSighting>(), Array.Empty<QueryTagHandAssignment>(), Array.Empty<QueryTagRule>(), Tags, out int none));
         Assert.Equal(int.MaxValue, none);
+    }
+
+    private static readonly Comparer<QueryTagSighting> InSlimRowOrder = Comparer<QueryTagSighting>.Create(QueryTagRebuildMerge.SlimRowOrder);
+
+    /* A slim row has no text sample. */
+    private static QueryTagSighting Slim(QueryTagSighting row) => row with { TextSample = null };
+
+    private static QueryTagRebuildMergeResult Merge(World world, IEnumerable<QueryTagSighting> slimRows, IEnumerable<QueryTagSighting> sightings)
+    {
+        var merge = new QueryTagRebuildMerge(Server, world.Assignments, world.Rules, Tags);
+        foreach (var row in slimRows)
+        {
+            merge.AddSlim(row);
+        }
+
+        foreach (var row in sightings)
+        {
+            merge.Add(row);
+        }
+
+        return merge.Finish();
+    }
+
+    private static string RowText(QueryTagMapRow row) => $"{row.Key}|{row.TagId}|{row.Source}|{row.RuleId}|{row.MatchedValue}";
+
+    /* An application rule that wins over a database rule, so a row can be given either tag, the earlier one or none. */
+    private static World TwoRuleWorld() => new(
+        new List<QueryTagRule>
+        {
+            new(1, QueryTagRuleField.Application, "Rpt*", 1, true, 1),
+            new(2, QueryTagRuleField.Database, "Arch*", 2, true, 2),
+        },
+        new List<QueryTagHandAssignment>(),
+        new List<List<QueryTagSighting>>());
+
+    private static QueryTagSighting HashRow(string key, string? application, string? database, string? host = "H1", string? login = "svc") =>
+        new(QueryTagKeyKind.Hash, key, database, null, application, login, host);
+
+    [Fact]
+    public void AKeyWithSlimRowsAndATaggedSighting_TakesTheSightingsTag_EvenWhenAnEarlierRuleTagsTheSlimRow()
+    {
+        var world = TwoRuleWorld();
+
+        /* 0xBOTH: the slim row matches rule 1, which wins over rule 2 when both rows count. The sighting matches only rule 2.
+           0xSAME: the slim row and the sighting match rule 1 with different values. */
+        var merged = Merge(
+            world,
+            new[] { HashRow("0xBOTH", "RptA", "Sales"), HashRow("0xSAME", "RptA", "Sales") },
+            new[] { HashRow("0xBOTH", "App", "Arch1"), HashRow("0xSAME", "RptZ", "Sales") });
+
+        Assert.Empty(merged.KeysNeedingOrder);
+        Assert.Equal(new[] { "0xBOTH|2|rule|2|Arch1", "0xSAME|1|rule|1|RptZ" }, merged.Rows.Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void AKeyWithTaggedSlimRowsAndASightingNoRuleTags_GetsNoMapRow_AndAKeyWithOnlySlimRowsIsTaggedFromThem()
+    {
+        var world = TwoRuleWorld();
+        var slim = new[] { HashRow("0xSEEN", "RptA", "Arch1"), HashRow("0xGONE", "RptA", "Sales"), HashRow("0xARCH", "App", "Arch1"), HashRow("0xNONE", "App", "Sales") };
+
+        var merged = Merge(world, slim, new[] { HashRow("0xSEEN", "App", "Sales") });
+
+        Assert.Empty(merged.KeysNeedingOrder);
+        Assert.Equal(new[] { "0xARCH|2|rule|2|Arch1", "0xGONE|1|rule|1|RptA" }, merged.Rows.Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+
+        /* The same slim rows with no sighting at all: 0xSEEN is tagged from its slim row. */
+        var slimOnly = Merge(world, slim, Array.Empty<QueryTagSighting>());
+        Assert.Equal(new[] { "0xARCH|2|rule|2|Arch1", "0xGONE|1|rule|1|RptA", "0xSEEN|1|rule|1|RptA" }, slimOnly.Rows.Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void SlimRowsOfOneKeyAtTheWinningStep_GiveTheFirstInSlimRowOrder_InEveryArrivalOrder()
+    {
+        var world = TwoRuleWorld();
+
+        /* Four rows match rule 1 with three values, in two databases, and one row matches only rule 2. First in order: the
+           database Arch1 before Sales, then the application RptB before RptC. RptA comes first by application alone. */
+        var rows = new List<QueryTagSighting>
+        {
+            HashRow("0xK", "RptA", "Sales"), HashRow("0xK", "RptC", "Arch1"), HashRow("0xK", "RptB", "Arch1", host: "H2"), HashRow("0xK", "RptB", "Arch1", host: "H1"),
+            HashRow("0xK", "App", "Arch0"),
+        };
+
+        var inOrder = QueryTagResolver.Resolve(Server, rows.OrderBy(row => row, InSlimRowOrder).ToList(), world.Assignments, world.Rules, Tags);
+        Assert.Equal("RptB", inOrder.MatchedValue);
+
+        int orders = 0;
+        foreach (var order in Permutations(rows, 0))
+        {
+            var merged = Merge(world, order, Array.Empty<QueryTagSighting>());
+            Assert.Empty(merged.KeysNeedingOrder);
+            Assert.Equal(new[] { QueryTagMapStore.MapRow(QueryTagKeyKind.Hash, "0xK", inOrder) }, merged.Rows);
+            orders++;
+        }
+
+        Assert.Equal(120, orders);
+    }
+
+    [Fact]
+    public void AMergeOfBothTables_ResolvesASightedKeyFromItsSightingsAlone_AndAKeyWithNoneFromItsSlimRowsInSlimRowOrder()
+    {
+        int slimOnlyTagged = 0, slimOnlyOrderDecides = 0, sightedWithSlimRows = 0, sightedWhereSlimRowsWouldChangeTheTag = 0;
+        for (int seed = 1; seed <= 40; seed++)
+        {
+            var world = NewWorld(seed);
+            var random = new Random(seed * 17);
+
+            /* Each key's rows are dealt to the two tables: about a third of the keys keep only slim rows, a third only
+               sightings, and a third have both. */
+            var slimByKey = new Dictionary<string, List<QueryTagSighting>>();
+            var sightingsByKey = new Dictionary<string, List<QueryTagSighting>>();
+            foreach (var rows in world.Keys)
+            {
+                int deal = random.Next(3);
+                foreach (var row in rows)
+                {
+                    bool toSlim = deal == 0 || (deal == 2 && random.Next(2) == 0);
+                    var table = toSlim ? slimByKey : sightingsByKey;
+                    if (!table.TryGetValue(row.Key, out var list))
+                    {
+                        table[row.Key] = list = new List<QueryTagSighting>();
+                    }
+
+                    list.Add(toSlim ? Slim(row) : row);
+                }
+            }
+
+            var allSlim = slimByKey.Values.SelectMany(rows => rows).ToList();
+            var allSightings = sightingsByKey.Values.SelectMany(rows => rows).ToList();
+            var merged = Merge(world, allSlim, allSightings);
+
+            /* Any arrival order inside each table gives the same rows and the same keys needing order. */
+            string expected = Text(merged);
+            Assert.Equal(expected, Text(Merge(world, Enumerable.Reverse(allSlim), Enumerable.Reverse(allSightings))));
+            for (int i = 0; i < 5; i++)
+            {
+                Assert.Equal(expected, Text(Merge(world, allSlim.OrderBy(_ => random.Next()), allSightings.OrderBy(_ => random.Next()))));
+            }
+
+            /* A sighted key comes out exactly as it does with no slim table. */
+            var sightingsAlone = Merge(world, allSightings);
+            var aloneByKey = sightingsAlone.Rows.ToDictionary(r => r.Key);
+            var rowByKey = merged.Rows.ToDictionary(r => r.Key);
+            Assert.Equal(
+                sightingsAlone.KeysNeedingOrder.Select(k => k.KeyKind + ":" + k.Key).OrderBy(k => k, StringComparer.Ordinal),
+                merged.KeysNeedingOrder.Select(k => k.KeyKind + ":" + k.Key).OrderBy(k => k, StringComparer.Ordinal));
+            foreach (var (key, sightings) in sightingsByKey)
+            {
+                aloneByKey.TryGetValue(key, out var alone);
+                rowByKey.TryGetValue(key, out var both);
+                Assert.True(Equals(alone, both), $"seed {seed}: {key} merged to {both} with its slim rows and to {alone} from its sightings alone");
+                if (slimByKey.TryGetValue(key, out var slimRows))
+                {
+                    sightedWithSlimRows++;
+                    var together = QueryTagResolver.Resolve(Server, slimRows.Concat(sightings).ToList(), world.Assignments, world.Rules, Tags);
+                    var apart = QueryTagResolver.Resolve(Server, sightings, world.Assignments, world.Rules, Tags);
+                    sightedWhereSlimRowsWouldChangeTheTag += together.TagId != apart.TagId ? 1 : 0;
+                }
+            }
+
+            /* A key with no sighting gets what the resolver gives over its slim rows in SlimRowOrder. */
+            foreach (var (key, slimRows) in slimByKey)
+            {
+                if (sightingsByKey.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                var inOrder = slimRows.OrderBy(row => row, InSlimRowOrder).ToList();
+                var resolution = QueryTagResolver.Resolve(Server, inOrder, world.Assignments, world.Rules, Tags);
+                var expectedRow = resolution.HasTag ? QueryTagMapStore.MapRow(slimRows[0].KeyKind, key, resolution) : null;
+                rowByKey.TryGetValue(key, out var settled);
+                Assert.True(Equals(settled, expectedRow), $"seed {seed}: {key} merged to {settled} but its slim rows in order resolve to {expectedRow}");
+                slimOnlyTagged += settled is not null ? 1 : 0;
+
+                var reversed = QueryTagResolver.Resolve(Server, Enumerable.Reverse(inOrder).ToList(), world.Assignments, world.Rules, Tags);
+                slimOnlyOrderDecides += reversed.Equals(resolution) ? 0 : 1;
+            }
+        }
+
+        /* The worlds really exercise each case. */
+        Assert.True(slimOnlyTagged > 150, $"only {slimOnlyTagged} keys were tagged from slim rows alone");
+        Assert.True(slimOnlyOrderDecides > 20, $"the order of the slim rows decided only {slimOnlyOrderDecides} keys");
+        Assert.True(sightedWithSlimRows > 300, $"only {sightedWithSlimRows} sighted keys had slim rows");
+        Assert.True(sightedWhereSlimRowsWouldChangeTheTag > 20, $"the slim rows would have changed the tag of only {sightedWhereSlimRowsWouldChangeTheTag} sighted keys");
+    }
+
+    [Fact]
+    public void ASlimRowAddedTwice_ChangesNothing()
+    {
+        for (int seed = 1; seed <= 10; seed++)
+        {
+            var world = NewWorld(seed);
+            var slim = world.Keys.SelectMany(rows => rows).Select(Slim).ToList();
+            var once = Merge(world, slim, Array.Empty<QueryTagSighting>());
+            Assert.NotEmpty(once.Rows);
+            Assert.Equal(Text(once), Text(Merge(world, slim.Concat(slim), Array.Empty<QueryTagSighting>())));
+            Assert.Equal(Text(once), Text(Merge(world, slim.Concat(Enumerable.Reverse(slim)), Array.Empty<QueryTagSighting>())));
+        }
+    }
+
+    [Fact]
+    public void ASlimRowAfterASighting_Throws()
+    {
+        var world = TwoRuleWorld();
+        var merge = new QueryTagRebuildMerge(Server, world.Assignments, world.Rules, Tags);
+        merge.AddSlim(HashRow("0xA", "RptA", "Sales"));
+        merge.Add(HashRow("0xB", "App", "Sales"));
+
+        Assert.Throws<InvalidOperationException>(() => merge.AddSlim(HashRow("0xC", "RptA", "Sales")));
     }
 }
