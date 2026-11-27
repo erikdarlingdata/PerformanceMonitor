@@ -117,8 +117,11 @@ public sealed class PgFactCollectorTests
            latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
            it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot, plus #6640's
            QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills, plus
-           #8883's SchedulerCountSql: the tempdb file setup method reads the file list first and the scheduler count second. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 6, PgFactCollector.AllSql.Count);
+           #8883's SchedulerCountSql: the tempdb file setup method reads the file list first and the scheduler count second, plus
+           #9879's BadActorHourlySplitSql: the bad actor method runs it in place of BadActorSql when the hourly rollup
+           reaches the window's first hour line. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 7, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.BadActorHourlySplitSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.QuerySpillsRankedSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
@@ -329,7 +332,10 @@ public sealed class PgFactCollectorTests
                         || target == "plan_regression_daily"
                         /* #5630: the PLAN_REGRESSION read joins the statement text dimension for the recompile hint, as
                            the drill-down does (#2150). */
-                        || target == "query_store_text",
+                        || target == "query_store_text"
+                        /* #9879: the bad actor split reads the hourly rollup for the whole hours before the window's
+                           last UTC day. */
+                        || target == TimescaleSupport.QueryStatsIoHourlyView,
                     $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
             }
         }

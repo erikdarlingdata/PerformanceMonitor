@@ -54,20 +54,21 @@ LIMIT 5";
 
     /// <summary>
     /// #9879: <see cref="BadActorSql"/>'s ranking and figures, with the whole hours before the window's last UTC day read
-    /// from the hourly rollup (<c>collect.query_stats_io_hourly</c>) instead of the raw rows. $1 server, $2 window start,
+    /// from the hourly rollup (<c>query_stats_io_hourly</c>) instead of the raw rows. $1 server, $2 window start,
     /// $3 window end, $4 the first hour line at or after the start, $5 the cut (an hour line, see
-    /// <see cref="ChooseBadActorRead"/>). The four arms hold each raw row of the closed window [$2, $3] exactly once:
+    /// <see cref="ChooseBadActorRead"/>). The three arms cover the closed window [$2, $3], each instant in exactly one:
     /// <list type="number">
     /// <item>raw rows in [$2, $4): the part hour before the first hour line. The first arm does NOT own $4.</item>
     /// <item>rollup buckets in [$4, $5): the rollup arm owns $4 and does not own $5. A bucket holds every raw row of
-    /// its hour whose <c>sample_interval_seconds</c> is not 0.</item>
-    /// <item>raw rows in [$4, $5) whose <c>sample_interval_seconds</c> is 0: the rows the rollup leaves out. The
-    /// collector stores a 0 interval beside all-zero deltas except when two passes land under one second apart, and
-    /// this arm keeps the sums equal to the raw read's in that case too.</item>
+    /// its hour whose <c>sample_interval_seconds</c> is not 0, the contract every reader of this rollup follows. The
+    /// collector stores a 0 interval beside all-zero deltas (a first sighting, a restart), so leaving those rows out
+    /// changes no sum. A delta stored with a 0 interval (two passes for one server under a second apart) is counted
+    /// only where a raw arm covers it.</item>
     /// <item>raw rows in [$5, $3]: the last raw arm owns $5 and the closed window end.</item>
     /// </list>
     /// The four sums rank exactly as <see cref="BadActorSql"/> ranks them. The rollup has no spills or DOP column, so
-    /// those two figures come from the raw rows of the five ranked queries, over the same closed window.
+    /// those two figures come from the raw rows of the five ranked queries, over the same closed window. Where raw
+    /// retention is shorter than the window, the rollup arm answers hours the raw rows no longer hold.
     /// </summary>
     public const string BadActorHourlySplitSql = @"
 WITH arms AS
@@ -91,23 +92,10 @@ WITH arms AS
         worker_time_sum,
         elapsed_time_sum,
         logical_reads_sum
-    FROM collect.query_stats_io_hourly
+    FROM query_stats_io_hourly
     WHERE server_id = $1
     AND   bucket >= $4
     AND   bucket < $5
-    UNION ALL
-    SELECT
-        database_name,
-        query_hash,
-        delta_execution_count,
-        delta_worker_time,
-        delta_elapsed_time,
-        delta_logical_reads
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   sample_interval_seconds = 0
-    AND   collection_time >= $4
-    AND   collection_time < $5
     UNION ALL
     SELECT
         database_name,
