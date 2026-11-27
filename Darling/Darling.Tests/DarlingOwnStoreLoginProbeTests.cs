@@ -87,10 +87,11 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     /* ---- Item 1: an owner string with no Username proves nothing on names ---- */
 
     [Theory]
-    [InlineData(DarlingStoreLogins.Surface.Web)]
-    [InlineData(DarlingStoreLogins.Surface.Mcp)]
-    public void AnOwnerStringWithNoUsername_IsNeverDedicatedOnNamesAlone(DarlingStoreLogins.Surface surface)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnOwnerStringWithNoUsername_IsNeverDedicatedOnNamesAlone(bool web)
     {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var postgres = surface == DarlingStoreLogins.Surface.Web ? OwnStore(OwnerWithNoUser, webConnectionString: Dedicated) : OwnStore(OwnerWithNoUser, mcpConnectionString: Dedicated);
 
         Assert.Equal(DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown, DarlingStoreLogins.CheckLoginNames(surface, postgres));
@@ -107,8 +108,9 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
 
     [Theory]
     [MemberData(nameof(Surfaces))]
-    public void TheFirewallPlan_IsSkippedOnlyForAnOwnStoreSurfaceTheHostKeepsOnLoopback(DarlingStoreLogins.Surface surface)
+    public void TheFirewallPlan_IsSkippedOnlyForAnOwnStoreSurfaceTheHostKeepsOnLoopback(bool web)
     {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var mcp = surface == DarlingStoreLogins.Surface.Mcp;
         DarlingConfig Config(PostgresConfig postgres) => new() { Postgres = postgres, Web = Web(), Mcp = Mcp() };
         PostgresConfig Own(string? surfaceString) => mcp ? OwnStore(Owner, mcpConnectionString: surfaceString) : OwnStore(Owner, webConnectionString: surfaceString);
@@ -131,20 +133,23 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     /* ---- Item 2: the decision as a pure function of the probe result ---- */
 
     [Theory]
-    [InlineData(true, false, DarlingStoreLogins.LoginProbeVerdict.Privileged)]
-    [InlineData(false, true, DarlingStoreLogins.LoginProbeVerdict.Privileged)]
-    [InlineData(true, true, DarlingStoreLogins.LoginProbeVerdict.Privileged)]
-    [InlineData(false, false, DarlingStoreLogins.LoginProbeVerdict.Unprivileged)]
-    public void ASuperuserOrAnOwnerRoleMember_IsPrivileged(bool superuser, bool ownerMember, DarlingStoreLogins.LoginProbeVerdict expected) =>
-        Assert.Equal(expected, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember).Verdict);
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, false)]
+    public void ASuperuserOrAnOwnerRoleMember_IsPrivileged(bool superuser, bool ownerMember, bool expectedPrivileged) =>
+        Assert.Equal(expectedPrivileged, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember).Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged);
 
     [Theory]
-    [InlineData(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, DarlingHostBinding.BindMode.NetworkAndLoopback, DarlingHostBinding.BindReason.NetworkExposed)]
-    [InlineData(DarlingStoreLogins.LoginProbeVerdict.Privileged, DarlingHostBinding.BindMode.LoopbackOnly, DarlingHostBinding.BindReason.LoginPrivileged)]
-    [InlineData(DarlingStoreLogins.LoginProbeVerdict.Failed, DarlingHostBinding.BindMode.LoopbackOnly, DarlingHostBinding.BindReason.LoginProbeFailed)]
+    [InlineData("Unprivileged", "NetworkAndLoopback", "NetworkExposed")]
+    [InlineData("Privileged", "LoopbackOnly", "LoginPrivileged")]
+    [InlineData("Failed", "LoopbackOnly", "LoginProbeFailed")]
     public void TheProbeResult_DecidesAnExposure_AndLeavesAnythingElseAlone(
-        DarlingStoreLogins.LoginProbeVerdict verdict, DarlingHostBinding.BindMode mode, DarlingHostBinding.BindReason reason)
+        string verdictName, string modeName, string reasonName)
     {
+        var verdict = Enum.Parse<DarlingStoreLogins.LoginProbeVerdict>(verdictName);
+        var mode = Enum.Parse<DarlingHostBinding.BindMode>(modeName);
+        var reason = Enum.Parse<DarlingHostBinding.BindReason>(reasonName);
         var exposed = new DarlingHostBinding.BindDecision(DarlingHostBinding.BindMode.NetworkAndLoopback, DarlingHostBinding.BindReason.NetworkExposed);
         var result = DarlingHostBinding.ApplyLoginProbe(exposed, Probe(verdict, "x"));
         Assert.Equal(mode, result.Mode);
@@ -160,16 +165,17 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
 
     public static IEnumerable<object[]> Surfaces() =>
     [
-        [DarlingStoreLogins.Surface.Web],
-        [DarlingStoreLogins.Surface.Mcp],
+        [true],
+        [false],
     ];
 
     /// <summary>What a host start decides, for each login the names let through: a login of its own is probed and only an unprivileged one is
     /// exposed. The names refuse first and never probe. A managed store and a container never probe either.</summary>
     [Theory]
     [MemberData(nameof(Surfaces))]
-    public async Task TheHostStart_ProbesOnlyAnOwnStoreOutsideAContainer_AndExposesOnlyAnUnprivilegedLogin(DarlingStoreLogins.Surface surface)
+    public async Task TheHostStart_ProbesOnlyAnOwnStoreOutsideAContainer_AndExposesOnlyAnUnprivilegedLogin(bool web)
     {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var ct = TestContext.Current.CancellationToken;
         PostgresConfig Own(string ownerString, string? surfaceString) =>
             surface == DarlingStoreLogins.Surface.Web ? OwnStore(ownerString, webConnectionString: surfaceString) : OwnStore(ownerString, mcpConnectionString: surfaceString);
@@ -276,8 +282,9 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     /// loopback and says so at Critical with the error class and without the password. Without the probe it would bind the network.</summary>
     [Theory]
     [MemberData(nameof(Surfaces))]
-    public async Task AHostWhoseSurfaceLoginCannotBeChecked_BindsLoopbackOnly_AndLogsTheErrorClass(DarlingStoreLogins.Surface surface)
+    public async Task AHostWhoseSurfaceLoginCannotBeChecked_BindsLoopbackOnly_AndLogsTheErrorClass(bool web)
     {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
         Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
         try
