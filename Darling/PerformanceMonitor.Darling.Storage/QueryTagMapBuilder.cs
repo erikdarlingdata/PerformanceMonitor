@@ -32,8 +32,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
 /// next one. A rebuild also reads <c>collect.query_tag_sightings_slim</c> (#9705), where the retention purge keeps a sighting's key and
 /// short match fields until the key's usage rows age out. A key with no sighting left is resolved from its slim rows, so it
-/// leaves the map at the first rebuild after both are gone. A key that has a sighting is resolved from its sightings alone, by
-/// a rebuild and by an extend, which reads no slim row. The extend path never deletes. A slim row has no text sample, so a
+/// leaves the map at the first rebuild after both are gone. A rebuild resolves a key that has a sighting from its sightings
+/// alone. An extend reads no slim row and never deletes: it writes the tag a changed key's sightings resolve to, and a key
+/// whose sightings resolve to no tag keeps the map row it had. So a key tagged from its slim rows that is sighted again under
+/// no rule keeps that tag until its server's next rebuild, which any write to the tags, assignments or rules starts, and the
+/// staggered rebuild otherwise once the server's map is <see cref="MaxRebuildAge"/> old. A slim row has no text sample, so a
 /// text rule tags a key only while it has a sighting.</para>
 ///
 /// <para><b>A rebuild reads both tables front to back, in one snapshot (#9705).</b> It reads each table in pages of

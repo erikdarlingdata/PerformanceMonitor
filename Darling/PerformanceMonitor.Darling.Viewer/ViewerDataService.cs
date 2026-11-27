@@ -1971,9 +1971,6 @@ SELECT
         /* V301 (#9374): the last measured relation sizes and their measured time, created on every store and never dropped. Relation-existence
            sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to 300 and showing a spurious upgrade banner on a store that is current. */
-        /* V318 (#9485): the planned change windows table, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
-           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 317 and showing a spurious upgrade
-           banner on a store that is current. */
         /* V320 (#9705): the slim query-tag sightings table, created on every store and never dropped. Table-existence sentinel, newest-first, and the top rung,
            so a fully migrated store maps to exactly StorageVersion.SchemaVersion and shows no upgrade banner. */
         if (hasQueryTagSlimSightings)
@@ -1981,13 +1978,14 @@ SELECT
             return QueryTagSlimSightings.Version;
         }
 
-        /* V319 (#9662): the three argument advanced web access setter, created on every store and never dropped. Function-existence sentinel, newest-first, and the TOP
-           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 318 and showing a spurious upgrade banner on a
-           store that is current. */
+        /* V319 (#9662): the three argument advanced web access setter, created on every store and never dropped. Function-existence sentinel, checked
+           newest-first, so a store migrated to V319 and no further maps to 319 and not 318. */
         if (hasWebAccessAdvancedActor)
         {
             return WebAccessAdvancedActor.Version;
         }
+        /* V318 (#9485): the planned change windows table, created on every store and never dropped. Relation-existence sentinel, checked newest-first,
+           so a store migrated to V318 and no further maps to 318 and not 317. */
         if (hasInvestigationChangeWindows)
         {
             return InvestigationChangeWindows.Version;

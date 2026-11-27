@@ -15,7 +15,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// aged out lost its map row at the next rebuild, so its older usage read as untagged. The retention purge appends each sighting
 /// it deletes here, in the statement that deletes it, and the map rebuild resolves a key from these rows when the key has no
 /// sighting left, so a rule on the database, object, application, login or host tags a key for as long as any usage row of it
-/// is kept. A key that has a sighting is resolved from its sightings alone.
+/// is kept. A rebuild resolves a key that has a sighting from its sightings alone (<see cref="QueryTagMapBuilder"/> has what an
+/// extend does in between).
 ///
 /// <para>The row has no <c>text_sample</c>, which is up to <see cref="QueryTagSchema.TextSampleMaxLength"/> characters and most of a
 /// sighting's width. A <c>text</c> or <c>text_tag</c> rule therefore reads only the sightings table, and tags a key seen inside
