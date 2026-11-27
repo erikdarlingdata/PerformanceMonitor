@@ -1234,7 +1234,7 @@ public static class PgTableTuning
                             ? ShortenedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout)
                             : recorded
                                 ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, commandTimeout)
-                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
+                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout));
                 }
                 else
                 {
@@ -1295,10 +1295,13 @@ public static class PgTableTuning
         return false;
     }
 
-    /// <summary>The warning for a start-path index build that timed out.</summary>
-    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
+    /// <summary>
+    /// The warning for a start-path index build that timed out. <paramref name="limitSeconds"/> is the limit the build ran under, which is
+    /// whole seconds of what is left of the start's shared build time when that falls under a second short of the build's own limit.
+    /// </summary>
+    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds, int limitSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
 
     /// <summary>
     /// The warning for a start-path index build that ran under what earlier builds left of the start's shared build time (#9795)
@@ -1308,7 +1311,10 @@ public static class PgTableTuning
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built at this start: the index builds of one start share {StartBuildBudgetSeconds} s, the builds before this one left it {limitSeconds} s, and it ran out of that after {elapsedSeconds:F0} s and was rolled back; the next service start tries it again");
 
-    /// <summary>The warning for a bounded start-path index build (#9289) that timed out and was recorded.</summary>
+    /// <summary>
+    /// The warning for a bounded start-path index build (#9289) that timed out and was recorded. <paramref name="limitSeconds"/> is the
+    /// limit the build ran under, as for <see cref="BuildTimeoutMessage"/>.
+    /// </summary>
     internal static string BoundedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, long heapPages, int limitSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) with {heapPages} uncompressed heap pages and was rolled back; the next start does not try it again for {PgIndexBuildAttempts.RetryAfter.TotalHours:F0} hours unless the table has fewer uncompressed pages by then, and the reader keeps its old shape until the index exists");

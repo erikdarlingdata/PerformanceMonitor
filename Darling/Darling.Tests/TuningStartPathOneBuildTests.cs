@@ -264,7 +264,8 @@ public sealed class TuningStartPathOneBuildTests
             Assert.Equal(1L, records);
             Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
                 && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
-                && l.Contains("uncompressed heap pages", StringComparison.Ordinal));
+                && l.Contains("uncompressed heap pages", StringComparison.Ordinal)
+                && l.Contains("(limit 299 s)", StringComparison.Ordinal));
             Assert.DoesNotContain(log.Lines, l => l.Contains("was not built at this start", StringComparison.Ordinal));
 
             var next = new CapturingTestLogger();
@@ -293,7 +294,8 @@ public sealed class TuningStartPathOneBuildTests
             Assert.Contains("up to 295 s", Assert.Single(BeforeBuildLines(log, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2])), StringComparison.Ordinal);
             Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
                 && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
-                && l.Contains("was not built at this start", StringComparison.Ordinal));
+                && l.Contains("was not built at this start", StringComparison.Ordinal)
+                && l.Contains("left it 295 s", StringComparison.Ordinal));
             Assert.DoesNotContain(log.Lines, l => l.Contains("uncompressed heap pages", StringComparison.Ordinal));
 
             var next = new CapturingTestLogger();
@@ -321,8 +323,10 @@ public sealed class TuningStartPathOneBuildTests
             Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
             Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
             Assert.Equal(expectedRecords, records);
-            Assert.Equal(expectedRecords == 1L, log.Lines.Any(l => l.Contains("uncompressed heap pages", StringComparison.Ordinal)));
-            Assert.Equal(expectedRecords == 0L, log.Lines.Any(l => l.Contains("was not built at this start", StringComparison.Ordinal)));
+            Assert.Equal(expectedRecords == 1L, log.Lines.Any(l => l.Contains("uncompressed heap pages", StringComparison.Ordinal)
+                && l.Contains("(limit 119 s)", StringComparison.Ordinal)));
+            Assert.Equal(expectedRecords == 0L, log.Lines.Any(l => l.Contains("was not built at this start", StringComparison.Ordinal)
+                && l.Contains("left it 118 s", StringComparison.Ordinal)));
         }
     }
 
@@ -518,10 +522,15 @@ public sealed class TuningStartPathOneBuildTests
     [Fact]
     public void TheTimeoutWarning_NamesTheIndexTheTableTheElapsedTimeAndTheRetry()
     {
-        var message = PgTableTuning.BuildTimeoutMessage("idx_demo", "collect.query_stats", 301.4);
+        var message = PgTableTuning.BuildTimeoutMessage("idx_demo", "collect.query_stats", 301.4, 300);
         Assert.Equal(
             "Index collect.idx_demo on collect.query_stats was not built: the build ran out of time after 301 s (limit 300 s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to 300 s",
             message);
+
+        /* #9827: a build that ran under the whole seconds left of the start's time names that limit, and the next try still has its own. */
+        Assert.Equal(
+            "Index collect.idx_demo on collect.query_stats was not built: the build ran out of time after 299 s (limit 299 s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to 300 s",
+            PgTableTuning.BuildTimeoutMessage("idx_demo", "collect.query_stats", 299.2, 299));
     }
 
     [Fact]
