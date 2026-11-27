@@ -80,7 +80,20 @@ public class PgAnomalyDetector : IAnomalyDetector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly PgBaselineProvider _baselineProvider;
-    private readonly ILogger? _logger;
+    private readonly ILogger? _passLogger;
+
+    /* #9879: the log the current async flow writes to. A detector that runs beside the others writes to a held log of
+       its own, which the pass then writes out in detector order. Every other flow writes to the pass's logger. */
+    private readonly AsyncLocal<ILogger?> _flowLogger = new();
+
+    private ILogger? Logger => _flowLogger.Value ?? _passLogger;
+
+    /// <summary>
+    /// The most detectors one pass runs at once (#9879). A detector holds its own pooled connection, and the I/O
+    /// detector also waits on a baseline compute that holds a second one, so the detectors of one pass hold at most
+    /// twice this many connections.
+    /// </summary>
+    internal const int MaxDetectorParallelism = 4;
 
     /// <summary>
     /// Per-metric deviation thresholds. Metrics not listed use DefaultDeviationThreshold.
@@ -91,7 +104,7 @@ public class PgAnomalyDetector : IAnomalyDetector
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _baselineProvider = baselineProvider ?? throw new ArgumentNullException(nameof(baselineProvider));
-        _logger = logger;
+        _passLogger = logger;
     }
 
     /// <summary>
@@ -160,20 +173,119 @@ public class PgAnomalyDetector : IAnomalyDetector
         if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
-        // Existing detection methods (upgraded to time-bucketed baselines)
-        await DetectCpuAnomalies(context, anomalies);
-        await DetectWaitAnomalies(context, anomalies);
-        await DetectBlockingAnomalies(context, anomalies);
-        await DetectIoAnomalies(context, anomalies);
+        /* The nine detectors, in the order their facts and their failure lines are reported. */
+        Func<AnalysisContext, List<Fact>, Task>[] detectors =
+        [
+            DetectCpuAnomalies,
+            DetectWaitAnomalies,
+            DetectBlockingAnomalies,
+            DetectIoAnomalies,
+            DetectBatchRequestAnomalies,
+            DetectSessionAnomalies,
+            DetectQueryDurationAnomalies,
+            DetectMemoryAnomalies,
+            DetectObjectStatsAnomalies
+        ];
 
-        // New detection methods
-        await DetectBatchRequestAnomalies(context, anomalies);
-        await DetectSessionAnomalies(context, anomalies);
-        await DetectQueryDurationAnomalies(context, anomalies);
-        await DetectMemoryAnomalies(context, anomalies);
-        await DetectObjectStatsAnomalies(context, anomalies);
-
+        await RunDetectorsAsync(context, anomalies, detectors, Math.Clamp(context.DetectorParallelism, 1, MaxDetectorParallelism));
         return anomalies;
+    }
+
+    /// <summary>
+    /// Runs the detectors and appends their facts to <paramref name="anomalies"/> in the order the detectors are listed,
+    /// whatever order they finish in (#9879). The detectors do not read each other's facts and each opens its own
+    /// connection, so on a long window the wait for nine of them one after another is the sum of their store reads.
+    ///
+    /// <para>With <paramref name="parallelism"/> at 1 each detector runs against the shared list in turn. Above 1, at
+    /// most that many run at once, each with a list and a held log of its own, and both are merged in detector order
+    /// once every detector has settled: a failing detector's line is written where it is when the detectors run in
+    /// turn, and the others still add their facts. If a detector throws (only a stop from the pass's own token gets out
+    /// of one), the pass waits for the detectors already running, starts none it has not started, keeps what the
+    /// detectors before the failing one produced, and rethrows the failure of the earliest detector in the list.</para>
+    /// </summary>
+    internal async Task RunDetectorsAsync(
+        AnalysisContext context,
+        List<Fact> anomalies,
+        IReadOnlyList<Func<AnalysisContext, List<Fact>, Task>> detectors,
+        int parallelism)
+    {
+        if (parallelism <= 1 || detectors.Count < 2)
+        {
+            foreach (var detector in detectors)
+                await detector(context, anomalies);
+            return;
+        }
+
+        var lists = new List<Fact>?[detectors.Count];
+        var logs = new HeldLog?[detectors.Count];
+        var tasks = new Task[detectors.Count];
+        var stopStarting = 0;
+        using var gate = new SemaphoreSlim(parallelism);
+
+        for (var i = 0; i < detectors.Count; i++)
+            tasks[i] = RunOne(i);
+
+        /* Waits for every detector to settle, failed or not. (A continuation, not a catch: this is not a read.) */
+        await Task.WhenAll(tasks).ContinueWith(static _ => { }, TaskScheduler.Default);
+
+        var firstFailed = Array.FindIndex(tasks, t => t.IsFaulted || t.IsCanceled);
+        var merged = firstFailed < 0 ? detectors.Count : firstFailed + 1;
+        for (var i = 0; i < merged; i++)
+        {
+            if (logs[i] is { } held && _passLogger is { } passLogger)
+                held.WriteTo(passLogger);
+            if (i != firstFailed && lists[i] is { } detectorFacts)
+                anomalies.AddRange(detectorFacts);
+        }
+
+        if (firstFailed >= 0)
+            await tasks[firstFailed];
+
+        async Task RunOne(int index)
+        {
+            await gate.WaitAsync(CancellationToken.None);
+            var finished = false;
+            try
+            {
+                if (Volatile.Read(ref stopStarting) != 0)
+                {
+                    finished = true;
+                    return;
+                }
+
+                lists[index] = [];
+                if (_passLogger is { } passLogger)
+                    _flowLogger.Value = logs[index] = new HeldLog(passLogger);
+                await detectors[index](context, lists[index]!);
+                finished = true;
+            }
+            finally
+            {
+                if (!finished)
+                    Volatile.Write(ref stopStarting, 1);
+                gate.Release();
+            }
+        }
+    }
+
+    /* #9879: holds the lines one detector logs while the detectors run side by side. One detector writes to it, on its own
+       async flow, and the pass reads it after that detector has settled. */
+    private sealed class HeldLog(ILogger target) : ILogger
+    {
+        private readonly List<Action<ILogger>> _lines = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => target.IsEnabled(logLevel);
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            _lines.Add(logger => logger.Log(logLevel, eventId, state, exception, formatter));
+
+        public void WriteTo(ILogger logger)
+        {
+            foreach (var line in _lines)
+                line(logger);
+        }
     }
 
     /* ---------------- SQL (Lite-verbatim, PG dialect only where forced) ---------------- */
@@ -687,7 +799,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -820,7 +932,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1047,7 +1159,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1155,7 +1267,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1359,7 +1471,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1459,7 +1571,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1559,7 +1671,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1660,7 +1772,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
         }
     }
 
@@ -1762,7 +1874,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
+            Logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
         }
     }
 

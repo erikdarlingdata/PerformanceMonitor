@@ -410,6 +410,13 @@ public class AnalysisContext
     /// </summary>
     public int FamilyParallelism { get; set; } = 1;
 
+    /// <summary>
+    /// How many of the anomaly detector's detectors a pass may run at once (#9879). 1, the default, runs them one after
+    /// another: the scheduled pass and every read that does not set it. An on-demand pass sets it above 1, so the
+    /// detectors' store reads overlap. The detector caps it at its own ceiling.
+    /// </summary>
+    public int DetectorParallelism { get; set; } = 1;
+
     private readonly AsyncLocal<List<CollectionFailure>?> _failureBuffer = new();
 
     /// <summary>
