@@ -256,25 +256,23 @@ public sealed class TuningStartPathOneBuildTests
     public async Task ATimeoutOfTheBoundedBuild_AfterAnEarlierBuildOfUnderASecond_IsRecorded()
     {
         var ct = TestContext.Current.CancellationToken;
-        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 0.5, ct);
-        await using (store)
-        {
-            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
-            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
-            Assert.Equal(1L, records);
-            Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
-                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
-                && l.Contains("uncompressed heap pages", StringComparison.Ordinal)
-                && l.Contains("(limit 299 s)", StringComparison.Ordinal));
-            Assert.DoesNotContain(log.Lines, l => l.Contains("was not built at this start", StringComparison.Ordinal));
+        var (scratch, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 0.5, ct);
+        await using var _ = scratch;
+        Assert.True(await IndexExistsAsync(scratch.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+        Assert.False(await IndexExistsAsync(scratch.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+        Assert.Equal(1L, records);
+        Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+            && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+            && l.Contains("uncompressed heap pages", StringComparison.Ordinal)
+            && l.Contains("(limit 299 s)", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("was not built at this start", StringComparison.Ordinal));
 
-            var next = new CapturingTestLogger();
-            await PgTableTuning.ApplyAsync(store.Body, next, ct);
-            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
-            Assert.Single(next.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
-                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
-                && l.Contains("is not built this start", StringComparison.Ordinal));
-        }
+        var next = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(scratch.Body, next, ct);
+        Assert.False(await IndexExistsAsync(scratch.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
+        Assert.Single(next.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+            && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+            && l.Contains("is not built this start", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -285,23 +283,21 @@ public sealed class TuningStartPathOneBuildTests
     public async Task ATimeoutOfTheBoundedBuild_AfterAnEarlierBuildOfSeveralSeconds_IsNotRecorded()
     {
         var ct = TestContext.Current.CancellationToken;
-        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 5, ct);
-        await using (store)
-        {
-            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
-            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
-            Assert.Equal(0L, records);
-            Assert.Contains("up to 295 s", Assert.Single(BeforeBuildLines(log, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2])), StringComparison.Ordinal);
-            Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
-                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
-                && l.Contains("was not built at this start", StringComparison.Ordinal)
-                && l.Contains("left it 295 s", StringComparison.Ordinal));
-            Assert.DoesNotContain(log.Lines, l => l.Contains("uncompressed heap pages", StringComparison.Ordinal));
+        var (scratch, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 5, ct);
+        await using var _ = scratch;
+        Assert.True(await IndexExistsAsync(scratch.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+        Assert.False(await IndexExistsAsync(scratch.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+        Assert.Equal(0L, records);
+        Assert.Contains("up to 295 s", Assert.Single(BeforeBuildLines(log, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2])), StringComparison.Ordinal);
+        Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+            && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+            && l.Contains("was not built at this start", StringComparison.Ordinal)
+            && l.Contains("left it 295 s", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("uncompressed heap pages", StringComparison.Ordinal));
 
-            var next = new CapturingTestLogger();
-            await PgTableTuning.ApplyAsync(store.Body, next, ct);
-            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
-        }
+        var next = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(scratch.Body, next, ct);
+        Assert.True(await IndexExistsAsync(scratch.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
     }
 
     /// <summary>
@@ -317,17 +313,15 @@ public sealed class TuningStartPathOneBuildTests
         double earlierBuildSeconds, long expectedRecords)
     {
         var ct = TestContext.Current.CancellationToken;
-        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds, ct, boundedLimitSeconds: 120);
-        await using (store)
-        {
-            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
-            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
-            Assert.Equal(expectedRecords, records);
-            Assert.Equal(expectedRecords == 1L, log.Lines.Any(l => l.Contains("uncompressed heap pages", StringComparison.Ordinal)
-                && l.Contains("(limit 119 s)", StringComparison.Ordinal)));
-            Assert.Equal(expectedRecords == 0L, log.Lines.Any(l => l.Contains("was not built at this start", StringComparison.Ordinal)
-                && l.Contains("left it 118 s", StringComparison.Ordinal)));
-        }
+        var (scratch, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds, ct, boundedLimitSeconds: 120);
+        await using var _ = scratch;
+        Assert.True(await IndexExistsAsync(scratch.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+        Assert.False(await IndexExistsAsync(scratch.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+        Assert.Equal(expectedRecords, records);
+        Assert.Equal(expectedRecords == 1L, log.Lines.Any(l => l.Contains("uncompressed heap pages", StringComparison.Ordinal)
+            && l.Contains("(limit 119 s)", StringComparison.Ordinal)));
+        Assert.Equal(expectedRecords == 0L, log.Lines.Any(l => l.Contains("was not built at this start", StringComparison.Ordinal)
+            && l.Contains("left it 118 s", StringComparison.Ordinal)));
     }
 
     /// <summary>
