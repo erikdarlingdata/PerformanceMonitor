@@ -10,6 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -104,5 +107,50 @@ public sealed class StoreObjectConvergenceOncePerStartTests
 
         var later = DarlingWorker.SelectHourlyConvergenceSteps(DarlingWorker.StoreObjectConvergence, timescaleAvailable: true, null, out _);
         Assert.Equal(DarlingWorker.StoreObjectConvergence.Count, later.Count);
+    }
+
+    /// <summary>
+    /// The hourly line is the proof the hourly path is wired on this store (#3817), so a first pass that has nothing left to run
+    /// still writes it at Information, saying why. The store is a data source on a closed port: a pass that opened a connection
+    /// would fail on it and log the "could not run" warning instead.
+    /// </summary>
+    [Fact]
+    public async Task WhenEveryStepRanAtStartup_TheFirstHourlyPassLogsOneInformationLine_AndOpensNoConnection()
+    {
+        var logger = new WorkerLogger();
+        await using var closedStore = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1;Pooling=false").Build();
+        var worker = new DarlingWorker(
+            logger,
+            NullLoggerFactory.Instance,
+            new McpRuntimeState(),
+            new WebRuntimeState(),
+            new MonitoredServerRegistryState(),
+            new CollectorRuntimeState(),
+            new WebTlsCertificateState(),
+            new BaselineCache(),
+            new ReadLatencyAccumulator())
+        {
+            StoreForTests = closedStore,
+        };
+
+        await worker.RunFirstHourlyConvergenceForTestsAsync(
+            DarlingWorker.StoreObjectConvergence.Select(s => s.Name), timescaleAvailable: false, TestContext.Current.CancellationToken);
+
+        var convergenceLines = logger.Captured.Lines.Where(l => l.Contains("Store object convergence", StringComparison.Ordinal)).ToList();
+        var line = Assert.Single(convergenceLines, l => l.StartsWith("Information: Store object convergence:", StringComparison.Ordinal));
+        Assert.DoesNotContain("at startup", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(convergenceLines, l => l.Contains("could not run", StringComparison.Ordinal));
+    }
+
+    private sealed class WorkerLogger : ILogger<DarlingWorker>
+    {
+        public CapturingTestLogger Captured { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Captured.Log(logLevel, eventId, state, exception, formatter);
     }
 }

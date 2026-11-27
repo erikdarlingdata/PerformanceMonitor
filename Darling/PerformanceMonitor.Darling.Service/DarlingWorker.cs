@@ -1007,6 +1007,13 @@ public sealed partial class DarlingWorker : BackgroundService
         set => _postgres = value;
     }
 
+    /// <summary>#9858: lets a test run the first hourly convergence pass as a start leaves it, with the set of steps the start's own pass completed.</summary>
+    internal async Task RunFirstHourlyConvergenceForTestsAsync(IEnumerable<string> ranAtStartup, bool timescaleAvailable, CancellationToken cancellationToken)
+    {
+        _convergedAtStartup = new HashSet<string>(ranAtStartup, StringComparer.Ordinal);
+        await ConvergeStoreObjectsAsync(cancellationToken, timescaleAvailable);
+    }
+
     /// <summary>
     /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
     /// a server both monitor. Made (or read back) once at start, after the store's migrations and before any worker,
