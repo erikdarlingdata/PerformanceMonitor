@@ -3496,8 +3496,10 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     ///
     /// <para><paramref name="bitmapSliceTimeColumn"/> (#9796, collect.query_tag_sightings only) ignores <paramref name="deleteSql"/> and
     /// runs each slice as two statements: <see cref="SliceBoundsProbeSql"/> reads the slice's bounds, then
-    /// <see cref="BoundedSliceDeleteSql"/> deletes it inside <see cref="WithSliceDeleteScanSettingAsync"/>. The slices, their order and
-    /// the rows they delete are those of <see cref="TimeSlicedDeleteSql"/>, and a probe that finds no expired row ends the drain.</para>
+    /// <see cref="BoundedSliceDeleteSql"/> deletes it inside <see cref="WithSliceDeleteScanSettingAsync"/>. On a store with no write
+    /// between the two, the slices, their order and the rows they delete are those of <see cref="TimeSlicedDeleteSql"/>, and a probe
+    /// that finds no expired row ends the drain. The probe and the DELETE read two snapshots, so a slice whose every row the sighting
+    /// writer moves past the cutoff between them deletes 0 rows and ends the drain early, and the next sweep goes on from there.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
