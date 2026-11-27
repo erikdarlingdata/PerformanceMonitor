@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -28,6 +29,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// waiting at its budget does not stop it. Every store read in it takes the cap's token, so at the cap its statements are cancelled and their
 /// connections go back to the pool.</para>
 ///
+/// <para><b>Where it is recorded.</b> The computation is a read of its own: it runs in its own <see cref="ReadScope"/>, which holds
+/// its statements, its connection waits and its window, and counts in the reads in progress. When it takes as long as the slow-read
+/// threshold, or ends at its cap or in an error, it is one row of the slow-read record under <see cref="Route"/>, written to the log
+/// of the call that started it and as that call's caller. The starting call's own row holds none of it. It takes no read-admission
+/// slot: one per store is its bound, and a slot of its own would make a call at a limit of one wait out its budget for a
+/// computation queued behind that same call.</para>
+///
 /// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's budget. From then on a
 /// call for the same key answers at once: still computing, the kept reference, or unfinished.</para>
 ///
@@ -42,6 +50,9 @@ internal static class QueryStoreClutterFleetReference
 
     /// <summary>The read bar, in seconds (#8570): a reference that took longer than this is kept for the clock hour.</summary>
     internal const int KeepAboveSeconds = 5;
+
+    /// <summary>The route a computation is recorded under in the slow-read record: the tool's name and what it computes.</summary>
+    internal const string Route = "get_query_store_clutter.fleet_reference";
 
     /// <summary>The reference and the window it was computed over.</summary>
     internal sealed record Reference(QueryStoreClutter.FleetMedian Median, int EnabledSqlServerTargets, DateTime WindowStartUtc, DateTime WindowEndUtc);
@@ -88,6 +99,8 @@ internal static class QueryStoreClutterFleetReference
         var flights = s_stores.GetValue(postgres, static _ => new Dictionary<Key, Flight>());
         var key = new Key(hoursBack, FloorHour(windowEndUtc), anchored);
         var now = clock.GetUtcNow().UtcDateTime;
+        /* The scope of the call that starts a computation: the computation records where that call's recorder does. */
+        var starter = ReadScope.Current;
         Flight flight;
         var started = false;
         lock (flights)
@@ -111,11 +124,12 @@ internal static class QueryStoreClutterFleetReference
                 var mine = flight = new Flight(now, clock.GetTimestamp());
                 flights[key] = mine;
                 /* Task.Run, so none of the computation runs under the lock. It outlives the call that starts it, so it leaves that
-                   call's read scope first: a statement that ends after the call answered is no part of the call's record. */
+                   call's read scope first: a statement that ends after the call answered is no part of the call's record. RunAsync
+                   then opens the computation's own scope. */
                 mine.Task = Task.Run(() =>
                 {
                     ReadScope.Detach();
-                    return RunAsync(flights, key, mine, compute, clock, logger);
+                    return RunAsync(flights, key, mine, compute, clock, logger, starter, windowEndUtc);
                 });
                 /* A failure after every call has stopped waiting is logged in RunAsync and observed here. */
                 _ = mine.Task.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
@@ -161,24 +175,34 @@ internal static class QueryStoreClutterFleetReference
     }
 
     private static async Task<Outcome> RunAsync(
-        Dictionary<Key, Flight> flights, Key key, Flight flight, Func<CancellationToken, Task<Reference>> compute, TimeProvider clock, ILogger? logger)
+        Dictionary<Key, Flight> flights, Key key, Flight flight, Func<CancellationToken, Task<Reference>> compute, TimeProvider clock, ILogger? logger,
+        ReadScope? starter, DateTime windowEndUtc)
     {
+        /* The computation's own read scope: every statement, connection wait and note from here on is this read's, and Offer below
+           writes its slow-read row. The window is noted first, as a tool notes its own before any reader it calls. */
+        using var readScope = ReadScope.OpenStartedBy(starter, logger);
+        ReadScope.NoteWindow(key.HoursBack, windowEndUtc);
         using var cap = new CancellationTokenSource(TimeSpan.FromSeconds(CapSeconds));
         try
         {
             if (ComputationSeam.Value is { } seam) await seam(cap);
             var reference = await compute(cap.Token);
-            var seconds = clock.GetElapsedTime(flight.StartedTimestamp).TotalSeconds;
+            var elapsed = clock.GetElapsedTime(flight.StartedTimestamp);
+            var seconds = elapsed.TotalSeconds;
             if (seconds <= KeepAboveSeconds)
             {
                 Remove(flights, key, flight);
             }
 
+            Offer(readScope.Scope, key, ReadScope.Resolve(ReadOutcome.Ok, readScope.Fallback), elapsed, errorClass: null);
             return new Outcome(reference, clock.GetUtcNow().UtcDateTime, seconds);
         }
         catch (Exception ex) when (IsUnfinished(ex, cap.Token))
         {
-            var seconds = clock.GetElapsedTime(flight.StartedTimestamp).TotalSeconds;
+            var elapsed = clock.GetElapsedTime(flight.StartedTimestamp);
+            var seconds = elapsed.TotalSeconds;
+            /* Out of time, at the cap or at a statement's deadline: a timeout, as a tool read that ends at its deadline is. */
+            Offer(readScope.Scope, key, ReadOutcome.Timeout, elapsed, SlowReadLog.ErrorClassOf(ex));
             logger?.LogWarning(
                 "get_query_store_clutter: the fleet reference over {HoursBack} hours did not finish ({Seconds:F1} s, cap {Cap} s); it is not retried this clock hour.",
                 key.HoursBack, seconds, CapSeconds);
@@ -187,10 +211,16 @@ internal static class QueryStoreClutterFleetReference
         catch (Exception ex)
         {
             Remove(flights, key, flight);
+            Offer(readScope.Scope, key, ReadOutcomeClassifier.Classify(ex, CancellationToken.None), clock.GetElapsedTime(flight.StartedTimestamp), SlowReadLog.ErrorClassOf(ex));
             logger?.LogWarning(ex, "get_query_store_clutter: the fleet reference over {HoursBack} hours failed.", key.HoursBack);
             throw;
         }
     }
+
+    /// <summary>Offers one ended computation to the slow-read record under <see cref="Route"/>, with the <c>hours_back</c> it was
+    /// computed over as its arguments. The log decides whether it is worth a row, as it does for a tool read.</summary>
+    private static void Offer(ReadScope scope, Key key, ReadOutcome outcome, TimeSpan elapsed, string? errorClass) =>
+        scope.OfferSlow(Route, outcome, (long)elapsed.TotalMilliseconds, new JsonObject { ["hours_back"] = key.HoursBack }, errorClass);
 
     /// <summary>True when the computation ran out of time: the cap fired, or the store cancelled a statement (<c>57014</c>, which
     /// the cap's own cancel request raises and so does the store role's <c>statement_timeout</c>).</summary>

@@ -851,7 +851,7 @@ public sealed class QueryStoreClutterLivePostgresTests
     /// <summary>
     /// #9882: the computation runs outside the read scope of the call that starts it, because it can outlive that call and the
     /// call's record is written when the call answers. The call runs inside a scope, the computation seam notes the scope the
-    /// computation runs in, and that is none. The call's own flow keeps its scope.
+    /// computation runs in, and that is a scope of its own, opened outside every other. The call's own flow keeps its scope.
     /// </summary>
     [Fact]
     public async Task TheFleetComputation_RunsOutsideTheStartingCallsReadScope()
@@ -877,8 +877,94 @@ public sealed class QueryStoreClutterLivePostgresTests
         {
             Assert.NotEqual("null", (await FleetOfAsync(postgres, asOf)).Median);
             Assert.Equal(1, Volatile.Read(ref computations));
-            Assert.Null(Volatile.Read(ref computationScope));
+            var own = Volatile.Read(ref computationScope);
+            Assert.NotNull(own);
+            Assert.NotSame(opened.Scope, own);
+            Assert.True(own.IsOutermost, "the computation's scope is nested in the starting call's");
             Assert.Same(opened.Scope, ReadScope.Current);
+        }
+        finally
+        {
+            ClearFleetSeams();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+        }
+    }
+
+    /// <summary>
+    /// #9882: the fleet computation is a read of its own in the slow-read record. Each call runs in a scope whose recorder names a
+    /// slow-read log, as the MCP filter's does. The computation seam moves the clock, so "as long as the threshold" is set, never
+    /// waited for. A cheap computation writes no row. One that took as long as the threshold writes one row under the computation's
+    /// own route, as the starting call's caller, with the window it read and the statements it ran. The starting call's scope holds
+    /// the same number of statements with the fleet arm as without it, so none of the fleet statements are in the call's row.
+    /// </summary>
+    [Fact]
+    public async Task AFleetComputationOverTheSlowReadBar_WritesOneRowUnderItsOwnRoute_AndACheapOneWritesNone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connectionString, asOf) = await PlantedStoreAsync(ct);
+        await using var dropScratch = scratch;
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        ReadStatementCapture.Register();
+
+        const string caller = "the starting caller";
+        var slowReads = new SlowReadLog();
+        var clock = new ManualClock(new DateTime(2026, 3, 10, 14, 10, 0, DateTimeKind.Utc));
+        var took = TimeSpan.Zero;
+        QueryStoreClutterFleetReference.Clock.Value = clock;
+        QueryStoreClutterFleetReference.ComputationSeam.Value = _ =>
+        {
+            clock.Advance(took);
+            return Task.CompletedTask;
+        };
+
+        /* One call in a recorder's scope: the statements the call's own scope saw. */
+        async Task<int> CallAsync(bool fleet)
+        {
+            using var opened = ReadScope.Open(null);
+            opened.Scope.CaptureStatements = true;
+            opened.Scope.RecordsTo(slowReads, ReadSurface.Mcp, caller);
+            var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, include_fleet_median: fleet, as_of: asOf);
+            Assert.False(McpHelpers.IsErrorEnvelope(json), json);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(fleet, doc.RootElement.GetProperty("fleet_median").ValueKind == JsonValueKind.Object);
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+            return opened.Scope.StatementTotal;
+        }
+
+        try
+        {
+            /* the first call of each kind pays for whatever a data source reads once, so neither is the one compared */
+            await CallAsync(fleet: true);
+            await CallAsync(fleet: false);
+            var withoutFleet = await CallAsync(fleet: false);
+            Assert.True(withoutFleet > 0, "the call's scope saw no statement");
+
+            /* cheap: the clock did not move, so the computation is under the threshold and writes nothing */
+            Assert.Equal(withoutFleet, await CallAsync(fleet: true));
+            Assert.False(slowReads.TryRead(out _), "a cheap computation wrote a slow-read row");
+
+            /* as long as the threshold: one row, the computation's own */
+            took = TimeSpan.FromMilliseconds(slowReads.ThresholdMs);
+            Assert.Equal(withoutFleet, await CallAsync(fleet: true));
+            Assert.True(slowReads.TryRead(out var row), "a computation as long as the threshold wrote no slow-read row");
+            Assert.Equal(QueryStoreClutterFleetReference.Route, row!.Route);
+            Assert.Equal("mcp", row.Surface);
+            Assert.Equal(slowReads.ThresholdMs, row.TotalMs);
+            Assert.Null(row.ErrorClass);
+            Assert.Equal(caller, row.Caller);
+            /* the five fleet reads at the least: the targets, read cost, plan churn, config and waits */
+            Assert.True(row.StatementCount >= 5, $"the row holds {row.StatementCount} statements");
+            using (var statements = JsonDocument.Parse(row.StatementsJson))
+            {
+                Assert.Equal(Math.Min(row.StatementCount, SlowReadLog.MaxStatementsStored), statements.RootElement.GetArrayLength());
+            }
+            Assert.NotNull(row.WindowStart);
+            Assert.NotNull(row.WindowEnd);
+            Assert.Equal(TimeSpan.FromHours(24), row.WindowEnd!.Value - row.WindowStart!.Value);
+            Assert.Contains("\"hours_back\":24", row.ArgumentsJson);
+            Assert.False(slowReads.TryRead(out _), "one computation wrote more than one slow-read row");
         }
         finally
         {

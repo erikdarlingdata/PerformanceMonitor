@@ -137,6 +137,9 @@ public sealed class McpToolLatencyFilter
             /* #9641: a server admin tool runs statements that carry a login's password verifier, on the store owner's data source, which this
                listener hears too. Its statements are never captured, so no slow-read line can show them. */
             readScope.Scope.CaptureStatements = !DarlingMcpWritePolicy.IsServerAdmin(toolName);
+            /* #9882: a read this call starts and leaves running (the fleet reference of get_query_store_clutter) offers its own
+               slow-read row to the same log, as this caller's. */
+            readScope.Scope.RecordsTo(_slowReads, ReadSurface.Mcp, caller);
             var windowBand = WindowBandOf(request);
 
             /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
