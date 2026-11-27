@@ -791,12 +791,12 @@ public static partial class DarlingCliCommands
 
     /// <summary>#9851: what starts the service on the host the help is printed for, named in the first usage line. The Windows form is the one
     /// whose entry point is <see cref="OperatorVerbForm.WindowsEntryPoint"/> (<see cref="OperatorVerbForm.EntryPoint"/> returns it for every
-    /// Windows folder), so the Service Control Manager is named only there. Every other form is the <c>dotnet</c> one, started by the systemd unit
-    /// the Linux tarball installs.</summary>
+    /// Windows folder), so the Service Control Manager is named only there. Every other form is the <c>dotnet</c> one, which the systemd unit
+    /// of the Linux tarball starts on a host and the image's entry point starts in a container, so both are named.</summary>
     private static string ServiceStarterText(string entryPoint) =>
         string.Equals(entryPoint, OperatorVerbForm.WindowsEntryPoint, StringComparison.Ordinal)
             ? "the Windows Service Control Manager"
-            : "the darling.service systemd unit";
+            : "the darling.service systemd unit or the container's entry point";
 
     /// <summary>The same text for an entry point given by the caller, so a test can ask for the Windows and the Linux form without changing the platform (#9751). Every usage line starts with <paramref name="entryPoint"/>, and the descriptions keep their relative spacing because every line shares that prefix.</summary>
     public static string UsageText(string entryPoint) =>
