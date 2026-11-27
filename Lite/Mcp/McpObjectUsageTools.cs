@@ -8,10 +8,12 @@
 
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -48,10 +50,10 @@ public sealed class McpObjectUsageTools
         [Description("The database to report on. Required: the window read is per database.")] string? database_name = null) =>
         GetObjectUsage(dataService, serverManager, server_name, database_name, days_back, limit, offset, DateTime.UtcNow, s_cache);
 
-    /// <summary>The tool with "now" supplied, so a test can pin the window. With no <paramref name="cache"/> every call reads the store.</summary>
+    /// <summary>The tool with "now" supplied, so a test can pin the window. With no <paramref name="cache"/> every call reads the store, and a test passes its own <paramref name="scanCache"/> to count the statement parses.</summary>
     internal static async Task<string> GetObjectUsage(
         LocalDataService dataService, ServerManager serverManager, string? server_name, string? database_name, int days_back, int limit, int offset,
-        DateTime nowUtc, ObjectUsageEvidenceCache? cache = null)
+        DateTime nowUtc, ObjectUsageEvidenceCache? cache = null, PerformanceMonitor.Analysis.ObjectReferences.QueryTextScanCache? scanCache = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -73,6 +75,11 @@ public sealed class McpObjectUsageTools
             return McpHelpers.Refusal("offset", "offset must be zero or more.");
         }
 
+        /* #9885: the call's phases and which path read the tables, for the slow-call row and the Information line the finally block writes. */
+        using var lockWaits = ReadLockWaitTally.Begin();
+        var phases = new ReadPhaseSplit();
+        lockWaits.MarkSplitKept();
+        string? answeredFrom = null;
         try
         {
             var database = database_name.Trim();
@@ -83,10 +90,16 @@ public sealed class McpObjectUsageTools
 
                 /* The index stats' last_user_* stamps are the server's local clock in the store; the reply converts each at its own instant
                    through this server's clock, as get_index_usage does (#4793). */
-                var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
-                var tables = await dataService.GetObjectUsageWindowAsync(resolved.ServerId, database, windowStart);
-                var executions = await dataService.GetObjectExecutionsAsync(resolved.ServerId, database, windowStart);
-                var references = await dataService.GetObjectReferencesAsync(resolved.ServerId, database, windowStart, executions);
+                var serverClock = await phases.TimeAsync("server clock", () => McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId));
+
+                /* The phase is named for the path that read the tables, so the line says it without a second field. */
+                var tablesStarted = Stopwatch.GetTimestamp();
+                var tablesRead = await dataService.GetObjectUsageTablesAsync(resolved.ServerId, database, windowStart);
+                phases.Add(tablesRead.AnsweredFrom == "chain" ? "tables from chain" : "tables from fold", Stopwatch.GetTimestamp() - tablesStarted);
+                answeredFrom = tablesRead.AnsweredFrom;
+                var tables = tablesRead.Result;
+                var executions = await phases.TimeAsync("executions", () => dataService.GetObjectExecutionsAsync(resolved.ServerId, database, windowStart));
+                var references = await dataService.GetObjectReferencesAsync(resolved.ServerId, database, windowStart, executions, phases, scanCache);
 
                 if (tables.SnapshotCount == 0 && executions.Modules.Count == 0 && references.References.Count == 0)
                 {
@@ -100,7 +113,7 @@ public sealed class McpObjectUsageTools
 
                 evidence = new ObjectUsageEvidence(
                     windowStart, nowUtc,
-                    [new ObjectUsageSide(resolved.DisplayName, tables, serverClock.ToUtc, executions, Inventory: null, References: references)]);
+                    [new ObjectUsageSide(resolved.DisplayName, tables, serverClock.ToUtc, executions, Inventory: null, References: references, AnsweredFrom: answeredFrom)]);
                 cache?.Set(cacheKey, evidence);
             }
 
@@ -119,5 +132,26 @@ public sealed class McpObjectUsageTools
         {
             return McpHelpers.FormatError("get_object_usage", ex);
         }
+        finally
+        {
+            ReportSlowRead(resolved.DisplayName, resolved.ServerId, days_back, answeredFrom, phases, lockWaits);
+        }
+    }
+
+    /// <summary>
+    /// #9885: hands the call's path and phases to the slow-call row, and writes one Information line when the call took over
+    /// <see cref="ReadLockWaitTally.SlowReadThreshold"/>, the way <c>get_query_store_top</c> does. "other" is what no phase accounts for. A call
+    /// answered from the evidence cache read nothing, so it names no path.
+    /// </summary>
+    private static void ReportSlowRead(string serverName, int serverId, int daysBack, string? answeredFrom, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
+    {
+        var total = phases.Total;
+        var split = phases.Describe(total);
+        lockWaits.NoteAnswer(answeredFrom, split);
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        AppLogger.Info("McpObjectUsageTools",
+            $"get_object_usage took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}, {daysBack} days): answered from {answeredFrom ?? "cache"}, "
+            + $"{lockWaits.DescribeLockWait()}, {split}");
     }
 }
