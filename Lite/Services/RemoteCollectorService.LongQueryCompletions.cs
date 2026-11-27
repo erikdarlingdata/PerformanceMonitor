@@ -621,6 +621,25 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// The messages of the SQL errors a failure carries, in the order the server sent them: its own and those of the exceptions it
+    /// wraps. A SqlException's Message joins them with line breaks, so the blocked process threshold refusal line names each one
+    /// from here (#9818). The shared project has no SqlClient, so each app reads them off its own exception.
+    /// </summary>
+    internal static List<string> ErrorMessagesOf(Exception? ex)
+    {
+        var messages = new List<string>();
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql)
+            {
+                messages.AddRange(sql.Errors.Cast<SqlError>().Select(e => e.Message));
+            }
+        }
+
+        return messages;
+    }
+
+    /// <summary>
     /// #4961: marks the failure of one create or start of the long-query session in an Azure SQL Database, so the failure line,
     /// the all-refused exception's message and the fault the run records carry the caps sentence
     /// (<see cref="AlwaysOnXeSessions.AzureCapsSentence"/>), as the deadlock and blocked-process sessions' do. The engine's
