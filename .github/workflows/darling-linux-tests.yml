@@ -210,12 +210,21 @@ jobs:
           # #9701: owned by root, so a root extract does not leave the build machine's uid on every file.
           tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz .
 
-      # The script needs root (useradd, /etc, systemctl). sudo drops the environment, so the two names it reads are kept:
-      # GITHUB_ACTIONS turns on the masking of its throwaway store passwords, and DOTNET_ROOT is where setup-dotnet put dotnet.
+      # #9837: dotnet-stack, so the leg can print the managed stacks of a service that is slow to say it is ready. A failed
+      # install only costs the stacks: the leg runs without them.
+      - name: Install dotnet-stack
+        shell: bash
+        run: dotnet tool install dotnet-stack --version 10.0.750501 --tool-path "${RUNNER_TEMP}/diag-tools" || echo "::warning::dotnet-stack did not install, so a slow start prints no managed stacks"
+
+      # The script needs root (useradd, /etc, systemctl). sudo drops the environment, so the names it reads are kept:
+      # GITHUB_ACTIONS turns on the masking of its throwaway store passwords, DOTNET_ROOT is where setup-dotnet put dotnet,
+      # and DARLING_DOTNET_STACK is the dotnet-stack the step above installed.
       - name: Install, start, stop and uninstall under systemd
         timeout-minutes: 10
         shell: bash
-        run: sudo --preserve-env=GITHUB_ACTIONS,DOTNET_ROOT bash .github/scripts/darling-linux-systemd-leg.sh releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz
+        env:
+          DARLING_DOTNET_STACK: ${{ runner.temp }}/diag-tools/dotnet-stack
+        run: sudo --preserve-env=GITHUB_ACTIONS,DOTNET_ROOT,DARLING_DOTNET_STACK bash .github/scripts/darling-linux-systemd-leg.sh releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz
 
       # The script prints both tails itself when a check fails, before its cleanup removes the log folder. The file log is
       # still on disk only when the script was stopped before its cleanup ran. The journal outlives the unit.

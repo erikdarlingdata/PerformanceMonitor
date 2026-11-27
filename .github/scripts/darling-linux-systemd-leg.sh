@@ -57,6 +57,34 @@ show_logs() {
   echo "::endgroup::"
 }
 
+# #9837: what a service that has not said it is ready waits on: its working folder, its inotify watches against the
+# machine's limit, the unit's memory, each thread's name, state, kernel wait channel and syscall number, the main
+# thread's kernel stack, its sockets, and the managed stacks when DARLING_DOTNET_STACK names a dotnet-stack executable
+# (the workflow installs one, a hand run may have none).
+show_start_sample() {
+  local pid
+  pid="$(systemctl show -p MainPID --value darling)"
+  echo "::group::darling.service is still starting after $1 s (main pid ${pid})"
+  if [ -n "${pid}" ] && [ "${pid}" != 0 ] && [ -d "/proc/${pid}" ]; then
+    echo "working folder: $(readlink "/proc/${pid}/cwd" 2>/dev/null)"
+    echo "inotify watches: $(cat /proc/"${pid}"/fdinfo/* 2>/dev/null | grep -c '^inotify' || true) (max_user_watches $(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null))"
+    echo "unit memory: $(systemctl show -p MemoryCurrent --value darling 2>/dev/null) bytes"
+    for task in /proc/"${pid}"/task/*; do
+      printf '%s | %s | %s | %s\n' "$(cat "${task}/comm" 2>/dev/null)" \
+        "$(sed -E 's/^.*\) ([A-Za-z]).*$/\1/' "${task}/stat" 2>/dev/null)" \
+        "$(cat "${task}/wchan" 2>/dev/null)" "$(cut -d' ' -f1 "${task}/syscall" 2>/dev/null)"
+    done | sort | uniq -c || true
+    echo "main thread kernel stack:"
+    cat "/proc/${pid}/stack" 2>/dev/null || true
+    echo "sockets:"
+    ss -tanpu 2>/dev/null | grep "pid=${pid}," || echo "none"
+    if [ -n "${DARLING_DOTNET_STACK:-}" ] && [ -x "${DARLING_DOTNET_STACK}" ]; then
+      timeout 30 "${DARLING_DOTNET_STACK}" report -p "${pid}" 2>&1 | head -n 300 || true
+    fi
+  fi
+  echo "::endgroup::"
+}
+
 # The page's Uninstall section, with the store's dropdb and dropuser replaced by removing the container. It runs on every
 # exit, so a failed run leaves the machine as clean as a passed one, and a passed run fails when anything is left.
 cleanup() {
@@ -321,7 +349,25 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now darling || fail "systemctl enable --now darling failed"
+# #9837: how long this machine takes to resolve its own name, one of the waits a first start can sit in.
+lookup_began="$(date +%s.%N)"
+lookup="$(timeout 30 getent hosts "$(hostname)" | head -n 1 || true)"
+echo "the machine's own name resolves to '${lookup:-nothing}' in $(awk -v a="${lookup_began}" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }') s"
+# The start runs in the background so the leg can look at the process while it starts: a start still running at 20, 50
+# and 80 s prints what it waits on (#9837). systemctl's own exit code still decides the step.
+start_began=${SECONDS}
+systemctl enable --now darling &
+starter=$!
+next_sample=20
+while kill -0 "${starter}" 2>/dev/null; do
+  if [ $((SECONDS - start_began)) -ge "${next_sample}" ]; then
+    show_start_sample "$((SECONDS - start_began))"
+    next_sample=$((next_sample + 30))
+  fi
+  sleep 1
+done
+wait "${starter}" || fail "systemctl enable --now darling failed after $((SECONDS - start_began)) s"
+start_seconds=$((SECONDS - start_began))
 systemctl status darling --no-pager 2>&1 | head -n 6 || true
 
 active="$(systemctl is-active darling || true)"
@@ -330,7 +376,7 @@ pid="$(systemctl show -p MainPID --value darling)"
 [ -n "${pid}" ] && [ "${pid}" != 0 ] || fail "the unit has no main process"
 owner="$(ps -o user= -p "${pid}" | tr -d ' ')"
 [ "${owner}" = "darling" ] || fail "the main process (pid ${pid}) runs as '${owner}', not darling"
-pass "step 8: darling.service is active, and its main process runs as darling"
+pass "step 8: darling.service is active after ${start_seconds} s, and its main process runs as darling"
 
 # ---- Step 9: proof that it runs ----
 # With no servers there is no Connected line and no collection_log row, so the proof is the health port and the three
