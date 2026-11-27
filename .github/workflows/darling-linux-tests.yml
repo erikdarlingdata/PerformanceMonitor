@@ -131,9 +131,10 @@ jobs:
           mkdir -p "${results}"
           # Which test files the build left out, and why (the LeaveOutViewerTestFiles target of the project file).
           cp Darling/Darling.Tests/obj/Release/net10.0/left-out-test-files.txt "${results}/" || true
+          # The step's shell runs with -e, so the test host's exit code is caught here and the report below still runs when it fails.
+          code=0
           dotnet Darling/Darling.Tests/bin/Release/net10.0/Darling.Tests.dll -noColor -trait- "Platform=Windows" \
-            -xml "${results}/results.xml" > "${results}/output.log" 2>&1
-          code=$?
+            -xml "${results}/results.xml" > "${results}/output.log" 2>&1 || code=$?
           # grep exits 1 when nothing matches, which is the green run.
           grep -E '\[FAIL\]' "${results}/output.log" | head -n 200 || true
           grep -E 'Total: [0-9]+' "${results}/output.log" | tail -n 1 || true
