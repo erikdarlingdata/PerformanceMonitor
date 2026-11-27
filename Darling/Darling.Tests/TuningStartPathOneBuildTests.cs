@@ -247,6 +247,99 @@ public sealed class TuningStartPathOneBuildTests
     }
 
     /// <summary>
+    /// #9827 with #9289: the earlier builds of a start took 0.5 s of the shared 300 s, which is less than a whole second, so the
+    /// bounded Query Store build still has its whole limit and is not shortened (the whole-seconds floor of 299.5 s is a rounding
+    /// artifact). When it runs out of time its timeout is recorded with the bounded Warning, and the next start skips it. The timeout
+    /// is forced without waiting for the limit: the session cancels the queued CREATE INDEX after 2 s while another session holds a lock.
+    /// </summary>
+    [Fact]
+    public async Task ATimeoutOfTheBoundedBuild_AfterAnEarlierBuildOfUnderASecond_IsRecorded()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 0.5, ct);
+        await using (store)
+        {
+            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+            Assert.Equal(1L, records);
+            Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+                && l.Contains("uncompressed heap pages", StringComparison.Ordinal));
+            Assert.DoesNotContain(log.Lines, l => l.Contains("was not built at this start", StringComparison.Ordinal));
+
+            var next = new CapturingTestLogger();
+            await PgTableTuning.ApplyAsync(store.Body, next, ct);
+            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
+            Assert.Single(next.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+                && l.Contains("is not built this start", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #9827 with #9795: the earlier build took 5 s of the shared 300 s, so the bounded build runs under the 295 s left and is
+    /// shortened. When it runs out of time it gets the shortened Warning and no record, and the next start tries it again.
+    /// </summary>
+    [Fact]
+    public async Task ATimeoutOfTheBoundedBuild_AfterAnEarlierBuildOfSeveralSeconds_IsNotRecorded()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds: 5, ct);
+        await using (store)
+        {
+            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+            Assert.Equal(0L, records);
+            Assert.Contains("up to 295 s", Assert.Single(BeforeBuildLines(log, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2])), StringComparison.Ordinal);
+            Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+                && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
+                && l.Contains("was not built at this start", StringComparison.Ordinal));
+            Assert.DoesNotContain(log.Lines, l => l.Contains("uncompressed heap pages", StringComparison.Ordinal));
+
+            var next = new CapturingTestLogger();
+            await PgTableTuning.ApplyAsync(store.Body, next, ct);
+            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), next.Joined);
+        }
+    }
+
+    /// <summary>
+    /// A start where the CPU cover builds first and takes <paramref name="earlierBuildSeconds"/> on the test clock, and the bounded
+    /// Query Store build then times out against a lock another session holds. The caller disposes the returned store.
+    /// </summary>
+    private static async Task<(SeededStore Store, CapturingTestLogger Log, long Records)> TimeOutBoundedBuildAfterAnEarlierBuildAsync(
+        double earlierBuildSeconds, CancellationToken ct)
+    {
+        var store = await SeededStore.CreateAsync(ct);
+        try
+        {
+            await store.DropAsync(ct, PgTableTuning.CpuWindowCoverIndexName, PgTableTuning.QueryStoreServerHashIndexName);
+            var log = new CapturingTestLogger();
+            await using (var holder = new NpgsqlConnection(store.ConnectionString))
+            {
+                await holder.OpenAsync(ct);
+                await Exec(holder, "BEGIN; LOCK TABLE collect.query_store_stats IN SHARE UPDATE EXCLUSIVE MODE", ct);
+                await Exec(store.Body, "SET statement_timeout = '2s'", ct);
+                try
+                {
+                    await PgTableTuning.ApplyAsync(store.Body, log, hourly: false, new TuningStartPasses.BuildClock(earlierBuildSeconds), 300, ct);
+                }
+                finally
+                {
+                    await Exec(holder, "ROLLBACK", CancellationToken.None);
+                    await Exec(store.Body, "RESET statement_timeout", CancellationToken.None);
+                }
+            }
+
+            return (store, log, await BuildRecordsAsync(store.Body, ct));
+        }
+        catch
+        {
+            await store.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// #6460: a first start on a brand-new, empty store builds all three large start-path indexes in ONE pass (an empty table
     /// builds instantly, so none of them uses the shared build budget), so the start logs no deferral and the first hourly pass
     /// finds nothing missing to warn about. Before, the first start built one and deferred the other two, and the hourly pass

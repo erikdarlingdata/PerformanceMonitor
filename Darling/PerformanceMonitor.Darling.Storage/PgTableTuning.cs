@@ -1119,9 +1119,12 @@ public static class PgTableTuning
 
                     if (onBudget && secondsLeft < commandTimeout)
                     {
-                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. */
+                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. It counts as
+                           shortened only when they used at least a whole second of the limit: with less, the whole-seconds floor above is a
+                           rounding artifact (299 s left of 300 after a 0.05 s build), not a shortening, and counting it would keep a timeout
+                           of the bounded build from being recorded (#9289), so the next start would try it again for up to another limit. */
                         commandTimeout = secondsLeft;
-                        shortened = true;
+                        shortened = budgetSpent >= TimeSpan.FromSeconds(1);
                     }
 
                     if (onBudget)
@@ -1228,7 +1231,7 @@ public static class PgTableTuning
                         shortened
                             ? ShortenedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout)
                             : recorded
-                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, buildTimeoutSeconds)
+                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, commandTimeout)
                                 : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
                 }
                 else

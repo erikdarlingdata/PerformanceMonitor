@@ -33,14 +33,14 @@ internal static class TuningStartPasses
     /// <summary>
     /// A clock on which every build that shares the start's build time takes <paramref name="secondsPerBuild"/> seconds: its monotonic
     /// timestamp moves that far each time it is read, and the pass reads it once when a build starts and once when it ends. The
-    /// wall clock is the system's.
+    /// time is kept in milliseconds, so a build can take a fraction of a second (#9827). The wall clock is the system's.
     /// </summary>
-    internal sealed class BuildClock(int secondsPerBuild) : TimeProvider
+    internal sealed class BuildClock(double secondsPerBuild) : TimeProvider
     {
-        private long _seconds;
+        private long _milliseconds;
 
-        public override long TimestampFrequency => 1;
+        public override long TimestampFrequency => 1000;
 
-        public override long GetTimestamp() => _seconds += secondsPerBuild;
+        public override long GetTimestamp() => _milliseconds += (long)Math.Round(secondsPerBuild * 1000);
     }
 }
