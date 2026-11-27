@@ -85,9 +85,9 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
         }
     }
 
-    private static AnalysisContext Context(TimeSpan? back = null) => new()
+    private static AnalysisContext Context(TimeSpan? back = null, int serverId = ServerId) => new()
     {
-        ServerId = ServerId,
+        ServerId = serverId,
         ServerName = "TestSrv",
         TimeRangeStart = Now.AddHours(-(back ?? TimeSpan.FromHours(4)).TotalHours),
         TimeRangeEnd = Now,
@@ -162,5 +162,31 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
             Assert.Equal(fresh.Value, fact.Value);
             Assert.Equal(fresh.Metadata.OrderBy(m => m.Key), fact.Metadata.OrderBy(m => m.Key));
         }
+    }
+
+    [Fact]
+    public async Task ACostReadThatFindsNothing_NamesItsScanInTheReplyState_OnceAndNotWhenKeptOrWhenItPriced()
+    {
+        const int quietServer = ServerId + 1;
+        var collector = new DuckDbFactCollector(_duckDb);
+
+        var first = Context(serverId: quietServer);
+        var facts = new List<Fact>();
+        await collector.CollectPlanRegressionFactsAsync(first, facts);
+
+        Assert.Empty(facts);
+        Assert.Matches(@"^The plan regression cost read found no candidate and its scan of the archive window took \d+ ms", first.PlanRegressionCostNote);
+        Assert.Equal(first.PlanRegressionCostNote, CollectionCaveatState.From(first).PlanRegressionCostNote);
+
+        /* A repeat inside the keep window ran no statement, so there is no scan to name. */
+        var repeat = Context(serverId: quietServer);
+        await collector.CollectPlanRegressionFactsAsync(repeat, new List<Fact>());
+        Assert.Null(repeat.PlanRegressionCostNote);
+
+        /* A read that priced candidates carries no floor note. */
+        var priced = Context();
+        await collector.CollectPlanRegressionFactsAsync(priced, new List<Fact>());
+        Assert.Null(priced.PlanRegressionCostNote);
+        Assert.Null(CollectionCaveatState.From(priced).PlanRegressionCostNote);
     }
 }

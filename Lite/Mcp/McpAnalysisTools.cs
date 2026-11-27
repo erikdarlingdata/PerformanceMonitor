@@ -504,7 +504,7 @@ public sealed class McpAnalysisTools
                     coverage.IsPartial
                         ? $"PARTIAL COVERAGE: {coverage.Describe()}. Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole."
                         : null,
-                    collectionCaveat),
+                    CollectionCaveats.Compose(collectionCaveat, collection.PlanRegressionCostNote)),
                 coverage = coverage.ToPayload(),
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions));

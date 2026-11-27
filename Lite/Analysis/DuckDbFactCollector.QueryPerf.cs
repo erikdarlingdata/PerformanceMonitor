@@ -454,6 +454,11 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                 $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches{profiles.Describe()}"));
     }
 
+    /// <summary>#9888: the reply's sentence for a cost read that found no candidate: the statement still scanned the window, and that is its time.</summary>
+    private static string PlanRegressionCostFloorNote(PlanRegressionStatementTime cost) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"The plan regression cost read found no candidate and its scan of the archive window took {cost.Statement.TotalMilliseconds:0} ms, a floor that stays on a server with nothing to price.");
+
     /// <summary>#9888: what the cost read did beyond its time: the rows left out by the cap, an answer from the kept result, or a read that found nothing.</summary>
     private static string DescribeCostRead(PlanRegressionStatementTime cost) =>
         (cost.FromKeep ? " answered from an earlier read" : "")
@@ -477,6 +482,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
         context.PlanRegressionFailures = null;
+        context.PlanRegressionCostNote = null;
 
         try
         {
@@ -524,6 +530,10 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             /* #9353: the cost statement is the pass's longest hold of the read lock, so it is read one database at a time. */
             (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan);
             costRead.Rows = candidates.Count;
+
+            /* #9888: a read that found nothing raises no fact, so the reply carries the floor of its scan through the context. */
+            if (candidates.Count == 0 && !costRead.FromKeep)
+                context.PlanRegressionCostNote = PlanRegressionCostFloorNote(costRead);
 
             /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
                call to the monitored server and must not hold the store's read lock. */
