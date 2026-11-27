@@ -238,6 +238,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        /* #9853: the phases of this constructor, in the start-up timeline the store open reports. */
+        Helpers.StartupTimeline.MarkPhase("MainWindow InitializeComponent");
         _windowState.Attach(this);
         LoadOverviewSortMode();
         /* #8221: a card's band brushes are read from the theme when it is bound, so a theme change binds the cards again. */
@@ -278,7 +280,9 @@ public partial class MainWindow : Window
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
+        Helpers.StartupTimeline.MarkPhase("MainWindow alert, investigation and mute services");
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        Helpers.StartupTimeline.MarkPhase("ServerManager load");
         /* #5750: the scoped notification routes. Any route, tag or server edit invalidates the cache, which starts one
            background reload (see NotificationRouteCache); a read that still finds it stale reloads on the calling thread.
            Task.Run keeps that reload off the UI thread's synchronization context. */
@@ -338,6 +342,7 @@ public partial class MainWindow : Window
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         ServerTabControl.SelectionChanged += ServerTabControl_SelectionChanged;
+        Helpers.StartupTimeline.MarkPhase("MainWindow route store, profile and schedule managers, timers");
     }
 
     /// <summary>
@@ -458,9 +463,16 @@ public partial class MainWindow : Window
         try
         {
             StatusText.Text = "Initializing database...";
+            Helpers.StartupTimeline.MarkPhase("Loaded event after window Show");
 
             // Initialize the DuckDB database
             await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => InitializeStoreAsync(), _routeLoader);
+            Helpers.StartupTimeline.MarkPhase("store schema check, migrations and sentinel open");
+            /* #9853: the one line that names every start-up phase. Null after the first report, so a store reset logs nothing. */
+            if (Helpers.StartupTimeline.Report() is { } startupPhases)
+            {
+                AppLogger.Info("Startup", startupPhases);
+            }
 
             /* #7812: a rebuild that left the new database without the old data says where the old file went. */
             if (_databaseInitializer.RebuildOutcome is { } rebuild)
