@@ -476,4 +476,207 @@ public sealed class QueryTagRebuildMergeTests
 
         Assert.Throws<InvalidOperationException>(() => merge.AddSlim(HashRow("0xC", "RptA", "Sales")));
     }
+
+    /* U+FFFD is one UTF-16 unit, 0xFFFD. U+1F600 is two, 0xD83D and 0xDE00: the higher code point, whose first unit is the lower. */
+    private const string LastOfThePlane = "�";
+    private const string AboveThePlane = "\U0001F600";
+
+    [Fact]
+    public void CompareCodePoints_PutsACharacterAboveUFFFFAfterEveryCharacterBelowIt_AndTakesNoneAsEmpty()
+    {
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints(LastOfThePlane, AboveThePlane) < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints(AboveThePlane, LastOfThePlane) > 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("Rpt" + LastOfThePlane + "z", "Rpt" + AboveThePlane + "a") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("", "\U00010000") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("\U00010000", AboveThePlane) < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints(AboveThePlane, "\U0001F601") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("z", AboveThePlane) < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("B", "a") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("App", "App1") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("App1", "App") > 0);
+        Assert.Equal(0, QueryTagRebuildMerge.CompareCodePoints("Rpt" + AboveThePlane, "Rpt" + AboveThePlane));
+
+        Assert.Equal(0, QueryTagRebuildMerge.CompareCodePoints(null, null));
+        Assert.Equal(0, QueryTagRebuildMerge.CompareCodePoints(null, string.Empty));
+        Assert.Equal(0, QueryTagRebuildMerge.CompareCodePoints(string.Empty, null));
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints(null, "a") < 0);
+        Assert.True(QueryTagRebuildMerge.CompareCodePoints("a", null) > 0);
+    }
+
+    [Fact]
+    public void CompareCodePoints_GivesTheByteOrderOfTheUtf8Form_ForTextsWithCharactersOnBothSidesOfUFFFF()
+    {
+        string[] characters = { "A", "a", "z", "é", "Ж", "中", "퟿", "", "�", "￿", "\U00010000", "\U0001F600", "\U0010FFFF" };
+        var random = new Random(9705);
+        string NewText() => string.Concat(Enumerable.Range(0, random.Next(0, 5)).Select(_ => Pick(random, characters)));
+
+        int otherThanByCodeUnit = 0;
+        for (int i = 0; i < 5000; i++)
+        {
+            string a = NewText();
+            string b = NewText();
+            int byUtf8 = Math.Sign(System.Text.Encoding.UTF8.GetBytes(a).AsSpan().SequenceCompareTo(System.Text.Encoding.UTF8.GetBytes(b)));
+
+            Assert.True(byUtf8 == Math.Sign(QueryTagRebuildMerge.CompareCodePoints(a, b)), $"pair {i}: the UTF-8 bytes order the texts {byUtf8}");
+            Assert.True(-byUtf8 == Math.Sign(QueryTagRebuildMerge.CompareCodePoints(b, a)), $"pair {i}: the UTF-8 bytes order the texts {-byUtf8} the other way round");
+            otherThanByCodeUnit += Math.Sign(string.CompareOrdinal(a, b)) != byUtf8 ? 1 : 0;
+        }
+
+        /* The texts really hold pairs that an order by UTF-16 code unit gets wrong. */
+        Assert.True(otherThanByCodeUnit > 100, $"only {otherThanByCodeUnit} pairs order differently by code unit");
+    }
+
+    [Fact]
+    public void SlimRowOrder_OrdersEachFieldByCodePoint_WhereTheOrderByCodeUnitIsTheOtherWayRound_AndNoneEqualsEmpty()
+    {
+        /* By UTF-16 code unit the two texts order the other way round: 0xD83D, the pair's first unit, is below 0xFFFD. */
+        Assert.True(string.CompareOrdinal(LastOfThePlane, AboveThePlane) > 0);
+
+        static QueryTagSighting Row(string? database = "Sales", string? application = "App", string? login = "svc", string? host = "H1", string? objectName = null) =>
+            new(QueryTagKeyKind.Hash, "0xK", database, objectName is null ? null : new QueryTagObject("Sales", "dbo", objectName), application, login, host);
+
+        var fields = new (string Field, QueryTagSighting First, QueryTagSighting Second)[]
+        {
+            ("database", Row(database: LastOfThePlane), Row(database: AboveThePlane)),
+            ("application", Row(application: LastOfThePlane), Row(application: AboveThePlane)),
+            ("login", Row(login: LastOfThePlane), Row(login: AboveThePlane)),
+            ("host", Row(host: LastOfThePlane), Row(host: AboveThePlane)),
+            ("object", Row(objectName: LastOfThePlane), Row(objectName: AboveThePlane)),
+        };
+        foreach (var (field, first, second) in fields)
+        {
+            Assert.True(QueryTagRebuildMerge.SlimRowOrder(first, second) < 0, $"U+FFFD does not come first in the {field}");
+            Assert.True(QueryTagRebuildMerge.SlimRowOrder(second, first) > 0, $"U+1F600 does not come last in the {field}");
+            Assert.Equal(0, QueryTagRebuildMerge.SlimRowOrder(first, first with { TextSample = "SELECT 1;" }));
+        }
+
+        /* An earlier field decides before a later one that orders the other way. */
+        Assert.True(QueryTagRebuildMerge.SlimRowOrder(Row(database: LastOfThePlane, application: "RptB"), Row(database: AboveThePlane, application: "RptA")) < 0);
+        Assert.True(QueryTagRebuildMerge.SlimRowOrder(Row(application: LastOfThePlane, host: "H2"), Row(application: AboveThePlane, host: "H1")) < 0);
+
+        /* None is the empty text, in every field that can be none or empty. */
+        Assert.Equal(0, QueryTagRebuildMerge.SlimRowOrder(Row(database: null), Row(database: string.Empty)));
+        Assert.Equal(0, QueryTagRebuildMerge.SlimRowOrder(Row(application: null), Row(application: string.Empty)));
+        Assert.Equal(0, QueryTagRebuildMerge.SlimRowOrder(Row(login: string.Empty), Row(login: null)));
+        Assert.Equal(0, QueryTagRebuildMerge.SlimRowOrder(Row(host: string.Empty), Row(host: null)));
+        Assert.True(QueryTagRebuildMerge.SlimRowOrder(Row(application: null), Row(application: "A")) < 0);
+        Assert.True(QueryTagRebuildMerge.SlimRowOrder(Row(objectName: "p1"), Row()) > 0);
+    }
+
+    [Fact]
+    public void TwoSlimRowsThatUFFFDAndACharacterAboveItTellApart_GiveTheUFFFDRowsMatchedValue_InBothArrivalOrders()
+    {
+        var world = TwoRuleWorld();
+
+        /* 0xAPP: the application, which is the matched value, decides. 0xDB: the database decides which application is the
+           matched value, and by application alone RptA would come first. An order by code unit gives the other row of each. */
+        var first = new[] { HashRow("0xAPP", "Rpt" + LastOfThePlane, "Sales"), HashRow("0xDB", "RptB", LastOfThePlane) };
+        var second = new[] { HashRow("0xAPP", "Rpt" + AboveThePlane, "Sales"), HashRow("0xDB", "RptA", AboveThePlane) };
+        string[] expected = { "0xAPP|1|rule|1|Rpt" + LastOfThePlane, "0xDB|1|rule|1|RptB" };
+
+        foreach (var arrival in new[] { first.Concat(second).ToList(), second.Concat(first).ToList() })
+        {
+            var merged = Merge(world, arrival, Array.Empty<QueryTagSighting>());
+            Assert.Empty(merged.KeysNeedingOrder);
+            Assert.Equal(expected, merged.Rows.Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+        }
+    }
+
+    private static List<string> RowTexts(IEnumerable<QueryTagMapRow> rows) =>
+        rows.Select(r => r.ToString()).OrderBy(r => r, StringComparer.Ordinal).ToList();
+
+    [Fact]
+    public void MapRowsAfterSetOrdered_AreTheRowsTheResolverGivesOverEachKeysSightingsInSlimRowOrder_AndAKeySetToNoTagHasNoRow()
+    {
+        int ordered = 0, orderDecides = 0;
+        for (int seed = 1; seed <= 40; seed++)
+        {
+            var world = NewWorld(seed);
+            var random = new Random(seed * 13);
+            var arrival = world.Keys.SelectMany(rows => rows).OrderBy(_ => random.Next()).ToList();
+            var inOrderByKey = world.Keys.ToDictionary(rows => rows[0].Key, rows => rows.OrderBy(row => row, InSlimRowOrder).ToList());
+            QueryTagResolution InOrder(string key) => QueryTagResolver.Resolve(Server, inOrderByKey[key], world.Assignments, world.Rules, Tags);
+
+            QueryTagRebuildMerge NewMerge()
+            {
+                var merge = new QueryTagRebuildMerge(Server, world.Assignments, world.Rules, Tags);
+                foreach (var row in arrival)
+                {
+                    merge.Add(row);
+                }
+
+                return merge;
+            }
+
+            /* As the builder does: each key that needs order is settled with the resolution of its sightings in order. */
+            var merge = NewMerge();
+            var settledByTheMerge = RowTexts(merge.MapRows());
+            var needOrder = merge.KeysNeedingOrder();
+            foreach (var key in needOrder)
+            {
+                var rows = inOrderByKey[key.Key];
+                merge.SetOrdered(rows[0].KeyKind, key.Key, InOrder(key.Key));
+                ordered++;
+                orderDecides += InOrder(key.Key).Equals(QueryTagResolver.Resolve(Server, Enumerable.Reverse(rows).ToList(), world.Assignments, world.Rules, Tags)) ? 0 : 1;
+            }
+
+            var expected = new List<QueryTagMapRow>();
+            foreach (var (key, rows) in inOrderByKey)
+            {
+                var resolution = InOrder(key);
+                if (resolution.HasTag)
+                {
+                    expected.Add(QueryTagMapStore.MapRow(rows[0].KeyKind, key, resolution));
+                }
+            }
+
+            Assert.Equal(RowTexts(expected), RowTexts(merge.MapRows()));
+            Assert.Empty(merge.KeysNeedingOrder());
+            Assert.Equal(settledByTheMerge.Count + needOrder.Count, expected.Count);
+
+            /* The same keys set to no tag: the map rows are the ones the merge settled alone, and no key is left needing order. */
+            var dropped = NewMerge();
+            foreach (var key in dropped.KeysNeedingOrder())
+            {
+                dropped.SetOrdered(inOrderByKey[key.Key][0].KeyKind, key.Key, QueryTagResolution.None);
+            }
+
+            Assert.Equal(settledByTheMerge, RowTexts(dropped.MapRows()));
+            Assert.Empty(dropped.KeysNeedingOrder());
+            Assert.Equal(settledByTheMerge, RowTexts(dropped.Finish().Rows));
+        }
+
+        /* The worlds really have keys that need order, and keys whose tag the order decides. */
+        Assert.True(ordered > 50, $"only {ordered} keys needed order");
+        Assert.True(orderDecides > 20, $"the order decided only {orderDecides} keys");
+    }
+
+    [Fact]
+    public void AKeyThatNeedsOrder_HasNoMapRowUntilSetOrdered_ThenTheRowOfTheResolutionItWasGiven_OrNoneWhenGivenNoTag()
+    {
+        var world = TwoRuleWorld();
+        QueryTagRebuildMerge NewMerge()
+        {
+            var merge = new QueryTagRebuildMerge(Server, world.Assignments, world.Rules, Tags);
+            merge.Add(HashRow("0xTWO", "RptB", "Sales"));
+            merge.Add(HashRow("0xTWO", "RptA", "Sales"));
+            merge.Add(HashRow("0xONE", "RptC", "Sales"));
+            return merge;
+        }
+
+        var merge = NewMerge();
+        Assert.Equal(new[] { "hash:0xTWO" }, merge.KeysNeedingOrder().Select(k => k.KeyKind + ":" + k.Key));
+        Assert.Equal(new[] { "0xONE|1|rule|1|RptC" }, merge.MapRows().Select(RowText));
+
+        var inOrder = new[] { HashRow("0xTWO", "RptB", "Sales"), HashRow("0xTWO", "RptA", "Sales") }.OrderBy(row => row, InSlimRowOrder).ToList();
+        merge.SetOrdered(QueryTagKeyKind.Hash, "0xTWO", QueryTagResolver.Resolve(Server, inOrder, world.Assignments, world.Rules, Tags));
+        Assert.Empty(merge.KeysNeedingOrder());
+        Assert.Equal(new[] { "0xONE|1|rule|1|RptC", "0xTWO|1|rule|1|RptA" }, merge.MapRows().Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+
+        var dropped = NewMerge();
+        dropped.SetOrdered(QueryTagKeyKind.Hash, "0xTWO", QueryTagResolution.None);
+        Assert.Empty(dropped.KeysNeedingOrder());
+        Assert.Equal(new[] { "0xONE|1|rule|1|RptC" }, dropped.MapRows().Select(RowText));
+        Assert.Equal(new[] { "0xONE|1|rule|1|RptC" }, dropped.Finish().Rows.Select(RowText));
+    }
 }

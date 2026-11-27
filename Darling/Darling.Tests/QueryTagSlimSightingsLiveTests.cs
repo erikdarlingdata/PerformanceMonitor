@@ -662,4 +662,98 @@ ORDER BY u.tier, u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.ap
             }
         });
     }
+
+    /* The text columns of both tables that the order of a key's rows reads. */
+    private static readonly string[] OrderColumns = { "database_name", "application_name", "login_name", "host_name", "object_name" };
+
+    [Fact]
+    public async Task OnAStoreThatSortsTextByLanguageRules_AKeyGetsTheRowOfItsFirstCallerByCodePoint_FromAnExtend_ARebuildOfItsSightings_AndARebuildOfItsSlimRows()
+    {
+        await WithStoreAsync(async env =>
+        {
+            /* An ICU collation sorts by language rules, lower case before upper, where code points put every upper case letter first. */
+            string collation = await ScalarAsync(env,
+                "SELECT COALESCE((SELECT collname::text FROM pg_collation WHERE collname IN ('und-x-icu', 'en-x-icu') ORDER BY collname::text DESC LIMIT 1), '')");
+            if (collation.Length == 0)
+            {
+                Assert.Skip("This PostgreSQL has neither the und-x-icu nor the en-x-icu collation (a build without ICU), so no column can be made to sort text by language rules.");
+            }
+
+            foreach (string table in new[] { "collect.query_tag_sightings", "collect.query_tag_sightings_slim" })
+            {
+                await ExecAsync(env, $"ALTER TABLE {table} " + string.Join(", ", OrderColumns.Select(column => $"ALTER COLUMN {column} TYPE text COLLATE \"{collation}\"")));
+            }
+
+            int reports = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, reports, "application", "Rpt*");
+            string ruleId = await ScalarAsync(env, "SELECT id FROM config.query_tag_rules");
+
+            /* The first pass rebuilds an empty map and leaves the builder a cursor, so the next one extends. */
+            var builder = new QueryTagMapBuilder(env.Source);
+            Assert.True(await PassAsync(env, builder));
+            Assert.Empty(await WholeMapAsync(env));
+
+            /* One key under two callers the rule matches with different values, the lower case one written first. The store
+               puts Rpta first. By code point RptB is first, so the key's map row carries RptB. */
+            await SightAsync(env, HashSightings("0xC0", "Rpta"));
+            await SightAsync(env, HashSightings("0xC0", "RptB"));
+            const string callersInStoreOrder = "SELECT string_agg(application_name, ',' ORDER BY application_name) FROM collect.{0} WHERE key = '0xC0'";
+            Assert.Equal("Rpta,RptB", await ScalarAsync(env, string.Format(CultureInfo.InvariantCulture, callersInStoreOrder, "query_tag_sightings")));
+            var expected = new[] { $"hash|0xC0|{reports}|rule|{ruleId}|application|RptB" };
+
+            /* No rule changed, so this pass extends. */
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(expected, await WholeMapAsync(env));
+
+            /* A tag write bumps the rules version, so this pass rebuilds, from the key's two sightings. */
+            await NewTagAsync(env, "Bump1");
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(expected, await WholeMapAsync(env));
+
+            /* Both sightings age out and move to slim rows, and the next rebuild reads only those. */
+            await AgeAsync(env, "0xC0", SightingsDays + 5);
+            await PurgeAsync(env);
+            Assert.Equal(string.Empty, await SightedKeysAsync(env));
+            Assert.Equal("Rpta,RptB", await ScalarAsync(env, string.Format(CultureInfo.InvariantCulture, callersInStoreOrder, "query_tag_sightings_slim")));
+            await NewTagAsync(env, "Bump2");
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(expected, await WholeMapAsync(env));
+        });
+    }
+
+    private static Task<string> IndexScansAsync(Env env) => ScalarAsync(env, "SHOW enable_indexscan");
+
+    [Fact]
+    public async Task AMoveSlice_LeavesItsConnectionWithIndexScansOn_AfterItMovedRows_AndAfterItFailed_WhichLeavesTheSightingInPlace()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-SightingsDays);
+            Assert.Equal("on", await IndexScansAsync(env));
+
+            await SightAtAsync(env, "0xOLD1", cutoff.AddHours(-100));
+            var (moved, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct);
+            Assert.Equal(1, moved);
+            Assert.Equal("on", await IndexScansAsync(env));
+            Assert.Equal("0xOLD1", await SlimKeysAsync(env));
+
+            /* The slim table of this scratch store refuses the next key, so the move's statement fails after it started. */
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim ADD CONSTRAINT ck_test_refuses_one_key CHECK (key <> '0xOLD2')");
+            await SightAtAsync(env, "0xOLD2", cutoff.AddHours(-50));
+            await Assert.ThrowsAsync<PostgresException>(() => DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct));
+
+            /* The same connection answers, so no failed transaction is left open on it, and its setting is the one it had. */
+            Assert.Equal("on", await IndexScansAsync(env));
+            Assert.Equal("0xOLD2", await SightedKeysAsync(env));
+            Assert.Equal("0xOLD1", await SlimKeysAsync(env));
+
+            /* With the refusal gone the same connection moves the same slice. */
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim DROP CONSTRAINT ck_test_refuses_one_key");
+            var (movedAfter, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct);
+            Assert.Equal(1, movedAfter);
+            Assert.Equal("on", await IndexScansAsync(env));
+            Assert.Equal(string.Empty, await SightedKeysAsync(env));
+            Assert.Equal("0xOLD1,0xOLD2", await SlimKeysAsync(env));
+        });
+    }
 }

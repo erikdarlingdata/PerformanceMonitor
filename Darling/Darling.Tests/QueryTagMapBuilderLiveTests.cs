@@ -455,6 +455,179 @@ public sealed class QueryTagMapBuilderLiveTests
         });
     }
 
+    /*
+     * The inserts a map write sends to one store (#9705), read off Npgsql's own tracing: once a listener samples its "Npgsql"
+     * source it opens an activity per command, tagged with the database's name and the command's text, and stops it when the
+     * command has run. The tags are matched by value, as NpgsqlCommandCounter matches them, and the scratch database's name
+     * keeps another class's commands out. The text only tells which statement ran: the write's insert, and not the extend's
+     * upsert, which is the one that goes on to an ON CONFLICT. Each insert is noted with the number rowsTaken gives at the
+     * moment it ends.
+     */
+    private sealed class MapInsertLog : IDisposable
+    {
+        private readonly string _database;
+        private readonly Func<int> _rowsTaken;
+        private readonly System.Diagnostics.ActivityListener _listener;
+        private readonly List<int> _rowsTakenAtEachInsert = new();
+
+        public MapInsertLog(string database, Func<int>? rowsTaken = null)
+        {
+            _database = database;
+            _rowsTaken = rowsTaken ?? (static () => 0);
+            _listener = new System.Diagnostics.ActivityListener
+            {
+                ShouldListenTo = source => source.Name == "Npgsql",
+                Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) => System.Diagnostics.ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = OnStopped,
+            };
+            System.Diagnostics.ActivitySource.AddActivityListener(_listener);
+        }
+
+        /// <summary>One entry per insert, in the order they ended.</summary>
+        public List<int> RowsTakenAtEachInsert
+        {
+            get
+            {
+                lock (_rowsTakenAtEachInsert)
+                {
+                    return _rowsTakenAtEachInsert.ToList();
+                }
+            }
+        }
+
+        private void OnStopped(System.Diagnostics.Activity activity)
+        {
+            bool onThisDatabase = false;
+            bool isTheMapInsert = false;
+            foreach (var tag in activity.TagObjects)
+            {
+                if (tag.Value is not string value)
+                {
+                    continue;
+                }
+
+                if (string.Equals(value, _database, StringComparison.Ordinal))
+                {
+                    onThisDatabase = true;
+                }
+                else if (value.Contains("INSERT INTO config.query_tag_map", StringComparison.Ordinal) && !value.Contains("ON CONFLICT", StringComparison.Ordinal))
+                {
+                    isTheMapInsert = true;
+                }
+            }
+
+            if (onThisDatabase && isTheMapInsert)
+            {
+                lock (_rowsTakenAtEachInsert)
+                {
+                    _rowsTakenAtEachInsert.Add(_rowsTaken());
+                }
+            }
+        }
+
+        public void Dispose() => _listener.Dispose();
+    }
+
+    [Fact]
+    public async Task ARebuildThatWritesFourRowsAStatement_WritesExactlyItsTaggedKeys_AtEveryCountAroundABatchEnd_InOneInsertPerBatch()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int batch = 4;
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+
+            /* A key no rule tags, so the map is never just every key the server has. */
+            await SightAsync(env, HashSightings("0xEE", "App"));
+            var builder = new QueryTagMapBuilder(env.Source, mapWriteBatchRows: batch);
+
+            int sighted = 0;
+            foreach (int keys in new[] { 0, 1, batch - 1, batch, batch + 1, (2 * batch) + 1 })
+            {
+                for (; sighted < keys; sighted++)
+                {
+                    await SightAsync(env, HashSightings("0xA" + (sighted + 1).ToString(CultureInfo.InvariantCulture), "Report"));
+                }
+
+                /* A tag write bumps the rules version, so the pass rebuilds the map from nothing. */
+                await NewTagAsync(env, "Bump" + keys.ToString(CultureInfo.InvariantCulture));
+                using var inserts = new MapInsertLog(env.Store.Database);
+                Assert.True(await PassAsync(env, builder), $"the rebuild of {keys} tagged keys failed");
+
+                Assert.Equal(Enumerable.Range(1, keys).Select(i => $"hash|0xA{i}|{tag}|rule").ToList(), await MapAsync(env));
+                int insertsSeen = inserts.RowsTakenAtEachInsert.Count;
+                Assert.True((keys + batch - 1) / batch == insertsSeen, $"{keys} tagged keys in batches of {batch} were written in {insertsSeen} inserts");
+            }
+        });
+    }
+
+    [Fact]
+    public async Task AMapWriteOfNineRowsInBatchesOfFour_TakesItsRowsAsItWritesThem_InThreeInserts_NoneOfMoreThanFourRows()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int batch = 4;
+            int tag = await NewTagAsync(env, "Reports");
+
+            /* The rows are made as the write asks for them, and each one is counted as it is handed over. */
+            int[] taken = { 0 };
+            IEnumerable<QueryTagMapRow> Rows(int count)
+            {
+                for (int i = 1; i <= count; i++)
+                {
+                    taken[0]++;
+                    yield return new QueryTagMapRow("hash", "0xA" + i.ToString(CultureInfo.InvariantCulture), tag, "rule", null, "application", "Report");
+                }
+            }
+
+            using var inserts = new MapInsertLog(env.Store.Database, () => taken[0]);
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, Rows((2 * batch) + 1), env.Ct, batchRows: batch);
+
+            /* What the write had taken when each insert ended: an insert carries the rows taken since the insert before it, so
+               four, four and one. A write that sends every row in one statement, or that takes them all first, gives another list. */
+            Assert.Equal(new[] { 4, 8, 9 }, inserts.RowsTakenAtEachInsert);
+            Assert.Equal(Enumerable.Range(1, 9).Select(i => $"hash|0xA{i}|{tag}|rule").ToList(), await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AMapWriteThatFailsInItsSecondBatch_LeavesTheOldMapRowsAndTheOldStoredCursor()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await NewTagAsync(env, "Reports");
+            QueryTagMapRow Row(string key) => new("hash", key, tag, "rule", null, "application", "Report");
+
+            var original = new QueryTagMapStoredCursor(1, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), "hash", "0xAA");
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, new[] { Row("0xAA"), Row("0xAB"), Row("0xAC") }, env.Ct, original, batchRows: 2);
+            var oldMap = new[] { $"hash|0xAA|{tag}|rule", $"hash|0xAB|{tag}|rule", $"hash|0xAC|{tag}|rule" };
+            Assert.Equal(oldMap, await MapAsync(env));
+            Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+
+            /* Two rows a statement, so the first statement of each write succeeds, after the delete, and the second fails:
+               on its fourth row, which names a tag that does not exist, on its third row, which repeats the key of the first
+               row, and on its fourth row, whose source the map's CHECK refuses. */
+            var moved = original with { RulesVersion = 2, Since = original.Since.AddHours(1), AfterKey = "0xZZ" };
+            var failing = new (string Why, QueryTagMapRow[] Rows)[]
+            {
+                ("a tag that does not exist", new[] { Row("0xBA"), Row("0xBB"), Row("0xBC"), Row("0xBD") with { TagId = tag + 1000 }, Row("0xBE") }),
+                ("a repeated key", new[] { Row("0xBA"), Row("0xBB"), Row("0xBA"), Row("0xBD") }),
+                ("a source the CHECK refuses", new[] { Row("0xBA"), Row("0xBB"), Row("0xBC"), Row("0xBD") with { Source = "guess" } }),
+            };
+            foreach (var (why, rows) in failing)
+            {
+                await Assert.ThrowsAsync<PostgresException>(() => QueryTagMapStore.ReplaceMapAsync(env.Store, Server, rows, env.Ct, moved, batchRows: 2));
+                Assert.True(oldMap.SequenceEqual(await MapAsync(env)), $"the old map rows are not all there after a write that failed on {why}");
+                Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+            }
+
+            /* The connection still writes: the rows that are good replace the map and move the cursor. */
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, failing[0].Rows.Take(3), env.Ct, moved, batchRows: 2);
+            Assert.Equal(new[] { $"hash|0xBA|{tag}|rule", $"hash|0xBB|{tag}|rule", $"hash|0xBC|{tag}|rule" }, await MapAsync(env));
+            Assert.Equal(moved, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+        });
+    }
+
     [Fact]
     public async Task AKeyWithNoSightingsLeft_LeavesTheMapAtTheNextRebuild_ButNeverOnAnExtend()
     {
