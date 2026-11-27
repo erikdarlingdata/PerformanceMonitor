@@ -352,6 +352,8 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The Linux page's scripted install and upgrade check the tarball's hash in a step of their own, before anything is extracted or run** ([#9843])
 - **Darling on Linux logs an upgrade run as recorded once for each run and state, not every five minutes** ([#9845])
 - **`--grant-script --host` prints the SQL login script by default on Linux and in the Compose container, and the Compose docs gain three fixes** ([#9846])
+- **The docs say the init server's locale WARNING and the Compose health port Warning are expected, and name the Lite `.previous` copies** ([#9849])
+- **The Linux and Compose docs say the first-start login failure is expected and the grant script's password placeholder needs replacing, and the Linux page says what `--check` skips and what `--rollback` needs** ([#9860])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8630,3 +8632,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9843]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9843
 [#9845]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9845
 [#9846]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9846
+[#9849]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9849
+[#9860]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9860
