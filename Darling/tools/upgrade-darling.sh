@@ -275,9 +275,24 @@ note "Upgrading ${old_version} to ${STAGED_VERSION}."
 [ "${old_version}" != "${STAGED_VERSION}" ] || note "The source is ${STAGED_VERSION}, the version that is already installed. The upgrade goes on and replaces the build with this copy."
 
 if [ "${check_only}" = 1 ]; then
+    # What ran above, one line each: every refusal exits before this point, so a line here is a check that passed.
+    note "Checked: this host runs systemd, and root runs this script from folders that only root can write."
+    note "Checked: the ${UNIT_NAME} unit, ${INSTALL_ROOT} and ${CONFIG_FILE} are installed."
+    note "Checked: no process other than the service runs from ${INSTALL_ROOT}."
+    [ "${SOURCE_KIND}" != folder ] || note "Checked: the source folder and every file in it are root's own and closed to other accounts' writes."
+    note "Checked: the new build runs as the '${SERVICE_USER}' user (--version said ${STAGED_VERSION})."
+    # The warnings that the real run prints, from the same tests and texts.
+    if unit_differs && [ "${replace_unit}" = 1 ]; then
+        note "The upgrade will replace ${UNIT_PATH} with the unit in the tarball (--replace-unit), and keep yours as ${UNIT_PATH}.previous."
+    else
+        ! unit_differs || note "The upgrade will warn: $(unit_differs_text)"
+        ! unit_marker_missing || note "The upgrade will warn: $(unit_marker_text)"
+    fi
+    ! log_root_open || note "The upgrade will warn: $(log_root_text)"
     note "The pre-flight passed. Nothing was changed, and the service was not stopped."
     exit 0
 fi
+! log_root_open || warn "$(log_root_text)"
 
 # ---- 2. stop ----
 config_checked=1
@@ -323,7 +338,7 @@ mv -T "${INSTALL_ROOT}" "${STAGED_REPLACED}" || die_recorded "Could not move ${I
 mv -T "${STAGED_BUILD}" "${INSTALL_ROOT}" || die_recorded "Could not move the new build into ${INSTALL_ROOT}. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
 note "The rollback copy of ${old_version} is ${PREVIOUS_ROOT}."
 
-if [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"; then
+if unit_differs; then
     if [ "${replace_unit}" = 1 ]; then
         cp -p "${UNIT_PATH}" "${UNIT_PATH}.previous"
         install -o root -g root -m 644 "${SHIPPED_UNIT}" "${UNIT_PATH}"
@@ -331,7 +346,7 @@ if [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"; then
         unit_replaced=1
         note "Replaced ${UNIT_PATH}. The one it replaced is ${UNIT_PATH}.previous."
     else
-        warn "${UNIT_PATH} is not the unit in the tarball, and it was left as it is. --replace-unit installs the tarball's unit, with its sandbox and its stopped marker."
+        warn "$(unit_differs_text)"
     fi
 fi
 
