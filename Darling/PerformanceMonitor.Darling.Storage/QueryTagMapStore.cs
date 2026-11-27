@@ -201,11 +201,12 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
     /// worst 820 MiB between growths and 1,068 MiB if one server had nearly all of them and grew. Both are under what the
     /// rebuild of one server holds on a lab store whose one server tags 8.36 million keys from 16.2 million rows, measured
     /// at 138.6 bytes a key with that one dictionary at 1.44 slots a key: 1,105 MiB of merge state in a process that peaks
-    /// at 1.38 GiB resident. Measured on a lab store of 42 servers of 0.92 to 1.86 million rows each, 41.3 million in all,
-    /// a budget of 8 million rows makes 6 groups, and the builder peaks at 1,333 MiB of managed heap and 1,386 MiB
-    /// resident: more heap than that 1,105 MiB. Its largest group is between 6.9 and 8 million estimated rows, so the peak
-    /// is 175 to 203 bytes of heap an estimated row, the rows being read included, and at that rate a group of 5 million
-    /// rows peaks at 830 to 970 MiB. Rows the estimate missed, and keys longer than 18 characters, are over these figures.
+    /// at 1,267 MiB of managed heap and 1,415 MiB resident. Measured on a lab store of 42 servers of 0.92 to 1.86 million
+    /// rows each, 41.3 million in all, a budget of 8 million rows makes 6 groups, and the builder peaks at 1,333 MiB of
+    /// managed heap and 1,386 MiB resident: 66 MiB more heap than that rebuild and 29 MiB less resident. Its largest group
+    /// is between 6.9 and 8 million estimated rows, so the peak is 175 to 203 bytes of heap an estimated row, the rows
+    /// being read included, and at that rate a group of 5 million rows peaks at 830 to 970 MiB of heap, under that
+    /// rebuild's 1,267 MiB. Rows the estimate missed, and keys longer than 18 characters, are over these figures.
     /// A server whose own estimate is over the budget is read alone, as is every server when the store gives no estimate
     /// (<see cref="QueryTagRebuildGroups.EstimateRows"/>). The value is threaded into the builder as a parameter (#3684).
     /// </summary>
