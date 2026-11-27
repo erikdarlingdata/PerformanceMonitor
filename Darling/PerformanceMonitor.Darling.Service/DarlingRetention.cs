@@ -2748,9 +2748,10 @@ WHERE NOT EXISTS
     /// One slice of the sightings purge (#9705): the probe finds the oldest expired <c>last_seen</c> and the slice's end, and
     /// <see cref="QueryTagSlimSightings.MoveSliceSql"/> deletes the expired sightings of that range and appends their slim rows.
     /// Returns the rows moved and the slice's end, which the drain passes back as <paramref name="lowerBound"/> of its next slice.
-    /// A probe that finds no expired row moves nothing, and the drain ends. The bounds reach the move as plain parameters, so its
-    /// plan is made for the real range. A row written below the bound later is left for the next drain, whose first probe has
-    /// no bound.
+    /// A probe that finds no expired row moves nothing, and the drain ends. The move runs in a transaction of its own, after
+    /// <see cref="QueryTagSlimSightings.MovePlanSettingSql"/>: the setting is local to that transaction, so it ends with the
+    /// commit or with the rollback of a failed move and reaches neither the probe nor any other statement of the purge. A row
+    /// written below the bound later is left for the next drain, whose first probe has no bound.
     /// </summary>
     /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
     internal static async Task<(int Rows, object? SliceEnd)> ExecuteSightingsMoveSliceAsync(
@@ -2781,11 +2782,24 @@ WHERE NOT EXISTS
             sliceEnd = reader.GetValue(1);
         }
 
-        using var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-        move.Parameters.AddWithValue(cutoff);
-        move.Parameters.AddWithValue(sliceStart);
-        move.Parameters.AddWithValue(sliceEnd);
-        return (await move.ExecuteNonQueryAsync(cancellationToken), sliceEnd);
+        /* Disposing the transaction rolls a failed move back, which also ends the plan setting. */
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        using (var setting = new NpgsqlCommand(QueryTagSlimSightings.MovePlanSettingSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds })
+        {
+            await setting.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        int rows;
+        using (var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds })
+        {
+            move.Parameters.AddWithValue(cutoff);
+            move.Parameters.AddWithValue(sliceStart);
+            move.Parameters.AddWithValue(sliceEnd);
+            rows = await move.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return (rows, sliceEnd);
     }
 
     /// <summary>

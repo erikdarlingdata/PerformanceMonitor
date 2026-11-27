@@ -44,7 +44,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// sightings comes first. Those are read in order, as the extend reads its keys
 /// (<see cref="QueryTagMapStore.ReadSightingsOfKeysAsync"/>), at most <see cref="MapKeysPerServerPerPass"/> a statement. Every
 /// page and the ordered read share one REPEATABLE READ, read only transaction, so a purge that moves a sighting to the slim
-/// table between two pages cannot hide the row from both, and the map is written once, after the read commits.</para>
+/// table between two pages cannot hide the row from both, and the map is written once, after the read commits, in one
+/// transaction of batched inserts (<see cref="QueryTagMapStore.MapWriteBatchRows"/> rows a statement), each row made as its
+/// batch is filled.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
 /// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
@@ -84,7 +86,7 @@ public sealed class QueryTagMapBuilder
     /// runs every enabled rule over them, which at 5000 keys is tens of milliseconds to a couple of seconds and one
     /// bounded upsert, well inside a pass interval. The cap pages the extend, which reads only what changed after the
     /// cursor (the last two minutes, or the tail of a burst), never the whole history: a server's whole history is read
-    /// by a rebuild, in block-range pages, and written in one transaction. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
+    /// by a rebuild, in block-range pages, and written in one transaction, <see cref="QueryTagMapStore.MapWriteBatchRows"/> rows a statement. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
     /// both stores share, so neither store's pass can outgrow the other's. The value is threaded into the SQL as a
     /// parameter (#3684), never written there.
     /// </summary>
@@ -121,16 +123,20 @@ public sealed class QueryTagMapBuilder
     private readonly Stopwatch _sinceConstruction = Stopwatch.StartNew();
     private readonly int _keysPerServerPerPass;
     private readonly int _rebuildPageBlocks;
+    private readonly int _mapWriteBatchRows;
     private readonly QueryTagSightingBuffer? _sightings;
     private readonly Dictionary<int, Cursor> _cursors = new();
 
     /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
     /// reads sightings other code wrote.</param>
     /// <param name="rebuildPageBlocks">The heap blocks one page of a rebuild's read covers (<see cref="QueryTagMapStore.RebuildPageBlocks"/>).</param>
+    /// <param name="mapWriteBatchRows">The map rows one statement of a rebuild's write carries (<see cref="QueryTagMapStore.MapWriteBatchRows"/>).</param>
     public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null,
-        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null, int rebuildPageBlocks = QueryTagMapStore.RebuildPageBlocks)
+        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null, int rebuildPageBlocks = QueryTagMapStore.RebuildPageBlocks,
+        int mapWriteBatchRows = QueryTagMapStore.MapWriteBatchRows)
     {
         _rebuildPageBlocks = rebuildPageBlocks > 0 ? rebuildPageBlocks : QueryTagMapStore.RebuildPageBlocks;
+        _mapWriteBatchRows = mapWriteBatchRows > 0 ? mapWriteBatchRows : QueryTagMapStore.MapWriteBatchRows;
         _maxRebuildAge = maxRebuildAge ?? MaxRebuildAge;
         _rebuildStartupGrace = rebuildStartupGrace ?? RebuildStartupGrace;
         _ageRebuildBackoff = ageRebuildBackoff ?? AgeRebuildBackoff;
@@ -350,7 +356,6 @@ public sealed class QueryTagMapBuilder
         DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
 
         var merge = new QueryTagRebuildMerge(serverId, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName);
-        var rows = new List<QueryTagMapRow>();
         await using (var read = await QueryTagMapStore.BeginRebuildReadAsync(connection, cancellationToken).ConfigureAwait(false))
         {
             /* The slim rows first, then the sightings: a key's first sighting drops what its slim rows resolved to (#9705). */
@@ -364,23 +369,24 @@ public sealed class QueryTagMapBuilder
                 merge.Add(row);
             }
 
-            var merged = merge.Finish();
-            rows.AddRange(merged.Rows);
-
-            /* The keys whose winning sightings disagree: the first one in order decides, so they are read in order, in the same snapshot. */
-            if (merged.KeysNeedingOrder.Count > 0)
+            /* The keys whose winning sightings disagree: the first one in order decides, so they are read back through the unique
+               index, in the same snapshot, and each answer goes back into the merge. */
+            var needOrder = merge.KeysNeedingOrder();
+            if (needOrder.Count > 0)
             {
                 await QueryTagMapStore.UseOrderedReadPlansAsync(connection, cancellationToken).ConfigureAwait(false);
-                for (int at = 0; at < merged.KeysNeedingOrder.Count; at += _keysPerServerPerPass)
+                for (int at = 0; at < needOrder.Count; at += _keysPerServerPerPass)
                 {
-                    var batch = merged.KeysNeedingOrder.Skip(at).Take(_keysPerServerPerPass).ToList();
+                    var batch = needOrder.GetRange(at, Math.Min(_keysPerServerPerPass, needOrder.Count - at));
                     var sightingsByKey = await QueryTagMapStore.ReadSightingsOfKeysAsync(connection, serverId, batch, cancellationToken).ConfigureAwait(false);
                     foreach (var key in batch)
                     {
-                        if (sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings))
-                        {
-                            AddResolved(rows, serverId, sightings, snapshot);
-                        }
+                        merge.SetOrdered(
+                            QueryTagMapStore.KindOf(key.KeyKind),
+                            key.Key,
+                            sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings)
+                                ? QueryTagResolver.Resolve(serverId, sightings, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName)
+                                : QueryTagResolution.None);
                     }
                 }
             }
@@ -388,8 +394,9 @@ public sealed class QueryTagMapBuilder
             await read.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        /* The merge makes each map row as the write takes it, a batch at a time: no list of the server's map rows is built (#9705). */
         var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, clock);
-        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
+        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, merge.MapRows(), cancellationToken, Stored(next, snapshot), _mapWriteBatchRows).ConfigureAwait(false);
         _cursors[serverId] = next;
         _ageBackoffUntil.Remove(serverId);
     }

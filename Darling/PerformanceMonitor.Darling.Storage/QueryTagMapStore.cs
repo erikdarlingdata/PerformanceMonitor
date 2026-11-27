@@ -117,9 +117,11 @@ LIMIT $5
 """;
 
     /// <summary>
-    /// The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
-    /// database, application, login, host, as the unique index reads them) because the resolver takes the first matching
-    /// sighting: a tie broken by whatever order the planner returned would let a rebuild change a key's tag (#5985).
+    /// The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays), in the order the unique index
+    /// reads them. The resolver takes the first matching sighting, and which of a key's sightings is first is decided in
+    /// code, not here (#9705): <see cref="ReadSightingsOfKeysAsync"/> sorts each key's rows by
+    /// <see cref="QueryTagRebuildMerge.SlimRowOrder"/>, so a key gets one tag whatever collation the store sorts text by
+    /// (#5985), and this ORDER BY has to agree with nothing. On a store whose text sorts by byte it is already that order.
     /// </summary>
     internal const string SightingsOfKeysSql = """
 SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample
@@ -184,6 +186,14 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
     }
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";
+
+    /// <summary>
+    /// The most map rows one statement of a rebuild's write carries (#9705). A rebuild writes a server's whole map in one
+    /// transaction, as batches of this many rows, so no statement and no parameter array grows with the server: one statement
+    /// carrying 8.4 million rows as arrays ended a lab store's backend at its 4 GB memory limit. The value is threaded into
+    /// the write as a parameter (#3684).
+    /// </summary>
+    public const int MapWriteBatchRows = 50000;
 
     /// <summary>Inserts the resolved rows. $1 server_id, $2..$8 the seven columns as parallel arrays.</summary>
     internal const string InsertMapSql = """
@@ -395,6 +405,16 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             list.Add(sighting);
         }
 
+        /* The first sighting in order decides a key's tag, and that order is the code's, not the statement's (#9705). The
+           sort is stable, so rows the store already returned in this order stay as they came. */
+        foreach (var id in grouped.Keys.ToList())
+        {
+            if (grouped[id].Count > 1)
+            {
+                grouped[id] = grouped[id].OrderBy(sighting => sighting, QueryTagRebuildMerge.SlimRowComparer).ToList();
+            }
+        }
+
         return grouped;
     }
 
@@ -490,16 +510,23 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
 
     /// <summary>
     /// Replaces one server's map rows with <paramref name="rows"/> in one transaction: a reader sees the old map or
-    /// the new one, and a failure part way rolls back to the old one. A <paramref name="cursor"/> is stored in the same
-    /// transaction (#9308), so a stored cursor is never ahead of the map it describes.
+    /// the new one, and a failure part way, in any batch, rolls back to the old one. The rows are taken from
+    /// <paramref name="rows"/> as they are written and inserted <paramref name="batchRows"/> to a statement (#9705), so the
+    /// write holds one batch and a caller that makes its rows on demand never holds the server's map. A
+    /// <paramref name="cursor"/> is stored in the same transaction (#9308), so a stored cursor is never ahead of the map it
+    /// describes.
     /// </summary>
     public static async Task ReplaceMapAsync(
         NpgsqlConnection connection,
         int serverId,
-        IReadOnlyList<QueryTagMapRow> rows,
+        IEnumerable<QueryTagMapRow> rows,
         CancellationToken cancellationToken,
-        QueryTagMapStoredCursor? cursor = null)
+        QueryTagMapStoredCursor? cursor = null,
+        int batchRows = MapWriteBatchRows)
     {
+        ArgumentNullException.ThrowIfNull(rows);
+        int batchSize = Math.Max(1, batchRows);
+
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = new NpgsqlCommand(DeleteServerMapSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
@@ -507,10 +534,26 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (rows.Count > 0)
+        var batch = new List<QueryTagMapRow>();
+        foreach (var row in rows)
         {
-            await using var insert = MapCommand(InsertMapSql, connection, transaction, serverId, rows);
+            batch.Add(row);
+            if (batch.Count == batchSize)
+            {
+                await InsertBatchAsync().ConfigureAwait(false);
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            await InsertBatchAsync().ConfigureAwait(false);
+        }
+
+        async Task InsertBatchAsync()
+        {
+            await using var insert = MapCommand(InsertMapSql, connection, transaction, serverId, batch);
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            batch.Clear();
         }
 
         if (cursor is not null)
@@ -655,6 +698,14 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
         return command;
     }
 
+    /// <summary>The key kind of a stored <c>key_kind</c> text, the inverse of <see cref="QueryTagSightingWriter.KindText"/>.</summary>
+    internal static QueryTagKeyKind KindOf(string kind) => kind switch
+    {
+        "hash" => QueryTagKeyKind.Hash,
+        "object" => QueryTagKeyKind.Object,
+        _ => QueryTagKeyKind.Caller,
+    };
+
     private static QueryTagSighting ReadSighting(NpgsqlDataReader reader)
     {
         string kind = reader.GetString(0);
@@ -665,12 +716,7 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
         string? login = reader.IsDBNull(5) ? null : reader.GetString(5);
         string? host = reader.IsDBNull(6) ? null : reader.GetString(6);
         string? sample = reader.IsDBNull(7) ? null : reader.GetString(7);
-        var keyKind = kind switch
-        {
-            "hash" => QueryTagKeyKind.Hash,
-            "object" => QueryTagKeyKind.Object,
-            _ => QueryTagKeyKind.Caller,
-        };
+        var keyKind = KindOf(kind);
 
         /* An object key's own text is the qualified name, so it carries the object even if the column was empty. */
         var objectRef = ParseQualified(objectName ?? (keyKind == QueryTagKeyKind.Object ? key : null), database);

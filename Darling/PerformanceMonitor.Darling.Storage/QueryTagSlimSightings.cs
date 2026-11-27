@@ -60,7 +60,12 @@ COMMENT ON TABLE collect.query_tag_sightings_slim IS 'A query-tag sighting past 
 """;
 
     /// <summary>
-    /// The hours of <c>last_seen</c> one slice of the move covers: a day, the slice every other time-sliced purge takes.
+    /// The hours of <c>last_seen</c> one slice of the move covers (#9705): a day, the slice every other time-sliced purge takes.
+    /// Measured cold on a lab store, on a day of 402,668 expired rows that lie all over the heap: a 24 hour slice moves in
+    /// 5.8 s through the bitmap read <see cref="MovePlanSettingSql"/> gives (12 hours 5.3 s, 6 hours 4.3 s) and in 54.6 s
+    /// through the index scan (12 hours 51.5 s, 6 hours 43.8 s). So a shorter slice saves under 30 percent of a slice's time,
+    /// doubles or quadruples the probes and the pacing waits of a drain, and a day is under the purge's 100 s target on
+    /// either plan.
     /// </summary>
     public const int MoveSliceHours = 24;
 
@@ -81,12 +86,24 @@ COMMENT ON TABLE collect.query_tag_sightings_slim IS 'A query-tag sighting past 
         $"SELECT s.slice_start, s.slice_start + INTERVAL '{MoveSliceHours} hours' FROM (SELECT min(last_seen) AS slice_start FROM collect.query_tag_sightings WHERE last_seen < $1{lowerBound}) AS s";
 
     /// <summary>
+    /// The plan setting of the move (#9705), run as its own command inside the transaction that holds only it and
+    /// <see cref="MoveSliceSql"/>: <c>SET LOCAL</c> ends with that transaction, committed or rolled back, so no probe and no
+    /// other statement of the purge is planned under it. With index scans off the delete finds its slice through a bitmap of
+    /// the <c>last_seen</c> index and reads the heap in block order with read-ahead. Left alone, the planner picks the index
+    /// scan even with the slice's real bounds as parameters, because <c>last_seen</c> follows heap position closely over the
+    /// whole table (a correlation of 0.98 on a lab store) while the rows of one expired day lie all over the heap, so it
+    /// prices one random read a row as if the rows were neighbours. Measured cold on that store, a day of 402,668 rows:
+    /// 54.6 s by the index scan, 5.8 s by the bitmap.
+    /// </summary>
+    public const string MovePlanSettingSql = "SET LOCAL enable_indexscan = off";
+
+    /// <summary>
     /// Deletes one slice of expired sightings and appends their slim rows in the same statement: a sighting is never gone
     /// without its slim row, and a failed statement leaves both tables as they were. <c>$1</c> is the cutoff, <c>$2</c> and
-    /// <c>$3</c> the slice's start and end as a probe returned them. They are plain parameters, not subqueries, so the planner
-    /// sees the real range: a slice's rows lie all over the heap, and with the range known it reads them through a bitmap,
-    /// in heap order with read-ahead, where a range it cannot see is planned as an index scan with one random read a row.
-    /// The statement's row count is the rows deleted, which is the rows inserted.
+    /// <c>$3</c> the slice's start and end as a probe returned them, as plain parameters. The range alone does not choose the
+    /// plan (#9705): the planner takes the index scan for it, 54.6 s for a lab day of 402,668 rows, so the statement runs
+    /// after <see cref="MovePlanSettingSql"/> in a transaction of its own and reads the slice through a bitmap, 5.8 s for the
+    /// same day. The statement's row count is the rows deleted, which is the rows inserted.
     /// </summary>
     public const string MoveSliceSql = """
 WITH moved AS (
