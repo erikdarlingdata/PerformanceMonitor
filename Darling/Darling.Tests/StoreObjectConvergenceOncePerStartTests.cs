@@ -170,6 +170,7 @@ public sealed class StoreObjectConvergenceOncePerStartTests
 
         var startTally = await RunStartPassAsync(steps);
         Assert.Equal(steps.Select(s => s.Name), startTally.Completed);
+        ran.Clear();
 
         var ranAtStartup = new HashSet<string>(startTally.Completed, StringComparer.Ordinal);
         var first = DarlingWorker.SelectHourlyConvergenceSteps(steps, timescaleAvailable: true, ranAtStartup, out var skipped);
