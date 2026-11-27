@@ -619,6 +619,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                 using var readScope = ReadScope.Open(logger);
                 readScope.Scope.CaptureStatements = true;
+                /* #9882: a read this request starts and leaves running (the fleet reference of get_query_store_clutter) offers its
+                   own slow-read row to the same log, as this caller's. */
+                readScope.Scope.RecordsTo(readLatencyRecorder.SlowReads, ReadSurface.Web, WebReadCaller(context));
                 var admissionBand = WebWindowBand(name, key => First(context, key));
                 /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                    or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).

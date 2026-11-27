@@ -924,23 +924,50 @@ public static class DarlingQueryStoreClutterReader
         ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var closedDays = await ResolveClutterRouteAsync(postgres, serverIds, startUtc, endUtc, cancellationToken);
+
+        /* #9882: one statement per server on the route every server shares, FleetChurnParallelism at a time. The statement groups by
+           server first, so the rows are the ones a single statement over the whole fleet returns. One server's distinct sort fits in
+           memory where the fleet's spills to disk, and the statements read the index on several connections at once. */
+        var ids = serverIds.Distinct().Order().ToArray();
+        var perServer = new List<PlanChurnP95Row>[ids.Length];
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, ids.Length),
+            new ParallelOptions { MaxDegreeOfParallelism = FleetChurnParallelism, CancellationToken = cancellationToken },
+            async (i, token) => perServer[i] = await ReadPlanChurnP95StatementAsync(postgres, new[] { ids[i] }, startUtc, endUtc, closedDays, token));
+        var rows = perServer.SelectMany(r => r).ToList();
+
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, DatabaseFilter.All, null, asOfUtc, null, logger, cancellationToken);
+    }
+
+    /// <summary>#9882: how many per-server statements of <see cref="GetPlanChurnP95Async"/> run at once, each on its own pooled connection.</summary>
+    internal const int FleetChurnParallelism = 4;
+
+    /// <summary>Test seam (#9882): runs in each statement of <see cref="GetPlanChurnP95Async"/> once it holds its connection and is handed
+    /// the statement's server ids and token, so a test can hold the statements in flight and count them. Unset in production.</summary>
+    internal static readonly AsyncLocal<Func<int[], CancellationToken, Task>?> FleetChurnStatementSeam = new();
+
+    /// <summary>#9882: one narrow plan-churn statement over <paramref name="serverIds"/> on a route already resolved
+    /// (<see cref="ResolveClutterRouteAsync"/>), with no dropped-database filter. <see cref="GetPlanChurnP95Async"/> runs it once per server.</summary>
+    internal static async Task<List<PlanChurnP95Row>> ReadPlanChurnP95StatementAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, ClutterRoute? closedDays, CancellationToken cancellationToken)
+    {
         var rows = new List<PlanChurnP95Row>();
-        await using var command = postgres.CreateCommand(closedDays switch { null => PlanChurnP95Sql, { Hours: true } => PlanChurnP95ClosedHoursSql, _ => PlanChurnP95ClosedDaysSql });
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        if (FleetChurnStatementSeam.Value is { } seam) await seam(serverIds, cancellationToken);
+        await using var command = new NpgsqlCommand(closedDays switch { null => PlanChurnP95Sql, { Hours: true } => PlanChurnP95ClosedHoursSql, _ => PlanChurnP95ClosedDaysSql }, connection);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         command.Parameters.Add(DatabaseFilter.All.Parameter());
         AddClosedDays(command, closedDays);
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(new PlanChurnP95Row(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2)));
-            }
+            rows.Add(new PlanChurnP95Row(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2)));
         }
 
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, DatabaseFilter.All, null, asOfUtc, null, logger, cancellationToken);
+        return rows;
     }
 
     /// <summary>
