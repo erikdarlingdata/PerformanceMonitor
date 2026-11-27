@@ -206,6 +206,107 @@ WHERE (SELECT count(DISTINCT q.query_text_digest) FILTER (WHERE {Honest}) FROM c
     }
 
     /// <summary>
+    /// One build folds every text of a key into the key's one row, for two servers in one statement, where raw is a plain table and where
+    /// it is a hypertable. The seed holds what the fold has to keep apart: a text with interval-honest and zero-interval rows under one
+    /// key, a text that only a zero-interval row carries (not one of the key's texts, yet its row is the key's newest), a text two keys
+    /// share, an honest row with no digest, and a key of NULLs whose texts arrive in descending order. Every column equals the raw
+    /// aggregate, each key has one row, and <c>digests</c> is the key's honest texts in ascending order.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OneBuild_FoldsEveryTextOfAKey_IntoOneRow(bool tiered) =>
+        WithStoreAsync(tiered, async (scratch, connection, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var seeder = new RawSeeder(connection, ct);
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(1), "DbA", "0xF1", null, digest: 3, cpu: 10);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(2), "DbA", "0xF1", null, digest: 1, cpu: 20);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(3), "DbA", "0xF1", null, digest: 1, interval: 0, cpu: 30, extreme: true);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(4), "DbA", "0xF1", null, digest: 1, cpu: 40);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(5), "DbA", "0xF1", null, digest: null, cpu: 50);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(55), "DbA", "0xF1", null, digest: 2, interval: 0, cpu: 60, extreme: true);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(6), "DbA", "0xF2", "procX", digest: 3, cpu: 70);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(7), null, null, null, digest: 9, cpu: 80);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(8), null, null, null, digest: 8, cpu: 90);
+            }
+
+            await QueryStatsLedgerSeed.SeedAsync(connection, Hour9, Hour9.AddHours(1), ct);
+            var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(0, result.Failed);
+
+            Assert.Equal(2 * 3, await AssertRollupEqualsRawAsync(connection, ct));
+            Assert.Equal(6L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly", ct));
+
+            // The first byte of each digest, in the order the row stores them.
+            const string texts = "array_to_string(ARRAY(SELECT get_byte(u.d, 0) FROM unnest(h.digests) WITH ORDINALITY AS u(d, i) ORDER BY u.i), ',')";
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                Assert.Equal("1,3", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash = '0xF1'", ct, ("id", serverId)));
+                Assert.Equal("3", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash = '0xF2'", ct, ("id", serverId)));
+                Assert.Equal("8,9", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash IS NULL", ct, ("id", serverId)));
+                Assert.Equal(4L, await ScalarAsync<long>(connection, "SELECT raw_rows FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = '0xF1'", ct, ("id", serverId)));
+                Assert.Equal(Hour9.AddMinutes(55), await ScalarAsync<DateTime>(connection, "SELECT last_execution_time FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = '0xF1'", ct, ("id", serverId)));
+            }
+        });
+
+    /// <summary>
+    /// One build keeps, for each key, the byte key of the key's newest text-bearing row, whichever of the key's texts that row belongs to
+    /// (#9799, #9802). The build takes the key per text first and folds those, and the store has no <c>max(bytea)</c> before PostgreSQL 18,
+    /// so both steps run the array form. The seed holds what the fold has to get right: a key whose newest row carries neither a text nor a
+    /// digest, so one of its partial keys is NULL and must lose to the others. A key none of whose rows carries either, whose key is NULL.
+    /// A key whose newest text is an inline text with no digest. And a key with two texts collected at the same instant, where the row
+    /// collected last wins.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OneBuild_KeepsTheNewestTextKeyOfAKey_AcrossItsTexts(bool tiered) =>
+        WithStoreAsync(tiered, async (scratch, connection, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var seeder = new RawSeeder(connection, ct);
+            var winners = new Dictionary<(int ServerId, string Hash), long>();
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(1), "DbA", "0xK1", null, digest: 1);
+                winners[(serverId, "0xK1")] = await seeder.InsertAsync(serverId, Hour9.AddMinutes(20), "DbA", "0xK1", null, digest: 2);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(10), "DbA", "0xK1", null, digest: 1);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(50), "DbA", "0xK1", null, noText: true);
+
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(2), "DbA", "0xK2", null, noText: true);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(3), "DbA", "0xK2", null, noText: true);
+
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(10), "DbA", "0xK3", null, digest: 4);
+                winners[(serverId, "0xK3")] = await seeder.InsertAsync(serverId, Hour9.AddMinutes(30), "DbA", "0xK3", null, digest: null);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(40), "DbA", "0xK3", null, noText: true);
+
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(15), "DbA", "0xK4", null, digest: 6);
+                winners[(serverId, "0xK4")] = await seeder.InsertAsync(serverId, Hour9.AddMinutes(15), "DbA", "0xK4", null, digest: 5);
+            }
+
+            await QueryStatsLedgerSeed.SeedAsync(connection, Hour9, Hour9.AddHours(1), ct);
+            var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(0, result.Failed);
+
+            Assert.Equal(2 * 4, await AssertRollupEqualsRawAsync(connection, ct));
+
+            // Bytes 9 to 16 of the key are the collection id of the row the key was taken from.
+            const string keyRow = "SELECT ('x' || encode(substring(latest_text_key FROM 9 FOR 8), 'hex'))::bit(64)::bigint FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = @hash";
+            foreach (var ((serverId, hash), collectionId) in winners)
+            {
+                Assert.Equal(collectionId, await ScalarAsync<long>(connection, keyRow, ct, ("id", serverId), ("hash", hash)));
+            }
+
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                Assert.True(await ScalarAsync<bool>(connection, "SELECT latest_text_key IS NULL FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = '0xK2'", ct, ("id", serverId)));
+            }
+        });
+
+    /// <summary>
     /// A raw row that arrives for an hour after it was built makes the hour incomplete (its build counted fewer rows than the ledger holds
     /// now), the next tick builds it again with no help from the settle rule, and the hour is complete and equal to raw once more.
     /// </summary>
@@ -792,7 +893,11 @@ WHERE h.server_id = ANY(@servers)", ct);
             await InsertAsync(serverId, hour.AddMinutes(11), null, "0xG6", "procZ", digest: 8, interval: null, cpu: 70);
         }
 
-        public async Task InsertAsync(int serverId, DateTime at, string? database, string? hash, string? host, int? digest = null, int? interval = 300, long cpu = 100, bool noDop = false, bool extreme = false)
+        /// <summary>
+        /// Plants one raw row and returns its collection id. A row with a digest carries an inline text too on every fourth id, a row
+        /// with no digest always carries one, and <paramref name="noText"/> plants a row with neither.
+        /// </summary>
+        public async Task<long> InsertAsync(int serverId, DateTime at, string? database, string? hash, string? host, int? digest = null, int? interval = 300, long cpu = 100, bool noDop = false, bool extreme = false, bool noText = false)
         {
             var id = ++_collectionId;
             var values = new List<(string Column, object? Value)>
@@ -805,8 +910,8 @@ WHERE h.server_id = ANY(@servers)", ct);
                 ("last_execution_time", at), ("creation_time", extreme ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) : at.AddDays(-3).AddMinutes(_random.Next(0, 600))),
                 ("min_dop", noDop ? null : Bound(1, 4, extreme, low: true)), ("max_dop", noDop ? null : Bound(4, 16, extreme, low: false)),
                 ("total_clr_time", Bound(0, 900, extreme, low: false)), ("plan_generation_num", Bound(1, 9, extreme, low: false)),
-                ("query_text", digest is null || id % 4 == 0 ? $"select {id}" : null),
-                ("query_text_digest", digest is { } d ? Enumerable.Repeat((byte)d, 32).ToArray() : null),
+                ("query_text", !noText && (digest is null || id % 4 == 0) ? $"select {id}" : null),
+                ("query_text_digest", !noText && digest is { } d ? Enumerable.Repeat((byte)d, 32).ToArray() : null),
             };
             foreach (var pair in new[] { "worker_time", "elapsed_time", "physical_reads", "rows", "grant_kb", "used_grant_kb", "ideal_grant_kb", "spills", "reserved_threads", "used_threads" })
             {
@@ -823,6 +928,7 @@ WHERE h.server_id = ANY(@servers)", ct);
             }
 
             await command.ExecuteNonQueryAsync(ct);
+            return id;
         }
 
         private long? Draw(int max) => _random.Next(0, 6) == 0 ? null : _random.Next(0, max);

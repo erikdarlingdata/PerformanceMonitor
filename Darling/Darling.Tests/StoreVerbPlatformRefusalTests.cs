@@ -120,7 +120,7 @@ public sealed class StoreVerbPlatformRefusalTests
         Assert.Equal("PerformanceMonitor.Darling.Service.exe", OperatorVerbForm.EntryPoint(isWindows: true, "/opt/darling/"));
         Assert.Equal("dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling/"));
         Assert.Equal("dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling"));
-        Assert.Equal("dotnet \"/opt/my darling/PerformanceMonitor.Darling.Service.dll\"", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/my darling"));
+        Assert.Equal("dotnet '/opt/my darling/PerformanceMonitor.Darling.Service.dll'", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/my darling"));
         Assert.Equal("dotnet PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, installDir: null));
         Assert.Equal(OperatorVerbForm.EntryPointHere() + " --add-server", OperatorVerbForm.InstalledCommandHere("--add-server"));
         Assert.Equal(OperatorVerbForm.EntryPoint(OperatingSystem.IsWindows(), AppContext.BaseDirectory), OperatorVerbForm.EntryPointHere());

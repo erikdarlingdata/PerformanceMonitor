@@ -53,11 +53,11 @@ public sealed class McpServerAdminTools
         "When collection is on and a connection setting changed, the new settings are tried first and saved only if the server answers (status \"connection_failed\", nothing saved). " +
         "An edit of host, auth, trust_server_certificate or encrypt_mode that leaves Windows authentication with trust_server_certificate true or encrypt_mode Optional is refused as invalid before any connection is tried, because Windows authentication would present Lite's own Windows account to a host the connection does not verify; an operator can allow it with mcp_allow_windows_auth_over_unverified_tls in settings.json. " +
         "Returns updated or unchanged, or invalid / not_found / ambiguous / collides / connection_failed / refused with nothing saved. updated returns {status, server, display_name, changed:[field names], tested, previous, undo, undo_note}: previous holds the changed fields as they were, undo is the edit_server call that sets them back (never the password). " +
-        "Served only when both mcp_allow_writes and mcp_allow_server_admin are true. server_name is a display name, host or storage name, and a partial name is accepted only when it matches exactly one server.")]
+        "Served only when both mcp_allow_writes and mcp_allow_server_admin are true. server_name is a display name, host or storage name, or id:<server_id>, and a partial name is accepted only when it matches exactly one server. A name more than one server answers to is refused as ambiguous with each candidate's server_id.")]
     public static async Task<string> EditServer(
         ServerManager serverManager,
         McpServerAdminHooks hooks,
-        [Description("The monitored server to edit: its display name or storage name. A partial name is accepted only when it matches exactly one server.")] string server_name,
+        [Description("The monitored server to edit: its display name or storage name, or id:<server_id>. A partial name is accepted only when it matches exactly one server.")] string server_name,
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool description for the keys.")] string changes_json,
         CancellationToken cancellationToken = default)
     {
@@ -118,6 +118,58 @@ public sealed class McpServerAdminTools
 
         return ServerResolver.PickByStorageName(all, resolved.ServerName);
     }
+
+    /// <summary>
+    /// The one server a name picks for <c>edit_server</c> over EVERY listed server (a disabled one too), or the answer to return
+    /// (#9693). The name goes through <see cref="ServerResolver.MatchForEdit"/>: an edit can change where a saved password is
+    /// sent, so a name that more than one server answers to is refused as <c>ambiguous</c> with each candidate's
+    /// <c>server_id</c>, and <c>id:&lt;server_id&gt;</c> names one of them.
+    /// </summary>
+    private static (ServerConnection? Server, string? Error) FindForEdit(ServerManager serverManager, string? serverName)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+        {
+            return (null, Refuse(EditTool, "invalid", "server_name is required: a display name or storage name from list_servers.", "server_name"));
+        }
+
+        var all = serverManager.GetAllServers();
+        var match = ServerResolver.MatchForEdit(all, serverName);
+        if (match.Candidates.Count == 1)
+        {
+            return ServerResolver.PickByStorageName(all, match.Candidates[0].ServerName);
+        }
+
+        if (match.Candidates.Count == 0)
+        {
+            return (null, McpHelpers.Refusal("server_name", ServerResolver.MissSentence(all, serverName)));
+        }
+
+        return (null, new JsonObject
+        {
+            ["status"] = "ambiguous",
+            ["tool"] = EditTool,
+            ["message"] = $"'{serverName.Trim()}' matches {match.Candidates.Count} monitored servers " +
+                          $"({(match.MatchedBy == "exact" ? "as the display name, the host or the storage name of more than one server" : "as a part of their names")}); " +
+                          $"nothing was changed. Re-issue edit_server with ONE candidate: its server_id as {ServerResolver.ServerIdNamePrefix}<server_id>, or a name that no other server has.",
+            ["matched_by"] = match.MatchedBy,
+            ["candidates"] = new JsonArray(match.Candidates.Select(c => (JsonNode?)new JsonObject
+            {
+                ["server_id"] = c.ServerId,
+                ["server"] = c.ServerName,
+                ["display_name"] = c.DisplayName,
+                ["kind"] = c.Kind,
+            }).ToArray()),
+            ["hints"] = new JsonObject { ["parameter"] = "server_name" },
+        }.ToJsonString());
+    }
+
+    /// <summary>The name the undo call of an edit passes (#9693): the storage name while <see cref="ServerResolver.MatchForEdit"/>
+    /// finds one server by it, else <c>id:&lt;server_id&gt;</c>, so the undo is never refused as ambiguous when another server has
+    /// that storage name as its display name or host.</summary>
+    private static string UndoServerName(ServerManager serverManager, string storage) =>
+        ServerResolver.MatchForEdit(serverManager.GetAllServers(), storage).Candidates.Count == 1
+            ? storage
+            : ServerResolver.ServerIdNamePrefix + RemoteCollectorService.GetDeterministicHashCode(storage).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private static string AuthWordOut(string authenticationType) => authenticationType switch
     {
@@ -222,7 +274,7 @@ public sealed class McpServerAdminTools
         CancellationToken cancellationToken,
         McpServerAdminHooks? hooks = null)
     {
-        var (stored, findError) = Find(serverManager, EditTool, serverName);
+        var (stored, findError) = FindForEdit(serverManager, serverName);
         if (stored is null)
         {
             return findError!;
@@ -616,7 +668,7 @@ public sealed class McpServerAdminTools
                 : new JsonObject
                 {
                     ["tool"] = EditTool,
-                    ["arguments"] = new JsonObject { ["server_name"] = storage, ["changes_json"] = undoChanges.ToJsonString() },
+                    ["arguments"] = new JsonObject { ["server_name"] = UndoServerName(serverManager, storage), ["changes_json"] = undoChanges.ToJsonString() },
                 },
             ["undo_note"] = undoNote,
             ["note"] = useProfile && reachChanged && next.IsEnabled

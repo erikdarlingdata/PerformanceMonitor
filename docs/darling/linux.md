@@ -343,7 +343,7 @@ All servers reachable.
 Two things to expect here:
 
 - **A note about the registry on a new store.** Before the first start the store has no tables, so the command prints `NOTE: the store has no server registry yet, so validating darling.json's own server list instead.` That is expected on a store that has never been started ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)).
-- **A certificate failure names the certificate.** An untrusted certificate fails with `[FAIL] <display-name>: A connection was successfully established with the server, but then an error occurred during the pre-login handshake. (provider: TCP Provider, error: 35 - An internal exception was caught) The server's certificate chain is not trusted by this machine, so add the issuing CA to the system trust store, or set trustServerCertificate for this server knowing that it skips the check.` The SQL Server's certificate chains to a CA that is not in the Linux trust store. Amazon RDS for SQL Server is one such case. When the certificate was not issued to the name in `host`, the last sentence says that instead, or as well. The secure fix is to add the CA: put each CA certificate as its own `.crt` file under `/usr/local/share/ca-certificates/`, run `sudo update-ca-certificates`, and run the pre-flight again. The other fix is `"trustServerCertificate": true` on the server's entry, which keeps the connection encrypted and accepts any certificate. Choose before the first start, because `servers` is only a seed.
+- **A certificate failure names the certificate.** An untrusted certificate fails with `[FAIL] <display-name>: A connection was successfully established with the server, but then an error occurred during the pre-login handshake. (provider: TCP Provider, error: 35 - An internal exception was caught) The server's certificate chain is not trusted by this machine, so add the issuing CA to the system trust store, or set trustServerCertificate for this server knowing that it skips the check.` The SQL Server's certificate chains to a CA that is not in the Linux trust store. Amazon RDS for SQL Server is one such case. When the certificate was not issued to the name in `host`, the last sentence says that instead, or as well. The secure fix is to add the CA: put each CA certificate as its own `.crt` file under `/usr/local/share/ca-certificates/`, run `sudo update-ca-certificates`, and run the pre-flight again. The other fix is `"trustServerCertificate": true` on the server's entry, which keeps the connection encrypted and accepts any certificate. Choose before the first start, because `servers` is only a seed. For a server that is already registered, editing `darling.json` and restarting the service changes nothing, so use one of two ways out. Add the CA to the trust store as described. Or run `--edit-server sql01 --set trustServerCertificate=true`, or `--set encryptMode=<mode>`, in the form shown under [Changing a registered server](#changing-a-registered-server). The verb works while the service runs and needs no restart, and a server with a SQL login asks for its password again.
 
 ## Step 8: Write the unit and start the service
 
@@ -458,6 +458,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `.\PerformanceMonitor.Darling.Service.exe --test-connection` or `--validate-config` | `darling-verb --test-connection` |
 | `.\PerformanceMonitor.Darling.Service.exe --check-settings` | `darling-verb --check-settings` |
 | `.\PerformanceMonitor.Darling.Service.exe --add-server` | `darling-verb --add-server`, with the arguments in [Add-server](cli.md#--add-server) |
+| `.\PerformanceMonitor.Darling.Service.exe --edit-server` | `darling-verb --edit-server`, with the arguments in [Edit-server](cli.md#--edit-server) |
 | `.\PerformanceMonitor.Darling.Service.exe --grant-script` | `darling-verb --grant-script` |
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
@@ -479,10 +480,19 @@ In this table `darling-verb` stands for the whole command above. The [command li
 
 ## Changing a registered server
 
-After the first start the server list lives in the store, and an edit to `servers` in `darling.json` does nothing. No log line says that the file differs from the registered server ([#9693](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9693)).
+After the first start the server list lives in the store, and an edit to `servers` in `darling.json` does nothing for a server that is already registered. At start-up the service logs one WARN line for each enabled registered server whose entry in the file differs from the store. The line names each differing field with the file's value and the store's value, and gives the `--edit-server` command that applies the file's values, with each word that is not plain in single quotes.
 
 - **To add a server**, use `--add-server` in its Linux form. It cannot change a server that is already registered.
-- **To change a registered server**, for example its `trustServerCertificate`, its `encryptMode` or its saved password, you need a write surface. They are the web dashboard's Admin page, the MCP `edit_server` tool (which needs `mcp.allowWrites`, `mcp.allowServerAdmin` and a token), and a Windows Viewer connected to this store. With the web dashboard and MCP off there is no way to do it on the host itself today. [Running Darling day to day](admin.md) has the steps for each surface.
+- **To change a registered server**, for example its `trustServerCertificate` or its `encryptMode`, use `--edit-server` in its Linux form. It works while the service runs, and the service applies the change within one sweep with no restart. When the change affects how a server with a saved password is reached, the verb asks for that password again, at a hidden prompt or as one line from stdin when input is redirected. It tests the connection with the new settings and saves only if the server answers.
+- **To change what `--edit-server` does not set**, such as a saved password, you need a write surface. They are the web dashboard's Admin page, the MCP `edit_server` tool (which needs `mcp.allowWrites`, `mcp.allowServerAdmin` and a token), and a Windows Viewer connected to this store. [Running Darling day to day](admin.md) has the steps for each surface.
+
+For example, with the command from [Service verbs on Linux](#service-verbs-on-linux):
+
+```bash
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --edit-server sql01 --set trustServerCertificate=true
+```
+
+[Edit-server](cli.md#--edit-server) lists the fields and the rules.
 
 ## The web dashboard and MCP
 
