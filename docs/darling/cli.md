@@ -23,6 +23,10 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 
 The examples on this page use the Windows form, `.\PerformanceMonitor.Darling.Service.exe --verb`. On Linux under systemd the same verb is `sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --verb`. [Service verbs on Linux](linux.md#service-verbs-on-linux) has the table, with what to do in place of each verb that is Windows only.
 
+## The Compose form
+
+On Docker Compose the service runs in the `darling` container, and the container's environment already points at its `darling.json`. From the compose folder, with the stack up, the same verb is `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --verb`. For example, `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script <server-name>` prints the login and grants for a server that Darling monitors, and `--grant-script --host <host>` does the same for a host that is not added yet. A verb that writes a file writes it inside the container, so copy the file out with `docker compose cp`. The verbs that are Windows only on Linux are Windows only here too.
+
 ## The table
 
 | Verb | What it does | Needs elevation | Service running | Exit codes | Details |
