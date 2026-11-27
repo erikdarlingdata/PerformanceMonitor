@@ -863,7 +863,9 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                 await create.ExecuteNonQueryAsync(ct);
             }
 
-            async Task<DarlingStoreLogins.LoginProbeResult> ProbeAsync(string user, string? options)
+            /* Each case proves its own switch took hold before the probe asks: after the connect (and the statement, for the session
+               authorization form) the connected role is the low one, so a refusal cannot come from the login being a superuser as it stands. */
+            async Task<DarlingStoreLogins.LoginProbeVerdict> ProbeAsync(string user, string? options, string? switchStatement)
             {
                 var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = user, Password = password, Pooling = false };
                 if (options is not null)
@@ -871,14 +873,38 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                     builder.Options = options;
                 }
 
-                return await DarlingStoreLogins.ProbeSurfaceLoginAsync(
-                    DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: builder.ConnectionString), ct);
+                string? connectedAs = null;
+                string? sessionAs = null;
+                var result = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+                    DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: builder.ConnectionString), ct,
+                    openConnection: async (connection, token) =>
+                    {
+                        await connection.OpenAsync(token);
+                        if (switchStatement is not null)
+                        {
+                            await using var switchCommand = new NpgsqlCommand(switchStatement, connection);
+                            await switchCommand.ExecuteNonQueryAsync(token);
+                        }
+
+                        await using var who = new NpgsqlCommand("SELECT current_user::text, session_user::text", connection);
+                        await using var reader = await who.ExecuteReaderAsync(token);
+                        Assert.True(await reader.ReadAsync(token));
+                        connectedAs = reader.GetString(0);
+                        sessionAs = reader.GetString(1);
+                    });
+                if (user != lowName)
+                {
+                    Assert.Equal(lowName, connectedAs);
+                }
+
+                Assert.Equal(switchStatement is null ? user : lowName, sessionAs ?? "");
+                return result.Verdict;
             }
 
-            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(lowName, null)).Verdict);
-            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(superName, $"-c role={lowName}")).Verdict);
-            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(memberName, $"-c role={lowName}")).Verdict);
-            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(superName, $"-c session_authorization={lowName}")).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, await ProbeAsync(lowName, null, null));
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, await ProbeAsync(superName, $"-c role={lowName}", null));
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, await ProbeAsync(memberName, $"-c role={lowName}", null));
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, await ProbeAsync(superName, null, $"SET SESSION AUTHORIZATION {lowName}"));
 
             bodySucceeded = true;
         }
