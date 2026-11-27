@@ -180,16 +180,16 @@ public partial class ViewerServerTab
                 await LoadQueryStoreAsync(startUtc, endUtc, timer);
                 break;
             case QueryStoreRegressionsSubTabIndex:
-                await LoadQueryStoreRegressionsAsync(startUtc, endUtc);
+                await LoadQueryStoreRegressionsAsync(startUtc, endUtc, timer);
                 break;
             case QueryStoreClutterSubTabIndex:
-                await LoadQueryStoreClutterAsync(startUtc, endUtc);
+                await LoadQueryStoreClutterAsync(startUtc, endUtc, timer);
                 break;
             case PlanCorrectionsSubTabIndex:
-                await LoadPlanCorrectionsAsync(startUtc, endUtc);
+                await LoadPlanCorrectionsAsync(startUtc, endUtc, timer);
                 break;
             case QueryHeatmapSubTabIndex:
-                await LoadQueryHeatmapAsync(startUtc, endUtc);
+                await LoadQueryHeatmapAsync(startUtc, endUtc, timer);
                 break;
             case TopQueriesSubTabIndex:
             default:
@@ -203,6 +203,10 @@ public partial class ViewerServerTab
     /// so a read that starts outside that load (a Daily Summary drill, a slicer drag) passes null and is the task itself: it can
     /// not land in another load's line or rename it.</summary>
     internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read) => timer?.Track(phase, read) ?? read;
+
+    /// <summary>#9887: <see cref="Timed{T}"/> for a read whose result wraps its rows (the regressions and clutter reads answer a record), so
+    /// the slow-load line counts them. <paramref name="rowsOf"/> runs only once the read has succeeded.</summary>
+    internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read, Func<T, long?> rowsOf) => timer?.Track(phase, read, rowsOf) ?? read;
 
     /// <summary><see cref="Timed{T}"/> for a task with no result (a join of several reads, or a read the caller awaits for effect).</summary>
     internal static Task Timed(ViewerLoadTimer? timer, string phase, Task read) => timer?.Track(phase, read) ?? read;
@@ -312,7 +316,7 @@ public partial class ViewerServerTab
             /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
                banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
-            await UpdateProcStatsLeftOutBannerAsync(read, startUtc, endUtc);
+            await UpdateProcStatsLeftOutBannerAsync(read, startUtc, endUtc, timer);
             await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask,
                 () => Timed(timer, "slicer read (retry)", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter)));
         }
@@ -333,12 +337,13 @@ public partial class ViewerServerTab
     /// no procedure ran in a database the server still has, from the collector's own run history, never "nothing was recorded".
     /// Collapsed when nothing was left out.
     /// </summary>
-    private async Task UpdateProcStatsLeftOutBannerAsync(ViewerRoutedRead<ViewerProcedureStatsRow> read, DateTime startUtc, DateTime endUtc)
+    private async Task UpdateProcStatsLeftOutBannerAsync(ViewerRoutedRead<ViewerProcedureStatsRow> read, DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         CollectorRunFacts? facts = null;
         if (read.Rows.Count == 0 && read.LeftOutDatabases is { Count: > 0 })
         {
-            facts = await _dataService.GetProcedureStatsRunFactsAsync(_server.ServerId, startUtc, endUtc);
+            /* #9887: the run-history read of an empty page is a store read, so the slow-load line books it and does not call it client work. */
+            facts = await Timed(timer, "run facts read", _dataService.GetProcedureStatsRunFactsAsync(_server.ServerId, startUtc, endUtc));
         }
 
         var text = DatabasesLeftOut.ProcedureBanner(read.LeftOutDatabases, read.Rows.Count, facts, (int)Math.Max(1, Math.Round((endUtc - startUtc).TotalHours)));
@@ -589,15 +594,18 @@ public partial class ViewerServerTab
     /// Dashboard grid's (duration regression % descending) — a grid-view-only SortDescription that does NOT
     /// touch the read's additional-duration ORDER BY (the TVF's ranking).
     /// </summary>
-    private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
+        /* #9887: the slow-load line names this sub-tab and its reads, so the store time of a slow open is not booked as client work. */
+        timer?.Surface = "Queries > Query Store Regressions";
         /* #4966: the probe starts beside the read and asks about the baseline window (the data layer keys it there), and the banner
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
-        var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var floorReadTask = _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
+        var floorTask = Timed(timer, "data start", _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var floorReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
             literalEndUtc: IsCustomRange ? endUtc : null, /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
-            dataStartProbe: floorTask); /* #6750: the rates divide from the data start the banner names. */
+            dataStartProbe: floorTask), /* #6750: the rates divide from the data start the banner names. */
+            regressions => regressions.Rows.Count);
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
         var read = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
@@ -702,10 +710,12 @@ public partial class ViewerServerTab
     /// ranking (score descending) as a grid-view-only SortDescription, so the read's chronological ORDER BY
     /// stands.
     /// </summary>
-    private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        var dataStartTask = _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        /* #9887: the slow-load line names this sub-tab and its reads (see LoadQueryStoreRegressionsAsync). The read answers a list, so its rows are counted as they are. */
+        timer?.Surface = "Queries > Plan Corrections";
+        var dataStartTask = Timed(timer, "data start", _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Plan Corrections");
         var rows = dataReadTask.Result;
         _planCorrectionFilterMgr!.UpdateData(rows);
