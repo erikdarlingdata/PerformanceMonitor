@@ -27,11 +27,14 @@ namespace PerformanceMonitorLite.Database;
 /// </summary>
 internal sealed class ReadLockWaitTally : IDisposable
 {
+    /// <summary>The slow-read threshold a host that sets none keeps, so a test that changes it restores this and writes no second copy of the figure.</summary>
+    internal static readonly TimeSpan DefaultSlowReadThreshold = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// A read that takes longer than this logs its timing line. Two seconds, the threshold the collector pass line uses. The
     /// setter is a test seam, so a test can make any read slow or fast without depending on the clock.
     /// </summary>
-    internal static TimeSpan SlowReadThreshold { get; set; } = TimeSpan.FromSeconds(2);
+    internal static TimeSpan SlowReadThreshold { get; set; } = DefaultSlowReadThreshold;
 
     private static readonly AsyncLocal<ReadLockWaitTally?> s_current = new();
 

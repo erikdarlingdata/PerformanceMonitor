@@ -64,7 +64,7 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
 
     public void Dispose()
     {
-        ReadLockWaitTally.SlowReadThreshold = TimeSpan.FromSeconds(2);
+        ReadLockWaitTally.SlowReadThreshold = ReadLockWaitTally.DefaultSlowReadThreshold;
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
@@ -103,7 +103,9 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
     /// <summary>One call inside the call timing scope the host's filter opens, with every call counted slow, so its row is written.</summary>
     private async Task<(JsonElement Reply, McpSlowCall Row)> CallWithRowAsync(int daysBack, ObjectUsageEvidenceCache? cache = null)
     {
-        var recorder = new McpCallTimingRecorder(_dataService) { SlowThreshold = TimeSpan.Zero };
+        /* The memory reader is a stub: the call's own reads are the ones under test, and the real reader (the sampler's and the closing
+           reading) takes the process-wide read lock on a thread that can outlive the test, which the next class's lock census would count. */
+        var recorder = new McpCallTimingRecorder(_dataService.RecordMcpSlowCallAsync, () => null) { SlowThreshold = TimeSpan.Zero };
         string text;
         using (var call = recorder.Begin("get_object_usage", null))
         {
