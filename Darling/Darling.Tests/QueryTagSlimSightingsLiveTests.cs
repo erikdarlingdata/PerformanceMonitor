@@ -307,7 +307,7 @@ public sealed class QueryTagSlimSightingsLiveTests
             var read = new List<QueryTagSighting>();
             await using (var transaction = await QueryTagMapStore.BeginRebuildReadAsync(env.Store, env.Ct))
             {
-                await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, Server, QueryTagMapStore.RebuildSlimSightings, QueryTagMapStore.RebuildPageBlocks, env.Ct))
+                await foreach (var (_, row) in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, new[] { Server }, QueryTagMapStore.RebuildSlimSightings, QueryTagMapStore.RebuildPageBlocks, env.Ct))
                 {
                     read.Add(row);
                 }
@@ -648,8 +648,9 @@ ORDER BY u.tier, u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.ap
                     var read = new List<string>();
                     await using (var transaction = await QueryTagMapStore.BeginRebuildReadAsync(env.Store, env.Ct))
                     {
-                        await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, Server, table, pageBlocks, env.Ct))
+                        await foreach (var (serverId, row) in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, new[] { Server }, table, pageBlocks, env.Ct))
                         {
+                            Assert.Equal(Server, serverId);
                             read.Add(Row(row));
                         }
 

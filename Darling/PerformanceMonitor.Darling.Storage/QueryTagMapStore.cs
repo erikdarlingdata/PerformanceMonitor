@@ -159,14 +159,15 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
         "SET LOCAL enable_indexscan TO DEFAULT; SET LOCAL enable_bitmapscan TO DEFAULT; SET LOCAL enable_indexonlyscan TO DEFAULT; SET LOCAL max_parallel_workers_per_gather TO DEFAULT";
 
     /// <summary>
-    /// One of the two tables a rebuild reads (#9705), with its three statements. <see cref="BlocksSql"/> is the table's heap
-    /// block count. <see cref="PageSql"/> is one block-range page: the rows of server $1 whose ctid is at or after $2 and before
-    /// $3, both the first row slot of a block, so a page is whole blocks and every block is in exactly one page.
-    /// <see cref="LastPageSql"/> has no upper bound, so a block added after the count was read is still read. Both tables are
-    /// plain tables (never a hypertable), so a ctid names one row of the one heap. The columns come back in the order of
-    /// <see cref="SightingsOfKeysSql"/>, a slim row with no text sample.
+    /// One of the two tables a rebuild reads (#9705), with its name and its three statements. <see cref="BlocksSql"/> is the
+    /// table's heap block count. <see cref="PageSql"/> is one block-range page: the rows of the servers in $1 whose ctid is at
+    /// or after $2 and before $3, both the first row slot of a block, so a page is whole blocks and every block is in exactly
+    /// one page. <see cref="LastPageSql"/> has no upper bound, so a block added after the count was read is still read. Both
+    /// tables are plain tables (never a hypertable), so a ctid names one row of the one heap. The columns come back in the
+    /// order of <see cref="SightingsOfKeysSql"/>, a slim row with no text sample, and then the row's server, so one read of
+    /// the table serves every server of a group.
     /// </summary>
-    internal sealed record RebuildTable(string BlocksSql, string PageSql, string LastPageSql);
+    internal sealed record RebuildTable(string Table, string BlocksSql, string PageSql, string LastPageSql);
 
     internal static readonly RebuildTable RebuildSightings = RebuildTableOf(
         "collect.query_tag_sightings",
@@ -178,12 +179,37 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
 
     private static RebuildTable RebuildTableOf(string table, string columns)
     {
-        string page = $"SELECT {columns} FROM {table} WHERE server_id = $1 AND ctid >= $2";
+        string page = $"SELECT {columns}, server_id FROM {table} WHERE server_id = ANY($1::integer[]) AND ctid >= $2";
         return new RebuildTable(
+            table,
             $"SELECT pg_relation_size('{table}'::regclass) / current_setting('block_size')::bigint",
             page + " AND ctid < $3",
             page);
     }
+
+    /// <summary>
+    /// The most estimated rows, of both sightings tables together, that the servers of one rebuild group may have (#9705). A
+    /// pass that rebuilds several servers reads each table once per group and holds one merge state per tagged key of every
+    /// server of the group until that server's map is written, so the group is what bounds the builder's memory. A row is at
+    /// most one tagged key, and a tagged key holds 138.6 bytes (<see cref="QueryTagRebuildMerge"/>), so a group of 8 million
+    /// rows holds at most 1,057 MiB. That is under what the rebuild of one server holds on a lab store whose one server tags
+    /// 8.36 million keys from 16.2 million rows: 1,105 MiB of merge state in a process that peaks at 1.38 GiB resident. A
+    /// server over the budget is read alone, as is every server when a table has no statistics. The value is threaded into
+    /// the builder as a parameter (#3684).
+    /// </summary>
+    public const int RebuildGroupRows = 8_000_000;
+
+    /// <summary>
+    /// What the store's statistics say of the <c>server_id</c> column of one table (#9705): the table's row estimate, and the
+    /// column's distinct count, most common values and their shares when the table has been analyzed. $1 the table's name.
+    /// </summary>
+    internal const string RebuildRowStatisticsSql = """
+SELECT c.reltuples::float8, s.n_distinct::float8, s.most_common_vals::text::integer[], s.most_common_freqs::float8[]
+FROM pg_class AS c
+LEFT JOIN pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_stats AS s ON s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = 'server_id' AND NOT s.inherited
+WHERE c.oid = $1::regclass
+""";
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";
 
@@ -455,14 +481,65 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
     }
 
     /// <summary>
-    /// Streams every row of one server from one of the rebuild's tables (#9705), each row once, in heap order, in pages of
-    /// <paramref name="pageBlocks"/> heap blocks, so each statement is bounded by the page and not by the server, and no list of
-    /// the server's rows is held. The block count is read first, inside the caller's snapshot when it has one
-    /// (<see cref="BeginRebuildReadAsync"/>). The rows come in no key order: <see cref="QueryTagRebuildMerge"/> resolves them.
+    /// The estimated rows of both sightings tables together for each of <paramref name="serverIds"/>, from the store's
+    /// statistics (#9705), which is what <see cref="QueryTagRebuildGroups.Form"/> bounds a rebuild group by. A server is left
+    /// out when either table gives it no estimate (<see cref="QueryTagRebuildGroups.EstimateRows"/>), so it is read alone.
     /// </summary>
-    internal static async IAsyncEnumerable<QueryTagSighting> ReadRebuildRowsAsync(
+    internal static async Task<Dictionary<int, double>> ReadRebuildRowEstimatesAsync(
+        NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
+    {
+        var statistics = new List<QueryTagRebuildGroups.ServerStatistics?>();
+        foreach (var table in new[] { RebuildSlimSightings, RebuildSightings })
+        {
+            await using var command = new NpgsqlCommand(RebuildRowStatisticsSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = table.Table });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            statistics.Add(await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+                ? new QueryTagRebuildGroups.ServerStatistics(
+                    reader.GetDouble(0),
+                    reader.IsDBNull(1) ? null : reader.GetDouble(1),
+                    reader.IsDBNull(2) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(2),
+                    reader.IsDBNull(3) ? Array.Empty<double>() : reader.GetFieldValue<double[]>(3))
+                : null);
+        }
+
+        var estimates = new Dictionary<int, double>();
+        foreach (int serverId in serverIds)
+        {
+            double rows = 0;
+            bool known = true;
+            foreach (var table in statistics)
+            {
+                if (QueryTagRebuildGroups.EstimateRows(table, serverId) is { } estimate)
+                {
+                    rows += estimate;
+                }
+                else
+                {
+                    known = false;
+                }
+            }
+
+            if (known)
+            {
+                estimates[serverId] = rows;
+            }
+        }
+
+        return estimates;
+    }
+
+    /// <summary>
+    /// Streams every row of the servers in <paramref name="serverIds"/> from one of the rebuild's tables (#9705), each row
+    /// once with its server, in heap order, in pages of <paramref name="pageBlocks"/> heap blocks: one front-to-back read of
+    /// the table for the whole group, however many servers it has. Each statement is bounded by the page and not by the
+    /// servers, and no list of their rows is held. The block count is read first, inside the caller's snapshot when it has
+    /// one (<see cref="BeginRebuildReadAsync"/>). The rows come in no key order: each server's
+    /// <see cref="QueryTagRebuildMerge"/> resolves its own.
+    /// </summary>
+    internal static async IAsyncEnumerable<(int ServerId, QueryTagSighting Row)> ReadRebuildRowsAsync(
         NpgsqlConnection connection,
-        int serverId,
+        IReadOnlyCollection<int> serverIds,
         RebuildTable table,
         int pageBlocks,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
@@ -473,6 +550,7 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             blocks = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);
         }
 
+        int[] servers = serverIds.ToArray();
         long step = Math.Max(1, pageBlocks);
         long from = 0;
         while (true)
@@ -480,7 +558,7 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             long to = from + step;
             bool last = to >= blocks;
             await using var command = new NpgsqlCommand(last ? table.LastPageSql : table.PageSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = servers });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)from, 0) });
             if (!last)
             {
@@ -491,7 +569,7 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             {
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    yield return ReadSighting(reader);
+                    yield return (reader.GetInt32(8), ReadSighting(reader));
                 }
             }
 
