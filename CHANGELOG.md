@@ -338,6 +338,13 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`kill_session` on SQL Server checks the server view grant first, and its dry run returns the KILL statement** ([#9803])
 - **A store going down with the service at stop is one Information line, not three warnings** ([#9805])
 - **Top queries, the FinOps optimization read and the host hourly rollup run on PostgreSQL 16 and 17** ([#9806])
+- **Darling `--help` names the command for the platform it runs on** ([#9812])
+- **Darling and Lite Query Store collection keeps a database name with a character outside the code page** ([#9816])
+- **The Lite guide's headless upgrade steps check the hash, keep a data copy before the first start and name the `[Update]` log line** ([#9824])
+- **The blocked process threshold refusal names each server message once, on one line** ([#9825])
+- **The Linux docs show the sha256 origin check, keep the store dump readable only by its owner and root, and say what `--rollback` uses up** ([#9828])
+- **`upgrade-darling.sh --check` shows the warnings the upgrade will print and the checks that passed, and the Linux page gives `sudo journalctl`** ([#9830])
+- **`setup.sh` prints no broken pipe message, and the Compose docs give the Compose form of `--grant-script`, the override file and the expected attention Warning** ([#9831])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8602,3 +8609,10 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9805]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9805
 [#9806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9806
 [#9807]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9807
+[#9812]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9812
+[#9816]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9816
+[#9824]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9824
+[#9825]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9825
+[#9828]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9828
+[#9830]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9830
+[#9831]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9831
