@@ -159,7 +159,7 @@ public sealed class QueryStoreClutterViewerSurfacesTests
         }
 
         Assert.Equal(10, headers.Length);
-        Assert.Contains("case QueryStoreClutterSubTabIndex:\n                await LoadQueryStoreClutterAsync(startUtc, endUtc);", queries, StringComparison.Ordinal);
+        Assert.Contains("case QueryStoreClutterSubTabIndex:\n                await LoadQueryStoreClutterAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -456,6 +456,7 @@ internal sealed class ReadScope
         ReadFallback.GateFailed => 3,
         ReadFallback.FallbackRaw => 2,
         ReadFallback.LedgerUncovered => 1,
+        ReadFallback.LedgerMismatch => 1,
         _ => 0,
     };
 

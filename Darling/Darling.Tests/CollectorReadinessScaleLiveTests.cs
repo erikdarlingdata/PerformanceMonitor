@@ -121,14 +121,18 @@ GROUP BY server_id, collector_name";
                     oldWaiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList(),
                     waiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList());
                 var detail = await DarlingMcpCollectorReadinessTools.ReadDetailAsync(postgres, waiting, start, now, ct);
+                var failures = await DarlingMcpCollectorReadinessTools.ReadFailuresAsync(postgres, waiting, start, now, ct);
                 foreach (var pair in waiting)
                 {
                     var old = oldRows.GetValueOrDefault((pair.ServerId, pair.Collector));
                     var fresh = detail[(pair.ServerId, pair.Collector)];
                     Assert.Equal(old?.Errors ?? 0, fresh.Errors);
                     Assert.Equal(old?.Skips ?? 0, fresh.Skips);
-                    Assert.Equal(old?.LastError, fresh.LastError);
-                    Assert.Equal(old?.LastErrorAt, fresh.LastErrorAt);
+
+                    /* The newest failure keeps its time and text (#9880 reads it by its own probe, to a longer length than the old 300 characters). */
+                    failures.TryGetValue((pair.ServerId, pair.Collector), out var failure);
+                    Assert.Equal(old?.LastErrorAt, failure?.At);
+                    Assert.Equal(old?.LastError, failure?.Text is { } text ? text[..Math.Min(text.Length, CollectorFleetLiveness.MaxMessageChars)] : null);
                 }
 
                 if (explainOut is not null)
@@ -151,6 +155,63 @@ GROUP BY server_id, collector_name";
                 await File.WriteAllTextAsync(explainOut, report.ToString(), ct);
             }
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheFailureProbe_LooksThroughOnlyTheNewestRunsOfAPair_NotEveryRowSinceTheStart()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness failure probe test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = LiveClock.Now();
+            var start = now.AddHours(-3);
+            var serverId = SeedServerBase + 700;
+            await RegisterServerAsync(connection, serverId, "probe-a", ct);
+            var lookback = DarlingMcpCollectorReadinessTools.FailureLookbackRuns;
+
+            /* beyond: a failure, then more skipped runs than the probe looks through. */
+            await InsertRunAsync(connection, serverId, "probe-a", "beyond", start.AddMinutes(1), "EXTENSION_MISSING", "run CREATE EXTENSION x", ct);
+            for (var i = 0; i < lookback + 20; i++)
+            {
+                await InsertRunAsync(connection, serverId, "probe-a", "beyond", start.AddMinutes(2 + i), "SKIPPED", null, ct);
+            }
+
+            /* edge: the failure is the oldest of exactly the newest runs the probe reads. */
+            await InsertRunAsync(connection, serverId, "probe-a", "edge", start.AddMinutes(1), "EXTENSION_MISSING", "run CREATE EXTENSION x", ct);
+            for (var i = 0; i < lookback - 1; i++)
+            {
+                await InsertRunAsync(connection, serverId, "probe-a", "edge", start.AddMinutes(2 + i), "YIELDED", null, ct);
+            }
+
+            /* newest: two failures among skipped runs. The newer one is the answer, whatever its status. */
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(1), "EXTENSION_MISSING", "old step", ct);
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(5), "ERROR", "newer failure", ct);
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(9), "SKIPPED", null, ct);
+
+            var pairs = new[] { "beyond", "edge", "newest", "never" }
+                .Select(c => new DarlingMcpCollectorReadinessTools.Pair(serverId, c, 5, false)).ToList();
+            var failures = await DarlingMcpCollectorReadinessTools.ReadFailuresAsync(postgres, pairs, start, now, ct);
+
+            Assert.False(failures.ContainsKey((serverId, "beyond")), "a failure older than the newest runs the probe reads is not read");
+            Assert.Equal("EXTENSION_MISSING", failures[(serverId, "edge")].Status);
+            Assert.Equal("ERROR", failures[(serverId, "newest")].Status);
+            Assert.Equal("newer failure", failures[(serverId, "newest")].Text);
+            Assert.False(failures.ContainsKey((serverId, "never")));
             bodySucceeded = true;
         }
         finally
@@ -217,8 +278,10 @@ GROUP BY server_id, collector_name";
             var root = doc.RootElement;
             var shown = root.GetProperty("waiting").EnumerateArray().ToList();
             Assert.True(root.GetProperty("waiting_count").GetInt32() > DarlingMcpCollectorReadinessTools.MaxWaitingRows);
-            Assert.Equal(DarlingMcpCollectorReadinessTools.MaxWaitingRows, shown.Count);
+            /* The page is the 200-row cap or fewer, when the response budget cut it first (#9880). */
+            Assert.InRange(shown.Count, 1, DarlingMcpCollectorReadinessTools.MaxWaitingRows);
             Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(shown.Count == DarlingMcpCollectorReadinessTools.MaxWaitingRows || root.GetProperty("budget_truncated").GetBoolean());
 
             /* Oldest wait first, and the youngest wait is the one that fell off the end. */
             var stamps = shown.Select(w => DateTime.Parse(w.GetProperty("waiting_since").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
@@ -376,6 +439,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertRunAsync(
+        NpgsqlConnection connection, int serverId, string serverName, string collector, DateTime at, string status, string? text, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message)
+VALUES ($1,$2,$3,$4,$5,$6,10,0,$7)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(at, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(collector);
+        command.Parameters.AddWithValue(status);
+        command.Parameters.AddWithValue((object?)text ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 

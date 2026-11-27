@@ -142,7 +142,8 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
 
         var rig = new Rig
         {
-            Service = new RemoteCollectorService(duckDb, servers, schedules),
+            /* #9895: the client timeout session is this install's own, named from its id. */
+            Service = new RemoteCollectorService(duckDb, servers, schedules, installIdStore: new InstallIdStore(_configDir, "test-machine", null)),
             Server = server,
             DuckDb = duckDb,
             ServerId = RemoteCollectorService.GetServerId(server),
@@ -500,7 +501,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
             Assert.Equal(1, Count(lines, "ERROR", RefusalLine(session)));
             Assert.Equal(2, Count(lines, "DEBUG", RefusalLine(session)));
             Assert.Equal(0, Count(lines, "WARN", RefusalLine(session)));
-            Assert.Equal(3, rig.ServerCalls.Count(call => call == SessionName(session)));
+            Assert.Equal(3, rig.ServerCalls.Count(call => call == SessionName(rig, session)));
         });
     }
 
@@ -593,9 +594,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         });
     }
 
-    private static string SessionName(string session) =>
+    private static string SessionName(Rig rig, string session) =>
         session == Deadlock ? DeadlocksCollector.XeSessionName
-        : session == Attention ? AlwaysOnXeSessions.AttentionXeSessionName
+        : session == Attention ? AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.Service.GetInstallId(), AlwaysOnXeSessionKind.Attention)
         : BlockedProcessReportCollector.XeSessionName;
 
     /// <summary>

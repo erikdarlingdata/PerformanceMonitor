@@ -172,7 +172,25 @@ public class CollectionBackgroundService : BackgroundService
        HotStoreResetLimit.Current so the check, the log line and Store Health agree. */
     internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
-    public bool IsPaused { get; set; }
+    private bool _isPaused;
+
+    /// <summary>
+    /// Whether collection is paused. A change raises <see cref="PausedChanged"/> on the thread that set it, so the tray text
+    /// follows a pause from the tray menu and from the Settings window alike (#9892). Setting the value it already has raises nothing.
+    /// </summary>
+    public bool IsPaused
+    {
+        get => _isPaused;
+        set
+        {
+            if (_isPaused == value) return;
+            _isPaused = value;
+            PausedChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>Raised after <see cref="IsPaused"/> changes. Both setters run on the UI thread, and the tray's handler touches WPF.</summary>
+    public event EventHandler? PausedChanged;
     public DateTime? LastCollectionTime { get; private set; }
 
     /// <summary>
