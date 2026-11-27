@@ -30,7 +30,7 @@ public sealed class DarlingUpgradeRunRecordTests
     private static readonly string[] FunctionNames =
     {
         "Get-DarlingBuildVersion", "New-DarlingUpgradeRun", "Complete-DarlingUpgradeRun", "Write-DarlingUpgradeRunFile",
-        "Read-DarlingUpgradeRunFile", "Set-DarlingUpgradeRunVerified", "Close-DarlingUpgradeRun", "Get-DarlingUpgradeRunWriteWarning",
+        "Read-DarlingUpgradeRunFile", "Set-DarlingUpgradeRunVerified", "Close-DarlingUpgradeRun",
     };
 
     private static string? PwshPath
@@ -288,7 +288,8 @@ public sealed class DarlingUpgradeRunRecordTests
             {
                 output = Run(folder,
                     "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok; "
-                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'");
+                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'",
+                    "Get-DarlingUpgradeRunWriteWarning");
             }
 
             Assert.Contains("ok=False", output, StringComparison.Ordinal);
