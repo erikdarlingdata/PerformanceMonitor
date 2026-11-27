@@ -173,7 +173,7 @@ public sealed class DarlingOwnStoreExposureTests : IDisposable
         DarlingStoreLogins.ReportContainerExposureWithoutDedicatedLogin(surface, OwnStore(), exposed: true, logger, inContainer: true);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Critical));
-        Assert.Equal(1, logger.Lines.Count);
+        Assert.Single(logger.Lines);
     }
 
     [Fact]
