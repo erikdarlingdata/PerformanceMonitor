@@ -235,6 +235,7 @@ Put the outcome of (a) to (d) in the release's test record. An unchecked box blo
 
 Before cutting the release, verify the nightly build has been clean:
 - Check that the most recent nightly build completed successfully (GitHub Actions) — verify the gated legs BY NAME (`build`, `Darling PostgreSQL tests`); a green wrapper exit code is not evidence, and the nightly publishes assets even when the test leg fails
+- The nightly's two Linux legs, `Darling suite on Linux` and `Darling under systemd (linux-x64 tarball)` (`darling-linux-tests.yml`, #9686), are report-only and never turn the nightly red, so open both BY NAME and read a red one as a finding before the cut
 - Confirm no community bug reports against the nightly in the last 24-48 hours
 - If any issues were reported and fixed, wait for a new clean nightly before proceeding
 

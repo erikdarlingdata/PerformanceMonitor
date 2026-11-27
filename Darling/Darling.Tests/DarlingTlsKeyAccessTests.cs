@@ -121,6 +121,8 @@ public sealed class DarlingTlsKeyAccessTests
 
     /* ---- PURE: who may be granted ---- */
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("S-1-1-0")]
     [InlineData("S-1-5-32-545")]
@@ -151,6 +153,8 @@ public sealed class DarlingTlsKeyAccessTests
     public void IsBroadPrincipal_RefusesTheGroupsEveryoneIsIn(string sid)
         => Assert.True(DarlingTlsKeyAccess.IsBroadPrincipal(new SecurityIdentifier(sid)));
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("S-1-5-32-559", (int)DarlingTlsKeyAccess.SidNameUse.Alias)] // Performance Log Users
     [InlineData("S-1-5-21-111-222-333-1105", (int)DarlingTlsKeyAccess.SidNameUse.Group)] // a domain group
@@ -162,6 +166,8 @@ public sealed class DarlingTlsKeyAccessTests
     public void RefuseByKind_RefusesEveryGroupAndEveryNonAccount(string sid, int use)
         => Assert.NotNull(DarlingTlsKeyAccess.RefuseByKind(new SecurityIdentifier(sid), (DarlingTlsKeyAccess.SidNameUse)use));
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("S-1-5-21-111-222-333-1105", (int)DarlingTlsKeyAccess.SidNameUse.User)] // a domain user or a gMSA
     [InlineData("S-1-5-18", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)] // LocalSystem
@@ -173,6 +179,8 @@ public sealed class DarlingTlsKeyAccessTests
     public void RefuseByKind_AcceptsAUserAndTheServiceIdentities(string sid, int use)
         => Assert.Null(DarlingTlsKeyAccess.RefuseByKind(new SecurityIdentifier(sid), (DarlingTlsKeyAccess.SidNameUse)use));
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("S-1-5-80-1111-2222-3333-4444-5555")]
     [InlineData("S-1-5-21-111-222-333-1105")]
@@ -192,6 +200,8 @@ public sealed class DarlingTlsKeyAccessTests
             | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership | FileSystemRights.ExecuteFile));
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_AddsOneReadEntryForTheAccount_AndKeepsEveryExistingEntry_InOrder()
     {
@@ -221,6 +231,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(before, after.Where(e => !e.Sid.Equals(Service)).ToList());
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_NeverReplacesTheAccessList_WhenTheAccountHasOnlyOtherAccess()
     {
@@ -233,6 +245,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(new[] { 0x20089, DarlingTlsKeyAccess.ReadMask }, Entries(plan.NewDescriptor!).Select(e => e.Mask).ToArray());
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData(0x120089)]
     [InlineData(0x1F01FF)]
@@ -246,6 +260,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Null(plan.NewDescriptor);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_ReadSplitAcrossTwoEntries_CountsAsGranted()
     {
@@ -256,6 +272,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(DarlingTlsKeyAccess.GrantOutcome.AlreadyGranted, plan.Outcome);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_AnEntryThatOnlyInheritsToChildren_DoesNotCount()
     {
@@ -266,6 +284,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(DarlingTlsKeyAccess.GrantOutcome.Added, plan.Outcome);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_AnExplicitDenyOnTheAccount_BlocksTheGrant()
     {
@@ -277,6 +297,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Null(plan.NewDescriptor);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_ADenyOnSomeoneElse_DoesNotBlock()
     {
@@ -285,6 +307,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(DarlingTlsKeyAccess.GrantOutcome.Added, plan.Outcome);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_ANullAccessList_IsLeftAlone()
     {
@@ -300,6 +324,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.NotNull(plan.Note);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PlanGrant_ThenPlanGrantAgain_IsIdempotent()
     {
@@ -311,6 +337,8 @@ public sealed class DarlingTlsKeyAccessTests
 
     /* ---- the orchestration ---- */
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_Grants_AndSaysWhatItDid_ForWhichAccountAndCertificate_AndThatTheServiceNeedsARestart()
     {
@@ -335,6 +363,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.True(target.Disposed);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_TheAccountAlreadyHasRead_SaysAlreadyGranted_AndWritesNothing()
     {
@@ -351,6 +381,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.DoesNotContain("Restart", rig.Output.ToString(), StringComparison.Ordinal);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_LocalMachineWithoutElevation_SaysSo_AndTouchesNothing()
     {
@@ -368,6 +400,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_CurrentUser_NeedsNoElevation()
     {
@@ -382,6 +416,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(1, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_NoCertificateWithThatThumbprint_Refuses_AndWritesNothing()
     {
@@ -397,6 +433,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_TwoCertificatesWithThatThumbprint_Refuses_AndWritesNothing()
     {
@@ -412,6 +450,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_ACertificateWithNoPrivateKey_Refuses_AndWritesNothing()
     {
@@ -427,6 +467,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("S-1-1-0")]
     [InlineData("S-1-5-32-545")]
@@ -577,6 +619,8 @@ public sealed class DarlingTlsKeyAccessTests
         return (code, reads, error);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_AnAccountThatCannotBeResolved_IsRefused_WithTheReason()
     {
@@ -591,6 +635,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_TheAccountNamedOnTheCommandLine_IsWhatTheResolverIsAsked()
     {
@@ -603,6 +649,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(@"CORP\svc-other", rig.AccountAsked);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_AnExplicitDeny_RefusesAndWritesNothing()
     {
@@ -617,6 +665,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(0, target.Writes);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_AWriteThatDoesNotTake_IsNotReportedAsGranted()
     {
@@ -632,6 +682,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Contains("does not have Read", rig.Error.ToString(), StringComparison.Ordinal);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_AWriteThatThrows_IsAFailure_NamingTheCause()
     {
@@ -646,6 +698,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Contains("The access list was not changed", rig.Error.ToString(), StringComparison.Ordinal);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_AStoreThatCannotBeOpened_IsNamed()
     {
@@ -793,6 +847,8 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Single(after, e => e.Sid.Value == account && e.Qualifier == AceQualifier.AccessAllowed);
     }
 
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Run_ALegacyKeyWithNoKeyFile_NamesTheProviderAndPrintsTheExactIcaclsCommand()
     {

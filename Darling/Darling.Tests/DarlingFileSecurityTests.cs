@@ -583,6 +583,8 @@ public sealed class DarlingFileSecurityTests
     /// that from every backup, leave the live file to its own hardening, and no-op cleanly when there
     /// are no backups.
     /// </summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ConfigBackupSweep_HardensEveryExistingBackup_AndSkipsTheLiveFile()
     {
@@ -633,6 +635,8 @@ public sealed class DarlingFileSecurityTests
     /// about a file that was already secure. The canary ACE proves the skip: HardenFile's rewrite would strip
     /// it, so its survival means the sweep never touched the descriptor.
     /// </summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ConfigBackupSweep_AlreadyHardenedBackup_IsSkippedUntouched()
     {

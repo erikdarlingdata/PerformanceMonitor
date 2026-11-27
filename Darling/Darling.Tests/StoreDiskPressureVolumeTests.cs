@@ -70,6 +70,8 @@ public sealed class StoreDiskPressureVolumeTests
 
     /// <summary>Left to itself the read answers for a real directory: a positive size, and free space that
     /// fits inside it.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ReadStoreVolumeSpace_RealDirectory_ReportsItsVolume()
     {

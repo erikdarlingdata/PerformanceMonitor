@@ -1,0 +1,240 @@
+name: Darling Linux tests
+
+# #9686: Darling runs on Linux (the container image, compose, Helm and the linux-x64 tarball), and every Darling test job
+# runs on windows-latest against the Windows PostgreSQL runtime. This workflow runs two things on ubuntu-latest:
+#
+#   1. linux-suite: the Darling test suite, built without the WPF Viewer (-p:DarlingTestsWithoutViewer=true, see
+#      Darling/Darling.Tests/Darling.Tests.csproj), against a Linux TimescaleDB container set up like the Windows test
+#      store: UTC time zones, pg_stat_statements, the product's worker settings, a `darling` superuser with trust
+#      authentication on loopback, and the `darlingtest`, `probe` and `darling` databases. Classes that only make sense on
+#      Windows carry the Platform=Windows trait and are left out.
+#   2. linux-systemd: the linux-x64 tarball installed by the steps of docs/darling/linux.md and run under systemd as the
+#      darling user (.github/scripts/darling-linux-systemd-leg.sh).
+#
+# Both jobs are report-only (continue-on-error) until they have been green for a while: a red one is a finding to read,
+# and it cannot fail the run that called it or block a merge. Nothing here is a required check.
+#
+# Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that
+# changes this file, the systemd script or the test project file, so a change to how the legs build or run proves itself.
+# Never add `pull_request_target`: the jobs build and run the checked-out code and must not get a write token or secrets.
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/darling-linux-tests.yml'
+      - '.github/scripts/darling-linux-systemd-leg.sh'
+      - 'Darling/Darling.Tests/Darling.Tests.csproj'
+
+permissions:
+  contents: read
+
+# The store image Darling/compose/docker-compose.yml pins, so a new TimescaleDB release cannot turn this red on its own.
+env:
+  STORE_IMAGE: timescale/timescaledb:2.32.1-pg17
+
+concurrency:
+  group: darling-linux-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-suite:
+    name: Darling suite on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      # The exact SDK version from global.json, not its feature band, as nightly.yml's linux job reads it.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # The settings .github/scripts/start-test-pg.ps1 gives the Windows test store on port 5541, in a container: the
+      # product's worker numbers, no durability (throwaway data), UTC, and the session id on every log line. A `docker run`
+      # and not a `services:` entry, because a service container cannot be given the server's command line. The superuser is
+      # `darling` with trust authentication, published on loopback only: acceptable on a throwaway runner with throwaway data.
+      - name: Start the store (a TimescaleDB container)
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name darling-test-store --shm-size=1g -p 127.0.0.1:5541:5432 \
+            -e POSTGRES_USER=darling -e POSTGRES_DB=darling -e POSTGRES_HOST_AUTH_METHOD=trust \
+            "${STORE_IMAGE}" \
+            postgres -c shared_preload_libraries=timescaledb,pg_stat_statements \
+              -c timescaledb.max_background_workers=74 -c max_worker_processes=85 \
+              -c fsync=off -c full_page_writes=off -c timezone=UTC -c log_timezone=UTC \
+              -c "log_line_prefix=%m [%p] %c "
+
+          # The image starts a temporary server on the socket only, runs its init scripts, and starts the real one. A
+          # pg_isready over TCP answers only from the real one, so wait for the init line first and then for TCP.
+          ready=0
+          for _ in $(seq 1 60); do
+            # grep reads the whole log (no -q), so docker logs never writes to a closed pipe under pipefail (#9671).
+            if docker logs darling-test-store 2>&1 | grep 'PostgreSQL init process complete' >/dev/null \
+              && docker exec darling-test-store pg_isready -h 127.0.0.1 -U darling >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "${ready}" != 1 ]; then
+            echo "::error::The store did not become ready in 120 seconds."
+            docker logs darling-test-store 2>&1 | tail -n 40
+            exit 1
+          fi
+
+          # darlingtest holds the suite, darling is the database the role-provisioning classes name, probe is for a
+          # hand-run query when a run is being diagnosed. The image made darling.
+          docker exec darling-test-store psql -h 127.0.0.1 -U darling -d darling -v ON_ERROR_STOP=1 -q \
+            -c "CREATE DATABASE darlingtest" -c "CREATE DATABASE probe"
+          docker exec darling-test-store psql -h 127.0.0.1 -U darling -d darlingtest -At \
+            -c "select 'time zone: ' || current_setting('timezone') || ', preload: ' || current_setting('shared_preload_libraries')"
+
+      # No --locked-mode: the lock file beside the project describes the Windows package graph (see the project file).
+      - name: Build the suite without the Viewer
+        timeout-minutes: 30
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release -p:DarlingTestsWithoutViewer=true -v m -nologo
+
+      # The suite starts a few hundred web hosts in one process, and a host that watches its configuration files holds an
+      # inotify instance. Ubuntu's default is 128 for one user. A lab run of the whole suite held 713 at once, and at
+      # 128 every later host failed to start with "The configured user limit (128) on the number of inotify instances has been
+      # reached", which failed several hundred tests that have nothing wrong with them.
+      - name: Raise the inotify instance limit
+        run: sudo sysctl -q -w fs.inotify.max_user_instances=8192
+
+      # The whole suite in one test host. Only the failures and the summary are printed; the full output is in the artifact.
+      # A lab run took 60 minutes on 8 cores, so the limit leaves room for a runner with fewer.
+      - name: Run the suite
+        timeout-minutes: 120
+        shell: bash
+        env:
+          DARLING_TEST_PG: Host=127.0.0.1;Port=5541;Username=darling;Database=darlingtest
+        run: |
+          set -uo pipefail
+          results="${RUNNER_TEMP}/darling-linux-suite"
+          mkdir -p "${results}"
+          # Which test files the build left out, and why (the LeaveOutViewerTestFiles target of the project file).
+          cp Darling/Darling.Tests/obj/Release/net10.0/left-out-test-files.txt "${results}/" || true
+          # The step's shell runs with -e, so the test host's exit code is caught here and the report below still runs when it fails.
+          code=0
+          dotnet Darling/Darling.Tests/bin/Release/net10.0/Darling.Tests.dll -noColor -trait- "Platform=Windows" \
+            -xml "${results}/results.xml" > "${results}/output.log" 2>&1 || code=$?
+          # grep exits 1 when nothing matches, which is the green run.
+          grep -E '\[FAIL\]' "${results}/output.log" | head -n 200 || true
+          grep -E 'Total: [0-9]+' "${results}/output.log" | tail -n 1 || true
+          {
+            echo '### Darling suite on Linux (report-only, #9686)'
+            echo ''
+            echo '```'
+            grep -E 'Total: [0-9]+' "${results}/output.log" | tail -n 1 || echo "No summary line: the test host exited with ${code} before it finished."
+            grep -E '\[FAIL\]' "${results}/output.log" | head -n 100 || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${code}" != 0 ]; then
+            echo "::error::The Darling suite on Linux exited with ${code}. The job is report-only (#9686)."
+          fi
+          exit "${code}"
+
+      - name: Save the store log
+        if: always()
+        shell: bash
+        run: docker logs darling-test-store > "${RUNNER_TEMP}/darling-linux-suite/store.log" 2>&1 || true
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-linux-suite
+          path: ${{ runner.temp }}/darling-linux-suite
+          if-no-files-found: warn
+          retention-days: 7
+
+  # #9686: the linux-x64 tarball installed under systemd the way docs/darling/linux.md says: the `darling` user, the folders
+  # of Step 5, darling.json with file: secrets, the pre-flight, the unit of Step 8, then stop, start and the Uninstall
+  # section. Every other Linux job runs the container image, so nothing else runs the tarball or the unit. The publish and
+  # the pack are the ones nightly.yml's linux job runs. It reports without blocking (continue-on-error) while it is new.
+  linux-systemd:
+    name: Darling under systemd (linux-x64 tarball)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      - name: Publish service (linux-x64)
+        timeout-minutes: 8
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+
+      - name: Pack the tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p releases
+          # #9701: owned by root, so a root extract does not leave the build machine's uid on every file.
+          tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz .
+
+      # #9837: dotnet-stack, so the leg can print the managed stacks of a service that is slow to say it is ready. A failed
+      # install only costs the stacks: the leg runs without them.
+      - name: Install dotnet-stack
+        shell: bash
+        run: dotnet tool install dotnet-stack --version 10.0.750501 --tool-path "${RUNNER_TEMP}/diag-tools" || echo "::warning::dotnet-stack did not install, so a slow start prints no managed stacks"
+
+      # The script needs root (useradd, /etc, systemctl). sudo drops the environment, so the names it reads are kept:
+      # GITHUB_ACTIONS turns on the masking of its throwaway store passwords, DOTNET_ROOT is where setup-dotnet put dotnet,
+      # and DARLING_DOTNET_STACK is the dotnet-stack the step above installed.
+      - name: Install, start, stop and uninstall under systemd
+        timeout-minutes: 10
+        shell: bash
+        env:
+          DARLING_DOTNET_STACK: ${{ runner.temp }}/diag-tools/dotnet-stack
+        run: sudo --preserve-env=GITHUB_ACTIONS,DOTNET_ROOT,DARLING_DOTNET_STACK bash .github/scripts/darling-linux-systemd-leg.sh releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz
+
+      # The script prints both tails itself when a check fails, before its cleanup removes the log folder. The file log is
+      # still on disk only when the script was stopped before its cleanup ran. The journal outlives the unit.
+      - name: Show the journal and the file log
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::journalctl -u darling"
+          sudo journalctl -u darling --no-pager -n 200 || true
+          echo "::endgroup::"
+          echo "::group::file log"
+          sudo sh -c 'tail -n 200 /usr/share/PerformanceMonitorDarling/logs/darling-service_*.log' || true
+          echo "::endgroup::"

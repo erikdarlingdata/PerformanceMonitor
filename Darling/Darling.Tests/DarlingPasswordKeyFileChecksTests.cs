@@ -105,6 +105,8 @@ public sealed class DarlingPasswordKeyFileChecksTests
     /// offered is to move it into a folder of its own, never to re-own or re-permission the root, which would change every
     /// file and folder on the drive (the store folder's rule, #7363). So the sentence offers no icacls.
     /// </summary>
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Judge_AKeyInADriveRoot_IsRefused_WithoutOfferingToChangeTheRoot()
     {

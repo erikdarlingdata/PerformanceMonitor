@@ -21,6 +21,8 @@ namespace Darling.Tests;
 /// failed, stopped, or run out of time) instead of printing "give it ~2 minutes". The script's functions run under
 /// Windows PowerShell 5.1 against a temp log folder and stand-ins for the service state and the clock.
 /// </summary>
+// #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+[Trait("Platform", "Windows")]
 public sealed class DarlingInstallReadyWaitTests
 {
     private static string Script => ReadRepoFile("Darling", "tools", "install-darling.ps1").Replace("\r\n", "\n", StringComparison.Ordinal);

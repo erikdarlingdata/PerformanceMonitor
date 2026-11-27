@@ -129,6 +129,8 @@ public sealed class DarlingDeployStaleFileTests
     /// <para>This is the rule standing between a manifest and a recursive-free delete inside a monitoring
     /// host's install directory. Everything else in this file is a consequence of it being right.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_NeverNominatesAPathThatMustSurviveAnUpgrade()
     {
@@ -173,6 +175,8 @@ public sealed class DarlingDeployStaleFileTests
     /// on the way IN as well as out. That is the argument for testing it: the guard's whole job is to be
     /// there on the day something upstream is wrong, so it has to be exercised with an upstream that is.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_LeavesTheStoreAndTheConfigAlone_EvenWhenTheListItIsHandedNamesThem()
     {
@@ -254,6 +258,8 @@ public sealed class DarlingDeployStaleFileTests
     /// file into a permanent startup warning: #2525's too-loud-to-be-useful outcome, caused by our own
     /// cleanup.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_PrunesADirectoryItEmptied_AndNotOneThatStillHasSomethingInIt()
     {
@@ -287,6 +293,8 @@ public sealed class DarlingDeployStaleFileTests
     /// <c>wwwroot\js\App.js</c> as <c>app.js</c> ships the same file under a name an ordinal comparison
     /// calls absent.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_NeverSelectsAFileTheNewBuildShips_WhateverTheCase()
     {
@@ -306,6 +314,8 @@ public sealed class DarlingDeployStaleFileTests
     /// at either function with one means something upstream failed and reported success — and selecting
     /// nothing is the answer that is right either way.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_RemovesNothing_WhenItCannotSayWhatTheNewBuildShips()
     {
@@ -334,6 +344,8 @@ public sealed class DarlingDeployStaleFileTests
     /// and that walk feeds this function directly. A path that cannot be written down cannot be read back
     /// and acted on by a later version of this script.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScriptsManifest_RefusesWhatItCannotVouchFor_AndNeverRecordsThePreservedPaths()
     {
@@ -404,6 +416,8 @@ public sealed class DarlingDeployStaleFileTests
     /// the TRUNCATION check while the rule under test was absent. The control row is here for the same
     /// reason.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_RefusesAnAbsolutePathWhereTheRawTextIs_NotOnlyInThePredicate()
     {
@@ -476,6 +490,8 @@ public sealed class DarlingDeployStaleFileTests
     /// never affected — the colon survives normalization — so the rows here are deliberately the two that
     /// were.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_RefusesARawUncPath_ThroughTheDiffAndTheManifestWriter()
     {
@@ -635,6 +651,8 @@ public sealed class DarlingDeployStaleFileTests
     /// file. Read from the parsed script, so a comment that quotes the old form does not count. A constant
     /// registry path (<c>HKLM:</c>) is exempt: it names no folder of ours.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheUpgradeAndInstallScripts_NameEveryPathLiterally()
     {
@@ -712,6 +730,8 @@ public sealed class DarlingDeployStaleFileTests
     /// staging folder named <c>a[x]b</c>: every file arrives, a file the install already had is overwritten,
     /// and one the new build does not ship survives (#4745). Before the fix nothing arrived and nothing threw.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheShippedFolderCopy_CarriesEveryFileOutOfAStagingFolderWhoseNameHasBrackets()
     {
@@ -758,6 +778,8 @@ public sealed class DarlingDeployStaleFileTests
     /// stop the script with a message, and a zip -Source is not checked at all - its <c>$Source</c> is a
     /// file, not a folder holding the executable (#4745).
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData(false, true, false)]
     [InlineData(false, false, true)]
@@ -890,6 +912,8 @@ public sealed class DarlingDeployStaleFileTests
     /// a BOM is one careless save away from being gone, and its absence is invisible. <see
     /// cref="TheShippedScripts_HoldNoByteAbove127"/> pins the version that cannot decay instead.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheShippedScripts_ParseAndBindNoOperatorAsACommandParameter()
     {

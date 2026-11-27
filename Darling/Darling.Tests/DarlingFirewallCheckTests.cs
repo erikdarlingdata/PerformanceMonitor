@@ -758,6 +758,8 @@ public class DarlingFirewallCheckTests
     /// that is not Darling's stays, and a removal that throws is reported with the command to run by hand rather than stopping the
     /// uninstall.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Uninstall_RemovesEveryRuleTheBuildersName_ForAnyPort_AndNothingElse()
     {
@@ -802,6 +804,8 @@ public class DarlingFirewallCheckTests
     /// fails (any nonzero exit) warns with the exit code and the exact command to re-run by hand. The exe is a stand-in that records its
     /// arguments, and the recorded verb is then classified by the service's own dispatcher.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void InstallScript_FirewallStep_RunsTheVerbTheServiceDispatches_AndWarnsOnAFailedExit()
     {

@@ -282,6 +282,8 @@ public sealed class CredentialOwnershipMessageTests
         }
     }
 
+    // #9686: With no stand-in the real system answers, and only on Windows does it add no Unix hint.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PasswordKeyFile_MissingWithNoUnixSeam_IsTheWindowsWording()
     {
