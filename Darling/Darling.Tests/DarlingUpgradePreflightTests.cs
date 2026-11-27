@@ -228,7 +228,10 @@ public sealed class DarlingUpgradePreflightTests
             New-Item -ItemType Directory -Path $root, $src | Out-Null
             Set-Content -LiteralPath (Join-Path $root 'PerformanceMonitor.Darling.Service.exe') -Value 'x'
             Set-Content -LiteralPath (Join-Path $src 'PerformanceMonitor.Darling.Service.exe') -Value 'y'
-            Set-Content -LiteralPath (Join-Path $root 'darling.json') -Value '{}'
+            # #9898: the store is named under this run's own folder, which does not exist. With '{}' the script judges the machine's
+            # real C:\ProgramData\PerformanceMonitorDarling when there is one (a developer with Darling installed) and stops on it.
+            $storeData = (Join-Path $base 'store\pg').Replace('\', '\\')
+            Set-Content -LiteralPath (Join-Path $root 'darling.json') -Value ('{ "postgres": { "dataDirectory": "' + $storeData + '" } }')
             function Get-Service { [pscustomobject]@{ Name = 'PerformanceMonitor Darling'; Status = 'Running' } }
             $registeredServicePath = Join-Path $root 'PerformanceMonitor.Darling.Service.exe'
             function Get-Process { $service = New-Object System.Object; $service | Add-Member -NotePropertyMembers @{ ProcessName = 'PerformanceMonitor.Darling.Service'; Id = 4100; Path = $registeredServicePath; HasExited = $false }; $service }
