@@ -59,12 +59,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// each table's pages once, for every server of the group, each row routed to its own server's merge, then each server's
 /// ordered read. A pass whose servers fit one group reads each table once, and a pass of G groups reads each G times. The
 /// estimate is the planner's: the rows a block of the table held at its last vacuum or analyze, times the blocks it has
-/// now, shared among the servers by the statistics of the server column. A server whose estimate is over the budget, and
-/// every server when a table gives no estimate or the estimates cannot be read, is a group of one, which is one read of
-/// each table for that server. The clock is read before the group's
+/// now, shared among the servers by the statistics of the server column. A table with no count to scale is taken at the
+/// most its blocks can hold, and a server the statistics cannot place at all the table's rows. A server whose estimate is
+/// over the budget, and every server when the estimates cannot be read, is a group of one, which is one read of each
+/// table for that server. A group of several servers whose read fails is read again a server at a time in the same pass,
+/// so only the server whose own read fails goes without. The clock is read before the group's
 /// read and every server of the group gets the cursor built from it. After the read commits each server's map is written
 /// in its own transaction: a write that fails leaves that server's old map and cursor and the other servers of the group
-/// are still written, and a read that fails leaves every server of the group with its old map. The server the staggered
+/// are still written. The server the staggered
 /// rebuild picks for age is always read alone.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
@@ -405,8 +407,10 @@ public sealed class QueryTagMapBuilder
     /// <summary>
     /// Rebuilds the servers of one group (#9705): one read transaction for the group, each table's pages once, each row to
     /// its own server's merge, then each server's ordered read, then each server's map write in its own transaction on its
-    /// own connection. A failed read fails every server of the group and a failed write only its own server. A server that
-    /// failed keeps its map and its cursor.
+    /// own connection. A failed write fails only its own server. A failed read of a group of several servers rebuilds each
+    /// of them alone in the same pass, with its own read and its own failure, so a server whose read fails every pass (its
+    /// ordered read runs into the command timeout, say) does not keep the servers grouped with it from their maps. A failed
+    /// read of one server fails that server. A server that failed keeps its map and its cursor.
     /// </summary>
     /// <returns>The servers whose rebuild failed.</returns>
     private async Task<List<int>> RebuildGroupAsync(IReadOnlyList<int> group, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
@@ -468,14 +472,24 @@ public sealed class QueryTagMapBuilder
 
             await read.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException && group.Count == 1)
+        {
+            _logger?.LogWarning("Query-tag map: the rebuild for server {ServerId} failed and its previous map stays: {Message}", group[0], ex.Message);
+            return group.ToList();
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* The group's merges are let go before any server is read again, so the pass never holds more than one group. */
+            merges.Clear();
+            _logger?.LogWarning("Query-tag map: the rebuild read for a group of {Servers} servers failed; each of them is read alone: {Message}", group.Count, ex.Message);
+            var failedAlone = new List<int>();
             foreach (int serverId in group)
             {
-                _logger?.LogWarning("Query-tag map: the rebuild for server {ServerId} failed and its previous map stays: {Message}", serverId, ex.Message);
+                cancellationToken.ThrowIfCancellationRequested();
+                failedAlone.AddRange(await RebuildGroupAsync(new[] { serverId }, snapshot, cancellationToken).ConfigureAwait(false));
             }
 
-            return group.ToList();
+            return failedAlone;
         }
 
         /* Each merge makes its map rows as the write takes them, a batch at a time: no list of a server's map rows is built

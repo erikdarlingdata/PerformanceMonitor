@@ -80,6 +80,7 @@ public sealed class LiveClockCensusTests
         ["QueryStoreIntervalWideGridLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
         ["QueryStoreTopLiteralEndStraddleLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
         ["QueryStoreTopMcpLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
+        ["QueryTagMapBuilderLiveTests.cs"] = "The one EXPLAIN is of the rebuild's page statement over the two sightings tables, which are plain tables: the plan is a ctid range of one heap and no chunk is chosen, wherever the rows' times fall. The clock is only a collection stamp.",
         ["RawPurgeTriggerGateErrorTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
         ["RawPurgeTriggerLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
         ["RawTablesLeaveCatalogSweepLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",

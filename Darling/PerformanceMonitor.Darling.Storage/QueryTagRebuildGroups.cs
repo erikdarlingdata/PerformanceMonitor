@@ -28,19 +28,29 @@ internal static class QueryTagRebuildGroups
     /// the table has now. <paramref name="Distinct"/> is <c>pg_stats.n_distinct</c>, none when the column has no statistics
     /// row: above zero a count of distinct servers, below zero minus the distinct servers as a fraction of the rows.
     /// <paramref name="CommonServers"/> and <paramref name="CommonShares"/> are <c>most_common_vals</c> and
-    /// <c>most_common_freqs</c>, each share a fraction of the rows.
+    /// <c>most_common_freqs</c>, each share a fraction of the rows. <paramref name="BlockSize"/> is the store's
+    /// <c>block_size</c>, the bytes of one heap block.
     /// </summary>
     internal sealed record ServerStatistics(
-        double Tuples, double Pages, double CurrentPages, double? Distinct, IReadOnlyList<int> CommonServers, IReadOnlyList<double> CommonShares);
+        double Tuples, double Pages, double CurrentPages, double? Distinct, IReadOnlyList<int> CommonServers, IReadOnlyList<double> CommonShares, int BlockSize);
+
+    /// <summary>
+    /// The most rows one heap block of <paramref name="blockSize"/> bytes can hold, PostgreSQL's <c>MaxHeapTuplesPerPage</c>:
+    /// the block without its 24-byte page header, over the least a row takes, a 4-byte line pointer and a 24-byte row header
+    /// (the 23-byte header rounded up to 8). That is 291 for the default 8 kB block.
+    /// </summary>
+    internal static int MaxHeapTuplesPerPage(int blockSize) => Math.Max(1, (blockSize - 24) / 28);
 
     /// <summary>
     /// The rows a table has now, estimated as the planner estimates them: the rows a block held at the last vacuum or
     /// analyze, times the blocks the table has now. The counted rows alone are the table as it was then, so a table that was
     /// analyzed empty and filled since would count no rows. A table with no blocks now has no rows, whatever was counted.
-    /// None when the table has blocks now and the count gives no rows a block to scale: a table never vacuumed or analyzed,
-    /// or one counted with no blocks or with no rows.
+    /// When the table has blocks now and the count gives no rows a block to scale (a table never vacuumed or analyzed, or
+    /// one counted with no blocks or with no rows), its rows are the most its blocks can hold
+    /// (<see cref="MaxHeapTuplesPerPage"/>): a ceiling, so a small table that stays under the autoanalyze threshold still
+    /// groups its servers and a large one is never taken for a small one.
     /// </summary>
-    internal static double? EstimateTableRows(ServerStatistics statistics)
+    internal static double EstimateTableRows(ServerStatistics statistics)
     {
         ArgumentNullException.ThrowIfNull(statistics);
 
@@ -51,26 +61,28 @@ internal static class QueryTagRebuildGroups
 
         if (statistics.Pages <= 0 || statistics.Tuples <= 0)
         {
-            return null;
+            return statistics.CurrentPages * MaxHeapTuplesPerPage(statistics.BlockSize);
         }
 
         return statistics.Tuples / statistics.Pages * statistics.CurrentPages;
     }
 
     /// <summary>
-    /// The rows of one table that the statistics give one server, or none when they give no estimate: no row of the table in
-    /// <c>pg_class</c>, no estimate of the table's rows (<see cref="EstimateTableRows"/>), or a table that has rows and no
-    /// statistics for the column. A table with no blocks gives every server zero. A server among the most common values gets
-    /// its share of the rows. Any other server gets the share the common values leave, split evenly over the distinct servers
-    /// that are not among them.
+    /// The rows of one table that the statistics give one server, or none when the store has no plain table of that name to
+    /// estimate. A table with no blocks gives every server zero. A server among the most common values gets its share of the
+    /// table's rows (<see cref="EstimateTableRows"/>). Any other server gets the share the common values leave, split evenly
+    /// over the distinct servers that are not among them. A server the statistics cannot place gets all the table's rows, so
+    /// it is never taken for a small one: the column has no statistics, or the common values leave no share or no distinct
+    /// server for it, which is what a server added since the last analyze looks like.
     /// </summary>
     internal static double? EstimateRows(ServerStatistics? statistics, int serverId)
     {
-        if (statistics is null || EstimateTableRows(statistics) is not { } rows)
+        if (statistics is null)
         {
             return null;
         }
 
+        double rows = EstimateTableRows(statistics);
         if (rows == 0)
         {
             return 0;
@@ -78,7 +90,7 @@ internal static class QueryTagRebuildGroups
 
         if (statistics.Distinct is not { } distinct)
         {
-            return null;
+            return rows;
         }
 
         double commonShare = 0;
@@ -93,15 +105,20 @@ internal static class QueryTagRebuildGroups
             commonShare += statistics.CommonShares[i];
         }
 
-        double distinctServers = distinct < 0 ? -distinct * rows : distinct;
-        double otherServers = Math.Max(1, distinctServers - common);
-        return rows * Math.Max(0, 1 - commonShare) / otherServers;
+        double otherShare = 1 - commonShare;
+        double otherServers = (distinct < 0 ? -distinct * rows : distinct) - common;
+        if (otherShare <= 0 || otherServers <= 0)
+        {
+            return rows;
+        }
+
+        return rows * otherShare / Math.Max(1, otherServers);
     }
 
     /// <summary>
     /// Splits <paramref name="serverIds"/> into groups, in their order, each group's estimated rows together within
     /// <paramref name="budgetRows"/>. A server whose estimate alone is over the budget is a group of one, and so is a server
-    /// with no estimate in <paramref name="estimatedRows"/>: with no statistics every server is read alone.
+    /// with no estimate in <paramref name="estimatedRows"/>: with no estimates every server is read alone.
     /// </summary>
     internal static List<List<int>> Form(IReadOnlyList<int> serverIds, IReadOnlyDictionary<int, double>? estimatedRows, double budgetRows)
     {

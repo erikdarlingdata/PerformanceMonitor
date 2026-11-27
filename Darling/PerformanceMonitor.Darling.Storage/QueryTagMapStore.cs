@@ -190,29 +190,43 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
     /// <summary>
     /// The most estimated rows, of both sightings tables together, that the servers of one rebuild group may have (#9705). A
     /// pass that rebuilds several servers reads each table once per group and holds one merge state per tagged key of every
-    /// server of the group until that server's map is written, so the group is what bounds the builder's memory. A row is at
-    /// most one tagged key, and a tagged key holds 138.6 bytes (<see cref="QueryTagRebuildMerge"/>), so a group of 8 million
-    /// rows holds at most 1,057 MiB. That is under what the rebuild of one server holds on a lab store whose one server tags
-    /// 8.36 million keys from 16.2 million rows: 1,105 MiB of merge state in a process that peaks at 1.38 GiB resident. A
-    /// server over the budget is read alone, as is every server when a table gives no estimate
-    /// (<see cref="QueryTagRebuildGroups.EstimateTableRows"/>). The value is threaded into the builder as a parameter (#3684).
+    /// server of the group until that server's map is written, so the group is what bounds the builder's memory. The bound
+    /// is an estimate, worked out for the worst case of a group whose every estimated row is a tagged key of its own, 18
+    /// characters long (<see cref="QueryTagRebuildMerge"/>). A tagged key is its text, 64 bytes, and one slot of its
+    /// server's dictionary, 52 bytes (an entry of 48 and a bucket of 4). Each server of the group has its own dictionary,
+    /// and a dictionary that fills grows to the next prime at least twice its size, 2.074 times it at most over .NET's
+    /// table of primes, so right after a growth a key holds up to 2.074 slots, 108 bytes. While one grows, its old arrays
+    /// and its new ones are both held, one more slot a key: 3.074 slots, 160 bytes. So a key holds at worst 64 + 108 = 172
+    /// bytes between growths and 64 + 160 = 224 bytes in the one dictionary that is growing, and 5 million keys hold at
+    /// worst 820 MiB between growths and 1,068 MiB if one server had nearly all of them and grew. Both are under what the
+    /// rebuild of one server holds on a lab store whose one server tags 8.36 million keys from 16.2 million rows, measured
+    /// at 138.6 bytes a key with that one dictionary at 1.44 slots a key: 1,105 MiB of merge state in a process that peaks
+    /// at 1.38 GiB resident. Measured on a lab store of 42 servers of 0.92 to 1.86 million rows each, 41.3 million in all,
+    /// a budget of 8 million rows makes 6 groups, and the builder peaks at 1,333 MiB of managed heap and 1,386 MiB
+    /// resident: more heap than that 1,105 MiB. Its largest group is between 6.9 and 8 million estimated rows, so the peak
+    /// is 175 to 203 bytes of heap an estimated row, the rows being read included, and at that rate a group of 5 million
+    /// rows peaks at 830 to 970 MiB. Rows the estimate missed, and keys longer than 18 characters, are over these figures.
+    /// A server whose own estimate is over the budget is read alone, as is every server when the store gives no estimate
+    /// (<see cref="QueryTagRebuildGroups.EstimateRows"/>). The value is threaded into the builder as a parameter (#3684).
     /// </summary>
-    public const int RebuildGroupRows = 8_000_000;
+    public const int RebuildGroupRows = 5_000_000;
 
     /// <summary>
     /// What the store says of one table and its <c>server_id</c> column (#9705): the rows and the heap blocks counted at the
-    /// last vacuum or analyze, the heap blocks the table has now, and the column's distinct count, most common values and
-    /// their shares when the table has been analyzed. The blocks it has now are read in the same statement as the count, so
-    /// the rows a block held can be scaled to the table as it is (<see cref="QueryTagRebuildGroups.EstimateTableRows"/>).
-    /// $1 the table's name.
+    /// last vacuum or analyze, the heap blocks the table has now, the column's distinct count, most common values and
+    /// their shares when the table has been analyzed, and the store's block size. The blocks it has now are read in the same
+    /// statement as the count, so the rows a block held can be scaled to the table as it is
+    /// (<see cref="QueryTagRebuildGroups.EstimateTableRows"/>). Only a plain table has a row: a partitioned table or a
+    /// hypertable keeps its rows in other relations and has no blocks of its own, which would read as an empty table, so it
+    /// gives no estimate and its servers are read alone. $1 the table's name.
     /// </summary>
     internal const string RebuildRowStatisticsSql = """
 SELECT c.reltuples::float8, c.relpages::float8, (pg_relation_size(c.oid) / current_setting('block_size')::int)::float8,
-    s.n_distinct::float8, s.most_common_vals::text::integer[], s.most_common_freqs::float8[]
+    s.n_distinct::float8, s.most_common_vals::text::integer[], s.most_common_freqs::float8[], current_setting('block_size')::int
 FROM pg_class AS c
 LEFT JOIN pg_namespace AS n ON n.oid = c.relnamespace
 LEFT JOIN pg_stats AS s ON s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = 'server_id' AND NOT s.inherited
-WHERE c.oid = $1::regclass
+WHERE c.oid = $1::regclass AND c.relkind = 'r'
 """;
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";
@@ -487,7 +501,8 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
     /// <summary>
     /// The estimated rows of both sightings tables together for each of <paramref name="serverIds"/>, from the store's
     /// statistics (#9705), which is what <see cref="QueryTagRebuildGroups.Form"/> bounds a rebuild group by. A server is left
-    /// out when either table gives it no estimate (<see cref="QueryTagRebuildGroups.EstimateRows"/>), so it is read alone.
+    /// out when either table gives it no estimate (<see cref="QueryTagRebuildGroups.EstimateRows"/>: a table that is not a
+    /// plain table), so it is read alone.
     /// </summary>
     internal static async Task<Dictionary<int, double>> ReadRebuildRowEstimatesAsync(
         NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
@@ -505,7 +520,8 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
                     reader.GetDouble(2),
                     reader.IsDBNull(3) ? null : reader.GetDouble(3),
                     reader.IsDBNull(4) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(4),
-                    reader.IsDBNull(5) ? Array.Empty<double>() : reader.GetFieldValue<double[]>(5))
+                    reader.IsDBNull(5) ? Array.Empty<double>() : reader.GetFieldValue<double[]>(5),
+                    reader.GetInt32(6))
                 : null);
         }
 
@@ -563,14 +579,7 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
         {
             long to = from + step;
             bool last = to >= blocks;
-            await using var command = new NpgsqlCommand(last ? table.LastPageSql : table.PageSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = servers });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)from, 0) });
-            if (!last)
-            {
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)to, 0) });
-            }
-
+            await using var command = RebuildPageCommand(connection, table, servers, from, last ? null : to);
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -586,6 +595,23 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
 
             from = to;
         }
+    }
+
+    /// <summary>
+    /// One page statement of a rebuild's read (#9705): the rows of <paramref name="servers"/> in the blocks from
+    /// <paramref name="from"/> up to <paramref name="to"/>, or to the end of the table when there is no <paramref name="to"/>.
+    /// </summary>
+    internal static NpgsqlCommand RebuildPageCommand(NpgsqlConnection connection, RebuildTable table, int[] servers, long from, long? to)
+    {
+        var command = new NpgsqlCommand(to is null ? table.LastPageSql : table.PageSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = servers });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)from, 0) });
+        if (to is { } end)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)end, 0) });
+        }
+
+        return command;
     }
 
     /// <summary>The map row of a key that resolved to a tag.</summary>
