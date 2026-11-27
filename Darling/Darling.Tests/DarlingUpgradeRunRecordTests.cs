@@ -221,6 +221,151 @@ public sealed class DarlingUpgradeRunRecordTests
         finally { Cleanup(folder); }
     }
 
+    /// <summary>
+    /// #9850: the in_progress record is written while the service runs, over the file a previous run left. A holder that lets writers in but
+    /// not deleters (no FileShare.Delete) makes File.Replace throw, and the record must still land, in place. The old code failed this case
+    /// with a sharing violation and left the previous run's record in the file.
+    /// </summary>
+    [Fact]
+    public void TheInProgressWrite_Lands_WhenTheOldFileIsHeldWithoutDeleteSharing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); $run['state'] = 'succeeded'; Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                var output = Run(folder, "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok + ' reason=[' + $w.Reason + ']'");
+                Assert.Contains("ok=True", output, StringComparison.Ordinal);
+            }
+
+            var file = ReadFile(folder);
+            Assert.Equal("in_progress", file.GetProperty("state").GetString());
+            Assert.Equal("new-target", file.GetProperty("target_build").GetString());
+            Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>#9850: the service's own pickup opens the file with ReadWrite and Delete sharing. The in_progress write must land with that handle open.</summary>
+    [Fact]
+    public void TheInProgressWrite_Lands_WhenTheOldFileIsHeldTheWayTheServiceHoldsIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); $run['state'] = 'succeeded'; Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var output = Run(folder, "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok");
+                Assert.Contains("ok=True", output, StringComparison.Ordinal);
+            }
+
+            var file = ReadFile(folder);
+            Assert.Equal("in_progress", file.GetProperty("state").GetString());
+            Assert.Equal("new-target", file.GetProperty("target_build").GetString());
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>
+    /// #9850: a write that fails with nothing able to get past the holder (a reader that lets in no writer and no deleter) leaves the old file whole, and
+    /// the warning for the in_progress record names that record and does not tell the operator the store will not show the run. The final record's
+    /// warning does say so.
+    /// </summary>
+    [Fact]
+    public void AFailedWrite_NamesTheRecordThatIsMissing_AndOnlyTheFinalOneSaysTheStoreWillNotShowTheRun()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            string output;
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                output = Run(folder,
+                    "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok; "
+                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'copy=[' + (Get-DarlingUpgradeRunWriteWarning 'after_copy' $w.Reason) + ']'; "
+                    + "'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'",
+                    "Get-DarlingUpgradeRunWriteWarning");
+            }
+
+            Assert.Contains("ok=False", output, StringComparison.Ordinal);
+            var lines = output.Split('\n').Select(l => l.Trim()).ToArray();
+            var start = lines.Single(l => l.StartsWith("start=[", StringComparison.Ordinal));
+            var end = lines.Single(l => l.StartsWith("end=[", StringComparison.Ordinal));
+            var afterCopy = lines.Single(l => l.StartsWith("copy=[", StringComparison.Ordinal));
+            Assert.Contains("in_progress", start, StringComparison.Ordinal);
+            Assert.DoesNotContain("will not show", start, StringComparison.Ordinal);
+            // The start write may precede a run that stops before the copy, so it must not promise a write after the copy.
+            Assert.DoesNotContain("after the copy", start, StringComparison.Ordinal);
+            Assert.Contains("when the run ends", start, StringComparison.Ordinal);
+            // The after-copy write comes after the copy, so only the end write follows it.
+            Assert.Contains("rewritten after the copy", afterCopy, StringComparison.Ordinal);
+            Assert.DoesNotContain("will not show", afterCopy, StringComparison.Ordinal);
+            Assert.DoesNotContain("written again after", afterCopy, StringComparison.Ordinal);
+            Assert.Contains("final", end, StringComparison.Ordinal);
+            Assert.Contains("will not show", end, StringComparison.Ordinal);
+            Assert.Equal("old-target", ReadFile(folder).GetProperty("target_build").GetString());
+            Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>
+    /// #9850: File.Replace threw and the old file is gone, so the temp file is moved into place, and that Move throws too. The returned reason must
+    /// name both failures. Replace's reason alone is what the outer catch used to lose. Windows will not give a Replace that fails after it removed the
+    /// old file without elevation, so the test shadows Test-Path for the run file: its first answer deletes the old file (Replace then throws on the
+    /// missing target) and its second answer recreates the file after saying it is missing (Move then throws, because the destination exists). The
+    /// expected messages come from the same two calls made in the same PowerShell, so the test follows the runtime's wording.
+    /// </summary>
+    [Fact]
+    public void WhenReplaceFailsAndTheMoveIntoPlaceFailsToo_TheReasonNamesBothFailures()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            var output = Run(folder, """
+                $runFile = Join-Path $root 'upgrade-run.json'
+                $run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run | Out-Null
+                $probe = Join-Path $root 'probe'; New-Item -ItemType Directory -Path $probe | Out-Null
+                $probeTemp = Join-Path $probe 'a.tmp'; Set-Content -LiteralPath $probeTemp -Value 'x'
+                $replaceMessage = ''; try { [System.IO.File]::Replace($probeTemp, (Join-Path $probe 'missing.json'), [NullString]::Value) } catch { $replaceMessage = $_.Exception.Message }
+                $moveDestination = Join-Path $probe 'there.json'; Set-Content -LiteralPath $moveDestination -Value 'y'
+                $moveMessage = ''; try { [System.IO.File]::Move($probeTemp, $moveDestination) } catch { $moveMessage = $_.Exception.Message }
+                $script:runFileChecks = 0
+                function Test-Path {
+                    [CmdletBinding()] param([string]$LiteralPath, [string]$PathType)
+                    $answer = Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+                    if ($PathType -eq 'Leaf' -and $LiteralPath -eq $runFile) {
+                        $script:runFileChecks++
+                        if ($script:runFileChecks -eq 1) { Remove-Item -LiteralPath $runFile -Force; return $true }
+                        if ($script:runFileChecks -eq 2) { Set-Content -LiteralPath $runFile -Value 'z'; return $false }
+                    }
+                    return $answer
+                }
+                $run2 = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow)
+                $w = Write-DarlingUpgradeRunFile $root $run2
+                'ok=' + $w.Ok
+                'distinct=' + (($replaceMessage -ne '') -and ($moveMessage -ne '') -and ($replaceMessage -ne $moveMessage))
+                'hasReplace=' + $w.Reason.Contains($replaceMessage)
+                'hasMove=' + $w.Reason.Contains($moveMessage)
+                'checks=' + $script:runFileChecks
+                """);
+            Assert.Contains("ok=False", output, StringComparison.Ordinal);
+            Assert.Contains("distinct=True", output, StringComparison.Ordinal);
+            Assert.Contains("checks=2", output, StringComparison.Ordinal);
+            Assert.Contains("hasMove=True", output, StringComparison.Ordinal);
+            Assert.Contains("hasReplace=True", output, StringComparison.Ordinal);
+            Assert.Empty(Directory.GetFiles(folder, "upgrade-run.json.*.tmp"));
+        }
+        finally { Cleanup(folder); }
+    }
+
     private static readonly string[] ServiceWrittenListFunctions =
     {
         "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount",

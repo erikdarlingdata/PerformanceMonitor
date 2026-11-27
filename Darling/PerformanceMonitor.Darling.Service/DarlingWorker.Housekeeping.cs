@@ -1201,17 +1201,19 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreConverge, budget.Token);
-            foreach (var step in s_storeObjectConvergence)
-            {
-                /* #3913: the ONE filter the hourly pass has. On a store without TimescaleDB, a step that needs
-                   it is skipped rather than run to fail; every other step runs, as it does at start. */
-                if (!timescaleAvailable && NeedsTimescale(step.Stage))
-                {
-                    continue;
-                }
+            /* #9858: the first pass after a start leaves out the steps this start's own pass already ran, so one start runs each
+               step once. Taken here, so only that first pass skips and every later pass runs the whole list. */
+            var ranAtStartup = Interlocked.Exchange(ref _convergedAtStartup, null);
+            var selected = SelectHourlyConvergenceSteps(s_storeObjectConvergence, timescaleAvailable, ranAtStartup, out var skippedAsRanAtStartup);
+            ConvergenceSelectionObserverForTests?.Invoke(selected.Select(step => step.Name).ToList());
 
-                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
+            if (selected.Count > 0)
+            {
+                await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreConverge, budget.Token);
+                foreach (var step in selected)
+                {
+                    await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
+                }
             }
 
             /* #5574: the perfmon_stats chunk re-group, AFTER the whole list because the "compression policies" step is what
@@ -1227,7 +1229,21 @@ AND   j.hypertable_name = '{relation}'", connection))
                 StartPerfmonRegroupDrain(cancellationToken);
             }
 
-            LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
+            if (selected.Count > 0)
+            {
+                LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
+            }
+            else
+            {
+                /* The line stays at Information (#3817): it is the proof the hourly path is wired on this store, in the log window an
+                   operator reads after a restart. Every step this pass left out already ran in the start's own pass, so it says it ran none and
+                   why (#9858). A step with an hourly delegate of its own never lands here, so the shipped list always runs at least
+                   one step and this line is the guard for a list that has none. */
+                _logger.LogInformation(
+                    "Store object convergence: 0 steps, {Skipped} already ran in this start's own pass (#9858), {DurationMs} ms",
+                    skippedAsRanAtStartup, passClock.ElapsedMilliseconds);
+            }
+
             await PassSteps.RecordAsync(
                 StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
                 new StorePassSteps.StepCounts(
@@ -1349,6 +1365,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             var ensure = hourly && step.HourlyEnsureAsync is not null ? step.HourlyEnsureAsync : step.EnsureAsync;
             var count = await ensure(connection, logger, cancellationToken);
             tally.Steps++;
+            tally.Completed.Add(step.Name);
             if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
             {
                 tally.Changed.Add($"{step.Name} {count.ToString(CultureInfo.InvariantCulture)}");

@@ -321,7 +321,8 @@ public sealed partial class DarlingWorker : BackgroundService
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
         Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null,
+        bool StartPassDoesHourlyWork = true);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -531,7 +532,8 @@ public sealed partial class DarlingWorker : BackgroundService
            large one takes the rest next hour. Stage TimescaleAfterRepairLaunch only so a store without TimescaleDB skips it. */
         new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => Task.FromResult(0),
-            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct),
+            StartPassDoesHourlyWork: false),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -543,6 +545,53 @@ public sealed partial class DarlingWorker : BackgroundService
         public List<string> Changed { get; } = new();
 
         public List<string> Failed { get; } = new();
+
+        /// <summary>The steps that returned without throwing (#9858). The start-path pass hands these to the first hourly pass,
+        /// which skips them: they ran moments earlier in the same start.</summary>
+        public List<string> Completed { get; } = new();
+    }
+
+    /// <summary>
+    /// The steps the start-path convergence pass ran to completion in this start, held for the FIRST hourly pass only (#9858).
+    /// That pass fires within seconds of the start (the tick's stamp seeds at MinValue) and used to run every step again,
+    /// 21 steps and the same tuning lines twice in one start. A step that threw at start is not in the set, so the hourly
+    /// pass still retries it, and so does a step the start never reached (the TimescaleDB steps on a store that was plain
+    /// PostgreSQL at start). Taken (and cleared) by <see cref="ConvergeStoreObjectsAsync"/>, so every later pass runs the
+    /// whole list on its own schedule.
+    /// </summary>
+    private HashSet<string>? _convergedAtStartup;
+
+    /// <summary>
+    /// The steps one hourly pass runs (#3913's TimescaleDB filter, and #9858's skip of what this start's own pass already ran).
+    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start. A step that completed at start is skipped
+    /// when <see cref="StoreObjectConvergenceStep.StartPassDoesHourlyWork"/> is true, whatever its hourly delegate is: an hourly delegate that is a
+    /// conservative variant of the start work (fewer statements beside live collection, as the tuning and compression steps have) is a strict
+    /// subset of the pass the start just ran in full, and running it again repeats the work and its log lines (#9858). A step whose start pass does
+    /// not do its hourly work ("rollup chunk visibility", a no-op at start) runs on the first hourly pass.
+    /// </summary>
+    internal static List<StoreObjectConvergenceStep> SelectHourlyConvergenceSteps(
+        IEnumerable<StoreObjectConvergenceStep> steps, bool timescaleAvailable, ISet<string>? ranAtStartup, out int skippedAsRanAtStartup)
+    {
+        var selected = new List<StoreObjectConvergenceStep>();
+        skippedAsRanAtStartup = 0;
+        foreach (var step in steps)
+        {
+            /* #3913: on a store without TimescaleDB, a step that needs it is skipped rather than run to fail. */
+            if (!timescaleAvailable && NeedsTimescale(step.Stage))
+            {
+                continue;
+            }
+
+            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name) && step.StartPassDoesHourlyWork)
+            {
+                skippedAsRanAtStartup++;
+                continue;
+            }
+
+            selected.Add(step);
+        }
+
+        return selected;
     }
 
     /* The whole-pass budget for the hourly store-object convergence (#3817), the #2327 shape and the same
@@ -963,6 +1012,20 @@ public sealed partial class DarlingWorker : BackgroundService
     {
         set => _postgres = value;
     }
+
+    /// <summary>#9858: a test sets this to read the step names each hourly convergence pass selected, in order, before the pass opens its connection.</summary>
+    internal Action<IReadOnlyList<string>>? ConvergenceSelectionObserverForTests { get; set; }
+
+    /// <summary>#9858: lets a test run the first hourly convergence pass as a start leaves it, with the set of steps the start's own pass completed.</summary>
+    internal async Task RunFirstHourlyConvergenceForTestsAsync(IEnumerable<string> ranAtStartup, bool timescaleAvailable, CancellationToken cancellationToken)
+    {
+        _convergedAtStartup = new HashSet<string>(ranAtStartup, StringComparer.Ordinal);
+        await ConvergeStoreObjectsAsync(cancellationToken, timescaleAvailable);
+    }
+
+    /// <summary>#9858: lets a test run a convergence pass as it runs once the first hourly pass has taken the start's set, so the whole list is selected.</summary>
+    internal Task RunHourlyConvergenceForTestsAsync(bool timescaleAvailable, CancellationToken cancellationToken) =>
+        ConvergeStoreObjectsAsync(cancellationToken, timescaleAvailable);
 
     /// <summary>
     /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
