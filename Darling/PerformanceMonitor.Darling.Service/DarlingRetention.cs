@@ -2750,8 +2750,9 @@ WHERE NOT EXISTS
     /// Returns the rows moved and the slice's end, which the drain passes back as <paramref name="lowerBound"/> of its next slice.
     /// A probe that finds no expired row moves nothing, and the drain ends. The move runs in a transaction of its own, after
     /// <see cref="QueryTagSlimSightings.MovePlanSettingSql"/>: the setting is local to that transaction, so it ends with the
-    /// commit or with the rollback of a failed move and reaches neither the probe nor any other statement of the purge. A row
-    /// written below the bound later is left for the next drain, whose first probe has no bound.
+    /// commit or with the rollback of a failed move and reaches neither the probe nor any other statement of the purge. The
+    /// setting's comment has the lab medians: a day that lies all over the heap moves 9.6 times faster with it, a day in heap
+    /// order 1.29 times slower. A row written below the bound later is left for the next drain, whose first probe has no bound.
     /// </summary>
     /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
     internal static async Task<(int Rows, object? SliceEnd)> ExecuteSightingsMoveSliceAsync(
