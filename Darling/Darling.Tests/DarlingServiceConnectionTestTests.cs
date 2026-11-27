@@ -438,6 +438,142 @@ public sealed class DarlingServiceConnectionTestTests
         Assert.Equal(expected, port);
     }
 
+    /* #9893: the flags form reaches the same trust_server_certificate the JSON form sets. The entry goes through the add core's own parse,
+       so the setting asserted is the one a registered server would carry. */
+    [Theory]
+    [InlineData(true, "--trust-server-certificate")]
+    [InlineData(true, "--trust-server-certificate=true")]
+    [InlineData(true, "--trust-server-certificate", "true")]
+    [InlineData(false, "--trust-server-certificate=false")]
+    [InlineData(false, "--trust-server-certificate", "false")]
+    [InlineData(false)]
+    public void TheTrustFlag_RegistersTheServerWithTheTrustSettingTheFlagGave(bool expected, params string[] trustArgs)
+    {
+        string[] args = ["--host", "sql01", "--auth", "windows", .. trustArgs];
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags, _ => "pw");
+        Assert.Null(problem);
+        var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(json!);
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        Assert.Equal(expected, Assert.Single(entries).ProbeConfig.TrustServerCertificate);
+    }
+
+    [Fact]
+    public void TheTrustFlag_DoesNotSwallowTheNextFlag_AndAloneCountsAsFlags()
+    {
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(
+            new[] { "--trust-server-certificate", "--host", "sql01", "--auth", "sql", "--username", "u" }, out _, out var flags, out var error));
+        Assert.Null(error);
+        Assert.Equal(new DarlingCliCommands.AddServerFlags("sql01", null, "sql", "u", TrustServerCertificate: true), flags);
+
+        Assert.True(new DarlingCliCommands.AddServerFlags(TrustServerCertificate: false).Any);
+    }
+
+    [Fact]
+    public void TheTrustFlagWithAValueThatIsNotTrueOrFalse_IsRefusedWithAPlainMessage()
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "sql01", "--trust-server-certificate=yes" }, out _, out _, out var error));
+        Assert.Contains("--trust-server-certificate takes true or false", error, StringComparison.Ordinal);
+    }
+
+    /* #9893: the three connection flags Lite's add takes reach the entry the add core parses, as the JSON form's own keys. */
+    [Theory]
+    [InlineData("Optional", "--encrypt-mode", "optional")]
+    [InlineData("Mandatory", "--encrypt-mode=MANDATORY")]
+    [InlineData("Strict", "--encrypt-mode", "Strict")]
+    [InlineData("Mandatory")]
+    public void TheEncryptModeFlag_RegistersTheServerWithTheModeTheFlagGave(string expected, params string[] encryptArgs)
+    {
+        string[] args = ["--host", "sql01", "--auth", "windows", .. encryptArgs];
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags, _ => "pw");
+        Assert.Null(problem);
+        var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(json!);
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        Assert.Equal(expected, Assert.Single(entries).ProbeConfig.EncryptMode);
+    }
+
+    [Theory]
+    [InlineData(true, "--read-only-intent")]
+    [InlineData(true, "--read-only-intent=true")]
+    [InlineData(false, "--read-only-intent", "false")]
+    [InlineData(false)]
+    public void TheReadOnlyIntentFlag_RegistersTheServerWithTheSettingTheFlagGave(bool expected, params string[] intentArgs)
+    {
+        string[] args = ["--host", "sql01", "--auth", "windows", .. intentArgs];
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags, _ => "pw");
+        Assert.Null(problem);
+        var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(json!);
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        Assert.Equal(expected, Assert.Single(entries).ProbeConfig.ReadOnlyIntent);
+    }
+
+    [Theory]
+    [InlineData(true, "--multi-subnet-failover")]
+    [InlineData(true, "--multi-subnet-failover=true")]
+    [InlineData(false, "--multi-subnet-failover", "false")]
+    [InlineData(false)]
+    public void TheMultiSubnetFailoverFlag_RegistersTheServerWithTheSettingTheFlagGave(bool expected, params string[] failoverArgs)
+    {
+        string[] args = ["--host", "sql01", "--auth", "windows", .. failoverArgs];
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags, _ => "pw");
+        Assert.Null(problem);
+        var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(json!);
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        Assert.Equal(expected, Assert.Single(entries).ProbeConfig.MultiSubnetFailover);
+    }
+
+    [Fact]
+    public void TheConnectionFlags_DoNotSwallowTheNextFlag_AndAnyOneCountsAsFlags()
+    {
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(
+            new[] { "--read-only-intent", "--multi-subnet-failover", "--encrypt-mode", "strict", "--host", "sql01", "--auth", "sql", "--username", "u" },
+            out _, out var flags, out var error));
+        Assert.Null(error);
+        Assert.Equal(
+            new DarlingCliCommands.AddServerFlags("sql01", null, "sql", "u", EncryptMode: "Strict", ReadOnlyIntent: true, MultiSubnetFailover: true), flags);
+
+        Assert.True(new DarlingCliCommands.AddServerFlags(EncryptMode: "Optional").Any);
+        Assert.True(new DarlingCliCommands.AddServerFlags(ReadOnlyIntent: false).Any);
+        Assert.True(new DarlingCliCommands.AddServerFlags(MultiSubnetFailover: false).Any);
+    }
+
+    [Theory]
+    [InlineData("--read-only-intent=yes")]
+    [InlineData("--multi-subnet-failover=1")]
+    [InlineData("--encrypt-mode=required")]
+    [InlineData("--encrypt-mode=")]
+    public void AConnectionFlagWithAValueItDoesNotTake_IsRefusedAndNoServerIsAdded(string badArg)
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "sql01", badArg }, out _, out _, out var error));
+        Assert.False(string.IsNullOrWhiteSpace(error));
+    }
+
+    [Fact]
+    public void TheEncryptModeFlagWithNoValue_IsRefusedAsNeedingOne()
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "sql01", "--encrypt-mode", "--auth", "sql" }, out _, out _, out var error));
+        Assert.False(string.IsNullOrWhiteSpace(error));
+    }
+
     [Fact]
     public void NoPort_LeavesThePortOutOfTheEntry_AndAPortAloneCountsAsFlags()
     {
