@@ -263,7 +263,9 @@ internal static class DarlingHostBinding
             return (candidate, null);
         }
 
-        var result = await (probe ?? DarlingStoreLogins.ProbeSurfaceLoginAsync)(surface, postgres, cancellationToken);
+        var result = probe is null
+            ? await DarlingStoreLogins.ProbeSurfaceLoginAsync(surface, postgres, cancellationToken)
+            : await probe(surface, postgres, cancellationToken);
         return (ApplyLoginProbe(candidate, result), result);
     }
 
