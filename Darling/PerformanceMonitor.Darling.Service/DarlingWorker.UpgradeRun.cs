@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed partial class DarlingWorker
 {
     /* #9432: records upgrade-run.json beside the install into collect.upgrade_runs. One instance for the life of the process, because it
-       remembers which problems it already warned about. */
+       remembers which problems it already warned about and which run and state it last logged as recorded (#9841). */
     private UpgradeRunPickup? _upgradeRunPickup;
 
     /* Next due time for the upgrade run pickup. It rides the store-side pass that runs every s_storeSettingsCheckInterval, on its own stamp
@@ -37,11 +37,7 @@ public sealed partial class DarlingWorker
         {
             _upgradeRunPickup ??= new UpgradeRunPickup(_logger);
             var result = await _upgradeRunPickup.PickUpAsync(connection, installDirectory, DateTime.UtcNow, cancellationToken);
-            if (result.Outcome is UpgradeRunPickupOutcome.Recorded or UpgradeRunPickupOutcome.RecordedAndRemoved)
-            {
-                _logger.LogInformation("Upgrade run {RunId} recorded in the store, state {State}", result.RunId, result.State);
-            }
-
+            _upgradeRunPickup.LogRecordedOnce(result);
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
