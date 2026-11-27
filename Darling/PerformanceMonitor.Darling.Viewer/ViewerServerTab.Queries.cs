@@ -204,6 +204,26 @@ public partial class ViewerServerTab
     /// not land in another load's line or rename it.</summary>
     internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read) => timer?.Track(phase, read) ?? read;
 
+    /// <summary>#9887: the store reads of the Queries sub-tabs the slow-load line times, so a test can hand a sub-tab a read it holds and count what the line names.
+    /// A member left null reads the data service, and the property below is null in the product.</summary>
+    internal sealed record QueriesSubTabReads
+    {
+        public Func<DateTime, DateTime, Task<ViewerRoutedRead<ViewerQueryStatsRow>>>? TopQueriesGrid { get; init; }
+        public Func<DateTime, DateTime, Task<ViewerRoutedRead<ViewerProcedureStatsRow>>>? TopProceduresGrid { get; init; }
+        public Func<DateTime, DateTime, Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Plan)>>? QueryStoreGrid { get; init; }
+        public Func<DateTime, DateTime, Task<DateTime?>>? RegressionsDataStart { get; init; }
+        public Func<DateTime, DateTime, Task<ViewerQueryStoreRegressionsRead>>? Regressions { get; init; }
+        public Func<DateTime, DateTime, Task<DateTime?>>? ClutterDataStart { get; init; }
+        public Func<DateTime, DateTime, Task<ViewerDataService.QueryStoreClutterResult>>? Clutter { get; init; }
+        public Func<DateTime, DateTime, Task<DateTime?>>? PlanCorrectionsDataStart { get; init; }
+        public Func<DateTime, DateTime, Task<List<PlanCorrectionRow>>>? PlanCorrections { get; init; }
+        public Func<DateTime, DateTime, Task<DateTime?>>? HeatmapDataStart { get; init; }
+        public Func<HeatmapMetric, DateTime, DateTime, Task<HeatmapResult>>? Heatmap { get; init; }
+    }
+
+    /// <summary>A test's stand-in for the Queries sub-tabs' reads; null in the product.</summary>
+    internal QueriesSubTabReads? QueriesReadsOverride { get; set; }
+
     /// <summary>#9887: <see cref="Timed{T}"/> for a read whose result wraps its rows (the regressions and clutter reads answer a record), so
     /// the slow-load line counts them. <paramref name="rowsOf"/> runs only once the read has succeeded.</summary>
     internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read, Func<T, long?> rowsOf) => timer?.Track(phase, read, rowsOf) ?? read;
@@ -232,7 +252,7 @@ public partial class ViewerServerTab
         timer?.Surface = "Queries > Top Queries by Duration";
         var tagFilter = await CurrentQueryTagFilterAsync();
         var floorTask = Timed(timer, "data start", _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
+        var dataReadTask = Timed(timer, "grid read", QueriesReadsOverride?.TopQueriesGrid?.Invoke(startUtc, endUtc) ?? _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter), read => read.Rows.Count);
         /* Walk finding D15: the slicer's read does not depend on the grid's, so it starts beside it and is awaited after the grid
            is bound. It used to start only once the grid read was in, which put its whole round trip behind the grid's. */
         var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
@@ -304,7 +324,7 @@ public partial class ViewerServerTab
         timer?.Surface = "Queries > Top Procedures by Duration";
         var tagFilter = await CurrentQueryTagFilterAsync();
         var floorTask = Timed(timer, "data start", _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
+        var dataReadTask = Timed(timer, "grid read", QueriesReadsOverride?.TopProceduresGrid?.Invoke(startUtc, endUtc) ?? _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter), read => read.Rows.Count);
         var slicerTask = Timed(timer, "slicer read", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
         {
@@ -360,7 +380,7 @@ public partial class ViewerServerTab
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null, tags: tagFilter));
+        var dataReadTask = Timed(timer, "grid read", QueriesReadsOverride?.QueryStoreGrid?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null, tags: tagFilter), read => read.Rows.Count);
         /* Walk finding D15: the slicer's read starts beside the grid's (see LoadTopQueriesAsync). */
         var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStoreSlicerWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
@@ -601,8 +621,8 @@ public partial class ViewerServerTab
         /* #4966: the probe starts beside the read and asks about the baseline window (the data layer keys it there), and the banner
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
-        var floorTask = Timed(timer, "data start", _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var floorReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
+        var floorTask = Timed(timer, "data start", QueriesReadsOverride?.RegressionsDataStart?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var floorReadTask = Timed(timer, "grid read", QueriesReadsOverride?.Regressions?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
             literalEndUtc: IsCustomRange ? endUtc : null, /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
             dataStartProbe: floorTask), /* #6750: the rates divide from the data start the banner names. */
             regressions => regressions.Rows.Count);
@@ -714,8 +734,8 @@ public partial class ViewerServerTab
     {
         /* #9887: the slow-load line names this sub-tab and its reads (see LoadQueryStoreRegressionsAsync). The read answers a list, so its rows are counted as they are. */
         timer?.Surface = "Queries > Plan Corrections";
-        var dataStartTask = Timed(timer, "data start", _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var dataStartTask = Timed(timer, "data start", QueriesReadsOverride?.PlanCorrectionsDataStart?.Invoke(startUtc, endUtc) ?? _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed(timer, "grid read", QueriesReadsOverride?.PlanCorrections?.Invoke(startUtc, endUtc) ?? _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Plan Corrections");
         var rows = dataReadTask.Result;
         _planCorrectionFilterMgr!.UpdateData(rows);

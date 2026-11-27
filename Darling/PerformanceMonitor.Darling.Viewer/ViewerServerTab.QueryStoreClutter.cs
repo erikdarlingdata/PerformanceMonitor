@@ -50,8 +50,8 @@ public partial class ViewerServerTab
            The shell's LoadInnerTabAsync declares no width, so this load does, before either starts. */
         using var readFanOut = ViewerReadFanOut.Of(2);
 
-        var dataStartTask = Timed(timer, "data start", _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var readTask = Timed(timer, "grid read", _dataService.GetQueryStoreClutterAsync(
+        var dataStartTask = Timed(timer, "data start", QueriesReadsOverride?.ClutterDataStart?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var readTask = Timed(timer, "grid read", QueriesReadsOverride?.Clutter?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreClutterAsync(
             _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter), result => result.Databases.Count);
 
         /* A read that throws skips the banner step below, so the probe would go unawaited: the helper watches it then, and a probe that
