@@ -56,8 +56,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int SmallStoreId = -9593102;
     private const int PagingId = -9600101;
     private const int BigRunId = -9600102;
+    private const int MatchedBudgetId = -9884101;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId, PagingId, BigRunId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId, PagingId, BigRunId, MatchedBudgetId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -805,6 +806,169 @@ public sealed class ClientTimeoutsToolLiveTests
             Assert.Equal(JsonValueKind.Null, body.GetProperty("budget_note").ValueKind);
             Assert.Equal(55, body.GetProperty("count").GetInt64());
         });
+    }
+
+    /// <summary>
+    /// #9884: twenty matched calls with 2,000-character statements over a thousand sampled events. With the sampled events gone the matched calls alone are
+    /// over the budget, so the oldest matched calls are left off whole as well, and <c>count</c>, the rates and every top list stay the whole read's. The
+    /// same store at <c>limit</c> 2 fits whole. The Lite twin runs the same shared payload over DuckDB.
+    /// </summary>
+    [Fact]
+    public async Task TwentyWideMatchedCalls_OverAThousandEvents_FitTheBudget_LeaveTheOldestCallsOff_AndKeepTheCountAndTopLists()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await SeedWideMatchedCallsAsync(connection, now, ct);
+
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, MatchedBudgetId, now.AddHours(-1), now, 20, ct);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, now);
+            var whole = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(
+                ClientTimeoutsRead.Payload(reading!, window, samples, 20, 2000), McpHelpers.JsonOptions))!.AsObject();
+
+            /* The unbudgeted matched calls alone are over the budget, so the cut below is theirs. */
+            Assert.Equal(WideMatchedCalls, whole["matched_calls"]!.AsArray().Count);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(whole["matched_calls"]!.ToJsonString()) > McpResponseBudget.DefaultBytes);
+
+            var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MatchedBudgetId), 1, limit: 20, cancellationToken: ct);
+
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+            using var doc = JsonDocument.Parse(json);
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            Assert.True(body.GetProperty("budget_truncated").GetBoolean());
+            Assert.Equal(0, body.GetProperty("sampled_events_returned").GetInt32());
+
+            var calls = body.GetProperty("matched_calls");
+            var returned = body.GetProperty("matched_calls_returned").GetInt32();
+            Assert.InRange(returned, 1, WideMatchedCalls - 1);
+            Assert.Equal(returned, calls.GetArrayLength());
+            Assert.Equal(WideMatchedCalls - returned, body.GetProperty("matched_calls_left_out_for_budget").GetInt32());
+            Assert.Equal(JsonValueKind.Null, body.GetProperty("matched_calls_statement_cut_to").ValueKind);
+
+            /* The newest calls are the ones kept, whole, in the order the unbudgeted read lists them. */
+            var wholeCalls = whole["matched_calls"]!.AsArray();
+            for (var i = 0; i < returned; i++)
+            {
+                Assert.Equal(wholeCalls[i]!.ToJsonString(), calls[i].GetRawText());
+            }
+
+            foreach (var key in new[] { "count", "rate_per_minute", "minutes_covered", "collector_runs", "sampled_events_in_range", "top_statements", "top_hosts", "top_databases", "top_client_apps", "excluded_from_alert" })
+            {
+                Assert.Equal(whole[key]!.ToJsonString(), body.GetProperty(key).GetRawText());
+            }
+
+            Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());
+
+            /* The note names the block that held the reply over the budget and the remedy that shortens it, and carries no as_of advice. */
+            var note = body.GetProperty("budget_note").GetString()!;
+            Assert.Contains("matched_calls", note, StringComparison.Ordinal);
+            Assert.Contains($"only {returned} of the {WideMatchedCalls} matched calls fit", note, StringComparison.Ordinal);
+            Assert.Contains($"{WideMatchedCalls - returned} were left out", note, StringComparison.Ordinal);
+            Assert.Contains("limit", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("as_of", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("hours_back", note, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task TheSameStoreAtLimit2_IsNotTruncated()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            await SeedWideMatchedCallsAsync(connection, Now(), ct);
+
+            var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MatchedBudgetId), 1, limit: 2, cancellationToken: ct);
+
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+            using var doc = JsonDocument.Parse(json);
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            Assert.False(body.GetProperty("budget_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, body.GetProperty("budget_note").ValueKind);
+            Assert.Equal(2, body.GetProperty("sampled_events").GetArrayLength());
+            Assert.Equal(2, body.GetProperty("matched_calls").GetArrayLength());
+            Assert.Equal(2, body.GetProperty("matched_calls_returned").GetInt32());
+            Assert.Equal(0, body.GetProperty("matched_calls_left_out_for_budget").GetInt32());
+            Assert.Equal(JsonValueKind.Null, body.GetProperty("matched_calls_statement_cut_to").ValueKind);
+        });
+    }
+
+    /// <summary>
+    /// #9884: when even one matched call is over the budget, it is listed with its statement cut to the longest head that fits, and the reply says how
+    /// long the head is. The budget is set a few hundred bytes above the reply that lists no matched call, so one whole call cannot fit.
+    /// </summary>
+    [Fact]
+    public async Task OneMatchedCallThatCannotFit_IsListedWithItsStatementCutToAHead_AndTheReplyNamesTheCut()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await SeedWideMatchedCallsAsync(connection, now, ct);
+
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, MatchedBudgetId, now.AddHours(-1), now, 20, ct);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, now);
+            string Reply(ClientTimeoutsFit fit) => JsonSerializer.Serialize(new { client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, 20, 2000, fit) }, McpHelpers.JsonOptions);
+
+            var budget = System.Text.Encoding.UTF8.GetByteCount(Reply(new ClientTimeoutsFit(0, 0))) + 900;
+            var json = ClientTimeoutsRead.FitToBudget(ClientTimeoutsRead.EventsReturned(samples, 20), ClientTimeoutsRead.MatchedCallsReturned(window, 20), 2000, Reply, budget);
+
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= budget);
+            using var doc = JsonDocument.Parse(json);
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            Assert.True(body.GetProperty("budget_truncated").GetBoolean());
+            Assert.Equal(1, body.GetProperty("matched_calls_returned").GetInt32());
+            Assert.Equal(WideMatchedCalls - 1, body.GetProperty("matched_calls_left_out_for_budget").GetInt32());
+            var head = body.GetProperty("matched_calls_statement_cut_to").GetInt32();
+            Assert.InRange(head, 1, 1999);
+
+            /* The call listed is the newest, and its statement is a head of the whole one. */
+            var whole = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(
+                ClientTimeoutsRead.Payload(reading!, window, samples, 20, 2000), McpHelpers.JsonOptions))!["matched_calls"]!.AsArray()[0]!;
+            var listed = body.GetProperty("matched_calls")[0];
+            Assert.Equal(whole["session_id"]!.GetValue<int>(), listed.GetProperty("session_id").GetInt32());
+            var statement = listed.GetProperty("statement").GetString()!;
+            Assert.StartsWith(whole["statement"]!.GetValue<string>()[..head], statement, StringComparison.Ordinal);
+            Assert.True(statement.Length < whole["statement"]!.GetValue<string>().Length);
+
+            var note = body.GetProperty("budget_note").GetString()!;
+            Assert.Contains("matched_calls", note, StringComparison.Ordinal);
+            Assert.Contains($"first {head} characters", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("as_of", note, StringComparison.Ordinal);
+        });
+    }
+
+    private const int WideMatchedCalls = 20;
+
+    /// <summary>
+    /// A thousand sampled events with distinct 2,000-character statements, and <see cref="WideMatchedCalls"/> captured calls of the newest run: each is a 4 ms
+    /// attention (under the 1 s floor) from its own session and the 30 s call it cancelled, 20 ms later, carrying a distinct 2,000-character statement. The
+    /// newest call has the highest index.
+    /// </summary>
+    private static async Task SeedWideMatchedCallsAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
+    {
+        await RegisterAsync(connection, MatchedBudgetId, "sqlserver", ct);
+        var runs = await SeedRunsAsync(connection, MatchedBudgetId, now.AddSeconds(-30), 12, TimeSpan.FromMinutes(1), ct);
+        foreach (var run in runs)
+        {
+            await RowAsync(connection, MatchedBudgetId, run.AddSeconds(2), "count", 5, null, null, null, null, ct);
+        }
+
+        for (var i = 0; i < 1000; i++)
+        {
+            var text = ("SELECT /* event " + i.ToString("D4", CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'x');
+            await RowAsync(connection, MatchedBudgetId, runs[0].AddSeconds(2).AddMilliseconds(-i * 20), "sample", 0, "sales", "app-" + (i % 7).ToString(CultureInfo.InvariantCulture),
+                "fp-" + i.ToString("D4", CultureInfo.InvariantCulture), text, ct, durationUs: 30_000_000);
+        }
+
+        for (var j = 0; j < WideMatchedCalls; j++)
+        {
+            var collectionTime = runs[0].AddSeconds(2).AddMilliseconds(j * 5);
+            var eventTime = collectionTime.AddSeconds(-1);
+            var call = ("EXEC dbo.Slow /* call " + j.ToString("D4", CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'y');
+            await RowAsync(connection, MatchedBudgetId, collectionTime, "sample", 0, "sales", "etl", null, null, ct,
+                durationUs: 4_000, eventTime: eventTime, sessionId: 5_000 + j);
+            await RowAsync(connection, MatchedBudgetId, collectionTime, "aborted", 0, "sales", "etl", "fp-call-" + j.ToString("D4", CultureInfo.InvariantCulture), call, ct,
+                durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(20), sessionId: 5_000 + j, host: "web01");
+        }
     }
 
     /// <summary>
