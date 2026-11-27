@@ -376,7 +376,6 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         var context = Context();
         var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), TestContext.Current.CancellationToken);
 
-        var (inTurn, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, plan);
         var oneStatement = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
 
         var expected = new[] { ("DbB", 101L), ("DbC", 102L), ("DbA", 103L) }
@@ -384,10 +383,25 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
             .Take(DuckDbFactCollector.PlanRegressionCandidateLimit)
             .ToList();
         Assert.Equal(expected, oneStatement.Select(c => (c.DatabaseName, c.QueryId)).ToList());
-        Assert.Equal(expected, inTurn.Select(c => (c.DatabaseName, c.QueryId)).ToList());
-        /* The cut is inside the tie: DbC keeps its first 25 queries and drops the other 11. */
+        /* The statement's cut is inside the tie: DbC keeps its first 25 queries and drops the other 11. */
         Assert.Contains(("DbC", 25L), expected);
         Assert.DoesNotContain(("DbC", 26L), expected);
+
+        /* The in-turn read prices the first PlanRegressionCostCap rows of the statement's order (#9888), so it is compared with the statement
+           under the same cap. With the cap raised to the statement's own limit it gives every row the statement does, and the cut is the
+           statement's, inside the tie in DbC. Under the production cap it gives the statement's first rows, and the cut falls inside the tie
+           in DbB: its first 11 queries stay and the rest of its rows are left out. */
+        foreach (var cap in new int?[] { DuckDbFactCollector.PlanRegressionCandidateLimit, null })
+        {
+            var effectiveCap = cap ?? DuckDbFactCollector.PlanRegressionCostCap;
+            var (inTurn, _) = await new DuckDbFactCollector(_duckDb) { PlanRegressionCostCapForTests = cap }.ReadPlanRegressionCostAsync(context, plan);
+            var keptAtCap = expected.Take(effectiveCap).ToList();
+            Assert.Equal(keptAtCap, inTurn.Select(c => (c.DatabaseName, c.QueryId)).ToList());
+        }
+
+        var keptAtProductionCap = expected.Take(DuckDbFactCollector.PlanRegressionCostCap).ToList();
+        Assert.Contains(("DbB", 11L), keptAtProductionCap);
+        Assert.DoesNotContain(("DbB", 12L), keptAtProductionCap);
     }
 
     /// <summary>
