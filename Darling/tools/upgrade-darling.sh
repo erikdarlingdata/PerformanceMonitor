@@ -25,7 +25,7 @@
 # The store is not rolled back: migrations that the new build applied stay applied. Read "Rolling back to an older
 # build" in docs/darling/admin.md before you upgrade.
 #
-# --rollback does step 5 by hand, for a new build that started and that you do not want to keep.
+# --rollback does step 5 by hand, for a new build that started and that you do not want to keep. It uses up the rollback copy.
 #
 # Exit codes: 0 the new build runs and is healthy (or --check passed, or --rollback finished healthy). 1 a refusal,
 # a failure, or an upgrade that was rolled back.
@@ -125,13 +125,29 @@ write_upgrade_run() {
         fi
         rm -f "${temp}"
     fi
-    warn "Could not write the upgrade record ${folder}/${RUN_RECORD_NAME}. The upgrade does not depend on it."
+    warn "Could not write the run record ${folder}/${RUN_RECORD_NAME}. The upgrade or rollback does not depend on it."
 }
 
 # die for a failure after the pre-flight: the run is recorded as failed in /opt/darling, for the build there to store.
 die_recorded() {
     write_upgrade_run "${INSTALL_ROOT}" failed 1 "$1"
     die "$1"
+}
+
+# Starts the record of a --rollback (#9821). A rollback is a run of its own, with its own run id, and the build it puts
+# back stores it as one more row: in_progress, then succeeded or failed. target_build is the build that goes back, and
+# rollback_folder is the folder that holds the build the rollback replaces, so the row reads as a step back and the
+# newest row names the build that runs. The states and the fields are the ones an upgrade writes, so every build that
+# stores upgrade runs can read the record, and an older build reads no record at all. $1 is the folder of the build
+# that goes back. restore_previous writes the record into that build's folder, and nowhere else.
+begin_rollback_run() {
+    RUN_ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+    [[ "${RUN_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || RUN_ID=""
+    RUN_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    RUN_TOOL_VERSION=unknown
+    [ ! -f "${SCRIPT_DIR}/${SERVICE_DLL}" ] || RUN_TOOL_VERSION="$(build_version "${SCRIPT_DIR}")"
+    STAGED_VERSION="$(build_version "$1")"
+    RUN_ROLLBACK_FOLDER="${FAILED_ROOT}"
 }
 
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The
@@ -176,6 +192,10 @@ restore_previous() {
         HEALTH_REASON="could not copy ${PREVIOUS_ROOT} onto new files (${COPY_REFUSED}), so no build was moved"
         return 1
     fi
+    # A --rollback starts its record in the copy, so the first read of the build that goes back stores the run as
+    # in_progress (#9821). The copy can hold the record of the upgrade that installed that build, which the store
+    # already has: this record replaces it.
+    [ "${rollback_only}" = 0 ] || write_upgrade_run "${STAGED_RESTORE}" in_progress
     if [ -d "${INSTALL_ROOT}" ]; then
         rm -rf "${FAILED_ROOT}"
         if ! mv -T "${INSTALL_ROOT}" "${FAILED_ROOT}"; then
@@ -211,17 +231,23 @@ if [ "${rollback_only}" = 1 ]; then
     others="$(processes_from "${INSTALL_ROOT}" "$(unit_pids)")"
     [ -z "${others}" ] || die "A process other than the service still runs from ${INSTALL_ROOT}. Nothing was changed. Let it finish or stop it, then run this script again:
 ${others}"
-    note "Going back from $(build_version "${INSTALL_ROOT}") to $(build_version "${PREVIOUS_ROOT}")..."
+    begin_rollback_run "${PREVIOUS_ROOT}"
+    note "Going back from $(build_version "${INSTALL_ROOT}") to ${STAGED_VERSION}..."
     if ! stop_and_confirm; then
         die "A process still runs from ${INSTALL_ROOT} after the stop, so nothing was moved. The service is STOPPED: start it with 'systemctl start darling'.
 ${LEFT_RUNNING:-}"
     fi
+    RUN_STOP_CHECK=clear
+    # The record goes only into the folder of the build that is back. A rollback that moved no build writes none, and
+    # a record that cannot be written is a warning: the rollback's result and exit code do not depend on it (#9821).
     if restore_previous; then
+        write_upgrade_run "${INSTALL_ROOT}" succeeded 0
         note "The build from ${PREVIOUS_ROOT} is back in ${INSTALL_ROOT} and is healthy. The build it replaced is in ${FAILED_ROOT}. The store's migrations stay applied."
+        note "The rollback copy is used up: ${PREVIOUS_ROOT} is gone, so a second --rollback has nothing to go back to. To go forward again, run a new upgrade with --source."
         exit 0
     fi
     [ "${RESTORED}" = 1 ] || die "The rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED. Fix what stopped the move, then run this script with --rollback again."
-    die "The build from ${PREVIOUS_ROOT} is back in ${INSTALL_ROOT}, and its health check failed: ${HEALTH_REASON}. The build it replaced is in ${FAILED_ROOT}."
+    die_recorded "The build from ${PREVIOUS_ROOT} is back in ${INSTALL_ROOT}, and its health check failed: ${HEALTH_REASON}. The build it replaced is in ${FAILED_ROOT}. The rollback copy is used up: ${PREVIOUS_ROOT} is gone."
 fi
 
 if [ ! -f "${INSTALL_ROOT}/${SERVICE_DLL}" ]; then
