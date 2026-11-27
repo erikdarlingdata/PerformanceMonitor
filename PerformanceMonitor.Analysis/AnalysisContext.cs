@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -427,6 +428,39 @@ public class AnalysisContext
     /// <summary>Sends the current flow's failures to <see cref="CollectionFailures"/> again (#9879), for a caller that
     /// buffered one family on the pass's own flow and goes on to run the next on it.</summary>
     public void StopBufferingCollectionFailuresForThisFlow() => _failureBuffer.Value = null;
+
+    /// <summary>
+    /// The anomaly read a collector may start beside its family reads (#9879). Null, the default, is every pass that
+    /// runs the anomaly detector after collection ends: the scheduled pass and every read that does not set one. An
+    /// on-demand <c>analyze_server</c> pass sets it, so the detector's store reads overlap the family reads and do not
+    /// add their whole length to the reply's wait. A collector that never starts it leaves
+    /// <see cref="AnomalyReadBesideFamilies.Run"/> null, and the pass then runs the detector after collection.
+    /// </summary>
+    public AnomalyReadBesideFamilies? AnomalyReadBesideFamilies { get; set; }
+}
+
+/// <summary>
+/// The anomaly detector's read of one pass, for a collector to start beside its family reads (#9879). The detector reads
+/// the server id, the window and the pass's token from the context and no family's facts, so it does not need the
+/// families to finish first. The pass still places what it produced: the facts go after the family facts and the
+/// failures after the family failures, where both land when the detector runs after collection.
+/// </summary>
+public sealed class AnomalyReadBesideFamilies(Func<AnalysisContext, Task<List<Fact>>> read)
+{
+    /// <summary>The detector's read.</summary>
+    public Func<AnalysisContext, Task<List<Fact>>> Read { get; } = read ?? throw new ArgumentNullException(nameof(read));
+
+    /// <summary>
+    /// The read once a collector has started it, and null until then. A collector that starts it waits for it to settle
+    /// before its own stage ends and does not rethrow its failure: the pass awaits this task where it runs the detector.
+    /// </summary>
+    public Task<List<Fact>>? Run { get; set; }
+
+    /// <summary>
+    /// The collection failures the read recorded, kept out of <see cref="AnalysisContext.CollectionFailures"/> while the
+    /// families run. The pass appends them itself, after it has counted the families that were not read.
+    /// </summary>
+    public List<CollectionFailure> Failures { get; set; } = [];
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>

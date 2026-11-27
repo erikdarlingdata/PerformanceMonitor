@@ -332,13 +332,16 @@ public sealed class DarlingAnalysisService
     /// — today's behavior, byte-for-byte.</param>
     /// <param name="sqlServerCollectorWrapper">#9149 test seam: wraps the SQL Server set's fact collector so a test can watch the
     /// context a pass hands it (how many family reads it lets run at once). Null (every production caller) keeps the collector as is.</param>
+    /// <param name="sqlServerDetectorWrapper">#9879 test seam: wraps the SQL Server set's anomaly detector so a test can watch when a
+    /// pass starts it. Null (every production caller) keeps the detector as is.</param>
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
         ILogger? logger = null,
         BaselineCache? baselineCache = null,
         PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
-        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null)
+        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null,
+        Func<IAnomalyDetector, IAnomalyDetector>? sqlServerDetectorWrapper = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -352,7 +355,9 @@ public sealed class DarlingAnalysisService
             sqlServerCollectorWrapper is null
                 ? new PgFactCollector(postgres, logger, analyzerConfig)
                 : sqlServerCollectorWrapper(new PgFactCollector(postgres, logger, analyzerConfig)),
-            new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
+            sqlServerDetectorWrapper is null
+                ? new PgAnomalyDetector(postgres, sqlServerBaselines, logger)
+                : sqlServerDetectorWrapper(new PgAnomalyDetector(postgres, sqlServerBaselines, logger)),
             new InferenceEngine(new RelationshipGraph()),
             new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
             sqlServerBaselines,
@@ -541,6 +546,13 @@ public sealed class DarlingAnalysisService
                still up, while a store already gone classifies quietly. */
             context.CancellationToken.ThrowIfCancellationRequested();
 
+            /* #9879: an on-demand pass lets the collector start the anomaly detector beside its family reads, so the
+               detector's store reads overlap them and do not add their whole length to the reply's wait. The scheduled pass
+               (the one caller that persists caveats) runs the detector after collection, as it always has. */
+            context.AnomalyReadBesideFamilies = persistCollectionCaveats
+                ? null
+                : new AnomalyReadBesideFamilies(engine.Detector.DetectAnomaliesAsync);
+
             // 1. Collect facts from the Postgres store
             var facts = await engine.Collector.CollectFactsAsync(context);
             LastWindowCoverage = context.Coverage;
@@ -682,7 +694,21 @@ public sealed class DarlingAnalysisService
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
-            var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+            List<Fact> anomalies;
+            if (context.AnomalyReadBesideFamilies is { Run: { } anomalyRead } beside)
+            {
+                /* #9879: the collector started the detector beside its family reads and waited for it to settle. Its
+                   failures join the pass's list here, after the ledger and the unread families above were computed from
+                   the family failures alone, and its facts follow the family facts. Both are where a detector that runs
+                   after collection puts them. */
+                context.CollectionFailures.AddRange(beside.Failures);
+                anomalies = await anomalyRead;
+            }
+            else
+            {
+                anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+            }
+
             facts.AddRange(anomalies);
 
             // 2. Score facts (base severity + amplifiers)

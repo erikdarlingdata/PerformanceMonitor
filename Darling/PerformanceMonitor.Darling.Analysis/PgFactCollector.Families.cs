@@ -42,6 +42,14 @@ public sealed partial class PgFactCollector
     /// that also ends at the deadline. One the deadline stops, or one not yet started when it fires, adds no fact and no
     /// failure and is named in <see cref="AnalysisContext.FamiliesLeftOutForTime"/>, in family order. Every other family
     /// runs to its end. A stop from the pass's own token is still rethrown.</para>
+    ///
+    /// <para>#9879: when the context carries an <see cref="AnalysisContext.AnomalyReadBesideFamilies"/>, the families
+    /// overlap and the coverage stamp found observed time in the window, the anomaly read runs beside the families. It
+    /// starts ahead of the first family, so it holds one of the gate's slots from the start and the pass still opens no
+    /// more connections than the ceiling. It reads through the pass's token, never the deadline's, and records its
+    /// failures to a list of its own. The stage waits for it to settle and leaves its facts, its failures and any
+    /// exception with the pass, which places them after the families' as it does when the detector runs after
+    /// collection. An unobserved window never starts it: the pass returns before the detector on one.</para>
     /// </summary>
     internal static async Task RunFamiliesAsync(
         AnalysisContext context,
@@ -100,13 +108,21 @@ public sealed partial class PgFactCollector
         var stopStarting = 0;
         using var gate = new SemaphoreSlim(parallelism);
 
+        /* #9879: the anomaly read goes first. Every slot is free here, so it takes one before any family asks, where a
+           read queued behind the families would start only as the last of them finished. */
+        Task anomalyRead = Task.CompletedTask;
+        if (context.ObservedDurationMs > 0 && context.AnomalyReadBesideFamilies is { } beside)
+            anomalyRead = beside.Run = RunAnomalyRead(beside);
+
         for (var i = 0; i < families.Count; i++)
             tasks[i] = RunOne(i);
 
-        /* Waits for every family to settle, failed or not. The earliest failure in family order is rethrown below, once the
-           failures of the families before it are kept. (A continuation, not a catch: every catch in this file family is a
-           classified one, and this is not a read.) */
-        await Task.WhenAll(tasks).ContinueWith(static _ => { }, TaskScheduler.Default);
+        /* Waits for every family and the anomaly read to settle, failed or not. The earliest failure in family order is
+           rethrown below, once the failures of the families before it are kept. The anomaly read's own failure stays in its
+           task for the pass. (A continuation, not a catch: every catch in this file family is a classified one, and this is
+           not a read.) */
+        Task[] settling = [.. tasks, anomalyRead];
+        await Task.WhenAll(settling).ContinueWith(static _ => { }, TaskScheduler.Default);
 
         var firstFailed = Array.FindIndex(tasks, t => t.IsFaulted || t.IsCanceled);
         var merged = firstFailed < 0 ? families.Count : firstFailed;
@@ -152,6 +168,23 @@ public sealed partial class PgFactCollector
             {
                 if (!finished)
                     Volatile.Write(ref stopStarting, 1);
+                gate.Release();
+            }
+        }
+
+        /* #9879: the anomaly read on a gate slot of its own. Its failures go to its own list, so the pass's list holds only
+           family failures until the pass has counted the families it could not read. The flow it starts on is the stage's
+           own, which no family's deadline token reaches. */
+        async Task<List<Fact>> RunAnomalyRead(AnomalyReadBesideFamilies read)
+        {
+            await gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                read.Failures = context.BufferCollectionFailuresForThisFlow();
+                return await read.Read(context);
+            }
+            finally
+            {
                 gate.Release();
             }
         }
