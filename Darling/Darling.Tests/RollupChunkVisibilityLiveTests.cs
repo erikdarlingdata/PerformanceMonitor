@@ -423,12 +423,19 @@ public sealed class RollupChunkVisibilityLiveTests
             var left = await LaggingAsync(c, ct);
             Assert.True(left >= lagging - 1 && left >= 1, $"{lagging} chunk(s) lagged and {left} still do after a one-vacuum pass");
 
-            /* The next pass, with its whole budget, takes the chunks the first one left (the read lists at most RollupVacuumMaxChunksPerPass). */
-            Assert.Equal(left, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            /* The next pass, with its whole budget, takes the chunks the first one left (the read lists at most RollupVacuumMaxChunksPerPass). A vacuum
+               that runs while a backend the test does not own holds the horizon (#9897) marks no page and counts nothing, and its chunk stays listed, so
+               the passes repeat until none lag. Each chunk is counted once, by the pass whose vacuum marked its pages, so the counts add up to what the
+               first pass left. */
+            var taken = await PassUntilCountedAsync(c, null, ct);
             for (var pass = 0; pass < 3 && await LaggingAsync(c, ct) > 0; pass++)
             {
-                Assert.True(await PassUntilCountedAsync(c, null, ct) > 0);
+                var more = await PassUntilCountedAsync(c, null, ct);
+                Assert.True(more > 0);
+                taken += more;
             }
+
+            Assert.Equal(left, taken);
 
             Assert.Equal(0, await LaggingAsync(c, ct));
             bodySucceeded = true;
