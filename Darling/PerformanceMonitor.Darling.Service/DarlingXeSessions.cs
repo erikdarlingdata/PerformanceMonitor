@@ -54,10 +54,10 @@ public static class DarlingXeSessions
     /// login lacks ALTER ANY EVENT SESSION (CREATE ANY DATABASE EVENT SESSION on Azure SQL Database): a least-privilege choice an
     /// operator is entitled to make (#1823), so the run records PERMISSIONS (#5378) and no Capture Down fires for it.
     /// </summary>
-    internal static AttentionEnsureFault? AttentionFaultFor(Exception ex) =>
+    internal static AttentionEnsureFault? AttentionFaultFor(Exception ex, string? sessionName = null) =>
         ErrorNumbersOf(ex).Any(SqlServerPermissionErrors.IsPermissionDenied)
             ? new AttentionEnsureFault(
-                $"XE session {AlwaysOnXeSessions.AttentionXeSessionName} could not be created because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no client timeouts can be captured until it is granted: {AlwaysOnXeSessions.DescribeFailure(ex)}")
+                $"XE session {sessionName ?? "for client timeouts"} could not be created because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no client timeouts can be captured until it is granted: {AlwaysOnXeSessions.DescribeFailure(ex)}")
             : null;
 
     /// <summary>
@@ -449,7 +449,10 @@ public static class DarlingXeSessions
             {
                 try
                 {
-                    var attentionStarted = await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);
+                    /* #9895: this install's own session, never the shared one an older install may read. An install with no id has none to make. */
+                    var attentionName = runner.AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention)
+                        ?? throw new InvalidOperationException(AlwaysOnXeSessions.NoOwnAttentionSessionMessage);
+                    var attentionStarted = await EnsureAttentionOnPremAsync(connection, server, attentionName, logger, cancellationToken);
                     if (attentionStarted)
                     {
                         outcome?.Started.Add(AttentionCollector.Instance.Name);
@@ -463,7 +466,7 @@ public static class DarlingXeSessions
                 {
                     /* #5640 (H2): a denied create is a permission state, recorded as PERMISSIONS by the run, so it is a Warning and not
                        the error of a capture that broke. Any other failure leaves the session absent and the read records SESSION_MISSING. */
-                    attentionFault = AttentionFaultFor(ex);
+                    attentionFault = AttentionFaultFor(ex, runner.AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention));
                     var attentionTransient = RecordOnPremAttentionFailure(outcome, attentionFault, ex);
 
                     if (attentionTransient)
@@ -872,14 +875,14 @@ WHERE ses.name = @session_name;", connection))
     /// read it. Turning the collector on again ensures it at the next sweep.
     /// </summary>
     /// <returns>True when it started a stopped session or created one (#8528); false when the session was running, or was left with another definition.</returns>
-    private static async Task<bool> EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<bool> EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, ILogger? logger, CancellationToken cancellationToken)
     {
         ServerSessionState state;
         async Task<object?> ProbeAsync(bool committedRead, CancellationToken token)
         {
             using var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling", committedRead), connection);
             cmd.CommandTimeout = 60;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AlwaysOnXeSessions.AttentionXeSessionName });
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             return await cmd.ExecuteScalarAsync(token);
         }
 
@@ -906,11 +909,11 @@ WHERE ses.name = @session_name;", connection))
                 }
 
                 server.AttentionXeDefinitionReplaced = true;
-                logger?.LogWarning("[{Server}] The attention XE session {Session} has a definition other than this version's (events, actions or targets): dropping it and creating it again", server.Config.DisplayName, AlwaysOnXeSessions.AttentionXeSessionName);
+                logger?.LogWarning("[{Server}] The attention XE session {Session} has a definition other than this version's (events, actions or targets): dropping it and creating it again", server.Config.DisplayName, sessionName);
                 await AlwaysOnXeSessions.DropAttentionMismatchAsync(
                     async token =>
                     {
-                        using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                        using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(sessionName), connection);
                         dropCmd.CommandTimeout = 60;
                         await dropCmd.ExecuteNonQueryAsync(token);
                     },
@@ -926,14 +929,14 @@ WHERE ses.name = @session_name;", connection))
             state,
             start: async () =>
             {
-                using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(), connection);
+                using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(sessionName), connection);
                 startCmd.CommandTimeout = 60;
                 await startCmd.ExecuteNonQueryAsync(cancellationToken);
                 logger?.LogInformation("[{Server}] Started attention XE session", server.Config.DisplayName);
             },
             create: async () =>
             {
-                using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
+                using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName), connection);
                 createCmd.CommandTimeout = 60;
                 await createCmd.ExecuteNonQueryAsync(cancellationToken);
                 logger?.LogInformation("[{Server}] Created and started attention XE session", server.Config.DisplayName);

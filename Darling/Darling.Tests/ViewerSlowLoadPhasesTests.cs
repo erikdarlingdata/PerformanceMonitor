@@ -823,4 +823,185 @@ public sealed class ViewerSlowLoadPhasesTests
         listener.Stop();
         return port;
     }
+
+    /// <summary>#9887: the Queries sub-tabs the slow-load line names, with the sub-tab's index, the read the line books for its rows and how many rows its held read answers.</summary>
+    private static (int Index, string Read, int Rows, Func<Func<Task>, ViewerServerTab.QueriesSubTabReads> Reads) QueriesSubTab(string subTab)
+    {
+        static Task<DateTime?> NoStart(DateTime a, DateTime b) => Task.FromResult<DateTime?>(null);
+        return subTab switch
+        {
+            "Query Store Regressions" => (6, "grid read", 3, hold => new ViewerServerTab.QueriesSubTabReads
+            {
+                RegressionsDataStart = NoStart,
+                Regressions = async (_, _) =>
+                {
+                    await hold();
+                    return new ViewerQueryStoreRegressionsRead(new List<ViewerQueryStoreRegressionRow> { new(), new(), new() }, null);
+                },
+            }),
+            "Query Store Clutter" => (7, "grid read", 3, hold => new ViewerServerTab.QueriesSubTabReads
+            {
+                ClutterDataStart = NoStart,
+                Clutter = async (_, _) =>
+                {
+                    await hold();
+                    return new ViewerDataService.QueryStoreClutterResult(
+                        new List<ViewerDataService.QueryStoreClutterRow> { new(), new(), new() }, new ViewerDataService.QueryStoreOverheadSummary());
+                },
+            }),
+            "Plan Corrections" => (8, "grid read", 3, hold => new ViewerServerTab.QueriesSubTabReads
+            {
+                PlanCorrectionsDataStart = NoStart,
+                PlanCorrections = async (_, _) =>
+                {
+                    await hold();
+                    return new List<PlanCorrectionRow> { new(), new(), new() };
+                },
+            }),
+            "Query Heatmap" => (9, "heatmap read", 0, hold => new ViewerServerTab.QueriesSubTabReads
+            {
+                HeatmapDataStart = NoStart,
+                Heatmap = async (_, _, _) =>
+                {
+                    await hold();
+                    return new HeatmapResult();
+                },
+            }),
+            _ => throw new ArgumentOutOfRangeException(nameof(subTab), subTab, null),
+        };
+    }
+
+    /// <summary>#9919: a slow-load threshold no load reaches, so a test that does not hold a read to make a line reads no wall clock. The clock a test
+    /// creates before the helper builds and shows a tab counts the build, and the tab's own first-open clock counts the tab's construction, so on a
+    /// loaded machine either passes the real 2,000 ms with no read held.</summary>
+    private const int OutOfReachMs = int.MaxValue;
+
+    /// <summary>Loads one Queries sub-tab whose store reads <paramref name="reads"/> hands in, on <paramref name="timer"/>, and returns the lines the load wrote.
+    /// #9919: the tab's first-open clock, which the sub-tab pick below starts, has its threshold out of reach, so the only line a load writes is the one
+    /// <paramref name="timer"/> decides: the test sets that clock's threshold.</summary>
+    private static List<string> LoadQueriesSubTab(int subTabIndex, ViewerServerTab.QueriesSubTabReads reads, ViewerLoadTimer timer, Func<Task>? whileLoading = null)
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(new ViewerDataService(FailsAtOnceStore()), new DarlingServer(1, "queries-subtab", "queries-subtab", true, null))
+            {
+                FirstOpenSlowThresholdMs = OutOfReachMs,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                /* The sub-tab is picked before the reads are handed in, so a load the pick starts itself reads the (failing) store and not these. */
+                ((TabControl)tab.FindName("QueriesSubTabControl")).SelectedIndex = subTabIndex;
+                tab.QueriesReadsOverride = reads;
+                tab.SlowLoadSink = lines.Add;
+                var load = tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "Queries"), timer);
+                if (whileLoading is not null)
+                {
+                    await whileLoading();
+                }
+
+                await load;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        return lines;
+    }
+
+    [Theory]
+    [InlineData("Query Store Regressions")]
+    [InlineData("Query Store Clutter")]
+    [InlineData("Plan Corrections")]
+    [InlineData("Query Heatmap")]
+    public void QueriesSubTab_AHeldRead_WritesALineNamingTheSubTab_ItsRead_AndTheRowsItAnswered(string subTab)
+    {
+        /* #9887: these four sub-tabs opened with none of their reads on the load's clock, so a slow open logged all of it as client work and named no
+           sub-tab. The read is held until the clock has run on, so its time is the store's and not the client's. */
+        const int heldMs = 150;
+        var (index, read, rows, reads) = QueriesSubTab(subTab);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = new ViewerLoadTimer(0);
+
+        var lines = LoadQueriesSubTab(index, reads(() =>
+        {
+            started.TrySetResult();
+            return gate.Task;
+        }), timer, async () =>
+        {
+            await started.Task;
+            var heldFrom = timer.ElapsedMs;
+            while (timer.ElapsedMs - heldFrom < heldMs)
+            {
+                await Task.Yield();
+            }
+
+            gate.SetResult();
+        });
+
+        var line = Assert.Single(lines);
+        Assert.StartsWith($"[queries-subtab] slow load: Queries > {subTab} took ", line, StringComparison.Ordinal);
+        Assert.True(ReadMs(line, read) >= heldMs - 10, line);
+        if (rows > 0)
+        {
+            Assert.Contains($", {rows} rows", line, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("Query Store Regressions", "data start,grid read")]
+    [InlineData("Query Store Clutter", "data start,grid read")]
+    [InlineData("Plan Corrections", "data start,grid read")]
+    [InlineData("Query Heatmap", "data start,heatmap read")]
+    public void QueriesSubTab_EachStoreCall_BooksOneTimedRead_AndAFastLoadWritesNoLine(string subTab, string expectedPhases)
+    {
+        /* #9919: the load's clock has its threshold out of reach, so the line is absent whatever the machine's speed and a sub-tab load that writes a
+           line whatever its threshold fails this test. ALoadUnderTheThreshold_WritesNoLine holds the threshold rule on its own. */
+        var expected = expectedPhases.Split(',');
+        var (index, _, _, reads) = QueriesSubTab(subTab);
+        var timer = new ViewerLoadTimer(OutOfReachMs);
+        List<string> booked = new();
+
+        var lines = LoadQueriesSubTab(index, reads(() => Task.CompletedTask), timer, async () =>
+        {
+            booked = await PhasesAsync(timer, expected.Length);
+        });
+
+        Assert.Equal(expected.OrderBy(n => n), booked.OrderBy(n => n));
+        Assert.Empty(lines);
+    }
+
+    [Theory]
+    [InlineData("Top Queries by Duration", 3)]
+    [InlineData("Top Procedures by Duration", 4)]
+    [InlineData("Query Store by Duration", 5)]
+    public void QueriesGridRead_TheLineCountsTheGridsRows_NotOnlyTheSlicers(string subTab, int index)
+    {
+        /* #9887: the grid reads answer a routed read and a tuple, neither a collection, so the line's row count held only the slicer's buckets. */
+        var reads = index switch
+        {
+            3 => new ViewerServerTab.QueriesSubTabReads
+            {
+                TopQueriesGrid = (_, _) => Task.FromResult(new ViewerRoutedRead<ViewerQueryStatsRow>(new List<ViewerQueryStatsRow> { new(), new(), new(), new() }, "raw", null)),
+            },
+            4 => new ViewerServerTab.QueriesSubTabReads
+            {
+                TopProceduresGrid = (_, _) => Task.FromResult(new ViewerRoutedRead<ViewerProcedureStatsRow>(new List<ViewerProcedureStatsRow> { new(), new(), new(), new() }, "raw", null)),
+            },
+            _ => new ViewerServerTab.QueriesSubTabReads
+            {
+                QueryStoreGrid = (_, _) => Task.FromResult((new List<ViewerQueryStoreRow> { new(), new(), new(), new() }, (QueryStoreIntervalWide.WideReadPlan?)null)),
+            },
+        };
+
+        var line = Assert.Single(LoadQueriesSubTab(index, reads, new ViewerLoadTimer(0)));
+
+        Assert.Contains($"Queries > {subTab} took ", line, StringComparison.Ordinal);
+        Assert.Contains(", 4 rows", line, StringComparison.Ordinal);
+    }
 }

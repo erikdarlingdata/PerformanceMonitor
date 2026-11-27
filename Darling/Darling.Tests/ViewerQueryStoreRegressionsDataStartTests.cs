@@ -89,7 +89,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         var queries = ViewerFile("ViewerServerTab.Queries.cs");
         var load = MethodBody(queries, @"private async Task LoadQueryStoreRegressionsAsync\(");
 
-        Assert.Equal(1, Matches(load, @"var floorTask = _dataService\.GetQueryStoreRegressionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var floorTask = Timed\(timer,\s*""data start"",\s*QueriesReadsOverride\?\.RegressionsDataStart\?\.Invoke\(startUtc,\s*endUtc\)\s*\?\?\s*_dataService\.GetQueryStoreRegressionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(load, @"await ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,\s*floorTask,\s*startUtc\);"));
         Assert.DoesNotContain("UpdateTruncationBanner(", load, StringComparison.Ordinal);
 
@@ -141,7 +141,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.True(banner.Success, "QueryStoreRegressionsTruncationBanner is not declared in ViewerServerTab.xaml, in the row above the grid");
         Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
         Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
-        Assert.Matches(@"<DataGrid Grid\.Row=""3"" x:Name=""QueryStoreRegressionsGrid""", xaml);
+        Assert.Matches(@"<DataGrid Grid\.Row=""4"" x:Name=""QueryStoreRegressionsGrid""", xaml);
     }
 
     // ── What the banner shows ──

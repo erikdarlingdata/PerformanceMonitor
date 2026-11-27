@@ -138,7 +138,7 @@ public sealed class AttentionCollectorLiveSqlTests
         Assert.True(AlwaysOnXeSessions.IsOwnName(sessionName, AlwaysOnXeSessionKind.Attention));
 
         /* The ensure's own DDL, renamed to the test session, and not started with the server. The test session is the only one touched. */
-        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
@@ -254,7 +254,7 @@ public sealed class AttentionCollectorLiveSqlTests
         var ct = TestContext.Current.CancellationToken;
         var sessionName = AlwaysOnXeSessions.OwnNameFor(
             LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
-        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
@@ -322,7 +322,7 @@ public sealed class AttentionCollectorLiveSqlTests
         var ct = TestContext.Current.CancellationToken;
         var sessionName = AlwaysOnXeSessions.OwnNameFor(
             LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
-        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
@@ -391,7 +391,7 @@ public sealed class AttentionCollectorLiveSqlTests
             + "ADD EVENT sqlserver.rpc_completed (SET collect_statement = (0) " + actions + " WHERE ([result] = 2 OR ([result] = 1 AND [duration] >= 900000))), "
             + "ADD EVENT sqlserver.sql_batch_completed (SET collect_batch_text = (0) " + actions + " WHERE ([result] = 2 OR ([result] = 1 AND [duration] >= 900000))) "
             + "ADD TARGET package0.event_counter, ADD TARGET package0.ring_buffer (SET max_memory = 1024) WITH (MEMORY_PARTITION_MODE = NONE, STARTUP_STATE = OFF);";
-        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql(newName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + newName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         /* Not started: the probe answers 0 (stopped) for a matching definition and 2 for a mismatch. */
@@ -454,7 +454,7 @@ public sealed class AttentionCollectorLiveSqlTests
         var ct = TestContext.Current.CancellationToken;
         var sessionName = AlwaysOnXeSessions.OwnNameFor(
             LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
-        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
@@ -539,7 +539,7 @@ public sealed class AttentionCollectorLiveSqlTests
         var oldCreate = "CREATE EVENT SESSION [" + oldName + "] ON SERVER "
             + "ADD EVENT sqlserver.attention (ACTION (sqlserver.client_app_name, sqlserver.client_hostname, sqlserver.database_name, sqlserver.session_id, sqlserver.sql_text)) "
             + "ADD TARGET package0.event_counter, ADD TARGET package0.ring_buffer (SET max_memory = 1024) WITH (MEMORY_PARTITION_MODE = NONE, STARTUP_STATE = OFF);";
-        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql(newName)
             .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + newName + "]", StringComparison.Ordinal)
             .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
         /* Not started: the probe answers 0 (stopped) for a matching definition and 2 for a mismatch. */
@@ -582,24 +582,24 @@ public sealed class AttentionCollectorLiveSqlTests
     }
 
     [Fact]
-    public async Task ExistingSharedSession_ReadOnlyBatchRunsGreen()
+    public async Task ExistingInstallSession_ReadOnlyBatchRunsGreen()
     {
         var connectionString = ConnectionString("pm-5754-attention-live-readonly");
         Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL to run the live attention collector test.");
-        Assert.SkipUnless(ReadOnlyMode, "Runs with DARLING_TEST_SQL_READONLY=1 only: it reads the shared session of a server that holds real monitoring data.");
+        Assert.SkipUnless(ReadOnlyMode, "Runs with DARLING_TEST_SQL_READONLY=1 only: it reads one install's attention session on a server that holds real monitoring data.");
 
         var ct = TestContext.Current.CancellationToken;
+        string? installSession;
         await using (var probe = new SqlConnection(connectionString))
         {
             await probe.OpenAsync(ct);
-            await using var exists = new SqlCommand("SELECT COUNT(*) FROM sys.dm_xe_sessions WHERE name = @name;", probe);
-            exists.Parameters.AddWithValue("@name", AttentionCollector.XeSessionName);
-            Assert.SkipWhen(Convert.ToInt32(await exists.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) == 0,
-                "No running " + AttentionCollector.XeSessionName + " session on this server.");
+            await using var exists = new SqlCommand("SELECT TOP (1) name FROM sys.dm_xe_sessions WHERE name LIKE N'PerformanceMonitor[_]%[_]Attention' ORDER BY name;", probe);
+            installSession = await exists.ExecuteScalarAsync(ct) as string;
+            Assert.SkipWhen(installSession is null, "No running per-install attention session on this server.");
         }
 
         /* Read only: the batch selects from the XE DMVs and writes nothing. It must run, and the counter must read as a number. */
-        var (_, context) = await RunCollectorAsync(connectionString!, AttentionCollector.XeSessionName, null, ct);
+        var (_, context) = await RunCollectorAsync(connectionString!, installSession!, null, ct);
         Assert.True(StagedCount(context) >= 0);
     }
 

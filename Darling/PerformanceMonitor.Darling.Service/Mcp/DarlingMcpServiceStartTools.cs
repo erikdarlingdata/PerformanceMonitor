@@ -44,6 +44,14 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
    AND to_regclass('collect.service_start_rungs') IS NOT NULL
    AND to_regclass('collect.service_start_rung_objects') IS NOT NULL";
 
+    /// <summary>What the read says in place of each start's upgrade run when the store has no <c>collect.upgrade_runs</c> (#9902).</summary>
+    public const string UpgradeRunsUnavailableNote =
+        "The store has no upgrade run history (it predates collect.upgrade_runs), so no start names the upgrade run before it. The service migrates the store at its next start.";
+
+    /// <summary>What the read says when the upgrade runs could not be read just now (#9902). The starts are complete.</summary>
+    public const string UpgradeRunsUnreadableNote =
+        "The upgrade runs could not be read just now, so no start names the upgrade run before it. The starts themselves are complete.";
+
     /// <summary>What a trend read says in place of its build markers when the store has no start history.</summary>
     public const string BuildChangesUnavailableNote =
         "The store has no service start history yet (it predates the start tables), so builds are not marked. The service migrates the store at its next start.";
@@ -59,7 +67,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
         "flush: the stop after a clean stop, within a minute of it after a crash), last_flush_at (the running start flushes about every minute), " +
         "schema_version_before and schema_version_after (equal when no rung ran), error_count and warn_count, first_errors and first_warns (the " +
         "first 5 lines each, secrets masked, cut at 160 characters, log_lines_truncated true when a line was dropped or cut), at_10_minutes and at_30_minutes (the counts at start + 10 and + 30 minutes, " +
-        "null until then), and rungs. A rung: version, name, attempt (a rung that failed and then applied has two rows), started_at, elapsed_ms, " +
+        "null until then), upgrade_run and rungs. upgrade_run (#9902) names the upgrade run before the start, from collect.upgrade_runs: the newest run that began at or before the start's process_started_at, so a start reads next to the upgrade that came before it (null when no run began that early; runs carry no service host, so on a store with several hosts a start can name a run another host made). It has run_id, state, recorded_state, target_build, started_at, ended_at (null until the run's file said it ended) and start_on_target_build (true when this start runs the run's target build, false when it runs another build, null when the run recorded no target build). recorded_state is what the store holds, which is what the upgrade script's file last said, and state is what the read makes of it: a run stored as in_progress reads as superseded once a newer run exists, and as ended_without_result once the service has started on its target build after the run began (the script's last write never landed, so the run ended with no recorded result), and ended_without_result wins when both hold. With a newer run the read says so at once. With no newer run, a run reads in_progress until its first start on the target build is 15 minutes old, because the script's last write can take three five-minute passes to be recorded, and ended_without_result from then on; a run with no start on its build and no newer run reads in_progress, and succeeded, failed and verified read as stored. When the store has no collect.upgrade_runs, upgrade_run is null on every start and upgrade_runs_note says why. A rung: version, name, attempt (a rung that failed and then applied has two rows), started_at, elapsed_ms, " +
         "outcome (applied or failed), objects (how many tables, columns, indexes, constraints, views, functions, hypertables and policies the rung created, changed or dropped, or the word fresh_install when the start's ladder began on an empty store, which records no objects) and error_text for a failure (cut at 160 characters). A start lists at most 10 rungs, the failed ones first and then the slowest, with rungs_total and rungs_omitted saying how many it tried and how many are not listed, and rungs_truncated true when any rung was left out or its text cut. Counts cover the service's own log lines from the start of the process. " +
         "limit is the number of starts (default 10, max 100), and a reply too big for the response budget leaves the oldest starts off whole (truncated and budget_truncated true); service_host keeps one host's starts, and hours_back keeps the starts that began in the last that many hours (1 to 9600). " +
         "Pass rung (a schema version, 1 to the highest this build knows) to list what that rung changed instead: each start that applied it, newest first, with objects (schema, object, column for a column row, kind of table, column, index, constraint, view, function, hypertable or policy, and action of create, alter or drop; alter is a column type, nullability or default, an index or constraint definition, a view or function body or a policy setting that changed; a constraint row names the table and the constraint) and objects_total, objects_omitted and objects_truncated (a start lists at most 40). " +
@@ -124,6 +132,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
             }
 
             var (page, truncated) = McpHelpers.BoundPage(fetched, limit);
+            var (upgradeRuns, upgradeRunsNote) = await ReadUpgradeRunsAsync(postgres, cancellationToken);
 
             /* The newest starts that fit the response budget: starts are left off the end whole, so `truncated` is true for the limit or the
                budget, and budget_truncated is the budget alone. Each start is also cut inside (rungs and log lines), and says so on its own row. */
@@ -139,7 +148,8 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
                     ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "service starts",
                         "Pass a smaller limit, or service_host to read one host's starts.")
                     : null,
-                starts = page.Take(kept).Select(Shape),
+                upgrade_runs_note = upgradeRunsNote,
+                starts = page.Take(kept).Select(r => Shape(r, upgradeRuns)),
             }, McpHelpers.JsonOptions);
 
             return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
@@ -242,7 +252,54 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
         }
     }
 
-    private static object Shape(ServiceStartRecord record)
+    /// <summary>
+    /// The upgrade runs the starts are paired with (#9902), newest first, or null with the note that says why there are none to pair: the store predates
+    /// <c>collect.upgrade_runs</c>, or the read failed. A failed run read never fails the starts it rides on.
+    /// </summary>
+    private static async Task<(IReadOnlyList<UpgradeRunRead>? Runs, string? Note)> ReadUpgradeRunsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using (var shape = postgres.CreateCommand(UpgradeRuns.ExistsSql))
+            {
+                shape.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                if (!(bool)(await shape.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    return (null, UpgradeRunsUnavailableNote);
+                }
+            }
+
+            return (await UpgradeRuns.ReadAsync(postgres, DateTime.UtcNow, cancellationToken), null);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return (null, UpgradeRunsUnavailableNote);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, UpgradeRunsUnreadableNote);
+        }
+    }
+
+    /// <summary>The upgrade run before a start, as the start's <c>upgrade_run</c> object, or null when no run began at or before the start or the runs were not read.</summary>
+    private static object? ShapeUpgradeRun(ServiceStartRow start, IReadOnlyList<UpgradeRunRead>? runs)
+    {
+        var run = runs is null ? null : UpgradeRuns.RunBefore(runs, start.ProcessStartedUtc);
+        return run is null
+            ? null
+            : new
+            {
+                run_id = run.RunId,
+                state = run.State,
+                recorded_state = run.RecordedState,
+                target_build = run.TargetBuild,
+                started_at = Iso(run.StartedUtc),
+                ended_at = Iso(run.EndedUtc),
+                start_on_target_build = UpgradeRuns.StartIsOnTarget(run.TargetBuild, start.ProductVersion),
+            };
+    }
+
+    private static object Shape(ServiceStartRecord record, IReadOnlyList<UpgradeRunRead>? upgradeRuns)
     {
         var s = record.Start;
         return new
@@ -265,6 +322,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
             first_errors = ShownLines(s.FirstErrors),
             first_warns = ShownLines(s.FirstWarns),
             log_lines_truncated = LinesCut(s.FirstErrors) || LinesCut(s.FirstWarns),
+            upgrade_run = ShapeUpgradeRun(s, upgradeRuns),
             rungs_total = record.Rungs.Count,
             rungs_omitted = record.Rungs.Count - ShownRungs(record.Rungs).Count,
             rungs_truncated = record.Rungs.Count > MaxRungsPerStart || ShownRungs(record.Rungs).Any(r => r.ErrorText is { Length: > MaxLineChars }),

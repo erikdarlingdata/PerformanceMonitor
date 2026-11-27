@@ -57,6 +57,13 @@ public enum ClientTimeoutsKind
 }
 
 /// <summary>
+/// What the response budget keeps of a <c>get_client_timeouts</c> reply (#9593, #9884): how many sampled events and how many matched calls it lists, and
+/// the length a matched call's statement is cut to (null when no statement is cut). <see cref="ClientTimeoutsRead.FitToBudget"/> chooses it,
+/// <see cref="ClientTimeoutsRead.Payload"/> writes it.
+/// </summary>
+public readonly record struct ClientTimeoutsFit(int SampledEvents, int MatchedCalls, int? MatchedCallTextLength = null);
+
+/// <summary>
 /// The <c>get_client_timeouts</c> read (#5640), written once for Lite and Darling: the same freshness and span rule the alert uses
 /// (<see cref="AttentionEvaluator.ReadSpan"/>, which is <see cref="AttentionEvaluator.Read"/>'s rule over the whole range), the same
 /// shared SQL (<see cref="AttentionWindowSql"/>), and one payload shape, so the two stores cannot answer differently. Each SKU keeps
@@ -126,29 +133,86 @@ public static class ClientTimeoutsRead
     /// <summary>How many sampled events a reply holds before the response budget cuts any: the newest <paramref name="limit"/> of <paramref name="samples"/>.</summary>
     public static int EventsReturned(IReadOnlyList<ClientTimeoutSample> samples, int limit) => Math.Min(samples.Count, limit);
 
-    /// <summary>
-    /// #9593: the reply that fits <see cref="McpResponseBudget.DefaultBytes"/>, for both SKUs. <paramref name="reply"/> is the SKU's whole
-    /// answer (its envelope and window notice around <see cref="Payload"/>) carrying the first n sampled events, so the envelope counts
-    /// against the budget. Events are listed newest collected_at first, so the ones left off the end are the oldest. Every other field is kept whole:
-    /// <c>count</c>, the rates, the top lists and <c>matched_calls</c> do not shrink, so a reply whose matched calls alone are over the
-    /// budget keeps no events and says so in <c>budget_note</c> (a smaller <c>limit</c> shortens that list too).
-    /// </summary>
-    public static string FitToBudget(int eventsReturned, Func<int, string> reply, int budgetBytes = McpResponseBudget.DefaultBytes) =>
-        McpResponseBudget.FitPrefix(eventsReturned, reply, budgetBytes, minimum: 0).Json;
+    /// <summary>How many matched calls a reply holds before the response budget cuts any: the newest <paramref name="limit"/> of the window's matched calls.</summary>
+    public static int MatchedCallsReturned(AttentionWindow window, int limit) => Math.Min(window.MatchedCalls.Count, limit);
 
-    /// <summary>The sentence <c>budget_note</c> carries when the response budget left sampled events out (#9593), null when none were left out.</summary>
-    private static string? BudgetNote(int eventsReturned, int kept) =>
-        kept >= eventsReturned
-            ? null
-            : McpResponseBudget.PageCutNote(eventsReturned, kept, "newest collected_at first", "sampled events",
+    /// <summary>
+    /// #9593, #9884: the reply that fits <see cref="McpResponseBudget.DefaultBytes"/>, for both SKUs. <paramref name="reply"/> is the SKU's whole
+    /// answer (its envelope and window notice around <see cref="Payload"/>) carrying what <see cref="ClientTimeoutsFit"/> keeps, so the envelope counts
+    /// against the budget. Sampled events are listed newest collected_at first and matched calls newest first, so what is left off the end is the oldest.
+    /// The sampled events go first. When the reply is still over the budget with none of them, the oldest matched calls are left off whole, down to one.
+    /// When that one call alone is over the budget, its statement is cut to the longest head that fits. <c>count</c>, the rates and the top lists are
+    /// never cut. The statement text a matched call carries is <paramref name="statementTextLength"/> characters at most, so that is the longest head.
+    /// </summary>
+    public static string FitToBudget(
+        int eventsReturned, int matchedCallsReturned, int statementTextLength, Func<ClientTimeoutsFit, string> reply, int budgetBytes = McpResponseBudget.DefaultBytes)
+    {
+        bool Fits(string json) => System.Text.Encoding.UTF8.GetByteCount(json) <= budgetBytes;
+
+        var events = McpResponseBudget.FitPrefix(eventsReturned, n => reply(new ClientTimeoutsFit(n, matchedCallsReturned)), budgetBytes, minimum: 0);
+        if (Fits(events.Json) || matchedCallsReturned == 0)
+        {
+            return events.Json;
+        }
+
+        var calls = McpResponseBudget.FitPrefix(matchedCallsReturned, n => reply(new ClientTimeoutsFit(0, n)), budgetBytes, minimum: 1);
+        if (Fits(calls.Json))
+        {
+            return calls.Json;
+        }
+
+        return McpResponseBudget.FitPrefix(statementTextLength, n => reply(new ClientTimeoutsFit(0, 1, n)), budgetBytes, minimum: 0).Json;
+    }
+
+    /// <summary>
+    /// The sentence <c>budget_note</c> carries when the response budget left sampled events or matched calls out (#9593, #9884), null when it left none out.
+    /// It names the block that held the reply over the budget and the remedy that shortens it, a smaller <c>limit</c>, which cuts <c>sampled_events</c> and
+    /// <c>matched_calls</c> together. Paging with <c>as_of</c> is advised only while a sampled event is listed to page from: it moves back to the oldest
+    /// returned collected_at, and it cannot shrink a reply whose matched calls are the same ones.
+    /// </summary>
+    private static string? BudgetNote(int eventsReturned, int eventsKept, int callsReturned, int callsKept, int? callTextLength)
+    {
+        var eventsCut = eventsKept < eventsReturned;
+        var callsCut = callsKept < callsReturned || callTextLength is not null;
+        if (!eventsCut && !callsCut)
+        {
+            return null;
+        }
+
+        const string SmallerLimit = "Pass a smaller limit, which shortens matched_calls and sampled_events together. ";
+
+        /* The sampled events go first, so a cut matched call means none is listed: its sentence stands in for the as_of paging advice. */
+        if (callsCut)
+        {
+            var leftOut = callsReturned - callsKept;
+            var detail = FormattableString.Invariant($"matched_calls held the reply over the budget: ")
+                + (leftOut > 0
+                    ? FormattableString.Invariant($"only {callsKept:#,0} of the {callsReturned:#,0} matched calls fit (newest first) and {leftOut:#,0} were left out whole (matched_calls_left_out_for_budget)")
+                    : "its one matched call does not fit whole")
+                + (callTextLength is { } head
+                    ? FormattableString.Invariant($", and the call listed has its statement cut to its first {head:#,0} characters (matched_calls_statement_cut_to)")
+                    : "")
+                + ". " + SmallerLimit + "count, the rates and the top lists are whole.";
+            return eventsCut
+                ? McpResponseBudget.PageCutNote(eventsReturned, eventsKept, "newest collected_at first", "sampled events", detail)
+                : "TRUNCATED: " + detail;
+        }
+
+        /* Moving as_of back reads the oldest returned collected_at again and then older runs, so it needs a listed event to start from. */
+        return eventsKept == 0
+            ? McpResponseBudget.PageCutNote(eventsReturned, eventsKept, "newest collected_at first", "sampled events",
+                "matched_calls and the blocks that stay whole leave no room for a sampled event, so none is listed to page from. " + SmallerLimit +
+                "count, the rates, the top lists and matched_calls are whole.")
+            : McpResponseBudget.PageCutNote(eventsReturned, eventsKept, "newest collected_at first", "sampled events",
                 "Move as_of back to the oldest returned collected_at, with hours_back wide enough to reach the older events, to read them (that collector run is read again whole, so no event is skipped), or pass a smaller limit. " +
                 "If every listed event has the same collected_at, that one run alone fills the reply and its older events cannot be paged this way. " +
                 "count, the rates, the top lists and matched_calls are whole.");
+    }
 
     /// <summary>
     /// The data answer's fields, in the order they are serialized (<paramref name="statementTextLength"/> cuts each sample text).
-    /// <paramref name="sampledEventsKept"/> (#9593) is how many of the <paramref name="limit"/>-cut sampled events the reply lists, the newest
-    /// first: <see cref="FitToBudget"/> sets it to the count that fits the response budget, and null keeps every one the limit allows.
+    /// <paramref name="fit"/> (#9593, #9884) is what the response budget keeps of the <paramref name="limit"/>-cut sampled events and matched calls, the
+    /// newest first, and of a matched call's statement: <see cref="FitToBudget"/> chooses it, and null keeps everything the limit allows.
     /// </summary>
     public static object Payload(
         AttentionReading reading,
@@ -156,10 +220,13 @@ public static class ClientTimeoutsRead
         IReadOnlyList<ClientTimeoutSample> samples,
         int limit,
         int statementTextLength,
-        int? sampledEventsKept = null)
+        ClientTimeoutsFit? fit = null)
     {
         var eventsReturned = EventsReturned(samples, limit);
-        var kept = Math.Clamp(sampledEventsKept ?? eventsReturned, 0, eventsReturned);
+        var kept = Math.Clamp(fit?.SampledEvents ?? eventsReturned, 0, eventsReturned);
+        var callsReturned = MatchedCallsReturned(window, limit);
+        var callsKept = Math.Clamp(fit?.MatchedCalls ?? callsReturned, 0, callsReturned);
+        var callTextLength = callsKept > 0 ? fit?.MatchedCallTextLength : null;
         var rate = Math.Round(reading.TotalCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero);
 
         /* #6131: the same monitoring-tool T-SQL (1.5 KB) came back twice in one answer, once as a top statement's sample and
@@ -223,7 +290,7 @@ public static class ClientTimeoutsRead
             top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
             top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples, excluded = AttentionEvaluator.IsExcludedApp(t.Name) }).ToList(),
             excluded_from_alert = Excluded(reading, rate),
-            matched_calls = window.MatchedCalls.Take(limit).Select(c => new
+            matched_calls = window.MatchedCalls.Take(callsKept).Select(c => new
             {
                 event_time = c.EventTime is null ? null : Stamp(c.EventTime.Value),
                 collected_at = Stamp(c.CollectionTime),
@@ -233,14 +300,16 @@ public static class ClientTimeoutsRead
                 excluded = AttentionEvaluator.IsExcludedApp(c.ClientAppName),
                 session_id = c.SessionId,
                 elapsed_seconds = c.ElapsedUs is null ? (double?)null : Math.Round(c.ElapsedUs.Value / 1_000_000.0, 3, MidpointRounding.AwayFromZero),
-                statement = McpHelpers.TruncateStatement(c.StatementText, statementTextLength),
+                statement = McpHelpers.TruncateStatement(c.StatementText, callTextLength ?? statementTextLength),
             }).ToList(),
-            matched_calls_returned = Math.Min(window.MatchedCalls.Count, limit),
+            matched_calls_returned = callsKept,
             matched_calls_truncated = window.MatchedCalls.Count > limit,
+            matched_calls_left_out_for_budget = callsReturned - callsKept,
+            matched_calls_statement_cut_to = callTextLength,
             sampled_events_returned = kept,
             sampled_events_truncated = samples.Count > limit,
-            budget_truncated = kept < eventsReturned,
-            budget_note = BudgetNote(eventsReturned, kept),
+            budget_truncated = kept < eventsReturned || callsKept < callsReturned || callTextLength is not null,
+            budget_note = BudgetNote(eventsReturned, kept, callsReturned, callsKept, callTextLength),
             sampled_events = events.Take(kept).ToList(),
         };
     }

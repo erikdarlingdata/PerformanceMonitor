@@ -72,7 +72,8 @@ public sealed class CollectorReadinessSinceStartLiveTests
                 Assert.False(root.GetProperty("verdict").GetString()!.StartsWith("Every due collector", StringComparison.Ordinal));
                 Assert.Equal("not yet", root.GetProperty("first_full_cycle").GetProperty("status").GetString());
                 Assert.Equal(JsonValueKind.Null, root.GetProperty("first_full_cycle").GetProperty("at").ValueKind);
-                var waiting = root.GetProperty("waiting").EnumerateArray().ToList();
+                /* Two servers with every default collector waiting is more rows than the response budget holds, so the rows are read across pages (#9880). */
+                var waiting = await WaitingAcrossPagesAsync(postgres, start, now, ct);
                 bool Waits(string server, string collector) =>
                     waiting.Any(w => w.GetProperty("server").GetString() == server && w.GetProperty("collector").GetString() == collector);
                 Assert.True(Waits("readiness-a", "memory_stats"));
@@ -441,6 +442,24 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<List<JsonElement>> WaitingAcrossPagesAsync(NpgsqlDataSource postgres, DateTime start, DateTime now, CancellationToken ct)
+    {
+        var rows = new List<JsonElement>();
+        var offset = 0;
+        while (true)
+        {
+            using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, now, ct, offset));
+            var page = doc.RootElement.GetProperty("waiting").EnumerateArray().Select(w => w.Clone()).ToList();
+            rows.AddRange(page);
+            if (!doc.RootElement.GetProperty("truncated").GetBoolean() || page.Count == 0)
+            {
+                return rows;
+            }
+
+            offset += page.Count;
+        }
     }
 
     private static async Task InsertAsync(
