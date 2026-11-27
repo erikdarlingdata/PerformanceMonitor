@@ -174,7 +174,7 @@
       "enabled": true,
       "frequency_minutes": 1,
       "retention_days": 30,
-      "description": "Client attentions (queries a client cancelled or timed out) from the PerformanceMonitor_Attention XE session; feeds the Client Timeouts alert (#5640)"
+      "description": "Client attentions (queries a client cancelled or timed out) from this install's own XE session, PerformanceMonitor_Lite_<id>_Attention; feeds the Client Timeouts alert (#5640)"
     },
     {
       "name": "long_query_completions",

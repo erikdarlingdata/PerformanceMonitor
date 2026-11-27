@@ -43,7 +43,6 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public void TheSharedSessionStartsWithTheDatabase_AndThisInstallsOwnFallbackSessionDoesNot(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
@@ -525,7 +524,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
 
     /* ── #5640 review round 1: H2 (a denied create is PERMISSIONS), L4 (definition probe), L5 (collector gate), L6 (Azure retry) ── */
 
-    private static bool IsAttentionStatement(string s) => s.Contains(AlwaysOnXeSessions.AttentionXeSessionName, StringComparison.Ordinal);
+    private static bool IsAttentionStatement(string s) => s.Contains(Own(AlwaysOnXeSessionKind.Attention), StringComparison.Ordinal);
 
     [Fact]
     public async Task H2_ACreateDeniedInEveryDatabase_LeavesAPermissionFault_ThatTheWorkerKeepsForTheRun()
@@ -844,7 +843,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.DoesNotContain("sqlserver.sql_text", creates[1], StringComparison.Ordinal);
         Assert.Contains("sqlserver.client_hostname", creates[1], StringComparison.Ordinal);
         Assert.Contains(logger.Lines, l => l.Contains("without statement text", StringComparison.Ordinal));
-        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)]);
+        Assert.True(rig.Alpha.Started[Own(AlwaysOnXeSessionKind.Attention)]);
     }
 
     /// <summary>
@@ -916,7 +915,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains(") = 5", sql, StringComparison.Ordinal);
         Assert.Contains("ELSE 2", sql, StringComparison.Ordinal);
         Assert.Equal(2, AlwaysOnXeSessions.AttentionDefinitionMismatch);
-        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql());
+        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Darling_0a1b2c3d_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql("PerformanceMonitor_Darling_0a1b2c3d_Attention"));
 
         /* Azure: the database-scoped catalog, sql_text allowed and not required, so a session created without it still matches. */
         var azure = AlwaysOnXeSessions.BuildAzureCatalogProbeSql(AlwaysOnXeSessionKind.Attention, "PerformanceMonitorDarling");
@@ -1124,36 +1123,103 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Equal(0, database.Created(Own(kind)));
     }
 
-    /* #9507: a shared client-timeout session with an older definition is replaced once per run and then used. A second read in
-       the same run does not replace it again, so an install whose recreated session still reads wrong falls back to its own. */
+    /* #9895: a client-timeout ensure creates and reads only this install's own session. A shared session another install reads, even
+       one with an older definition, is never dropped, started or created over: the install makes its own beside it. */
     [Fact]
-    public async Task ASharedAttentionSessionWithAnOlderDefinition_IsReplacedOncePerRun_AndUsed()
+    public async Task AnAttentionEnsure_LeavesTheSharedSessionAlone_AndCreatesItsOwn()
     {
         var kind = AlwaysOnXeSessionKind.Attention;
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
         var database = new ScriptedDatabase();
         database.Started[shared] = true;
         database.WrongEvent.Add(shared);
-        var claims = 0;
-        Func<bool> claim = () => ++claims == 1;
 
-        var first = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: claim);
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None);
 
-        Assert.Equal(AlwaysOnXeChoice.Shared, first.Choice);
-        Assert.Equal(AlwaysOnXeChange.Created, first.Change);
-        Assert.Equal(1, database.Statements.Count(s => s.StartsWith("DROP EVENT SESSION [" + shared + "]", StringComparison.Ordinal)));
-        Assert.Equal(1, database.Created(shared));
-
-        var second = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: claim);
-
-        Assert.Equal(AlwaysOnXeChoice.Own, second.Choice);
-        Assert.Equal(1, database.Statements.Count(s => s.StartsWith("DROP EVENT SESSION [" + shared + "]", StringComparison.Ordinal)));
-        Assert.Equal(1, database.Created(shared));
-        Assert.Equal(2, claims);
+        Assert.Equal(AlwaysOnXeChoice.Own, result.Choice);
+        Assert.Equal(AlwaysOnXeChange.Created, result.Change);
+        Assert.Equal(1, database.Created(Own(kind)));
+        Assert.DoesNotContain(database.Statements, statement => statement.Contains("[" + shared + "]", StringComparison.Ordinal));
+        Assert.Equal(0, database.Created(shared));
     }
 
-    /* #9507: only the client-timeout session is replaced. Another kind's shared session in the same state is left alone, and the
-       claim is never asked for it. */
+    /* #9895: the replace-on-mismatch applies to this install's own session only, once per ensure pass that reads it. */
+    [Fact]
+    public async Task AnAttentionEnsure_ReplacesOnlyItsOwnSessionWithAnOlderDefinition()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = true;
+        database.Started[Own(kind)] = true;
+        database.WrongEvent.Add(shared);
+        database.WrongEvent.Add(Own(kind));
+
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Own, CancellationToken.None);
+
+        Assert.Equal(AlwaysOnXeChoice.Own, result.Choice);
+        Assert.Equal(1, database.Statements.Count(s => s.StartsWith("DROP EVENT SESSION [" + Own(kind) + "]", StringComparison.Ordinal)));
+        Assert.Equal(1, database.Created(Own(kind)));
+        Assert.DoesNotContain(database.Statements, statement => statement.Contains("[" + shared + "]", StringComparison.Ordinal));
+    }
+
+    /* #9895: an install with no id has no session of its own to make, and the shared one is another install's, so the ensure throws
+       and sends nothing. */
+    [Fact]
+    public async Task AnAttentionEnsure_WithNoOwnName_ThrowsAndTouchesNothing()
+    {
+        var database = new ScriptedDatabase();
+        database.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)] = true;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AlwaysOnXeAzureEnsure.RunAsync(
+            database, AlwaysOnXeSessionKind.Attention, null, AlwaysOnXeChoice.Shared, CancellationToken.None));
+
+        Assert.Empty(database.Statements);
+    }
+
+    /* #9895: the read of a client-timeout session names this install's own session whatever the choice map holds, and refuses to
+       fall back to the shared name. */
+    [Fact]
+    public void AnAttentionRead_NamesTheOwnSession_NeverTheSharedOne()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var choices = new AlwaysOnXeChoices();
+
+        Assert.Equal(Own(kind), choices.NameFor("server", "db", kind, Own(kind)));
+        choices.Set("server", "db", kind, AlwaysOnXeChoice.Shared);
+        Assert.Equal(Own(kind), choices.NameFor("server", "db", kind, Own(kind)));
+        Assert.Throws<InvalidOperationException>(() => choices.NameFor("server", "db", kind, null));
+        Assert.Throws<InvalidOperationException>(() => AlwaysOnXeSessions.ReadNameFor(kind, null));
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.ReadNameFor(kind, AlwaysOnXeSessions.SharedNameFor(kind)));
+        Assert.Equal(AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock), AlwaysOnXeSessions.ReadNameFor(AlwaysOnXeSessionKind.Deadlock, null));
+    }
+
+    /* #9895: the server-scoped create, start and drop builders take this install's own name and refuse the shared one, so no host
+       can send a statement that alters the session an older install reads. Two installs get two names. */
+    [Fact]
+    public void TheServerAttentionBuilders_TakeAnOwnNameOnly_AndTwoInstallsGetTwoNames()
+    {
+        var kind = AlwaysOnXeSessionKind.Attention;
+        var first = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, "0a1b2c3d", kind);
+        var second = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, "4e5f6a7b", kind);
+        var lite = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, "0a1b2c3d", kind);
+
+        Assert.NotEqual(first, second);
+        Assert.NotEqual(first, lite);
+        Assert.Equal(first, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, "0a1b2c3d", kind));
+        Assert.NotEqual(AlwaysOnXeSessions.SharedNameFor(kind), first);
+        Assert.Equal("DROP EVENT SESSION [" + first + "] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql(first));
+        Assert.Contains("[" + first + "]", AlwaysOnXeSessions.BuildAttentionServerCreateSql(first), StringComparison.Ordinal);
+        Assert.DoesNotContain(AlwaysOnXeSessions.SharedNameFor(kind) + "]", AlwaysOnXeSessions.BuildAttentionServerCreateSql(first), StringComparison.Ordinal);
+
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.BuildAttentionServerCreateSql(shared));
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.BuildAttentionServerStartSql(shared));
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.BuildAttentionServerDropSql(shared));
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.BuildAzureCreateSql(kind, shared));
+    }
+
+    /* #9507: a shared deadlock session in an older state is still left alone. */
     [Fact]
     public async Task ASharedDeadlockSessionWithAnOlderDefinition_IsStillLeftAlone()
     {
@@ -1162,14 +1228,11 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         var database = new ScriptedDatabase();
         database.Started[shared] = true;
         database.WrongEvent.Add(shared);
-        var claims = 0;
 
-        var result = await AlwaysOnXeAzureEnsure.RunAsync(
-            database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, claimSharedAttentionReplace: () => ++claims > 0);
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None);
 
         Assert.Equal(AlwaysOnXeChoice.Own, result.Choice);
         Assert.False(database.Sent("DROP EVENT SESSION", shared));
-        Assert.Equal(0, claims);
     }
 
     /* #8528: an ensure that found the sessions stopped and started them leaves that on the loop state, and the Capture Down
