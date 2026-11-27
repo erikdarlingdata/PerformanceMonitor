@@ -85,7 +85,9 @@ CREATE TABLE IF NOT EXISTS mcp_slow_calls (
     hours_back DOUBLE,
     peak_working_set_bytes BIGINT,
     duckdb_memory_bytes BIGINT,
-    memory_source VARCHAR
+    memory_source VARCHAR,
+    answered_from VARCHAR,
+    phase_split VARCHAR
 )";
 
     /// <summary>

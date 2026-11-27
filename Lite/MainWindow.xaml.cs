@@ -596,6 +596,9 @@ public partial class MainWindow : Window
                 new AppLoggerAdapter<CollectionBackgroundService>(),
                 _scheduleManager);
 
+            /* #9885: the parse cache get_object_usage reads is warmed only while the MCP server is up, so a Lite with MCP off pays nothing. */
+            _backgroundService.ObjectUsageWarmEnabled = () => _mcpService != null;
+
             // Start background collection.
             // Off the UI thread on purpose: DuckDB.NET is synchronous and Lite has no
             // ConfigureAwait(false), so starting this from the Loaded handler would run the entire
