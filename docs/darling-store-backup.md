@@ -150,8 +150,10 @@ If the service connects to a PostgreSQL that you run (`postgres.managed` is `fal
 Dump the `darling` database:
 
 ```
-pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling
+(umask 077; pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling)
 ```
+
+The dump holds every collected row. The `umask 077` makes the file readable only by its owner and root. Without it the file gets your account's default mode, which on most Linux hosts lets every local account read it.
 
 `pg_dump` and the restore commands below ask for the password at a terminal. A backup that runs from a script, a timer or a remote command has no terminal, so give the password in a password file. Put the line `<host>:<port>:darling:<owner>:<password>` in `~/.pgpass` of the user who runs the backup, or in another file that the `PGPASSFILE` variable names. Write a `:` or a `\` in the password as `\:` or `\\`. The file must be mode `0600`: libpq ignores a file that the group or others can read, and the command stops with `no password supplied`. Do not put the password in `PGPASSWORD` on the command line, because the shell history keeps it.
 
@@ -207,8 +209,10 @@ docker compose start
 To move to another host, use a dump. The store container has `pg_dump` and `pg_restore`. On the old host:
 
 ```
-docker compose exec -T store pg_dump -U darling --format=custom --no-owner --no-acl darling > darling-store.dump
+(umask 077; docker compose exec -T store pg_dump -U darling --format=custom --no-owner --no-acl darling > darling-store.dump)
 ```
+
+Your shell makes the file, so the `umask 077` keeps it readable only by its owner and root.
 
 The store is a TimescaleDB store, so the same circular foreign-key warning as above is expected, and you can ignore it.
 
