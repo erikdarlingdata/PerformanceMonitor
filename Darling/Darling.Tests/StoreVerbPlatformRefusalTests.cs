@@ -138,13 +138,74 @@ public sealed class StoreVerbPlatformRefusalTests
         Assert.DoesNotContain(".exe", linux, StringComparison.Ordinal);
     }
 
+    /// <summary>#9751: the usage text is built from the entry point it is given, so a Linux operator reads the command they can run
+    /// and a Windows operator reads the executable. The verbs are the same on both. The Usage lines are the ones after "Usage:".</summary>
+    private static (string Entry, string Line)[] UsageLines(string usage, string entryPoint)
+    {
+        var lines = usage.Split(Environment.NewLine);
+        var first = Array.IndexOf(lines, "Usage:") + 1;
+        Assert.True(first > 0, "the text has a Usage: heading");
+        return lines.Skip(first).Select(l => (entryPoint, l)).ToArray();
+    }
+
+    private static string[] VerbsOf(string usage, string entryPoint) =>
+        UsageLines(usage, entryPoint).Select(x =>
+        {
+            Assert.StartsWith("  " + entryPoint, x.Line, StringComparison.Ordinal);
+            var rest = x.Line[("  " + entryPoint).Length..].TrimStart();
+            return rest.StartsWith("--", StringComparison.Ordinal) ? rest.Split(' ', ',')[0] : "";
+        }).ToArray();
+
     [Fact]
-    public void TheHelp_SaysHowToTypeTheVerbsOnLinux_AndThatTheStoreVerbsRunThere()
+    public void TheHelp_OnLinux_NamesTheLinuxCommandOnEveryLine_AndListsTheVerbsTheWindowsHelpDoes()
+    {
+        var linuxEntry = OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling");
+        var windowsEntry = OperatorVerbForm.EntryPoint(isWindows: true, "C:\\Darling");
+        var linux = DarlingCliCommands.UsageText(linuxEntry);
+        var windows = DarlingCliCommands.UsageText(windowsEntry);
+
+        Assert.DoesNotContain(".exe", linux, StringComparison.Ordinal);
+        Assert.Equal("dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll", linuxEntry);
+        var linuxVerbs = VerbsOf(linux, linuxEntry);
+        var windowsVerbs = VerbsOf(windows, windowsEntry);
+        Assert.True(linuxVerbs.Length > 40);
+        Assert.Equal(windowsVerbs, linuxVerbs);
+        Assert.Contains("--edit-server", linuxVerbs);
+        Assert.Contains("--backfill-rollups", linuxVerbs);
+    }
+
+    [Fact]
+    public void TheHelp_OnWindows_NamesTheExecutableOnEveryLine()
+    {
+        var windows = DarlingCliCommands.UsageText(OperatorVerbForm.WindowsEntryPoint);
+
+        Assert.All(UsageLines(windows, OperatorVerbForm.WindowsEntryPoint), x => Assert.StartsWith("  PerformanceMonitor.Darling.Service.exe", x.Line, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheHelp_ForThisHost_UsesThisHostsEntryPoint_AndSaysThatTheStoreVerbsRunOnLinux()
     {
         var usage = DarlingCliCommands.UsageText();
-        Assert.Contains("dotnet PerformanceMonitor.Darling.Service.dll", usage, StringComparison.Ordinal);
+        var entry = OperatorVerbForm.EntryPointHere();
+        Assert.All(UsageLines(usage, entry), x => Assert.StartsWith("  " + entry, x.Line, StringComparison.Ordinal));
         var backfill = usage.Split(Environment.NewLine).First(l => l.Contains("--backfill-rollups [--free-space <size>]  Materialize", StringComparison.Ordinal));
         Assert.Contains("bring-your-own", backfill, StringComparison.Ordinal);
         Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
+    }
+
+    [Fact]
+    public void TheAddServerHelp_ShowsThePowerShellAndCmdPipesOnWindows_AndOneShellPipeOnLinux()
+    {
+        var linuxEntry = OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling");
+        var linux = DarlingCliCommands.AddServerUsageText(isWindows: false, linuxEntry);
+        var windows = DarlingCliCommands.AddServerUsageText(isWindows: true, OperatorVerbForm.WindowsEntryPoint);
+
+        Assert.DoesNotContain(".exe", linux, StringComparison.Ordinal);
+        Assert.DoesNotContain("PowerShell", linux, StringComparison.Ordinal);
+        Assert.Contains("cat servers.json | " + linuxEntry + " --add-server", linux, StringComparison.Ordinal);
+        Assert.Contains("--add-server --host sql01 --auth windows", linux, StringComparison.Ordinal);
+        Assert.Contains("PowerShell:", windows, StringComparison.Ordinal);
+        Assert.Contains("cmd:", windows, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet", windows, StringComparison.Ordinal);
     }
 }
