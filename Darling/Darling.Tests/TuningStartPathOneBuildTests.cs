@@ -303,11 +303,36 @@ public sealed class TuningStartPathOneBuildTests
     }
 
     /// <summary>
+    /// #9827 with #9289: the bounded build's own limit is below the start's 300 s, so what shortens it is the time left measured
+    /// against that limit. With a 120 s limit and an earlier build of 180.4 s, 119.6 s are left, which the whole-seconds floor reads as
+    /// 119 s: a shortfall of 0.4 s is not a shortening and the timeout is recorded, though the earlier build took more than a whole
+    /// second. An earlier build of 181.5 s leaves 118.5 s, a shortfall of 1.5 s, which is a shortening and is not recorded.
+    /// </summary>
+    [Theory]
+    [InlineData(180.4, 1L)]
+    [InlineData(181.5, 0L)]
+    public async Task ATimeoutOfTheBoundedBuild_WhoseLimitIsBelowTheStartsTime_IsRecordedOnlyWhenTheTimeLeftFallsAWholeSecondShort(
+        double earlierBuildSeconds, long expectedRecords)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (store, log, records) = await TimeOutBoundedBuildAfterAnEarlierBuildAsync(earlierBuildSeconds, ct, boundedLimitSeconds: 120);
+        await using (store)
+        {
+            Assert.True(await IndexExistsAsync(store.Body, PgTableTuning.CpuWindowCoverIndexName, ct), log.Joined);
+            Assert.False(await IndexExistsAsync(store.Body, PgTableTuning.QueryStoreServerHashIndexName, ct), log.Joined);
+            Assert.Equal(expectedRecords, records);
+            Assert.Equal(expectedRecords == 1L, log.Lines.Any(l => l.Contains("uncompressed heap pages", StringComparison.Ordinal)));
+            Assert.Equal(expectedRecords == 0L, log.Lines.Any(l => l.Contains("was not built at this start", StringComparison.Ordinal)));
+        }
+    }
+
+    /// <summary>
     /// A start where the CPU cover builds first and takes <paramref name="earlierBuildSeconds"/> on the test clock, and the bounded
-    /// Query Store build then times out against a lock another session holds. The caller disposes the returned store.
+    /// Query Store build, whose own limit is <paramref name="boundedLimitSeconds"/>, then times out against a lock another session holds.
+    /// The caller disposes the returned store.
     /// </summary>
     private static async Task<(SeededStore Store, CapturingTestLogger Log, long Records)> TimeOutBoundedBuildAfterAnEarlierBuildAsync(
-        double earlierBuildSeconds, CancellationToken ct)
+        double earlierBuildSeconds, CancellationToken ct, int boundedLimitSeconds = 300)
     {
         var store = await SeededStore.CreateAsync(ct);
         try
@@ -321,7 +346,7 @@ public sealed class TuningStartPathOneBuildTests
                 await Exec(store.Body, "SET statement_timeout = '2s'", ct);
                 try
                 {
-                    await PgTableTuning.ApplyAsync(store.Body, log, hourly: false, new TuningStartPasses.BuildClock(earlierBuildSeconds), 300, ct);
+                    await PgTableTuning.ApplyAsync(store.Body, log, hourly: false, new TuningStartPasses.BuildClock(earlierBuildSeconds), boundedLimitSeconds, ct);
                 }
                 finally
                 {

@@ -1093,7 +1093,8 @@ public static class PgTableTuning
 
                     /* #9795: the budget builds of one start share StartBuildBudgetSeconds. Whole seconds, because CommandTimeout is
                        whole seconds and 0 there means no limit: with under a second left the build waits for the next start. */
-                    var secondsLeft = (int)Math.Floor((TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent).TotalSeconds);
+                    var budgetLeft = TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent;
+                    var secondsLeft = (int)Math.Floor(budgetLeft.TotalSeconds);
                     if (onBudget && secondsLeft < 1)
                     {
                         logger?.LogInformation(
@@ -1120,11 +1121,12 @@ public static class PgTableTuning
                     if (onBudget && secondsLeft < commandTimeout)
                     {
                         /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. It counts as
-                           shortened only when they used at least a whole second of the limit: with less, the whole-seconds floor above is a
-                           rounding artifact (299 s left of 300 after a 0.05 s build), not a shortening, and counting it would keep a timeout
-                           of the bounded build from being recorded (#9289), so the next start would try it again for up to another limit. */
+                           shortened only when the time left falls short of this build's own limit by at least a whole second. A
+                           shortfall under a second is the whole-seconds floor above, a rounding artifact (299.95 s left against a
+                           300 s limit, or 119.6 s against 120 s), not a shortening, and counting it would keep a timeout of the
+                           bounded build from being recorded (#9289), so the next start would try it again for up to another limit. */
+                        shortened = TimeSpan.FromSeconds(commandTimeout) - budgetLeft >= TimeSpan.FromSeconds(1);
                         commandTimeout = secondsLeft;
-                        shortened = budgetSpent >= TimeSpan.FromSeconds(1);
                     }
 
                     if (onBudget)
