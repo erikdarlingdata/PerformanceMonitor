@@ -118,4 +118,33 @@ public sealed class BlockedProcessThresholdForgetOnRemovalTests : IAsyncDisposab
         Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, kept.Outcome);
         Assert.Equal(1, stayingBatch.Sent);
     }
+
+    /// <summary>
+    /// #9818: AWS RDS refuses sp_configure and RECONFIGURE twice each, so the SqlException carries 15247, 5812, 15247 and 5812 and its
+    /// Message joins the same two messages twice with line breaks. The refusal line, built from Darling's own reader of the errors,
+    /// names each message once, in the order the server sent them, on one line, for the RDS wording and for the other.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ARefusalThatRepeatsItsErrorsNamesEachMessageOnceOnOneLine(bool awsRds)
+    {
+        const string permissionDenied = "User does not have permission to perform this action.";
+        const string reconfigureDenied = "You do not have permission to run the RECONFIGURE statement.";
+        var runner = new DarlingCollectorRunner(_store, new CollectorDeltaCalculator());
+        var answer = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.CreateMany(
+            14, (15247, permissionDenied), (5812, reconfigureDenied), (15247, permissionDenied), (5812, reconfigureDenied));
+        var batch = new Batch(_ => Task.FromException<int>(answer));
+
+        var result = await runner.BlockedProcessThresholdBootstrap.RunAsync(1, Settings, batch.SendAsync, Numbers);
+        var line = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo { IsAwsRds = awsRds }, DarlingXeSessions.ErrorMessagesOf(result.Refusal));
+
+        Assert.Contains('\n', answer.Message);
+        Assert.Equal(BlockedProcessThresholdOutcome.Refused, result.Outcome);
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain('\r', line);
+        Assert.EndsWith($" {permissionDenied} {reconfigureDenied}", line, StringComparison.Ordinal);
+        Assert.Equal(1, line.Split(permissionDenied).Length - 1);
+        Assert.Equal(1, line.Split(reconfigureDenied).Length - 1);
+    }
 }

@@ -17,25 +17,31 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
 internal static class SqlExceptionFactory
 {
-    public static SqlException Create(int number, byte errorClass = 20, string message = "message")
+    public static SqlException Create(int number, byte errorClass = 20, string message = "message") =>
+        CreateMany(errorClass, (number, message));
+
+    /// <summary>One exception carrying several errors in the order given, as a batch the server answers with more than one error does (#9818).</summary>
+    public static SqlException CreateMany(byte errorClass, params (int Number, string Message)[] errors)
     {
         const BindingFlags all = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
         var errorCtor = typeof(SqlError).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance)
             .OrderByDescending(c => c.GetParameters().Length).First();
-        var ints = new Queue<object>(new object[] { number, 0, 0, 0 });
-        var bytes = new Queue<object>(new object[] { (byte)0, errorClass, (byte)0, (byte)0 });
-        var strings = new Queue<object>(new object[] { "server", message, "procedure", "extra", "extra" });
-        var args = errorCtor.GetParameters().Select(p =>
-            p.ParameterType == typeof(int) ? ints.Dequeue()
-            : p.ParameterType == typeof(byte) ? bytes.Dequeue()
-            : p.ParameterType == typeof(string) ? strings.Dequeue()
-            : p.ParameterType == typeof(uint) ? (object)0u
-            : p.ParameterType == typeof(Exception) ? null!
-            : p.HasDefaultValue ? p.DefaultValue! : throw new InvalidOperationException($"unmapped SqlError ctor parameter {p.ParameterType}")).ToArray();
-        var error = errorCtor.Invoke(args);
-
         var collection = Activator.CreateInstance(typeof(SqlErrorCollection), true)!;
-        typeof(SqlErrorCollection).GetMethod("Add", all, null, new[] { typeof(SqlError) }, null)!.Invoke(collection, new[] { error });
+        foreach (var (number, message) in errors)
+        {
+            var ints = new Queue<object>(new object[] { number, 0, 0, 0 });
+            var bytes = new Queue<object>(new object[] { (byte)0, errorClass, (byte)0, (byte)0 });
+            var strings = new Queue<object>(new object[] { "server", message, "procedure", "extra", "extra" });
+            var args = errorCtor.GetParameters().Select(p =>
+                p.ParameterType == typeof(int) ? ints.Dequeue()
+                : p.ParameterType == typeof(byte) ? bytes.Dequeue()
+                : p.ParameterType == typeof(string) ? strings.Dequeue()
+                : p.ParameterType == typeof(uint) ? (object)0u
+                : p.ParameterType == typeof(Exception) ? null!
+                : p.HasDefaultValue ? p.DefaultValue! : throw new InvalidOperationException($"unmapped SqlError ctor parameter {p.ParameterType}")).ToArray();
+            var error = errorCtor.Invoke(args);
+            typeof(SqlErrorCollection).GetMethod("Add", all, null, new[] { typeof(SqlError) }, null)!.Invoke(collection, new[] { error });
+        }
 
         var create = typeof(SqlException).GetMethods(all)
             .Where(m => m.Name == "CreateException" && m.GetParameters().Length >= 2
