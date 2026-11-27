@@ -150,23 +150,6 @@ begin_rollback_run() {
     RUN_ROLLBACK_FOLDER="${FAILED_ROOT}"
 }
 
-# Copies the record of the run that a --rollback undoes from the installed build into the copy that goes back (#9821).
-# That run's own build stores its end only on a 5-minute pass, so a rollback before the pass would leave the row at
-# in_progress. Returns 1, and copies nothing, unless the record is a plain file with a run id and the state succeeded
-# or failed, in the layout write_upgrade_run writes. The rollback's own record replaces it after the health check.
-carry_undone_run() {
-    local source="${INSTALL_ROOT}/${RUN_RECORD_NAME}" temp
-    [ -f "${source}" ] && [ ! -L "${source}" ] && root_only_writable "${STAGED_RESTORE}" || return 1
-    grep -Eq '^  "run_id": "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}",$' "${source}" || return 1
-    grep -Eq '^  "state": "(succeeded|failed)",$' "${source}" || return 1
-    temp="$(mktemp "${STAGED_RESTORE}/${RUN_RECORD_NAME}.XXXXXXXX" 2>/dev/null)" || return 1
-    if cat "${source}" >"${temp}" && chmod 644 "${temp}" && mv -f -T "${temp}" "${STAGED_RESTORE}/${RUN_RECORD_NAME}" 2>/dev/null; then
-        return 0
-    fi
-    rm -f "${temp}"
-    return 1
-}
-
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The
 # service may add a key file at a start, so the check afterwards is that every line from before is still there. The
 # service user can swap a key file for a link or a FIFO, so the hashes are taken as the service user, which reads every
@@ -209,11 +192,10 @@ restore_previous() {
         HEALTH_REASON="could not copy ${PREVIOUS_ROOT} onto new files (${COPY_REFUSED}), so no build was moved"
         return 1
     fi
-    # A --rollback puts a record in the copy for the first read of the build that goes back (#9821): the finished
-    # record of the run it undoes when the installed build holds one, and its own record as in_progress when not.
-    # The copy can hold the record of the upgrade that installed that build, which the store already has: this
-    # record replaces it.
-    [ "${rollback_only}" = 0 ] || carry_undone_run || write_upgrade_run "${STAGED_RESTORE}" in_progress
+    # A --rollback starts its record in the copy, so the first read of the build that goes back stores the run as
+    # in_progress (#9821). The copy can hold the record of the upgrade that installed that build, which the store
+    # already has: this record replaces it.
+    [ "${rollback_only}" = 0 ] || write_upgrade_run "${STAGED_RESTORE}" in_progress
     if [ -d "${INSTALL_ROOT}" ]; then
         rm -rf "${FAILED_ROOT}"
         if ! mv -T "${INSTALL_ROOT}" "${FAILED_ROOT}"; then
