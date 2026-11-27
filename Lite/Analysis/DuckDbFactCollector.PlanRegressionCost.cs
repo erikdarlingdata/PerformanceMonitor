@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -505,18 +506,78 @@ LIMIT 100";
 
     /// <summary>
     /// The cost statement's candidates in its own order and cut (#9353): the CPU lost, the factor second, the row's key last, the first
-    /// <see cref="PlanRegressionCandidateLimit"/>. Read in batches of databases (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the same
-    /// rows in the same order as one statement over every database gives, ties included.
+    /// <see cref="PlanRegressionCostCap"/> (#9888). Read in batches of databases (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the
+    /// same rows in the same order as one statement over every database gives, ties included. The rows the statement returned beyond the cap
+    /// are counted in <see cref="PlanRegressionStatementTime.LeftOut"/>. A read for a server, window start, window end and secondary-database
+    /// scope that was made under <see cref="PlanRegressionCostKeepFor"/> ago is answered from the rows it returned, without the statement
+    /// (#9888): the periodic pass, a user's read and a repeated compare of one anchored window share one scan. The kept rows are the
+    /// statement's whole result, so the cap is applied to them on every read.
     /// </summary>
     internal async Task<(List<PlanRegressionCandidate> Candidates, PlanRegressionStatementTime Time)> ReadPlanRegressionCostAsync(
         AnalysisContext context, ArchiveReadPlan plan)
     {
-        var (ranked, time) = await ReadPlanRegressionByDatabaseAsync(
-            _duckDb, context, plan,
-            (connection, databases) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, databases),
-            AfterPlanRegressionDatabaseReadForTests, holdTarget: PlanRegressionHoldTargetForTests);
-        return (InRankOrder(ranked, r => r.Key).Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList(), time);
+        var cap = PlanRegressionCostCapForTests ?? PlanRegressionCostCap;
+        var secondaries = context.SecondaryReplicaDatabases is { Count: > 0 } set ? string.Join('\u001f', set.OrderBy(d => d, StringComparer.Ordinal)) : "";
+        var key = new PlanRegressionCostKey(context.ServerId, context.TimeRangeStart.AddDays(-14), context.TimeRangeEnd, secondaries);
+        var now = Stopwatch.GetTimestamp();
+        List<RankedPlanRegression>? ranked = null;
+        lock (_planRegressionCostKeep)
+        {
+            foreach (var expired in _planRegressionCostKeep.Where(e => Stopwatch.GetElapsedTime(e.Value.At, now) > PlanRegressionCostKeepFor).Select(e => e.Key).ToList())
+                _planRegressionCostKeep.Remove(expired);
+            if (_planRegressionCostKeep.TryGetValue(key, out var kept)) ranked = kept.Rows;
+        }
+
+        var time = default(PlanRegressionStatementTime);
+        if (ranked is null)
+        {
+            Interlocked.Increment(ref _planRegressionCostStatementRuns);
+            (ranked, time) = await ReadPlanRegressionByDatabaseAsync(
+                _duckDb, context, plan,
+                (connection, databases) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, databases),
+                AfterPlanRegressionDatabaseReadForTests, holdTarget: PlanRegressionHoldTargetForTests);
+            lock (_planRegressionCostKeep)
+            {
+                if (_planRegressionCostKeep.Count >= PlanRegressionCostKeepEntries)
+                    _planRegressionCostKeep.Remove(_planRegressionCostKeep.OrderBy(e => e.Value.At).First().Key);
+                _planRegressionCostKeep[key] = new KeptPlanRegressionCost(ranked, Stopwatch.GetTimestamp());
+            }
+        }
+        else
+        {
+            time.FromKeep = true;
+        }
+
+        var ordered = InRankOrder(ranked, r => r.Key).ToList();
+        time.LeftOut = Math.Max(0, ordered.Count - cap);
+        return (ordered.Take(cap).Select(r => r.Candidate).ToList(), time);
     }
+
+    /// <summary>
+    /// #9888: the most candidates one cost read prices. The fact keeps <see cref="MaxPlanRegressionOffenders"/> (20) and the plan check
+    /// fetches at most <see cref="MaxPlanInputFetches"/> (20) plans, so a candidate past the first 50 by lost CPU is never read. The
+    /// rows past it are counted in the reply and the log line, as the plan check names the candidates its fetch budget did not reach.
+    /// </summary>
+    internal const int PlanRegressionCostCap = 50;
+
+    /// <summary>A test seam: the cap, so a test can set it below the candidates it seeds. Null in production.</summary>
+    internal int? PlanRegressionCostCapForTests { get; set; }
+
+    /// <summary>#9888: how long a cost read's rows answer a repeat of the same read.</summary>
+    internal static readonly TimeSpan PlanRegressionCostKeepFor = TimeSpan.FromMinutes(2);
+
+    /// <summary>#9888: the most cost reads kept at once (one per server and window), the oldest dropped first.</summary>
+    internal const int PlanRegressionCostKeepEntries = 16;
+
+    private readonly record struct PlanRegressionCostKey(int ServerId, DateTime WindowStart, DateTime WindowEnd, string Secondaries);
+
+    private readonly record struct KeptPlanRegressionCost(List<RankedPlanRegression> Rows, long At);
+
+    private readonly Dictionary<PlanRegressionCostKey, KeptPlanRegressionCost> _planRegressionCostKeep = new();
+    private int _planRegressionCostStatementRuns;
+
+    /// <summary>A test seam: how many times the cost statement ran for this collector, a read answered from the keep not counted (#9888).</summary>
+    internal int PlanRegressionCostStatementRunsForTests => Volatile.Read(ref _planRegressionCostStatementRuns);
 
     /// <summary>The most rows the cost statement returns, and so the most a pass that reads its databases in turn keeps of all of them.</summary>
     internal const int PlanRegressionCandidateLimit = 100;
