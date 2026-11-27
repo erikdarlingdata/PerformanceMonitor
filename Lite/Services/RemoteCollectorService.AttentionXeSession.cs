@@ -37,6 +37,13 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task EnsureAttentionXeSessionAsync(ServerConnection server, int engineEdition = 0, CancellationToken cancellationToken = default)
     {
+        /* #9895: a server whose removal has begun is not ensured: its removal is dropping this session while the server is still
+           registered, and a create on a cycle that runs meanwhile would bring it back, to outlive the server. */
+        if (_longQueryTraceRemoved.ContainsKey(server.Id))
+        {
+            return;
+        }
+
         /* Skip if the attention collector is disabled */
         var schedule = _scheduleManager.GetScheduleForServer(server.Id, "attention");
         if (schedule == null || !schedule.Enabled)
