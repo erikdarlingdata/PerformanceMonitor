@@ -62,6 +62,8 @@ docker compose up -d
 
 The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. The monitoring login must exist on each SQL Server before Darling can collect from it. With the stack up, `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host> --auth sql --username DarlingMonitor` prints the T-SQL that creates it (use the login that the server entry in `darling.json` uses in place of `DarlingMonitor`), and [Permissions](permissions.md#lite--darling-on-premises) has the grants. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
 
+The printed `CREATE LOGIN` has `N'<strong password>'` where the password goes. Before you run the script, replace it with the password in `secrets/sql_password.txt`, the one `setup.sh` asked for. Run as printed, the login gets the placeholder as its password and the service's connections keep failing. Until the login exists, the service logs this as a warning: `Connect failed, retrying in 59s: Login failed for user '<login>'`. The delay in that line starts near 60 seconds and doubles to about 240, and the same line is not repeated for each retry. That warning is expected on a first start, and it adds to the start's warning count. Collection begins at the first retry after the login exists. There is nothing to restart.
+
 The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off step before the new image starts; the steps, the rollback and a Kubernetes example are in [Container user](darling/security.md#container-user).
 
 MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, do both of these:
