@@ -202,6 +202,39 @@ public sealed class SlowReadLogTests
     }
 
     [Fact]
+    public void ConnectionOpens_AreStoredOnTheirOwn_AndNeverRaiseTheStatementCount()
+    {
+        var log = new SlowReadLog();
+        using var opened = ReadScope.Open(null);
+        var scope = opened.Scope;
+        scope.CaptureStatements = true;
+        scope.AddStatement("SELECT 1", 2.0, null);
+        scope.AddConnectionOpen(11.4);
+        scope.AddStatement("SELECT 2", 3.0, null);
+        scope.AddConnectionOpen(7.2);
+
+        log.Offer(scope, ReadSurface.Mcp, "route", ReadOutcome.Ok, 6000, null, null, null);
+        Assert.True(log.TryRead(out var record));
+        Assert.Equal(2, record!.StatementCount);
+        Assert.Equal(2, JsonNode.Parse(record.StatementsJson)!.AsArray().Count);
+        Assert.Equal(2, record.ConnectionOpens);
+        Assert.Equal(19, record.ConnectionOpenMs);
+    }
+
+    [Fact]
+    public void AScopeThatDidNotCapture_StoresNullOpens_NotZero()
+    {
+        var log = new SlowReadLog();
+        using var opened = ReadScope.Open(null);
+        var scope = opened.Scope;
+
+        log.Offer(scope, ReadSurface.Mcp, "route", ReadOutcome.Ok, 6000, null, null, null);
+        Assert.True(log.TryRead(out var record));
+        Assert.Null(record!.ConnectionOpens);
+        Assert.Null(record.ConnectionOpenMs);
+    }
+
+    [Fact]
     public void TheQueue_HoldsAtMost256_DropsTheOldest_AndCountsTheDrops()
     {
         var log = new SlowReadLog();

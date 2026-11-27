@@ -111,7 +111,7 @@ public sealed class PlanRegressionReadLockTests : IDisposable
         Assert.Matches(
             @"took \d+ ms for PlanRegressionLockServer \(server 9353\): archive read plan \d+ ms, " +
             @"failures read \d+ ms for \d+ rows \(read lock wait \d+ ms\), " +
-            @"cost read \d+ ms for \d+ candidates \(read lock wait \d+ ms\), " +
+            @"cost read \d+ ms for \d+ candidates( \(found no candidate[^)]*\))? \(read lock wait \d+ ms\), " +
             @"longest single read lock hold \d+ ms, plan check \d+ ms with \d+ plan fetches",
             line);
     }

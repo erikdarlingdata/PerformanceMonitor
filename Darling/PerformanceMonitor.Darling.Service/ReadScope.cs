@@ -50,6 +50,8 @@ internal sealed class ReadScope
     private readonly PriorityQueue<StatementTiming, (double DurationMs, int NegatedOrdinal)> _statements = new();
     private readonly object _statementGate = new();
     private int _statementCount;
+    private int _connectionOpens;
+    private double _connectionOpenMs;
     private string? _source;
     private string? _sourceReason;
     private long _rows = -1;
@@ -364,7 +366,46 @@ internal sealed class ReadScope
         }
     }
 
-    /// <summary>Every statement the scope saw, including the ones it counted but did not keep.</summary>
+    /// <summary>
+    /// Notes one physical connection open the read caused (#9923). An open is not a statement: it takes no slot among the kept
+    /// statements and does not move <see cref="StatementTotal"/>, so two reads that run the same statements count the same
+    /// whether the pool had an idle connection or not. The count and the total time are kept on their own.
+    /// </summary>
+    internal void AddConnectionOpen(double durationMs)
+    {
+        lock (_statementGate)
+        {
+            _connectionOpens++;
+            _connectionOpenMs += Math.Max(0, durationMs);
+        }
+    }
+
+    /// <summary>How many physical connection opens the scope saw while it captured (#9923).</summary>
+    internal int ConnectionOpens
+    {
+        get
+        {
+            lock (_statementGate)
+            {
+                return _connectionOpens;
+            }
+        }
+    }
+
+    /// <summary>The time those opens took together, in milliseconds (#9923).</summary>
+    internal double ConnectionOpenMs
+    {
+        get
+        {
+            lock (_statementGate)
+            {
+                return _connectionOpenMs;
+            }
+        }
+    }
+
+    /// <summary>Every statement the scope saw, including the ones it counted but did not keep. A physical connection open is
+    /// not a statement (#9923); see <see cref="ConnectionOpens"/>.</summary>
     internal int StatementTotal
     {
         get
