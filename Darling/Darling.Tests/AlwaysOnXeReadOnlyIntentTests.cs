@@ -263,7 +263,8 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
 
         await rig.EnsureAsync();
 
-        foreach (var kind in Kinds)
+        /* #9895: the client-timeout session is this install's own and has no shared session, so only the two shared captures are here. */
+        foreach (var kind in Kinds.Where(k => k != AlwaysOnXeSessionKind.Attention))
         {
             var shared = Shared(kind);
             Assert.Equal(

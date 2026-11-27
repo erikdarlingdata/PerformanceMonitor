@@ -479,8 +479,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task TheXeSessionDatabaseList_NarrowsTheEnsure_AndEmptyMeansEveryDatabase(AlwaysOnXeSessionKind kind)
     {
-        /* #9895: a client timeout ensure creates only this install's own session. */
-        var shared = kind == AlwaysOnXeSessionKind.Attention ? Own(kind) : AlwaysOnXeSessions.SharedNameFor(kind);
         Task EnsureAsync(Rig rig) => kind switch
         {
             AlwaysOnXeSessionKind.Deadlock => rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None),
@@ -489,6 +487,10 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         };
 
         var listed = await BuildRigAsync();
+        /* #9895: a client timeout ensure creates only this install's own session. */
+        var shared = kind == AlwaysOnXeSessionKind.Attention
+            ? AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, listed.Service.GetInstallId(), kind)
+            : AlwaysOnXeSessions.SharedNameFor(kind);
         listed.Server.XeSessionDatabases = new List<string> { "ALPHA" };
         await EnsureAsync(listed);
         Assert.True(listed.Alpha.Started[shared]);

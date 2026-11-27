@@ -286,7 +286,7 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
     public async Task Removal_OnPremises_LeavesTheOwnAttentionSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt_AndSaysSo()
     {
         var rig = BuildRig(azureSqlDatabase: false);
-        var keepers = new LongQueryTraceInstanceGuard("sql01", new[] { Instance(traceOn: false, "SQL01") });
+        var keepers = new LongQueryTraceInstanceGuard("sql01", new[] { Instance(traceOn: true, "SQL01") });
 
         await DarlingRemovedServerSessions.DropAsync(
             rig.Removed, rig.Runner, rig.Remaining, _ => false, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers), rig.Logger, CancellationToken.None,
