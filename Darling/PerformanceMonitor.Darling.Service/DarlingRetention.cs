@@ -979,15 +979,17 @@ public static class DarlingRetention
                tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
                them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
                Failure-isolated like every sibling. */
-            /* #9705: the statement that deletes a slice of sightings also writes their slim rows (QueryTagSlimSightings.MoveExpiredSql), one
-               INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's slices, pacing and time budget and no
-               sighting is deleted without its slim row. */
+            /* #9705: the statement that deletes a slice of sightings also appends their slim rows (QueryTagSlimSightings.MoveSliceSql), one
+               INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's pacing and time budget and no
+               sighting is deleted without its slim row. A probe finds each slice and the move takes its bounds as parameters
+               (ExecuteSightingsMoveSliceAsync). */
             var sightingsRetentionDays = QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor);
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
-                QueryTagSlimSightings.MoveExpiredSql(TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen")),
+                QueryTagSlimSightings.MoveSliceSql,
                 utcNow.AddDays(-sightingsRetentionDays), logger, cancellationToken,
-                pacer: walPacer);
+                pacer: walPacer,
+                sliceStatement: ExecuteSightingsMoveSliceAsync);
             if (sightingsDeleted is not null)
             {
                 tablesPurged++;
@@ -2743,6 +2745,50 @@ WHERE NOT EXISTS
         Math.Max(widestFactRetentionDays, WidestEffectiveRetentionDays(QueryTagSightingFeeders(), retentionDaysFor));
 
     /// <summary>
+    /// One slice of the sightings purge (#9705): the probe finds the oldest expired <c>last_seen</c> and the slice's end, and
+    /// <see cref="QueryTagSlimSightings.MoveSliceSql"/> deletes the expired sightings of that range and appends their slim rows.
+    /// Returns the rows moved and the slice's end, which the drain passes back as <paramref name="lowerBound"/> of its next slice.
+    /// A probe that finds no expired row moves nothing, and the drain ends. The bounds reach the move as plain parameters, so its
+    /// plan is made for the real range. A row written below the bound later is left for the next drain, whose first probe has
+    /// no bound.
+    /// </summary>
+    /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
+    internal static async Task<(int Rows, object? SliceEnd)> ExecuteSightingsMoveSliceAsync(
+        NpgsqlConnection connection,
+        DateTime cutoff,
+        object? lowerBound,
+        CancellationToken cancellationToken)
+    {
+        object sliceStart;
+        object sliceEnd;
+        using (var probe = new NpgsqlCommand(
+            lowerBound is null ? QueryTagSlimSightings.FirstSliceProbeSql : QueryTagSlimSightings.NextSliceProbeSql,
+            connection) { CommandTimeout = DeleteTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(cutoff);
+            if (lowerBound is not null)
+            {
+                probe.Parameters.AddWithValue(lowerBound);
+            }
+
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(0, cancellationToken))
+            {
+                return (0, null);
+            }
+
+            sliceStart = reader.GetValue(0);
+            sliceEnd = reader.GetValue(1);
+        }
+
+        using var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+        move.Parameters.AddWithValue(cutoff);
+        move.Parameters.AddWithValue(sliceStart);
+        move.Parameters.AddWithValue(sliceEnd);
+        return (await move.ExecuteNonQueryAsync(cancellationToken), sliceEnd);
+    }
+
+    /// <summary>
     /// The days the purge keeps a <c>collect.query_tag_sightings_slim</c> row after its <c>last_seen</c> (#9705): as long as the
     /// longest-kept usage row a tag read joins the key to. Those are the raw rows of the collectors that write sightings, and the
     /// Query Store hash hourly and daily tables, which share the <c>query_store</c> collector's horizon
@@ -3475,7 +3521,8 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         string? adaptiveRowCapTimeColumn = null,
         RetentionWalPacer? pacer = null,
         Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
-        Func<int, bool, string>? cursoredSql = null)
+        Func<int, bool, string>? cursoredSql = null,
+        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -3528,7 +3575,26 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             var batches = 0;
             int drained;
 
-            if (adaptiveRowCapTimeColumn is null)
+            if (adaptiveRowCapTimeColumn is null && sliceStatement is not null)
+            {
+                /* #9705: a slice the caller runs as a probe and a statement. Each slice hands its end to the next one as the probe's
+                   lower bound. The first slice of a drain has none. deleteSql is not run here. */
+                object? lowerBound = null;
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        batches++;
+                        var walBefore = await ReadWalAsync(ct);
+                        var (rows, sliceEnd) = await sliceStatement(connection, cutoff, lowerBound, ct);
+                        deleted += rows;
+                        lowerBound = sliceEnd ?? lowerBound;
+                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
+                    },
+                    pacer,
+                    cancellationToken);
+            }
+            else if (adaptiveRowCapTimeColumn is null)
             {
                 using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 command.Parameters.AddWithValue(cutoff);

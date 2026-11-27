@@ -31,17 +31,20 @@ namespace PerformanceMonitor.Darling.Storage;
 /// stale and the next pass rebuilds again. Otherwise the pass extends: it resolves only the keys whose sightings changed
 /// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
 /// next one. A rebuild also reads <c>collect.query_tag_sightings_slim</c> (#9705), where the retention purge keeps a sighting's key and
-/// short match fields until the key's usage rows age out, so a key leaves the map at the first rebuild after both are gone; the
-/// extend path never deletes. A slim row has no text sample, so a text rule tags a key only while it has a sighting.</para>
+/// short match fields until the key's usage rows age out. A key with no sighting left is resolved from its slim rows, so it
+/// leaves the map at the first rebuild after both are gone. A key that has a sighting is resolved from its sightings alone, by
+/// a rebuild and by an extend, which reads no slim row. The extend path never deletes. A slim row has no text sample, so a
+/// text rule tags a key only while it has a sighting.</para>
 ///
 /// <para><b>A rebuild reads both tables front to back, in one snapshot (#9705).</b> It reads each table in pages of
 /// <see cref="QueryTagMapStore.RebuildPageBlocks"/> heap blocks (<see cref="QueryTagMapStore.ReadRebuildRowsAsync"/>), so no
 /// statement of the read grows with the server and no row is fetched through an index. The rows arrive in no key order, so
-/// each goes to <see cref="QueryTagRebuildMerge"/> as it is read: it keeps one small state per key, and names the few keys
-/// whose tag depends on which of their rows comes first. Those are read in order, as the extend reads its keys
+/// each goes to <see cref="QueryTagRebuildMerge"/> as it is read, the slim rows first: it keeps one small state per tagged
+/// key, drops a key's slim state at the key's first sighting, and names the few keys whose tag depends on which of their
+/// sightings comes first. Those are read in order, as the extend reads its keys
 /// (<see cref="QueryTagMapStore.ReadSightingsOfKeysAsync"/>), at most <see cref="MapKeysPerServerPerPass"/> a statement. Every
-/// page and the ordered read share one REPEATABLE READ, read only transaction, so the map is the one a single statement over
-/// both tables would give, and the map is written once, after the read commits.</para>
+/// page and the ordered read share one REPEATABLE READ, read only transaction, so a purge that moves a sighting to the slim
+/// table between two pages cannot hide the row from both, and the map is written once, after the read commits.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
 /// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
@@ -350,18 +353,21 @@ public sealed class QueryTagMapBuilder
         var rows = new List<QueryTagMapRow>();
         await using (var read = await QueryTagMapStore.BeginRebuildReadAsync(connection, cancellationToken).ConfigureAwait(false))
         {
-            foreach (var table in QueryTagMapStore.RebuildTables)
+            /* The slim rows first, then the sightings: a key's first sighting drops what its slim rows resolved to (#9705). */
+            await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(connection, serverId, QueryTagMapStore.RebuildSlimSightings, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
             {
-                await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(connection, serverId, table, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
-                {
-                    merge.Add(row);
-                }
+                merge.AddSlim(row);
+            }
+
+            await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(connection, serverId, QueryTagMapStore.RebuildSightings, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
+            {
+                merge.Add(row);
             }
 
             var merged = merge.Finish();
             rows.AddRange(merged.Rows);
 
-            /* The keys whose winning rows disagree: the first row in order decides, so they are read in order, in the same snapshot. */
+            /* The keys whose winning sightings disagree: the first one in order decides, so they are read in order, in the same snapshot. */
             if (merged.KeysNeedingOrder.Count > 0)
             {
                 await QueryTagMapStore.UseOrderedReadPlansAsync(connection, cancellationToken).ConfigureAwait(false);

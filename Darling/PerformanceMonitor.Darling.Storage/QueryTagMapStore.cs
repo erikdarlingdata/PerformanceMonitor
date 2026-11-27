@@ -117,26 +117,16 @@ LIMIT $5
 """;
 
     /// <summary>
-    /// The sighting rows of the listed keys, from the sightings table and from the slim table (#9705: a key's older callers stay
-    /// in <c>collect.query_tag_sightings_slim</c> after their sighting ages out, and an extend must resolve a key from the same rows
-    /// a rebuild does, or the weekly rebuild would change its tag). A slim row has no text sample and sorts after a sighting with the
-    /// same caller. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
+    /// The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
     /// database, application, login, host, as the unique index reads them) because the resolver takes the first matching
     /// sighting: a tie broken by whatever order the planner returned would let a rebuild change a key's tag (#5985).
     /// </summary>
     internal const string SightingsOfKeysSql = """
-SELECT u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample
-FROM unnest($2::text[], $3::text[]) AS k(key_kind, key)
-CROSS JOIN LATERAL (
-    SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample, 0 AS tier
-    FROM collect.query_tag_sightings AS s
-    WHERE s.server_id = $1 AND s.key_kind = k.key_kind AND s.key = k.key
-    UNION ALL
-    SELECT t.key_kind, t.key, NULLIF(t.database_name, ''), t.object_name, NULLIF(t.application_name, ''), NULLIF(t.login_name, ''), NULLIF(t.host_name, ''), NULL::text, 1
-    FROM collect.query_tag_sightings_slim AS t
-    WHERE t.server_id = $1 AND t.key_kind = k.key_kind AND t.key = k.key
-) AS u
-ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.application_name, ''), COALESCE(u.login_name, ''), COALESCE(u.host_name, ''), u.tier
+SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample
+FROM collect.query_tag_sightings AS s
+JOIN unnest($2::text[], $3::text[]) AS k(key_kind, key) ON k.key_kind = s.key_kind AND k.key = s.key
+WHERE s.server_id = $1
+ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.application_name, ''), COALESCE(s.login_name, ''), COALESCE(s.host_name, '')
 """;
 
     /// <summary>
@@ -161,7 +151,7 @@ ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.applicatio
     /// <summary>
     /// Puts the plan settings of <see cref="RebuildReadSettingsSql"/> back for the rest of the read transaction (#9705): the
     /// ordered read of the keys that need order (<see cref="SightingsOfKeysSql"/>) finds each key through the unique index, as
-    /// the extend's does, and with index scans off it would scan both tables.
+    /// the extend's does, and with index scans off it would scan the sightings table.
     /// </summary>
     internal const string RebuildOrderedReadSettingsSql =
         "SET LOCAL enable_indexscan TO DEFAULT; SET LOCAL enable_bitmapscan TO DEFAULT; SET LOCAL enable_indexonlyscan TO DEFAULT; SET LOCAL max_parallel_workers_per_gather TO DEFAULT";
@@ -172,7 +162,7 @@ ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.applicatio
     /// $3, both the first row slot of a block, so a page is whole blocks and every block is in exactly one page.
     /// <see cref="LastPageSql"/> has no upper bound, so a block added after the count was read is still read. Both tables are
     /// plain tables (never a hypertable), so a ctid names one row of the one heap. The columns come back in the order of
-    /// <see cref="SightingsOfKeysSql"/>, a slim row with its empty strings as NULL and no text sample.
+    /// <see cref="SightingsOfKeysSql"/>, a slim row with no text sample.
     /// </summary>
     internal sealed record RebuildTable(string BlocksSql, string PageSql, string LastPageSql);
 
@@ -182,10 +172,7 @@ ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.applicatio
 
     internal static readonly RebuildTable RebuildSlimSightings = RebuildTableOf(
         "collect.query_tag_sightings_slim",
-        "key_kind, key, NULLIF(database_name, ''), object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text");
-
-    /// <summary>The tables a rebuild reads, in the order it reads them: the sightings, then the slim rows (#9705).</summary>
-    internal static readonly IReadOnlyList<RebuildTable> RebuildTables = new[] { RebuildSightings, RebuildSlimSightings };
+        "key_kind, key, database_name, object_name, application_name, login_name, host_name, NULL::text");
 
     private static RebuildTable RebuildTableOf(string table, string columns)
     {
