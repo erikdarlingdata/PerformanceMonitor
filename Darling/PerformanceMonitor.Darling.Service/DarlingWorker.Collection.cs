@@ -632,6 +632,11 @@ public sealed partial class DarlingWorker
            a segment's catch above is what makes its steps' absence visible in this count. */
         LogStoreObjectConvergence(startupConvergence, startupConvergenceClock.ElapsedMilliseconds, startup: true);
 
+        /* #9858: hand the steps that ran to the first hourly pass, which skips them (ConvergeStoreObjectsAsync takes this). That pass fires within
+           seconds of this line, and until now it ran all 21 steps again and wrote the tuning and group-index lines a second time in the same start. A
+           step that threw is not in the set, so the hourly pass still retries it. */
+        _convergedAtStartup = new HashSet<string>(startupConvergence.Completed, StringComparer.Ordinal);
+
         /* #9698: what a non-superuser store login lacks, said once per start after the convergence pass has built what it can: the aggregates it could not
            build, the pg_wal size and the store's own log, each with the grant that fixes it for this login. Reads the catalog on its own connection and never
            fails the start. A superuser login, or one that holds all three, logs nothing. */

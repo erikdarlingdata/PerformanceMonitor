@@ -182,6 +182,22 @@ public sealed class StoreVerbPlatformRefusalTests
         Assert.All(UsageLines(windows, OperatorVerbForm.WindowsEntryPoint), x => Assert.StartsWith("  PerformanceMonitor.Darling.Service.exe", x.Line, StringComparison.Ordinal));
     }
 
+    /* #9851: the first usage line says what starts the service on the host the help is printed for. A Linux help that named the Windows
+       Service Control Manager sent the operator to a starter that host does not have. The third row is the Linux form with no install
+       folder known, which is also not the Windows form. */
+    [Theory]
+    [InlineData(true, "C:\\Darling", "Service Control Manager", "systemd")]
+    [InlineData(false, "/opt/darling", "systemd", "Service Control Manager")]
+    [InlineData(false, null, "systemd", "Service Control Manager")]
+    public void TheHelpsFirstLine_NamesTheStarterOfThePlatformItIsPrintedFor(bool isWindows, string? installDir, string named, string notNamed)
+    {
+        var entry = OperatorVerbForm.EntryPoint(isWindows, installDir);
+        var first = UsageLines(DarlingCliCommands.UsageText(entry), entry).First().Line;
+
+        Assert.Contains(named, first, StringComparison.Ordinal);
+        Assert.DoesNotContain(notNamed, first, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheHelp_ForThisHost_UsesThisHostsEntryPoint_AndSaysThatTheStoreVerbsRunOnLinux()
     {
