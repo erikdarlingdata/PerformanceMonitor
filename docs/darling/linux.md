@@ -448,7 +448,7 @@ Run a verb as the service's user, with `DARLING_CONFIG` set, so that it reads th
 sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll <verb>
 ```
 
-The apphost, `/opt/darling/PerformanceMonitor.Darling.Service <verb>`, is the same program and finds `dotnet` by itself. A message from the service that tells you to run a verb names it in this form, with the folder the service runs from. An example is `dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --backfill-rollups` ([#9703](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9703)). The `--help` text names the same command, so on Linux you read the usage lines as printed ([#9751](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9751)).
+The apphost, `/opt/darling/PerformanceMonitor.Darling.Service <verb>`, is the same program and finds `dotnet` by itself. A message from the service that tells you to run a verb names it in this form, with the folder the service runs from. An example is `dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --backfill-rollups` ([#9703](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9703)). The `--help` text names the same command, so on Linux you read the usage lines as printed ([#9751](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9751)). An MCP answer names the verb without the folder, as in `dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups`. Run it from `/opt/darling`, or put the folder before the `.dll` name.
 
 In this table `darling-verb` stands for the whole command above. The [command line reference](cli.md) has every verb with its exit codes.
 
