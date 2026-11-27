@@ -310,6 +310,10 @@ LIMIT 10";
     {
     }
 
+    /// <summary>The budget the public constructor gives each document the capture filters (#9873): the filter's read budget on the real clock, so a
+    /// document the filter cannot finish reading in <see cref="SensitiveStatements.ReadBudget"/> comes back withheld whole.</summary>
+    internal static SensitiveStatements.JudgeBudget DefaultJudgeBudget() => new(SensitiveStatements.ReadBudget);
+
     /// <param name="judgeBudget">Builds the statement filter's budget for one document (#9873): a deadlock graph, a blocked-process
     /// report or a stored plan each gets a fresh one. Defaults to a budget at <see cref="SensitiveStatements.ReadBudget"/>, which
     /// is what production runs. A test supplies one speed cannot decide (a frozen clock) or one already spent.</param>
@@ -317,7 +321,7 @@ LIMIT 10";
         NpgsqlDataSource store, InvestigationRequestStore requests, ILogger logger, Func<DateTime>? utcNow,
         Func<string, int, int>? collectorIntervalMinutes, TimeSpan? sectionDeadline, Func<SensitiveStatements.JudgeBudget>? judgeBudget)
     {
-        _newJudgeBudget = judgeBudget ?? (static () => new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
+        _newJudgeBudget = judgeBudget ?? DefaultJudgeBudget;
         _sectionDeadline = sectionDeadline ?? RequestDeadline;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _requests = requests ?? throw new ArgumentNullException(nameof(requests));

@@ -603,7 +603,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             await setup.Capture.CaptureOnceAsync(ct);
 
             var deadlock = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "deadlocks"));
-            Assert.Equal(InvestigationEvidenceCapture.GraphWithheldReason, deadlock["graph_withheld"]!.GetValue<string>());
+            Assert.Equal(InvestigationEvidenceWithheld.GraphReason, deadlock["graph_withheld"]!.GetValue<string>());
             Assert.Empty(deadlock["parties"]!.AsArray());
             Assert.Empty(deadlock["objects"]!.AsArray());
             Assert.Null(deadlock["parties_dropped"]);
@@ -626,7 +626,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
 
             var head = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "head_blocker"));
-            Assert.Equal(InvestigationEvidenceCapture.ReportWithheldReason, head["report_withheld"]!.GetValue<string>());
+            Assert.Equal(InvestigationEvidenceWithheld.ReportReason, head["report_withheld"]!.GetValue<string>());
             Assert.Equal(62, head["spid"]!.GetValue<int>());
             Assert.Equal("inferred", head["statement_source"]!.GetValue<string>());
             Assert.Null(head["input_buffer"]);
@@ -645,8 +645,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
 
             var target = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "regression_targets"));
-            Assert.Equal(InvestigationEvidenceCapture.PlanWithheldReason, target["good_plan_withheld"]!.GetValue<string>());
-            Assert.Equal(InvestigationEvidenceCapture.PlanWithheldReason, target["bad_plan_withheld"]!.GetValue<string>());
+            Assert.Equal(InvestigationEvidenceWithheld.PlanReason, target["good_plan_withheld"]!.GetValue<string>());
+            Assert.Equal(InvestigationEvidenceWithheld.PlanReason, target["bad_plan_withheld"]!.GetValue<string>());
             Assert.Null(target["good_compiled"]);
             Assert.Null(target["bad_compiled"]);
             Assert.Equal(8_000, target["bad_cpu_per_exec_us"]!.GetValue<long>());
@@ -662,7 +662,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
 
         var row = InvestigationEvidenceCapture.DeadlockRow(AlertAt, "tempdb", "process25", filtered!);
 
-        Assert.Equal(InvestigationEvidenceCapture.GraphWithheldReason, row["graph_withheld"]!.GetValue<string>());
+        Assert.Equal(InvestigationEvidenceWithheld.GraphReason, row["graph_withheld"]!.GetValue<string>());
         Assert.Empty(row["parties"]!.AsArray());
         Assert.Empty(row["objects"]!.AsArray());
         Assert.Null(row["parties_dropped"]);

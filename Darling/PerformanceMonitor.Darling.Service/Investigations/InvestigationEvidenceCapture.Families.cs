@@ -243,25 +243,13 @@ LIMIT $6";
             ["parties"] = parties,
         };
         if (withheld)
-            row["graph_withheld"] = GraphWithheldReason;
+            row["graph_withheld"] = InvestigationEvidenceWithheld.GraphReason;
         if (objectsDropped > 0)
             row["objects_dropped"] = objectsDropped;
         if (model.Processes.Count > kept.Count)
             row["parties_dropped"] = model.Processes.Count - kept.Count;
         return row;
     }
-
-    /// <summary>What a row says when the statement filter withheld its whole deadlock graph (#9873).</summary>
-    internal const string GraphWithheldReason =
-        "The statement filter withheld the whole deadlock graph (it ran out of time reading it, or could not read it safely), so its parties and objects are not shown.";
-
-    /// <summary>What a row says when the statement filter withheld the whole blocked-process report its head blocker is read from (#9873).</summary>
-    internal const string ReportWithheldReason =
-        "The statement filter withheld the whole blocked-process report (it ran out of time reading it, or could not read it safely), so the blocker's statement is not read from it.";
-
-    /// <summary>What a row says when the statement filter withheld a whole stored plan its compiled values are read from (#9873).</summary>
-    internal const string PlanWithheldReason =
-        "The statement filter withheld the whole plan (it ran out of time reading it, or could not read it safely), so its compiled values are not shown.";
 
     /// <summary>Runs one whole document (a deadlock graph, a blocked-process report, a plan) through the statement filter
     /// under a fresh budget from <see cref="_newJudgeBudget"/> (#9873).</summary>
@@ -539,7 +527,7 @@ LIMIT $6";
             /* #9873: a report the filter withheld whole has no frame or input buffer to read, which would pass for a blocker with
                none. The row says the report was withheld. */
             if (withheld)
-                row["report_withheld"] = ReportWithheldReason;
+                row["report_withheld"] = InvestigationEvidenceWithheld.ReportReason;
             rows.Add(row);
         }
 
@@ -644,12 +632,12 @@ LIMIT $6";
             target["good_compiled"] = Compiled(goodPlan);
             /* #9873: a plan the filter withheld whole has null compiled values, as a missing plan has; the target says it was withheld. */
             if (IsWithheldWhole(goodPlan))
-                target["good_plan_withheld"] = PlanWithheldReason;
+                target["good_plan_withheld"] = InvestigationEvidenceWithheld.PlanReason;
             cancellationToken.ThrowIfCancellationRequested();
             var badPlan = FilterXml(plans.GetValueOrDefault(bad));
             target["bad_compiled"] = Compiled(badPlan);
             if (IsWithheldWhole(badPlan))
-                target["bad_plan_withheld"] = PlanWithheldReason;
+                target["bad_plan_withheld"] = InvestigationEvidenceWithheld.PlanReason;
             target["stopped_running"] = target["window_executions"]?.GetValue<long>() == 0;
         }
 
