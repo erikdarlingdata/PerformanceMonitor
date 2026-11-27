@@ -103,8 +103,8 @@ public enum ComposeTimeBucket
     Day,
 
     /// <summary>Adaptive: the compiler resolves this to a concrete grain (minute/hour/day) from the panel's
-    /// window at compile time (see <see cref="MeasureCatalog.ResolveBucket"/>), so any range renders a readable,
-    /// bounded point count. Never reaches <c>date_trunc</c> as-is.</summary>
+    /// window and server scope at compile time (see <see cref="MeasureCatalog.ResolveBucket(ComposeTimeBucket, double, bool)"/>),
+    /// so any range renders a readable, bounded point count. Never reaches <c>date_trunc</c> as-is.</summary>
     Auto,
 }
 
@@ -2280,10 +2280,25 @@ public static class MeasureCatalog
     public static int BucketSeconds(ComposeTimeBucket value) => s_bucketWire.First(x => x.Value == value).Seconds;
 
     /// <summary>Resolve <see cref="ComposeTimeBucket.Auto"/> to a concrete grain for a window of
-    /// <paramref name="windowSeconds"/>: minute up to 2 days, hour up to 60 days, day beyond — so any range
-    /// yields a readable, bounded point count (≤ ~2880, well under <see cref="ComposeLimits.MaxBuckets"/>).
-    /// Any non-Auto bucket is returned unchanged, so existing panels compile byte-for-byte as before.</summary>
-    public static ComposeTimeBucket ResolveBucket(ComposeTimeBucket value, double windowSeconds)
+    /// <paramref name="windowSeconds"/>, for a caller that has no server scope: minute up to 2 days, hour up to 60 days,
+    /// day beyond, so any range yields a readable, bounded point count (at most about 2880, well under
+    /// <see cref="ComposeLimits.MaxBuckets"/>). Any non-Auto bucket is returned unchanged, so a panel with an explicit
+    /// bucket compiles byte-for-byte the same. A caller that knows the run's scope and source uses
+    /// <see cref="ResolveBucket(ComposeTimeBucket, double, bool)"/>.</summary>
+    public static ComposeTimeBucket ResolveBucket(ComposeTimeBucket value, double windowSeconds) =>
+        ResolveBucket(value, windowSeconds, fleetHourlySource: false);
+
+    /// <summary>Resolve <see cref="ComposeTimeBucket.Auto"/> from the window and the run's scope (#9883). The rule, in order:
+    /// a window over 60 days is day, a window over 2 days is hour, a window of
+    /// <see cref="ComposeSourceRouter.HourlyRawEdgesMinWindow"/> (12 hours) or more is hour when
+    /// <paramref name="fleetHourlySource"/> is true, and anything else is minute. <paramref name="fleetHourlySource"/> is
+    /// <see cref="ComposeSourceRouter.IsFleetHourlySource"/>: the run has no server scope (the whole fleet) and reads a source
+    /// the hourly rollup can serve. A minute series cannot come from an hourly rollup, so a fleet series left on Auto at the
+    /// default 24 hours would read every server's raw rows, and an hour series is the one the hourly-raw-edges route serves.
+    /// The grain depends on the scope, the source and the window only, never on whether the rollup is present, current or
+    /// passes its count guard: a run the route cannot serve reads raw at the same hour grain, so the picture is the same
+    /// either way. Any non-Auto bucket is returned unchanged.</summary>
+    public static ComposeTimeBucket ResolveBucket(ComposeTimeBucket value, double windowSeconds, bool fleetHourlySource)
     {
         if (value != ComposeTimeBucket.Auto)
         {
@@ -2292,7 +2307,9 @@ public static class MeasureCatalog
 
         if (windowSeconds <= 2d * 86_400d)
         {
-            return ComposeTimeBucket.Minute;
+            return fleetHourlySource && windowSeconds >= ComposeSourceRouter.HourlyRawEdgesMinWindow.TotalSeconds
+                ? ComposeTimeBucket.Hour
+                : ComposeTimeBucket.Minute;
         }
 
         return windowSeconds <= 60d * 86_400d ? ComposeTimeBucket.Hour : ComposeTimeBucket.Day;

@@ -167,7 +167,7 @@ public sealed class ComposeParameterCoverageTests
     internal static bool PredictsHourlyEdgesBinds(PanelPlan plan, ComposeRunContext context) =>
         context.HourlyEdges is { } verdict
         && ComposeSourceRouter.HourlyRawEdgesCandidate(
-            plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+            plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage, ComposeSourceRouter.IsFleetScope(context.Servers), out _) is { } candidate
         && ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage).Tier == ComposeSourceTier.Raw
         && verdict.SourceTable == candidate.SourceTable
         && verdict.HourStartUtc == candidate.HourStartUtc

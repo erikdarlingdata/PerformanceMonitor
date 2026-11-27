@@ -212,7 +212,9 @@ public static class ComposeSourceRouter
     internal static readonly IReadOnlySet<string> HourlyRawEdgesEnabledSources =
         new HashSet<string>(StringComparer.Ordinal) { "query_stats", "procedure_stats" };
 
-    private static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
+    /// <summary>The shortest window the hourly-raw-edges route serves. An Auto bucket on a fleet read of this length or more
+    /// resolves to hour (#9883, <see cref="MeasureCatalog.ResolveBucket(ComposeTimeBucket, double, bool)"/>).</summary>
+    internal static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
     private static readonly TimeSpan HourlyRawEdgesEndSlack = TimeSpan.FromMinutes(1);
 
     /// <summary>The hourly CAGG is chosen up to this age — a day inside the 90-day (#1937) hourly retention; older windows
@@ -464,7 +466,17 @@ public static class ComposeSourceRouter
     /// when the router did not choose raw (a rollup tier answers, so no hourly-edges decision applies).</summary>
     public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
         PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
-        RollupAvailability rollups, RollupCoverage coverage, out string? refusal)
+        RollupAvailability rollups, RollupCoverage coverage, out string? refusal) =>
+        HourlyRawEdgesCandidate(plan, nowUtc, windowStartUtc, windowEndUtc, rollups, coverage, fleetScope: false, out refusal);
+
+    /// <summary><see cref="HourlyRawEdgesCandidate(PanelPlan, DateTime, DateTime, DateTime, RollupAvailability, RollupCoverage, out string?)"/>
+    /// for a caller that knows the run's server scope (#9883). <paramref name="fleetScope"/> is <see cref="IsFleetScope"/> of the
+    /// run's servers, and it decides only what an Auto bucket resolves to (<see cref="ResolvePanelBucket"/>): hour for a fleet
+    /// read of 12 hours or more, which this route serves. The runner and the compiler both pass the run's scope, so they
+    /// resolve the same bucket and reach the same candidate. The overloads without it resolve Auto from the window alone.</summary>
+    public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
+        RollupAvailability rollups, RollupCoverage coverage, bool fleetScope, out string? refusal)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(coverage);
@@ -502,11 +514,11 @@ public static class ComposeSourceRouter
 
         if (plan.Mode is not (PanelMode.Ranked or PanelMode.Scalar))
         {
-            var bucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, (windowEndUtc - windowStartUtc).TotalSeconds);
+            var bucket = ResolvePanelBucket(plan, (windowEndUtc - windowStartUtc).TotalSeconds, fleetScope);
             if (bucket is not (ComposeTimeBucket.Hour or ComposeTimeBucket.Day))
             {
-                /* An Auto bucket resolves to minute up to 2 days, so a time series left on Auto at the default 24 hours needs
-                   minute rows the hourly rollup cannot give. */
+                /* A minute series needs minute rows the hourly rollup cannot give. An explicit minute bucket lands here, and so
+                   does an Auto bucket up to 2 days on a run scoped to named servers (#9883). */
                 refusal = "hourly_edges_bucket";
                 return null;
             }
@@ -571,6 +583,62 @@ public static class ComposeSourceRouter
         }
 
         return new ComposeHourlyEdgesCandidate(source, successor, hStart, hEnd);
+    }
+
+    /// <summary>Whether <paramref name="servers"/> is the whole fleet (#9883): no server scope, which is how a run with no
+    /// server, an empty list or "All" arrives. A list of names is a server scope, whatever it names.</summary>
+    public static bool IsFleetScope(IReadOnlyList<string>? servers) => NormalizeServerScope(servers) is null;
+
+    /// <summary>Whether an Auto bucket on this panel takes the fleet rule (#9883): the run is fleet scope
+    /// (<see cref="IsFleetScope"/>) and the panel reads a source the hourly rollup can serve
+    /// (<see cref="HourlyRawEdgesEnabledSources"/>). Scope and source only: no rollup, coverage or guard state.</summary>
+    public static bool IsFleetHourlySource(PanelPlan plan, bool fleetScope)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return fleetScope && HourlyRawEdgesEnabledSources.Contains(plan.Measure.SourceTable);
+    }
+
+    /// <summary>The concrete bucket a panel's series is drawn at (#9883): <see cref="MeasureCatalog.ResolveBucket(ComposeTimeBucket, double, bool)"/>
+    /// over the panel's bucket, the window and <see cref="IsFleetHourlySource"/>. The compiler, the hourly-raw-edges candidate and
+    /// the runner's notes all resolve through here, so they agree on the grain.</summary>
+    public static ComposeTimeBucket ResolvePanelBucket(PanelPlan plan, double windowSeconds, bool fleetScope)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds, IsFleetHourlySource(plan, fleetScope));
+    }
+
+    /// <summary>The note a run carries when its Auto bucket resolved to hour by the fleet rule (#9883).</summary>
+    public const string FleetAutoHourNote =
+        "Auto chose hour buckets for a fleet read of 12 hours or more. Set the bucket to minute for minute detail.";
+
+    /// <summary><see cref="FleetAutoHourNote"/> when the fleet rule is what gave this time series its hour bucket (#9883), else
+    /// null: the panel is a time series on Auto, and the scope changes what Auto resolves to (hour with it, minute from the
+    /// window alone). An explicit bucket, a window over 2 days (hour or day from the window alone), a window under 12 hours, a
+    /// run scoped to named servers and a source the hourly rollup cannot serve all answer null, because the rule chose nothing.</summary>
+    public static string? FleetAutoHourNoteFor(PanelPlan plan, double windowSeconds, bool fleetScope)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries
+            && plan.TimeBucket == ComposeTimeBucket.Auto
+            && ResolvePanelBucket(plan, windowSeconds, fleetScope) != MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds)
+            ? FleetAutoHourNote
+            : null;
+    }
+
+    /// <summary>Whether a minute time series that reads raw would be served by the hourly-raw-edges route at an hour bucket
+    /// (#9883): the panel is a time series whose bucket resolves to minute, and the same panel with an hour bucket is a
+    /// candidate (every gate of <see cref="HourlyRawEdgesCandidate(PanelPlan, DateTime, DateTime, DateTime, RollupAvailability, RollupCoverage, bool, out string?)"/>
+    /// holds). The raw-read refusal adds its hour-bucket advice only then, so it never sends a reader to a bucket that
+    /// would read raw as well.</summary>
+    public static bool HourBucketWouldReadRollup(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
+        RollupAvailability rollups, RollupCoverage coverage, bool fleetScope)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries
+            && ResolvePanelBucket(plan, (windowEndUtc - windowStartUtc).TotalSeconds, fleetScope) == ComposeTimeBucket.Minute
+            && HourlyRawEdgesCandidate(
+                plan with { TimeBucket = ComposeTimeBucket.Hour }, nowUtc, windowStartUtc, windowEndUtc, rollups, coverage, fleetScope, out _) is not null;
     }
 
     /// <summary>The one reading of a server scope for the hourly-raw-edges proof: null or empty is the whole fleet

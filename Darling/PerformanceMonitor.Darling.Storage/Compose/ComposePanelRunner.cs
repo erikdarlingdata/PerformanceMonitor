@@ -548,7 +548,10 @@ internal static class ComposePanelRunner
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
            commits after the guard cannot add a row the guard never saw. Every other panel opens its own connection
            inside RunComposedQueryAsync, exactly as before. */
-        var hourlyEdgesCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, now, start, end, rollups, coverage, out var hourlyEdgesRefusal);
+        /* #9883: the run's scope decides what an Auto bucket resolves to (hour for a fleet read of 12 hours or more), so the candidate
+           here and the compile below are given the same scope and resolve the same bucket. */
+        var fleetScope = ComposeSourceRouter.IsFleetScope(serverScope);
+        var hourlyEdgesCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, now, start, end, rollups, coverage, fleetScope, out var hourlyEdgesRefusal);
         /* The candidate path resolves the compose deadline FIRST, so the run never holds the snapshot's connection while it asks the
            pool for a second one (at the pool's size, every panel would hold one and wait for another). The same value is the panel's
            client deadline and bounds the guard. The other path resolves it inside the try below, as it always has. */
@@ -590,7 +593,9 @@ internal static class ComposePanelRunner
            route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
            holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
         if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
-            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, plan!.Filters) is { } rawTooBig)
+            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, plan!.Filters,
+                /* #9883: a minute series the hourly-raw-edges route would serve at an hour bucket is told so in the refusal. */
+                ComposeSourceRouter.HourBucketWouldReadRollup(plan!, now, start, end, rollups, coverage, fleetScope)) is { } rawTooBig)
         {
             return ComposeRunOutcome.BadRequest(rawTooBig);
         }
@@ -649,9 +654,12 @@ internal static class ComposePanelRunner
                 retentionNotice = dataStartNotice?.Text;
             }
 
+            /* #9883: a fleet time series whose Auto bucket resolved to hour says so, and how to get minute detail. It rides the same
+               notice the page, the Viewer and the MCP tool already show, after any partial-window sentence. */
             if (ComposeStoreAvailability.CombineNotices(
                     retentionNotice,
-                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count, rows.Count >= ComposeLimits.HardRowCap ? EarliestBucket(rows) : null)) is string notice)
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count, rows.Count >= ComposeLimits.HardRowCap ? EarliestBucket(rows) : null),
+                    ComposeSourceRouter.FleetAutoHourNoteFor(plan, (end - start).TotalSeconds, fleetScope)) is string notice)
             {
                 payload["notice"] = notice;
 

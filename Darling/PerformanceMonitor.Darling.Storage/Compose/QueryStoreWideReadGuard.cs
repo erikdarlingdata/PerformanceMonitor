@@ -401,8 +401,11 @@ WHERE b.daily_rows IS NOT NULL
     /// The raw-route refusal (#5811) for a read of <paramref name="countedStart"/>..<paramref name="countedEnd"/>, or null when the
     /// estimate is under <paramref name="limit"/> (or there is none). It states the estimate, the limit and the longest window that fits
     /// for these servers, so a refusal reported from the field can be checked against the collection log.
+    /// When <paramref name="hourBucketReadsRollup"/> is true (#9883: the panel is a minute time series the hourly-raw-edges route
+    /// would serve at an hour bucket, <see cref="ComposeSourceRouter.HourBucketWouldReadRollup"/>), the sentence also says that
+    /// an hour bucket reads the hourly rollup, which is the change that keeps the servers and the window.
     /// </summary>
-    internal static string? RawRefusal(RawEstimate? estimate, string collector, DateTime countedStart, DateTime countedEnd, long limit)
+    internal static string? RawRefusal(RawEstimate? estimate, string collector, DateTime countedStart, DateTime countedEnd, long limit, bool hourBucketReadsRollup = false)
     {
         if (estimate is not { } found || found.Servers == 0)
         {
@@ -421,17 +424,21 @@ WHERE b.daily_rows IS NOT NULL
             ? $"Choose fewer servers or a window of {Window(TimeSpan.FromHours(fitHours))} or less."
             : "Choose fewer servers.";
         return $"This panel needs about {Million(rows)} million {noun} rows ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}), "
-            + $"over the limit of {Million(limit)} million. {shorter}";
+            + $"over the limit of {Million(limit)} million. {shorter}"
+            + (hourBucketReadsRollup ? " " + HourBucketAdvice : string.Empty);
     }
+
+    /// <summary>The sentence <see cref="RawRefusal"/> adds for a minute time series an hour bucket would serve from the rollup (#9883).</summary>
+    internal const string HourBucketAdvice = "An hour bucket reads the hourly rollup instead.";
 
     /// <summary>The raw-route guard end to end (#5811): estimate, then refuse. Null means the panel runs.</summary>
     internal static async Task<string?> CheckRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
         DateTime countedStart, DateTime countedEnd, ILogger? logger,
-        int commandTimeoutSeconds, CancellationToken cancellationToken, IReadOnlyList<ComposeFilter>? filters = null) =>
+        int commandTimeoutSeconds, CancellationToken cancellationToken, IReadOnlyList<ComposeFilter>? filters = null, bool hourBucketReadsRollup = false) =>
         RawRefusal(
             await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, commandTimeoutSeconds, cancellationToken),
-            collector, countedStart, countedEnd, RawLimitFor(collector, filters));
+            collector, countedStart, countedEnd, RawLimitFor(collector, filters), hourBucketReadsRollup);
 
     /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
     private static async Task<Estimate?> ReadEstimateAsync(
