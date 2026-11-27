@@ -37,6 +37,16 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// </summary>
 internal static class DarlingHostBinding
 {
+    /// <summary>
+    /// #9837: the content root of every host the service builds: the folder that holds the binaries. A host builder left to its default
+    /// takes the working folder, and watches it and every folder under it for a changed <c>appsettings.json</c>. On Linux that is one
+    /// inotify watch per folder, added before the builder returns. A systemd unit with no <c>WorkingDirectory</c> runs in <c>/</c>, so
+    /// the default walks the whole file system before the host starts and READY=1 goes out, which on a machine with a large tree is
+    /// longer than the unit's start timeout. The Windows service lifetime sets the same folder for the same reason (its working folder
+    /// is System32), and it is where the documentation says an <c>appsettings.json</c> goes.
+    /// </summary>
+    internal static string ContentRoot => AppContext.BaseDirectory;
+
     /// <summary>The effective bind. <see cref="LoopbackOnly"/> is the secure default;
     /// <see cref="NetworkAndLoopback"/> binds the LAN interface behind the surface's auth gate.</summary>
     internal enum BindMode

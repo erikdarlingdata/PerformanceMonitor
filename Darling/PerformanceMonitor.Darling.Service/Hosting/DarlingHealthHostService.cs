@@ -107,7 +107,12 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             /* #8184: the sibling hosts' pins. EnvironmentName: an ambient ASPNETCORE_ENVIRONMENT=Development must not put the developer
                exception page on an unauthenticated listener (#4281 review, finding 4). The empty Kestrel configuration: a
                Kestrel__Endpoints__* variable or an appsettings file must not add a second listener or fail the start (#5288). */
-            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+                /* #9837: not the working folder, which the builder would watch with every folder under it. */
+                ContentRootPath = DarlingHostBinding.ContentRoot,
+            });
             builder.Logging.ClearProviders();
             var listenAddress = address;
             builder.WebHost.ConfigureKestrel(options =>

@@ -1093,7 +1093,8 @@ public static class PgTableTuning
 
                     /* #9795: the budget builds of one start share StartBuildBudgetSeconds. Whole seconds, because CommandTimeout is
                        whole seconds and 0 there means no limit: with under a second left the build waits for the next start. */
-                    var secondsLeft = (int)Math.Floor((TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent).TotalSeconds);
+                    var budgetLeft = TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent;
+                    var secondsLeft = (int)Math.Floor(budgetLeft.TotalSeconds);
                     if (onBudget && secondsLeft < 1)
                     {
                         logger?.LogInformation(
@@ -1119,9 +1120,22 @@ public static class PgTableTuning
 
                     if (onBudget && secondsLeft < commandTimeout)
                     {
-                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. */
+                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. It counts as
+                           shortened only when the time left falls short of this build's own limit by at least a whole second. A
+                           shortfall under a second is the whole-seconds floor above, a rounding artifact (299.95 s left against a
+                           300 s limit, or 119.6 s against 120 s), not a shortening, and counting it would keep a timeout of the
+                           bounded build from being recorded (#9289), so the next start would try it again for up to another limit. */
+                        shortened = TimeSpan.FromSeconds(commandTimeout) - budgetLeft >= TimeSpan.FromSeconds(1);
                         commandTimeout = secondsLeft;
-                        shortened = true;
+                    }
+
+                    if (onBudget)
+                    {
+                        /* #9827: collection waits for this build, so the log says which index, on which table, and for how long at most.
+                           commandTimeout is the smaller of the build's own limit and what is left of the start's shared build time. */
+                        logger?.LogInformation(
+                            "Index collect.{Index} on {Table} is missing and is being built at this start: collection waits while it builds, for up to {LimitSeconds} s",
+                            indexName, CreatedIndexTable(statement), commandTimeout);
                     }
 
                     budgeted = onBudget;
@@ -1156,6 +1170,11 @@ public static class PgTableTuning
                 if (budgeted)
                 {
                     buildElapsed = clock.GetElapsedTime(buildStartedAt);
+
+                    /* #9827: the build the line before it announced finished. A timeout or a busy table logs its own line instead. */
+                    logger?.LogInformation(
+                        "Index collect.{Index} on {Table} was built at this start in {ElapsedSeconds:F1} s",
+                        CreatedIndexName(statement), CreatedIndexTable(statement), buildElapsed.Value.TotalSeconds);
                 }
 
                 applied++;
@@ -1214,8 +1233,8 @@ public static class PgTableTuning
                         shortened
                             ? ShortenedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout)
                             : recorded
-                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, buildTimeoutSeconds)
-                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
+                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, commandTimeout)
+                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout));
                 }
                 else
                 {
@@ -1276,10 +1295,13 @@ public static class PgTableTuning
         return false;
     }
 
-    /// <summary>The warning for a start-path index build that timed out.</summary>
-    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
+    /// <summary>
+    /// The warning for a start-path index build that timed out. <paramref name="limitSeconds"/> is the limit the build ran under, which is
+    /// whole seconds of what is left of the start's shared build time when that falls under a second short of the build's own limit.
+    /// </summary>
+    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds, int limitSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
 
     /// <summary>
     /// The warning for a start-path index build that ran under what earlier builds left of the start's shared build time (#9795)
@@ -1289,7 +1311,10 @@ public static class PgTableTuning
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built at this start: the index builds of one start share {StartBuildBudgetSeconds} s, the builds before this one left it {limitSeconds} s, and it ran out of that after {elapsedSeconds:F0} s and was rolled back; the next service start tries it again");
 
-    /// <summary>The warning for a bounded start-path index build (#9289) that timed out and was recorded.</summary>
+    /// <summary>
+    /// The warning for a bounded start-path index build (#9289) that timed out and was recorded. <paramref name="limitSeconds"/> is the
+    /// limit the build ran under, as for <see cref="BuildTimeoutMessage"/>.
+    /// </summary>
     internal static string BoundedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, long heapPages, int limitSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) with {heapPages} uncompressed heap pages and was rolled back; the next start does not try it again for {PgIndexBuildAttempts.RetryAfter.TotalHours:F0} hours unless the table has fewer uncompressed pages by then, and the reader keeps its old shape until the index exists");

@@ -173,7 +173,12 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             /* #9013: the health host's pins (#4281, #5288): Production, so an ambient ASPNETCORE_ENVIRONMENT=Development cannot put the
                developer exception page on this listener, and an empty Kestrel configuration, so a Kestrel__Endpoints__* variable or an
                appsettings file cannot add a second listener. The limits are the health port's: a scrape is a short GET with no body. */
-            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+            var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+                /* #9837: not the working folder, which the builder would watch with every folder under it. */
+                ContentRootPath = DarlingHostBinding.ContentRoot,
+            });
             /* #9013: the slim builder still registers the framework's forwarded-headers filter, which ASPNETCORE_FORWARDEDHEADERS_ENABLED
                turns on; pinned off as on the web and MCP hosts (#5288), so metrics.allowFrom and the token throttle key on the TCP peer. */
             DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);

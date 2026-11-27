@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.FrontDoor;
@@ -174,6 +175,13 @@ internal static class DarlingProcessServices
         () => provider.GetRequiredService<IFrontDoorDirectory>(),
         provider.GetRequiredService<ILogger<DarlingFrontDoorMcpPeers>>()));
     }
+
+    /// <summary>
+    /// The process host's builder (#9837), on <see cref="DarlingHostBinding.ContentRoot"/> and not on the working folder, so building it
+    /// never walks the tree under the folder the service was started in. A test builds it the way <c>Program.cs</c> does.
+    /// </summary>
+    internal static HostApplicationBuilder CreateHostBuilder(string[] args) =>
+        Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, ContentRootPath = DarlingHostBinding.ContentRoot });
 
     /// <summary>
     /// Puts the rolling file log on the host's loggers (#9747). The provider buffers lines for up to five seconds and writes them on a timer,
