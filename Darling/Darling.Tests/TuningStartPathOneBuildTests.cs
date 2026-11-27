@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -40,6 +43,56 @@ public sealed class TuningStartPathOneBuildTests
         PgTableTuning.QueryStoreServerHashIndexName,
     };
 
+    private static readonly string[] UpgradedTables =
+    {
+        "collect.procedure_stats",
+        "collect.cpu_utilization_stats",
+        "collect.query_store_stats",
+    };
+
+    /// <summary>#9827: the line a start logs before it builds a missing index that shares the build time, for that index on that table.</summary>
+    private static IReadOnlyList<string> BeforeBuildLines(CapturingTestLogger log, string index, string table) =>
+        log.Lines.Where(l => l.StartsWith("Information:", StringComparison.Ordinal)
+            && l.Contains("collection waits", StringComparison.Ordinal)
+            && l.Contains(index, StringComparison.Ordinal)
+            && l.Contains(table, StringComparison.Ordinal)).ToList();
+
+    /// <summary>#9827: the line a start logs after it built a missing index that shares the build time, for that index on that table.</summary>
+    private static IReadOnlyList<string> AfterBuildLines(CapturingTestLogger log, string index, string table) =>
+        log.Lines.Where(l => l.StartsWith("Information:", StringComparison.Ordinal)
+            && l.Contains(" was built ", StringComparison.Ordinal)
+            && l.Contains(index, StringComparison.Ordinal)
+            && l.Contains(table, StringComparison.Ordinal)).ToList();
+
+    /// <summary>#9827: every build line of a pass, before or after, whatever the index.</summary>
+    private static IReadOnlyList<string> AnyBuildLines(CapturingTestLogger log) =>
+        log.Lines.Where(l => l.Contains("collection waits", StringComparison.Ordinal)
+            || l.Contains(" was built ", StringComparison.Ordinal)).ToList();
+
+    /// <summary>
+    /// #9827: the pass logged one line before and one after the build of <paramref name="index"/> on <paramref name="table"/>, in that
+    /// order, and the line before names the longest the build may take. Returns the line after, which names how long it took.
+    /// </summary>
+    private static string AssertBuiltWithBothLines(CapturingTestLogger log, string index, string table, int? upToSeconds)
+    {
+        var before = Assert.Single(BeforeBuildLines(log, index, table));
+        var after = Assert.Single(AfterBuildLines(log, index, table));
+        var limit = int.Parse(Regex.Match(before, @"up to (\d+) s", RegexOptions.CultureInvariant).Groups[1].Value, CultureInfo.InvariantCulture);
+        if (upToSeconds is { } expected)
+        {
+            Assert.Equal(expected, limit);
+        }
+        else
+        {
+            /* On the system clock the builds before this one used a little of the 300 s, so the limit is 300 or just under it. */
+            Assert.InRange(limit, 1, 300);
+        }
+
+        var lines = log.Lines.ToList();
+        Assert.True(lines.IndexOf(before) < lines.IndexOf(after), log.Joined);
+        return after;
+    }
+
     /// <summary>
     /// #9795: a store with rows that lacks several large indexes at once, as one upgraded across the releases that added them does,
     /// has every one of them after ONE start when the builds fit the shared build time, and the hourly pass after it has nothing to warn about.
@@ -53,11 +106,14 @@ public sealed class TuningStartPathOneBuildTests
         await store.DropAsync(ct, Upgraded);
 
         /* The hourly pass never builds any of them, however many are missing. */
-        await PgTableTuning.ApplyAsync(body, new CapturingTestLogger(), hourly: true, ct);
+        var firstHourly = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(body, firstHourly, hourly: true, ct);
         foreach (var name in Upgraded)
         {
             Assert.False(await IndexExistsAsync(body, name, ct), name);
         }
+
+        Assert.Empty(AnyBuildLines(firstHourly));
 
         var start = new CapturingTestLogger();
         await PgTableTuning.ApplyAsync(body, start, ct);
@@ -69,10 +125,19 @@ public sealed class TuningStartPathOneBuildTests
         Assert.DoesNotContain(start.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.Equal(0, start.CountAtLevel(LogLevel.Warning));
 
+        /* #9827: the start says what it builds while collection waits, once before and once after each index, naming the index and the table. */
+        for (var i = 0; i < Upgraded.Length; i++)
+        {
+            AssertBuiltWithBothLines(start, Upgraded[i], UpgradedTables[i], i == 0 ? 300 : null);
+        }
+
+        Assert.Equal(6, AnyBuildLines(start).Count);
+
         PgTableTuning.ResetHourlyMissingWarnings();
         var hourly = new CapturingTestLogger();
         await PgTableTuning.ApplyAsync(body, hourly, hourly: true, ct);
         Assert.DoesNotContain(hourly.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
+        Assert.Empty(AnyBuildLines(hourly));
 
         /* The next start: nothing is missing, nothing is built or deferred, and no index OID changes. */
         var oids = await OidsAsync(body, ct);
@@ -81,6 +146,9 @@ public sealed class TuningStartPathOneBuildTests
         Assert.Equal(oids, await OidsAsync(body, ct));
         Assert.DoesNotContain(next.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.Equal(0, next.CountAtLevel(LogLevel.Warning));
+
+        /* #9827: nothing is missing, so the start says nothing about a build. */
+        Assert.Empty(AnyBuildLines(next));
     }
 
     /// <summary>
@@ -107,6 +175,14 @@ public sealed class TuningStartPathOneBuildTests
         Assert.Single(start1.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.Equal(0, start1.CountAtLevel(LogLevel.Warning));
 
+        /* #9827: the first build may take its own 300 s, the second only the 100 s left of the shared time, and each says how long it took.
+           The deferred third announces no build, because none starts. */
+        Assert.Contains("200.0 s", AssertBuiltWithBothLines(start1, ProcedureStatsNameIndex.IndexName, UpgradedTables[0], 300), StringComparison.Ordinal);
+        Assert.Contains("200.0 s", AssertBuiltWithBothLines(start1, PgTableTuning.CpuWindowCoverIndexName, UpgradedTables[1], 100), StringComparison.Ordinal);
+        Assert.Empty(BeforeBuildLines(start1, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2]));
+        Assert.Empty(AfterBuildLines(start1, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2]));
+        Assert.Equal(4, AnyBuildLines(start1).Count);
+
         var hourly = new CapturingTestLogger();
         await PgTableTuning.ApplyAsync(body, hourly, hourly: true, ct);
         Assert.False(await IndexExistsAsync(body, PgTableTuning.QueryStoreServerHashIndexName, ct), hourly.Joined);
@@ -114,11 +190,17 @@ public sealed class TuningStartPathOneBuildTests
             && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
             && l.Contains("is missing", StringComparison.Ordinal));
 
+        Assert.Empty(AnyBuildLines(hourly));
+
         var start2 = new CapturingTestLogger();
         await PgTableTuning.ApplyAsync(body, start2, ct);
         Assert.True(await IndexExistsAsync(body, PgTableTuning.QueryStoreServerHashIndexName, ct), start2.Joined);
         Assert.DoesNotContain(start2.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.Equal(0, start2.CountAtLevel(LogLevel.Warning));
+
+        /* #9827: the next start announces only the index it builds. */
+        AssertBuiltWithBothLines(start2, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2], 300);
+        Assert.Equal(2, AnyBuildLines(start2).Count);
     }
 
     /// <summary>
@@ -148,6 +230,11 @@ public sealed class TuningStartPathOneBuildTests
             Assert.Single(cut.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
                 && l.Contains(PgTableTuning.QueryStoreServerHashIndexName, StringComparison.Ordinal)
                 && l.Contains("was not built at this start", StringComparison.Ordinal));
+
+            /* #9827: the build that ran out of its 1 s says it started and no line says it was built, and the build before it says both. */
+            Assert.Contains("299.0 s", AssertBuiltWithBothLines(cut, PgTableTuning.CpuWindowCoverIndexName, UpgradedTables[1], 300), StringComparison.Ordinal);
+            Assert.Contains("up to 1 s", Assert.Single(BeforeBuildLines(cut, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2])), StringComparison.Ordinal);
+            Assert.Empty(AfterBuildLines(cut, PgTableTuning.QueryStoreServerHashIndexName, UpgradedTables[2]));
         }
 
         Assert.Equal(0L, await BuildRecordsAsync(body, ct));
@@ -197,6 +284,9 @@ public sealed class TuningStartPathOneBuildTests
         Assert.DoesNotContain(start.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.DoesNotContain(hourly.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
         Assert.DoesNotContain(start.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
+
+        /* #9827: an empty table builds in no time and pauses nothing, so the start does not announce its builds. */
+        Assert.Empty(AnyBuildLines(start));
     }
 
     /// <summary>

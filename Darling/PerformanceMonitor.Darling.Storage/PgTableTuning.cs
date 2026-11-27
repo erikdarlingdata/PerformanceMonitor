@@ -1124,6 +1124,15 @@ public static class PgTableTuning
                         shortened = true;
                     }
 
+                    if (onBudget)
+                    {
+                        /* #9827: collection waits for this build, so the log says which index, on which table, and for how long at most.
+                           commandTimeout is the smaller of the build's own limit and what is left of the start's shared build time. */
+                        logger?.LogInformation(
+                            "Index collect.{Index} on {Table} is missing and is being built at this start: collection waits while it builds, for up to {LimitSeconds} s",
+                            indexName, CreatedIndexTable(statement), commandTimeout);
+                    }
+
                     budgeted = onBudget;
                     buildStartedAt = clock.GetTimestamp();
                     sql = GuardedCreate(statement);
@@ -1156,6 +1165,11 @@ public static class PgTableTuning
                 if (budgeted)
                 {
                     buildElapsed = clock.GetElapsedTime(buildStartedAt);
+
+                    /* #9827: the build the line before it announced finished. A timeout or a busy table logs its own line instead. */
+                    logger?.LogInformation(
+                        "Index collect.{Index} on {Table} was built at this start in {ElapsedSeconds:F1} s",
+                        CreatedIndexName(statement), CreatedIndexTable(statement), buildElapsed.Value.TotalSeconds);
                 }
 
                 applied++;
