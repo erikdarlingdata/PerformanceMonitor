@@ -43,7 +43,6 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public void TheSharedSessionStartsWithTheDatabase_AndThisInstallsOwnFallbackSessionDoesNot(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
@@ -844,7 +843,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.DoesNotContain("sqlserver.sql_text", creates[1], StringComparison.Ordinal);
         Assert.Contains("sqlserver.client_hostname", creates[1], StringComparison.Ordinal);
         Assert.Contains(logger.Lines, l => l.Contains("without statement text", StringComparison.Ordinal));
-        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)]);
+        Assert.True(rig.Alpha.Started[Own(AlwaysOnXeSessionKind.Attention)]);
     }
 
     /// <summary>

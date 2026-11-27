@@ -79,11 +79,12 @@ public sealed class AttentionXeSessionTests
     [Fact]
     public void TheAzureStatement_IsDatabaseScoped_WithTheSameTargetsAndNoServerOnlyOption()
     {
-        var shared = AlwaysOnXeSessions.BuildAzureCreateSql(Attention, AlwaysOnXeSessions.SharedNameFor(Attention));
+        var other = AlwaysOnXeSessions.BuildAzureCreateSql(
+            Attention, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, "ffffffff", Attention));
         var own = AlwaysOnXeSessions.BuildAzureCreateSql(
             Attention, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, Attention));
 
-        foreach (var sql in new[] { shared, own })
+        foreach (var sql in new[] { other, own })
         {
             Assert.Contains("ON DATABASE", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("ON SERVER", sql, StringComparison.Ordinal);
@@ -104,7 +105,7 @@ public sealed class AttentionXeSessionTests
     [Fact]
     public void TheAzureStatementCarriesEveryActionNotOnTheClosedRejectedList()
     {
-        var sql = AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(Attention, AlwaysOnXeSessions.SharedNameFor(Attention));
+        var sql = AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(Attention, OwnName);
 
         foreach (var action in new[] { "client_app_name", "client_hostname", "database_name", "session_id", "sql_text" })
         {
@@ -121,7 +122,7 @@ public sealed class AttentionXeSessionTests
         {
             var shared = AlwaysOnXeSessions.SharedNameFor(kind);
             Assert.True(names.Add(shared), "two kinds share the name " + shared);
-            Assert.Contains("[" + shared + "]", AlwaysOnXeSessions.BuildAzureCreateSql(kind, shared), StringComparison.Ordinal);
+            Assert.Contains("[" + AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, kind) + "]", AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, kind)), StringComparison.Ordinal);
             Assert.Contains("@session_name", AlwaysOnXeSessions.BuildAzureCatalogProbeSql(kind, "test"), StringComparison.Ordinal);
             Assert.False(string.IsNullOrWhiteSpace(AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind)));
         }
