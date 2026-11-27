@@ -339,6 +339,8 @@ public class DarlingTlsKeyFileHardenTests
         }
     }
 
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData(@"C:\certs\darling.pfx")]
     [InlineData("d:/certs/darling.pfx")]

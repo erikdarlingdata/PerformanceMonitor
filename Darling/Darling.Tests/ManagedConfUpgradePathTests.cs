@@ -150,6 +150,8 @@ public sealed class ManagedConfUpgradePathTests : IDisposable
     /// <c>AppendManagedConf</c> delegate calls — classifies Legacy (so it CAN heal on this and every later
     /// start) and its text carries <c>shared_preload_libraries</c> with no include of any other file.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void FreshUpgradeInitdbDirectory_AfterEnsureConfAppended_IsLegacy()
     {

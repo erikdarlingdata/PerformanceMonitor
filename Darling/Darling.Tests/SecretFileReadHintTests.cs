@@ -205,6 +205,8 @@ public sealed class SecretFileReadHintTests
         }
     }
 
+    // #9686: With no stand-in the real system answers, and only on Windows does it add no Unix hint.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void NoUnixSeam_MissingFile_IsTheWindowsWording()
     {
@@ -308,6 +310,8 @@ public sealed class SecretFileReadHintTests
         Assert.DoesNotContain(McpSecret, line, StringComparison.Ordinal);
     }
 
+    // #9686: With no stand-in the real system answers, and only on Windows does it add no Unix hint.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void NoUnixSeam_IsUnchanged()
     {

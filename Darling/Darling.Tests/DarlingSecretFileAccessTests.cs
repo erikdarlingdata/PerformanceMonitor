@@ -281,6 +281,8 @@ public sealed class DarlingSecretFileAccessTests
 
     /// <summary>Only this machine's own account database names the operator group: the lookup is machine-qualified,
     /// and an answer whose domain is anything else (a domain or trusted-domain group) is not accepted.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void OperatorGroup_IsLookedUpOnThisMachineOnly()
     {

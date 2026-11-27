@@ -561,7 +561,8 @@ if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
         recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None, recompressFreeBytes);
 }
 
-var builder = Host.CreateApplicationBuilder(args);
+/* #9837: built on the folder that holds the binaries, never on the working folder (see DarlingHostBinding.ContentRoot). */
+var builder = DarlingProcessServices.CreateHostBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe
    serves interactive debugging and `sc create` installation (plan HP7/Phase 8). */

@@ -118,6 +118,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// CRITICAL, naming the exact rename to do by hand. Held open with no sharing, the file cannot be moved:
     /// the deterministic stand-in for a scanner or a shell holding it in the field.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RestoreLinkedControlFile_ARenameItCannotMake_SaysTheStoreCannotStart_AndNamesTheRename()
     {
@@ -209,6 +211,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// still reverted, since it is the right one for when the file is back, but nothing may call the store
     /// back or the data safe, and the outcome carries the shape to the alert.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_LinkMode_ARestoreThatFails_NeverClaimsARunningStore()
     {
@@ -283,6 +287,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// on the data directory, from the rescued runtime. The revert is refused, the outcome says the runtime was
     /// NOT reverted, and nothing claims a store that is back.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_AServerItCouldNotStop_IsNeverReportedAsReverted()
     {
@@ -357,6 +363,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// ...and when it cannot be moved back, nothing is deleted, the store is not called back, and the CRITICAL
     /// line names the move, the rename inside it, and why restarting first would be the expensive mistake.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task PreCommitFailure_ADataDirectoryItCannotMoveBack_SaysTheStoreCannotStart()
     {
@@ -411,6 +419,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// disk space and a test box gets copy mode. A catch clause that no longer reached the recovery leaves the
     /// store where it is.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpgradeDataDirectory_AFailureBeforeTheCommitPoint_RunsTheRecovery()
     {
@@ -441,6 +451,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// back BEFORE the runtime revert, and records no block, because a shutdown is not a bad package. The old
     /// runtime's pg_ctl.exe is the stand-in program, which fails every command, so the upgrade reaches the step that observes the already-cancelled token.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpgradeDataDirectory_AShutdownBeforeTheCommitPoint_PutsTheDataDirectoryBackFirst()
     {
@@ -480,6 +492,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// answers every command with a failure, so the log carries both stop attempts, and the marker that lets the next start
     /// find the server is kept.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task UpdateTimescaleQuiesced_AShutdownBeforeTheStart_StillRunsTheStopInItsFinally()
     {
@@ -569,6 +583,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// come from looking. The fake runs from the rescued runtime's bin, where the real one runs from, and a
     /// running image does not stop that directory being moved, so without the check this revert really happens.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RevertRuntime_RefusesWhileAPostgresServerHoldsTheDataDirectory()
     {
@@ -640,6 +656,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     }
 
     /// <summary>A standalone (single-user) backend records its PID negated, and holds the directory just the same.</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void FindLivePostmaster_ReadsThePidEitherWayPostgresRecordsIt()
     {
@@ -668,6 +686,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// aside, a second move that failed left NO runtime at all. A file held open under the rescued runtime
     /// makes exactly that happen, since nothing is open under the live one.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RevertRuntime_ASecondMoveThatFails_PutsTheFirstOneBack()
     {

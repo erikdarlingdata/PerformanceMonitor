@@ -134,6 +134,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// classifier is a table, and finding out about one wrong row per CI round is how a table gets fixed
     /// wrong.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Classify_DecidesEveryRowOfTheTable()
     {
@@ -156,6 +158,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// would quietly stop matching on precisely the box that moved it — the one box where a missed check costs
     /// the most.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Classify_HonoursARelocatedProfileRoot()
     {
@@ -174,6 +178,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// A profile redirected outside <c>ProfilesDirectory</c> is still a profile, so the current identity's own
     /// profile is checked as well as the machine root — the same second arm the installer applies.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Classify_AlsoChecksTheCurrentIdentitysOwnProfile()
     {
@@ -225,6 +231,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// <para>Asserted against the separator rather than a literal <c>C:\Users</c>, so the row that matters —
     /// "the drive and the folder are not merely concatenated" — is the one being checked.</para>
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ProfileRootForSystemDrive_IsRooted_NotDriveRelative()
     {
@@ -338,6 +346,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// A refused location produces exactly ONE critical line. The issue's ask was one clear actionable
     /// message, and a diagnosis split across four lines is how the useful one gets quoted without the others.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Report_SaysItOnce_Critically()
     {
@@ -358,6 +368,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// warning every healthy install prints is a warning nobody reads, and this one has to be believed on the
     /// day it appears.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Report_IsSilentForAMachineScopedInstall()
     {
@@ -374,6 +386,8 @@ public sealed class DarlingServiceInstallLocationTests
     /// as a service is perfectly readable as them — so this is the one false positive available to the check,
     /// aimed at someone doing exactly what the docs told them to.
     /// </summary>
+    // #9686: Reads the install location from the Windows registry, which only Windows has.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void Report_IsSilentOnAConsoleRun()
     {

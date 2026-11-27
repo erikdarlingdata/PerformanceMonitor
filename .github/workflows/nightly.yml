@@ -1626,6 +1626,15 @@ jobs:
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-linux-store.yml
 
+  # #9686: the Darling suite on Linux against a Linux TimescaleDB, and the linux-x64 tarball under systemd
+  # (darling-linux-tests.yml, the same workflow a pull request touching its files runs). Both of its jobs are report-only
+  # (continue-on-error), and this job is NOT in publish's needs, so a red one reports and stops nothing.
+  darling-linux-tests:
+    name: Darling Linux tests
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-linux-tests.yml
+
   # #8017: the Darling Helm chart (darling-helm.yml, the same workflow a pull request touching the chart runs): lint, render
   # and schema checks, then installs of both store modes on a kind cluster. Gated like the other jobs here and NOT in
   # publish's needs, for the same reason as the web UI smoke above.

@@ -2192,6 +2192,8 @@ public sealed class DarlingCollectorToggleVerbTests
     /// output, since the apphost is not always built. Whether a non-Windows host keeps the verb needs a non-Windows run, which this
     /// project's Windows target cannot do.
     /// </summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
