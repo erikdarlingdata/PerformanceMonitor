@@ -206,11 +206,13 @@ public sealed partial class PgFactCollector
             {
                 await families[index](context, familyFacts);
             }
-            catch (Exception ex) when (deadline.IsCancellationRequested && !passToken.IsCancellationRequested
+            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, passToken) && deadline.IsCancellationRequested
                                        && AnalysisShutdown.IsShutdownResidue(ex))
             {
                 /* The same shapes a family's own catch lets through once the token it reads is signalled, so nothing the
-                   deadline caused reaches the pass as a failure. */
+                   deadline caused reaches the pass as a failure. The filter opens as every other catch in this file family
+                   does: an abandonment of the pass itself is never taken here, so it unwinds the pass whether or not the
+                   deadline has also fired. */
                 leftOut[index] = true;
             }
             finally

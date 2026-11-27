@@ -277,6 +277,7 @@ public sealed class AnalyzeServerDetectorBesideFamiliesTests
 /// and the window's coverage is stated, and the family reads still run through the real family stage with the context
 /// the service built.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class AnalyzeServerDetectorBesideFamiliesLiveTests
 {
     private const string ServerName = "darling-analyze-detector-beside-e2e";

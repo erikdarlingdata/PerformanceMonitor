@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// every family, and a call with no budget returns a reply that does not carry the field. The budget is zero, which the
 /// service fires before the pass starts, so no assert here waits on a clock.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class AnalyzeServerFamilyBudgetLiveTests
 {
     private const string ServerName = "darling-analyze-family-budget-e2e";
