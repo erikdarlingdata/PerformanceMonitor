@@ -12,7 +12,7 @@ namespace Darling.Tests;
 
 /* #1776 own-store: every test mints its own scratch database through ScratchPostgres and touches nothing on the shared one. */
 /// <summary>
-/// #9796: the slice DELETE of the sightings purge on a real store. Every seeded time and the cutoff are fixed January dates,
+/// #9796: the slice DELETE of the sightings purge (the #9705 move) on a real store. Every seeded time and the cutoff are fixed January dates,
 /// so no row, bound or plan moves with the hour the test runs.
 /// </summary>
 public sealed class RetentionPurgeBitmapSliceLiveTests
@@ -64,23 +64,11 @@ public sealed class RetentionPurgeBitmapSliceLiveTests
 
     private static async Task<(DateTime Start, DateTime End)> ReadBoundsAsync(NpgsqlConnection store, CancellationToken ct)
     {
-        await using var probe = new NpgsqlCommand(DarlingRetention.SliceBoundsProbeSql(Table, TimeColumn), store);
+        await using var probe = new NpgsqlCommand(QueryTagSlimSightings.FirstSliceProbeSql, store);
         probe.Parameters.AddWithValue(Cutoff);
         var bounds = await DarlingRetention.ReadSliceBoundsAsync(probe, ct);
         Assert.NotNull(bounds);
         return bounds.Value;
-    }
-
-    /* The scan node under the DELETE the purge sends for the slice, planned (not run) with the slice's own bounds as parameters. */
-    private static async Task<string> SliceDeleteScanNodeAsync(
-        NpgsqlConnection store, NpgsqlTransaction? transaction, (DateTime Start, DateTime End) slice, CancellationToken ct)
-    {
-        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + DarlingRetention.BoundedSliceDeleteSql(Table, TimeColumn), store, transaction);
-        explain.Parameters.AddWithValue(Cutoff);
-        explain.Parameters.AddWithValue(slice.Start);
-        explain.Parameters.AddWithValue(slice.End);
-        using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
-        return plan.RootElement[0].GetProperty("Plan").GetProperty("Plans")[0].GetProperty("Node Type").GetString()!;
     }
 
     [Fact]
@@ -93,26 +81,9 @@ public sealed class RetentionPurgeBitmapSliceLiveTests
             Assert.Equal(FirstDay.AddDays(1), slice.End.ToUniversalTime());
 
             await ExecAsync(store, $"DELETE FROM {Table} WHERE {TimeColumn} < timestamptz '2026-01-05 00:00:00+00'", ct);
-            await using var probe = new NpgsqlCommand(DarlingRetention.SliceBoundsProbeSql(Table, TimeColumn), store);
+            await using var probe = new NpgsqlCommand(QueryTagSlimSightings.FirstSliceProbeSql, store);
             probe.Parameters.AddWithValue(Cutoff);
             Assert.Null(await DarlingRetention.ReadSliceBoundsAsync(probe, ct));
-        });
-    }
-
-    [Fact]
-    public async Task TheSliceDelete_IsAnIndexScanOnItsOwn_AndABitmapHeapScanUnderThePurgesSetting_AndTheSettingEndsWithItsTransaction()
-    {
-        await WithSeededStoreAsync(async (store, ct) =>
-        {
-            var slice = await ReadBoundsAsync(store, ct);
-
-            Assert.Equal("Index Scan", await SliceDeleteScanNodeAsync(store, transaction: null, slice, ct));
-
-            var underTheSetting = await DarlingRetention.WithSliceDeleteScanSettingAsync(
-                store, (transaction, token) => SliceDeleteScanNodeAsync(store, transaction, slice, token), ct);
-            Assert.Equal("Bitmap Heap Scan", underTheSetting);
-
-            Assert.Equal("Index Scan", await SliceDeleteScanNodeAsync(store, transaction: null, slice, ct));
         });
     }
 
@@ -154,7 +125,7 @@ public sealed class RetentionPurgeBitmapSliceLiveTests
     }
 
     [Fact]
-    public async Task TheSightingsMoveStatement_IsAnIndexScanOnItsOwn_AndABitmapHeapScanUnderThePurgesSetting()
+    public async Task TheSightingsMoveStatement_IsAnIndexScanOnItsOwn_AndABitmapHeapScanUnderThePurgesSetting_AndTheSettingEndsWithItsTransaction()
     {
         await WithSeededStoreAsync(async (store, ct) =>
         {
@@ -165,31 +136,8 @@ public sealed class RetentionPurgeBitmapSliceLiveTests
             var underTheSetting = await DarlingRetention.WithSliceDeleteScanSettingAsync(
                 store, (transaction, token) => MoveDeleteScanNodeAsync(store, transaction, slice, token), ct);
             Assert.Equal("Bitmap Heap Scan", underTheSetting);
-        });
-    }
 
-    [Fact]
-    public async Task TheSliceDelete_UnderTheSetting_RemovesExactlyTheSlicesExpiredRows()
-    {
-        await WithSeededStoreAsync(async (store, ct) =>
-        {
-            var slice = await ReadBoundsAsync(store, ct);
-
-            var deleted = await DarlingRetention.WithSliceDeleteScanSettingAsync(
-                store,
-                async (transaction, token) =>
-                {
-                    await using var delete = new NpgsqlCommand(DarlingRetention.BoundedSliceDeleteSql(Table, TimeColumn), store, transaction);
-                    delete.Parameters.AddWithValue(Cutoff);
-                    delete.Parameters.AddWithValue(slice.Start);
-                    delete.Parameters.AddWithValue(slice.End);
-                    return await delete.ExecuteNonQueryAsync(token);
-                },
-                ct);
-
-            Assert.Equal(RowsPerDay, deleted);
-            await using var left = new NpgsqlCommand($"SELECT count(*) || '|' || to_char(min({TimeColumn}) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') FROM {Table}", store);
-            Assert.Equal($"{RowsPerDay * (Days - 1)}|2026-01-02 00:00:00", (string)(await left.ExecuteScalarAsync(ct))!);
+            Assert.Equal("Index Scan", await MoveDeleteScanNodeAsync(store, transaction: null, slice, ct));
         });
     }
 }

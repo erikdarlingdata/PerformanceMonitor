@@ -2316,25 +2316,6 @@ AND   d.collection_time < g.state_time";
              + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
     }
 
-    /// <summary>
-    /// #9796: the bounds of the slice <see cref="TimeSlicedDeleteSql"/> deletes, read as a statement of its own: the oldest
-    /// expired <paramref name="timeColumn"/> and that time plus one slice width. Both are NULL when no expired row is left,
-    /// which ends the drain. <c>$1</c> is the cutoff. Table and column come from catalog constants (never user input), so
-    /// interpolation is safe.
-    /// </summary>
-    internal static string SliceBoundsProbeSql(string table, string timeColumn)
-        => $"SELECT s.slice_start, s.slice_start + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'"
-         + $" FROM (SELECT min({timeColumn}) AS slice_start FROM {table} WHERE {timeColumn} < $1) AS s";
-
-    /// <summary>
-    /// #9796: the DELETE of the one slice whose bounds <see cref="SliceBoundsProbeSql"/> read, the same rows
-    /// <see cref="TimeSlicedDeleteSql"/> deletes for that slice. <c>$1</c> is the cutoff, <c>$2</c> the slice start
-    /// (inclusive) and <c>$3</c> the slice end (exclusive). The bounds are parameters, so the planner sees their values
-    /// and sizes the slice from the column's statistics.
-    /// </summary>
-    internal static string BoundedSliceDeleteSql(string table, string timeColumn)
-        => $"DELETE FROM {table} WHERE {timeColumn} < $1 AND {timeColumn} >= $2 AND {timeColumn} < $3";
-
     /* #9796: the slice DELETE of a table whose expired rows are scattered through the heap runs with the plain index
        scan off. SET LOCAL lasts to the end of the transaction, and that transaction holds the one DELETE, so the
        bounds probe and every other statement of the purge keep their plans. With the setting on, the planner costs an
@@ -2349,8 +2330,8 @@ AND   d.collection_time < g.state_time";
     internal const string SliceDeleteScanSettingSql = "SET LOCAL enable_indexscan = off";
 
     /// <summary>
-    /// #9796: runs <see cref="SliceBoundsProbeSql"/> (already bound to its cutoff) and returns the slice's bounds, or null when
-    /// no expired row is left.
+    /// #9796: runs a slice probe (already bound to its parameters) that selects the slice's start and end, and returns them, or null
+    /// when the start is NULL because no expired row is left.
     /// </summary>
     internal static async Task<(DateTime Start, DateTime End)?> ReadSliceBoundsAsync(NpgsqlCommand probe, CancellationToken cancellationToken)
     {
@@ -2822,8 +2803,8 @@ WHERE NOT EXISTS
     /// DELETE of a table with scattered expired rows runs under: the DELETE inside the move plans as a Bitmap Heap Scan,
     /// and the setting ends with the commit or with the rollback of a failed move, so it reaches neither the probe nor any
     /// other statement of the purge. The setting's comment has the lab medians: a day that lies all over the heap moves 9.6
-    /// times faster with it, a day in heap order 1.29 times slower. The probe is not <see cref="SliceBoundsProbeSql"/>: it
-    /// starts from the end of the slice before (<paramref name="lowerBound"/>), because nothing vacuums the table between two
+    /// times faster with it, a day in heap order 1.29 times slower. After the first slice the probe starts from
+    /// the end of the slice before (<paramref name="lowerBound"/>), because nothing vacuums the table between two
     /// slices and a probe from the bottom of the index would visit the dead entry of every row the slices before deleted. The
     /// probe and the move read two snapshots, so a slice whose every row the sighting writer moves past the cutoff between
     /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A row written below the bound later
@@ -3593,17 +3574,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     ///
     /// <para><paramref name="sliceStatement"/> (#9705, collect.query_tag_sightings only) ignores <paramref name="deleteSql"/> and
     /// runs each slice as the caller's probe and statement (<see cref="ExecuteSightingsMoveSliceAsync"/>), handing each slice's
-    /// end to the next as its lower bound. The statement's DELETE already runs under <see cref="WithSliceDeleteScanSettingAsync"/>.
-    /// It wins when <paramref name="bitmapSliceTimeColumn"/> is also set.</para>
-    ///
-    /// <para><paramref name="bitmapSliceTimeColumn"/> (#9796) ignores <paramref name="deleteSql"/> and
-    /// runs each slice as two statements: <see cref="SliceBoundsProbeSql"/> reads the slice's bounds, then
-    /// <see cref="BoundedSliceDeleteSql"/> deletes it inside <see cref="WithSliceDeleteScanSettingAsync"/>. On a store with no write
-    /// between the two, the slices, their order and the rows they delete are those of <see cref="TimeSlicedDeleteSql"/>, and a probe
-    /// that finds no expired row ends the drain. The probe and the DELETE read two snapshots, so a slice whose every row a writer
-    /// moves past the cutoff between them deletes 0 rows and ends the drain early, and the next sweep goes on from there. No call
-    /// site passes it since the sightings purge moved to <paramref name="sliceStatement"/>. The parameter stays for the plain
-    /// time-sliced DELETE of a table whose expired rows are scattered through the heap, and the move shares its probe reader and scan setting.</para>
+    /// end to the next as its lower bound. The statement's DELETE already runs under <see cref="WithSliceDeleteScanSettingAsync"/>.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -3617,8 +3588,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         RetentionWalPacer? pacer = null,
         Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
         Func<int, bool, string>? cursoredSql = null,
-        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null,
-        string? bitmapSliceTimeColumn = null)
+        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -3685,39 +3655,6 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
                         var (rows, sliceEnd) = await sliceStatement(connection, cutoff, lowerBound, ct);
                         deleted += rows;
                         lowerBound = sliceEnd ?? lowerBound;
-                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
-                    },
-                    pacer,
-                    cancellationToken);
-            }
-            else if (bitmapSliceTimeColumn is not null)
-            {
-                using var probe = new NpgsqlCommand(SliceBoundsProbeSql(tableName, bitmapSliceTimeColumn), connection) { CommandTimeout = DeleteTimeoutSeconds };
-                probe.Parameters.AddWithValue(cutoff);
-                var sliceDeleteSql = BoundedSliceDeleteSql(tableName, bitmapSliceTimeColumn);
-
-                drained = await DrainBatchesAsync(
-                    async ct =>
-                    {
-                        batches++;
-                        var walBefore = await ReadWalAsync(ct);
-                        var rows = 0;
-                        if (await ReadSliceBoundsAsync(probe, ct) is { } slice)
-                        {
-                            rows = await WithSliceDeleteScanSettingAsync(
-                                connection,
-                                async (transaction, token) =>
-                                {
-                                    using var delete = new NpgsqlCommand(sliceDeleteSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds };
-                                    delete.Parameters.AddWithValue(cutoff);
-                                    delete.Parameters.AddWithValue(slice.Start);
-                                    delete.Parameters.AddWithValue(slice.End);
-                                    return await delete.ExecuteNonQueryAsync(token);
-                                },
-                                ct);
-                        }
-
-                        deleted += rows;
                         return (rows, batchSize, await WalSinceAsync(walBefore, ct));
                     },
                     pacer,
