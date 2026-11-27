@@ -77,12 +77,4 @@ public sealed class AttentionXeSessionLiteTests
         var arm = ReadLite("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
         Assert.Contains("throw new XeSessionEnsureException(captureName, ex)", arm, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void RemovingAServer_ForgetsTheOwnAttentionSessionToo()
-    {
-        var removal = ReadLite("Lite/Services/RemoteCollectorService.LongQueryCompletions.cs");
-
-        Assert.Contains("AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention", removal, StringComparison.Ordinal);
-    }
 }

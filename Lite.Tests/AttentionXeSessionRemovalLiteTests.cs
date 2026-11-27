@@ -123,4 +123,29 @@ public sealed class AttentionXeSessionRemovalLiteTests : IDisposable
 
         Assert.Empty(rig.Drops);
     }
+
+    [Fact]
+    public async Task AServerBeingRemoved_IsNotEnsuredByACycleThatRunsDuringTheDrop()
+    {
+        var rig = await BuildRigAsync(engineEdition: 3);
+        var ensures = 0;
+        rig.Service.XeSessionServerEnsureOverrideForTests = (_, _, _) =>
+        {
+            ensures++;
+            return Task.CompletedTask;
+        };
+
+        /* The removal has begun: the server is still registered, and the collection timer can still run its attention cycle. */
+        await rig.Service.DropLongQueryTraceOfRemovedServerAsync(rig.Server, CancellationToken.None);
+        await rig.Service.EnsureAttentionXeSessionAsync(rig.Server, engineEdition: 3, CancellationToken.None);
+
+        Assert.Equal(0, ensures);
+
+        /* A server that is not being removed is still ensured, so the guard is what stopped the call. */
+        var other = new ServerConnection { ServerName = "attention-removal-kept", DisplayName = "attention-kept" };
+        rig.Servers.AddServer(other);
+        await rig.Service.EnsureAttentionXeSessionAsync(other, engineEdition: 3, CancellationToken.None);
+
+        Assert.Equal(1, ensures);
+    }
 }
