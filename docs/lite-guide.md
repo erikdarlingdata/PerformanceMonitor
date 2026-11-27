@@ -279,6 +279,12 @@ Copy-Item -Path '<data>.previous\*' -Destination '<data>' -Recurse
 
 Then run the scheduled task that starts Lite.
 
+The two copies stay until the next upgrade, whose steps 3 and 4 delete them before they copy again. The data copy is as big as the data folder was at the upgrade. Once the new build runs and you no longer need to roll back, delete both to get the space back:
+
+```powershell
+Remove-Item -Path '<folder>.previous', '<data>.previous' -Recurse -Force
+```
+
 Suppose you start the new version with `--headless` while the old version still runs in the same session. The new version asks the old one to shut down, and then it takes over. A headless start never shows the "close it and continue?" dialog. If the old version runs as an administrator and the new one does not, the new one cannot close it. It writes the reason to the log and exits. Stop the old one first.
 
 #### Where the logs are

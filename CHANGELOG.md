@@ -349,6 +349,9 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Darling logs each large index the start builds, and a timed-out bounded Query Store index build is now recorded** ([#9833])
 - **`install-darling.sh` and `upgrade-darling.sh` no longer refuse for a process in a container that runs from the container's own `/opt/darling`** ([#9836])
 - **On Linux the Darling service no longer watches the whole file system, so a first start under systemd says it is ready at once** ([#9839])
+- **The Linux page's scripted install and upgrade check the tarball's hash in a step of their own, before anything is extracted or run** ([#9843])
+- **Darling on Linux logs an upgrade run as recorded once for each run and state, not every five minutes** ([#9845])
+- **`--grant-script --host` prints the SQL login script by default on Linux and in the Compose container, and the Compose docs gain three fixes** ([#9846])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8624,3 +8627,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9833]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9833
 [#9836]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9836
 [#9839]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9839
+[#9843]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9843
+[#9845]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9845
+[#9846]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9846

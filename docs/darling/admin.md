@@ -28,7 +28,7 @@ Run the command line verbs on the service host, from the folder that holds `Perf
 
 ## Add a server
 
-1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. On Docker Compose, run `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host>` from the compose folder. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
+1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. On Docker Compose, run `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host> --auth sql --username DarlingMonitor` from the compose folder, with the login that the server entry uses in place of `DarlingMonitor`. A Compose service connects with a SQL login, and on Linux a `--host` script with no `--auth` is for a SQL login too. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
 2. Add the server in one of these ways:
    - In the Viewer, click **Add Server** in the sidebar, fill in the dialog and save.
    - On the command line, for a Windows-authentication server, run `.\PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows`.
@@ -324,6 +324,16 @@ The project name is `performancemonitor-darling` in every release, so the new fo
 
    `setup.sh` is not needed, because every secret file and `darling.json` is already there. The new `darling.sample.json` is for reference only.
 3. Make again in `new/docker-compose.yml` every edit you made in `old/docker-compose.yml`. The new file replaces yours, so the `mcp_token` and TLS secrets, a changed port mapping, a `mem_limit` and any added library in the store's preload list are gone until you make them again. Run `diff old/docker-compose.yml new/docker-compose.yml` to see them next to what the release changed. To have nothing to make again, keep your edits in `docker-compose.override.yml` and `.env` beside the compose file, which `docker compose` reads on top of the release's file, and copy those two files into `new` along with `darling.json` and `secrets/` in step 2.
+
+   A `ports:` list in `docker-compose.override.yml` is added to the release's list, so on a host where the release's port is taken `up -d` fails with port in use. To replace the list, write `ports: !override` (Compose 2.24 or later). Your list then replaces the release's whole list, so give every port you want published. This one moves the web dashboard to 55153 and keeps the MCP port:
+
+   ```yaml
+   services:
+     darling:
+       ports: !override
+         - "127.0.0.1:55153:5153"
+         - "127.0.0.1:5152:5152"
+   ```
 4. From the new folder, pull the images and start the stack. Use `up -d` and not `restart`. `restart` keeps each container as it was made, with the old image, the old flags and the old secrets, and only `up -d` recreates a container whose compose file changed:
 
    ```bash
