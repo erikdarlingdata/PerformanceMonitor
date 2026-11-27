@@ -89,7 +89,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         var queries = ViewerFile("ViewerServerTab.Queries.cs");
         var load = MethodBody(queries, @"private async Task LoadQueryStoreRegressionsAsync\(");
 
-        Assert.Equal(1, Matches(load, @"var floorTask = _dataService\.GetQueryStoreRegressionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var floorTask = Timed\(timer,\s*""data start"",\s*QueriesReadsOverride\?\.RegressionsDataStart\?\.Invoke\(startUtc,\s*endUtc\)\s*\?\?\s*_dataService\.GetQueryStoreRegressionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(load, @"await ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,\s*floorTask,\s*startUtc\);"));
         Assert.DoesNotContain("UpdateTruncationBanner(", load, StringComparison.Ordinal);
 

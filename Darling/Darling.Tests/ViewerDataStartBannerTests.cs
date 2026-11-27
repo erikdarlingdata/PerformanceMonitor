@@ -130,7 +130,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
         var body = drill.Value;
 
         Assert.Equal(1, Matches(body,
-            @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc\);\s*var dataReadTask = (?:Timed\(timer,\s*""[^""]+"",\s*)?_dataService\.GetLatestQuerySnapshotsAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc,"));
+            @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc\)\);\s*var dataReadTask = (?:Timed\(timer,\s*""[^""]+"",\s*)?_dataService\.GetLatestQuerySnapshotsAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc,"));
         /* #5034: the read is awaited beside its probe, so a probe that fails after the read threw is watched. The rows come from the same read. */
         Assert.Equal(1, Matches(body,
             @"await AwaitReadWatchingProbeAsync\(dataReadTask,\s*dataStartTask,\s*""Active Queries""\);\s*var \(totalCount, snapshots\) = dataReadTask\.Result;"));
@@ -197,7 +197,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, $@"var floorTask = Timed\(timer, ""data start"", _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(tab,
-            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*startUtc,\s*endUtc\);)?\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask(?:,\s*\(\) => Timed\(timer,\s*""slicer read \(retry\)"",[^;]*?\))?\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*startUtc,\s*endUtc(?:,\s*timer)?\);)?\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask(?:,\s*\(\) => Timed\(timer,\s*""slicer read \(retry\)"",[^;]*?\))?\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
     }
 
     [Theory]
