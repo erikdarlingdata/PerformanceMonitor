@@ -3873,6 +3873,31 @@ function Get-CimInstance {
         probe.AppendLine(ConfirmProbeAclFunction);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
+            # #9898: the lock makes pg-runtime-prev\ itself, and a folder a process makes is owned by its token's default owner.
+            # An elevated interactive token's is Administrators (a CI runner, a developer's shell) and an SSH logon's is the user,
+            # so the lock rightly reports that folder as owned by a user there. This test means the Administrators case: state it
+            # on this probe's own token (children inherit it, nothing outside this process changes). A token that cannot take the
+            # change (not elevated) keeps its own owner, and the not-elevated branch below is the one that reads it.
+            Add-Type -Namespace Pm9898 -Name DefaultOwner -MemberDefinition '
+                [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+                [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length);
+                [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+                [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+                public static int SetOwner(byte[] sid) {
+                    IntPtr token;
+                    if (!OpenProcessToken(GetCurrentProcess(), 0x88, out token)) { return Marshal.GetLastWin32Error(); }
+                    IntPtr block = Marshal.AllocHGlobal(IntPtr.Size + sid.Length);
+                    try {
+                        Marshal.Copy(sid, 0, block + IntPtr.Size, sid.Length);
+                        Marshal.WriteIntPtr(block, block + IntPtr.Size);
+                        return SetTokenInformation(token, 4, block, IntPtr.Size) ? 0 : Marshal.GetLastWin32Error();
+                    }
+                    finally { Marshal.FreeHGlobal(block); CloseHandle(token); }
+                }'
+            $adminsSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+            $adminsBytes = New-Object byte[] $adminsSid.BinaryLength
+            $adminsSid.GetBinaryForm($adminsBytes, 0)
+            'defaultOwnerSet=' + [Pm9898.DefaultOwner]::SetOwner($adminsBytes)
             $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4034-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             try {
                 New-Item -ItemType Directory -Path "$root\pg-runtime\pgsql\bin", "$root\planted" -Force | Out-Null
