@@ -73,9 +73,6 @@ public sealed class StoreObjectConvergenceTests
            applied only on a store without it (#3913): it skips exactly the stages the start path runs inside its own TimescaleDB
            gate. A second filter would be a step one cadence runs and the other does not. #9858 added the one other input, the
            steps this start already ran, and the behaviour is held in StoreObjectConvergenceOncePerStartTests. */
-        var hourly = MethodBody(code, HourlySignature);
-        Assert.False(string.IsNullOrEmpty(hourly), "could not locate ConvergeStoreObjectsAsync — this pin cannot silently pass on a parse miss");
-        Assert.Contains("SelectHourlyConvergenceSteps(s_storeObjectConvergence", hourly, StringComparison.Ordinal);
         var plainStoreSteps = DarlingWorker.SelectHourlyConvergenceSteps(DarlingWorker.StoreObjectConvergence, timescaleAvailable: false, ranAtStartup: null, out _);
         Assert.Equal(
             DarlingWorker.StoreObjectConvergence.Where(st => !DarlingWorker.NeedsTimescale(st.Stage)).Select(st => st.Name),
@@ -85,9 +82,8 @@ public sealed class StoreObjectConvergenceTests
         Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Ungated));
         Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Tuning));
 
-        /* The start path reaches the list ONLY through the segment walk, and the segment walk is the only
-           iteration of the list itself: the hourly pass goes through the selection above. */
-        Assert.Equal(1, CountOf(code, "foreach (var step in s_storeObjectConvergence)"));
+        /* The start path reaches the list through the segment walk. That the hourly pass goes through the selection above is held by
+           the behaviour tests in StoreObjectConvergenceOncePerStartTests, which drive ConvergeStoreObjectsAsync itself. */
         var segment = MethodBody(code, SegmentSignature);
         Assert.False(string.IsNullOrEmpty(segment));
         Assert.Contains("foreach (var step in s_storeObjectConvergence)", segment, StringComparison.Ordinal);

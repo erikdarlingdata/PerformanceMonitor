@@ -98,31 +98,87 @@ public sealed class StoreObjectConvergenceOncePerStartTests
         Assert.Equal(2, skipped);
     }
 
+    /// <summary>
+    /// A step whose hourly delegate is a different piece of work is never skipped (#9858 round 2). "rollup chunk visibility" does
+    /// nothing at start and all of its work on the hourly pass, so a start that "completed" it must still run it on the first hourly pass.
+    /// </summary>
     [Fact]
-    public void WhenEveryRealStepRanAtStartup_TheFirstHourlyPassRunsNone_AndALaterPassRunsAll()
+    public async Task WhenEveryRealStepRanAtStartup_TheFirstHourlyPassStillRunsTheStepsWithTheirOwnHourlyWork_AndALaterPassRunsAll()
     {
         var ranAtStartup = new HashSet<string>(DarlingWorker.StoreObjectConvergence.Select(s => s.Name), StringComparer.Ordinal);
+        var hourlyOnly = DarlingWorker.StoreObjectConvergence
+            .Where(s => s.HourlyEnsureAsync is not null && !ReferenceEquals(s.HourlyEnsureAsync, s.EnsureAsync))
+            .Select(s => s.Name)
+            .ToList();
+        Assert.Contains("rollup chunk visibility", hourlyOnly);
 
         var first = DarlingWorker.SelectHourlyConvergenceSteps(DarlingWorker.StoreObjectConvergence, timescaleAvailable: true, ranAtStartup, out var skipped);
-        Assert.Empty(first);
-        Assert.Equal(DarlingWorker.StoreObjectConvergence.Count, skipped);
+        Assert.Equal(hourlyOnly, first.Select(s => s.Name));
+        Assert.Equal(DarlingWorker.StoreObjectConvergence.Count - hourlyOnly.Count, skipped);
+
+        /* The step the start pass completed as a no-op really does its work only through the hourly delegate. */
+        var rollup = DarlingWorker.StoreObjectConvergence.Single(s => s.Name == "rollup chunk visibility");
+        Assert.Equal(0, await rollup.EnsureAsync(null!, NullLogger.Instance, TestContext.Current.CancellationToken));
 
         var later = DarlingWorker.SelectHourlyConvergenceSteps(DarlingWorker.StoreObjectConvergence, timescaleAvailable: true, null, out _);
         Assert.Equal(DarlingWorker.StoreObjectConvergence.Count, later.Count);
     }
 
+    [Fact]
+    public async Task AStepWithItsOwnHourlyDelegate_RunsOnTheFirstHourlyPass_ButOneWhoseHourlyDelegateIsTheStartOneIsSkipped()
+    {
+        var ran = new List<string>();
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> shared = (_, _, _) =>
+        {
+            ran.Add("shared");
+            return Task.FromResult(0);
+        };
+        var steps = new[]
+        {
+            new DarlingWorker.StoreObjectConvergenceStep(
+                "no hourly delegate", DarlingWorker.StoreObjectConvergenceStage.Ungated, DarlingWorker.StoreObjectChangeSignal.InPlace,
+                (_, _, _) => Task.FromResult(0)),
+            new DarlingWorker.StoreObjectConvergenceStep(
+                "hourly is the start one", DarlingWorker.StoreObjectConvergenceStage.Ungated, DarlingWorker.StoreObjectChangeSignal.InPlace, shared, shared),
+            new DarlingWorker.StoreObjectConvergenceStep(
+                "own hourly delegate", DarlingWorker.StoreObjectConvergenceStage.Tuning, DarlingWorker.StoreObjectChangeSignal.InPlace,
+                (_, _, _) => Task.FromResult(0),
+                (_, _, _) =>
+                {
+                    ran.Add("own hourly work");
+                    return Task.FromResult(1);
+                }),
+        };
+
+        var startTally = await RunStartPassAsync(steps);
+        Assert.Equal(steps.Select(s => s.Name), startTally.Completed);
+
+        var ranAtStartup = new HashSet<string>(startTally.Completed, StringComparer.Ordinal);
+        var first = DarlingWorker.SelectHourlyConvergenceSteps(steps, timescaleAvailable: true, ranAtStartup, out var skipped);
+        Assert.Equal(new[] { "own hourly delegate" }, first.Select(s => s.Name));
+        Assert.Equal(2, skipped);
+
+        var hourlyTally = new DarlingWorker.StoreObjectConvergenceTally();
+        foreach (var step in first)
+        {
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(
+                null!, step, hourlyTally, new CapturingTestLogger(), TestContext.Current.CancellationToken, hourly: true);
+        }
+
+        Assert.Contains("own hourly work", ran);
+    }
+
     /// <summary>
-    /// The hourly line is the proof the hourly path is wired on this store (#3817), so a first pass that has nothing left to run
-    /// still writes it at Information, saying why. The store is a data source on a closed port: a pass that opened a connection
-    /// would fail on it and log the "could not run" warning instead.
+    /// Two real <c>ConvergeStoreObjectsAsync</c> calls, through the worker's own hooks: the first, with everything completed at start, selects only
+    /// the steps with hourly work of their own, and the second, which finds the set already taken, selects the whole list. The store is a data
+    /// source on a closed port, so each pass fails on its connection after it has chosen its steps, which is all this reads.
     /// </summary>
     [Fact]
-    public async Task WhenEveryStepRanAtStartup_TheFirstHourlyPassLogsOneInformationLine_AndOpensNoConnection()
+    public async Task TheFirstRealPassSkipsWhatTheStartRan_AndTheSecondRealPassRunsTheWholeList()
     {
-        var logger = new WorkerLogger();
         await using var closedStore = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1;Pooling=false").Build();
         var worker = new DarlingWorker(
-            logger,
+            new WorkerLogger(),
             NullLoggerFactory.Instance,
             new McpRuntimeState(),
             new WebRuntimeState(),
@@ -134,14 +190,17 @@ public sealed class StoreObjectConvergenceOncePerStartTests
         {
             StoreForTests = closedStore,
         };
+        var selections = new List<IReadOnlyList<string>>();
+        worker.ConvergenceSelectionObserverForTests = selections.Add;
+        var allNames = DarlingWorker.StoreObjectConvergence.Select(s => s.Name).ToList();
 
-        await worker.RunFirstHourlyConvergenceForTestsAsync(
-            DarlingWorker.StoreObjectConvergence.Select(s => s.Name), timescaleAvailable: false, TestContext.Current.CancellationToken);
+        await worker.RunFirstHourlyConvergenceForTestsAsync(allNames, timescaleAvailable: true, TestContext.Current.CancellationToken);
+        await worker.RunHourlyConvergenceForTestsAsync(timescaleAvailable: true, TestContext.Current.CancellationToken);
 
-        var convergenceLines = logger.Captured.Lines.Where(l => l.Contains("Store object convergence", StringComparison.Ordinal)).ToList();
-        var line = Assert.Single(convergenceLines, l => l.StartsWith("Information: Store object convergence:", StringComparison.Ordinal));
-        Assert.DoesNotContain("at startup", line, StringComparison.Ordinal);
-        Assert.DoesNotContain(convergenceLines, l => l.Contains("could not run", StringComparison.Ordinal));
+        Assert.Equal(2, selections.Count);
+        Assert.Contains("rollup chunk visibility", selections[0]);
+        Assert.True(selections[0].Count < allNames.Count);
+        Assert.Equal(allNames, selections[1]);
     }
 
     private sealed class WorkerLogger : ILogger<DarlingWorker>

@@ -1205,6 +1205,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                step once. Taken here, so only that first pass skips and every later pass runs the whole list. */
             var ranAtStartup = Interlocked.Exchange(ref _convergedAtStartup, null);
             var selected = SelectHourlyConvergenceSteps(s_storeObjectConvergence, timescaleAvailable, ranAtStartup, out var skippedAsRanAtStartup);
+            ConvergenceSelectionObserverForTests?.Invoke(selected.Select(step => step.Name).ToList());
 
             if (selected.Count > 0)
             {
@@ -1235,9 +1236,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             else
             {
                 /* The line stays at Information (#3817): it is the proof the hourly path is wired on this store, in the log window an
-                   operator reads after a restart. The start's own pass ran the steps, so this one says it ran none and why (#9858). */
+                   operator reads after a restart. Every step this pass left out already ran in the start's own pass, so it says it ran none and
+                   why (#9858). A step with an hourly delegate of its own never lands here, so the shipped list always runs at least
+                   one step and this line is the guard for a list that has none. */
                 _logger.LogInformation(
-                    "Store object convergence: 0 steps, all {Skipped} ran in this start's own pass (#9858), {DurationMs} ms",
+                    "Store object convergence: 0 steps, {Skipped} already ran in this start's own pass (#9858), {DurationMs} ms",
                     skippedAsRanAtStartup, passClock.ElapsedMilliseconds);
             }
 

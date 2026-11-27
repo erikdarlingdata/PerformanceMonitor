@@ -560,8 +560,19 @@ public sealed partial class DarlingWorker : BackgroundService
     private HashSet<string>? _convergedAtStartup;
 
     /// <summary>
+    /// True when the hourly pass would run the very work the start pass already did (#9858): the step has no hourly delegate of its
+    /// own, or its hourly delegate is the start one. A step with a different hourly delegate does work the start pass did not
+    /// (the start pass of "rollup chunk visibility" is a no-op and its hourly delegate is the whole step, the hourly compression and
+    /// tuning passes are the conservative variants that run beside live collection), so skipping it would hold that work back
+    /// an hour after every start, and forever on a service restarted more often than hourly.
+    /// </summary>
+    private static bool HourlyWorkIsStartWork(StoreObjectConvergenceStep step) =>
+        step.HourlyEnsureAsync is null || ReferenceEquals(step.HourlyEnsureAsync, step.EnsureAsync);
+
+    /// <summary>
     /// The steps one hourly pass runs (#3913's TimescaleDB filter, and #9858's skip of what this start's own pass already ran).
-    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start.
+    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start. Only a step whose hourly work is its start
+    /// work is skipped (<see cref="HourlyWorkIsStartWork"/>), so the first pass still runs every step with an hourly delegate of its own.
     /// </summary>
     internal static List<StoreObjectConvergenceStep> SelectHourlyConvergenceSteps(
         IEnumerable<StoreObjectConvergenceStep> steps, bool timescaleAvailable, ISet<string>? ranAtStartup, out int skippedAsRanAtStartup)
@@ -576,7 +587,7 @@ public sealed partial class DarlingWorker : BackgroundService
                 continue;
             }
 
-            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name))
+            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name) && HourlyWorkIsStartWork(step))
             {
                 skippedAsRanAtStartup++;
                 continue;
@@ -1007,12 +1018,19 @@ public sealed partial class DarlingWorker : BackgroundService
         set => _postgres = value;
     }
 
+    /// <summary>#9858: a test sets this to read the step names each hourly convergence pass selected, in order, before the pass opens its connection.</summary>
+    internal Action<IReadOnlyList<string>>? ConvergenceSelectionObserverForTests { get; set; }
+
     /// <summary>#9858: lets a test run the first hourly convergence pass as a start leaves it, with the set of steps the start's own pass completed.</summary>
     internal async Task RunFirstHourlyConvergenceForTestsAsync(IEnumerable<string> ranAtStartup, bool timescaleAvailable, CancellationToken cancellationToken)
     {
         _convergedAtStartup = new HashSet<string>(ranAtStartup, StringComparer.Ordinal);
         await ConvergeStoreObjectsAsync(cancellationToken, timescaleAvailable);
     }
+
+    /// <summary>#9858: lets a test run a convergence pass as it runs once the first hourly pass has taken the start's set, so the whole list is selected.</summary>
+    internal Task RunHourlyConvergenceForTestsAsync(bool timescaleAvailable, CancellationToken cancellationToken) =>
+        ConvergeStoreObjectsAsync(cancellationToken, timescaleAvailable);
 
     /// <summary>
     /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
