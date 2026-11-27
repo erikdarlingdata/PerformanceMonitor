@@ -310,7 +310,7 @@ public sealed class DarlingOwnStoreExposureTests : IDisposable
         var login = await ResolveInContainerAsync(
             DarlingStoreLogins.Surface.Web, OwnStore(webConnectionString: Dedicated), logger, exposed: true, Provisioned());
 
-        Assert.Equal(WebRole, login);
+        Assert.Equal(Dedicated, login);
         Assert.Empty(logger.Lines);
     }
 
