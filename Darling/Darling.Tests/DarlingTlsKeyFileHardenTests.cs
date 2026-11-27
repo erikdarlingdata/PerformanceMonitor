@@ -1142,6 +1142,8 @@ public class DarlingTlsKeyFileHardenTests
             return;
         }
 
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
+
         var scratch = Directory.CreateTempSubdirectory("darling-5700-denied-");
         try
         {

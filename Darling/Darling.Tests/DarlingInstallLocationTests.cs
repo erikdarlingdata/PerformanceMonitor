@@ -2288,6 +2288,7 @@ function Get-CimInstance {
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheNativeOwnerStep_ChangesNothingOutsideTheRoot_AndGivesEveryOtherOutcomeItsOwnResult(string scriptName, string shell)
     {
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
@@ -2398,6 +2399,7 @@ function Get-CimInstance {
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheNativeOwnerStep_PutsThePrivilegesBackAsItFoundThem(string scriptName, string shell)
     {
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
@@ -3732,6 +3734,7 @@ function Get-CimInstance {
     [InlineData("upgrade-darling.ps1")]
     public void ThePreLockWritableExtractionCheck_ReportsAFolderItCannotList_RatherThanSkippingIt(string scriptName)
     {
+        TokenPrivilegeProbe.SkipWhenAnyEnabled();
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
