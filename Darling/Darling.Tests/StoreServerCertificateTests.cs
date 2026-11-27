@@ -132,16 +132,95 @@ public sealed class StoreServerCertificateTests
         }
     }
 
+    /// <summary>
+    /// #9908: the certificate context for a test listener. An SslStream server never sends a self-signed root: SChannel leaves it out of
+    /// the Certificate message, and .NET on Linux trims it from the list it gives OpenSSL. So the listener is given its own certificate
+    /// and nothing else, and sends exactly that. Extra certificates would not reach the client, and on Windows .NET would copy them into
+    /// the machine's Intermediate Certification Authorities store.
+    /// </summary>
+    private static SslStreamCertificateContext LeafOnlyContext(X509Certificate2 serverWithKey) =>
+        SslStreamCertificateContext.Create(serverWithKey, additionalCertificates: null, offline: true);
+
+    /// <summary>A chain as the validation callback receives it: built by this machine's chain engine from <paramref name="known"/> (what the
+    /// engine can find), then carrying <paramref name="sent"/> (what the store sent) in its policy's ExtraStore, where SslStream puts it.</summary>
+    private static X509Chain BuiltChain(X509Certificate2 server, X509Certificate2[] known, X509Certificate2[] sent)
+    {
+        var chain = new X509Chain();
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.DisableCertificateDownloads = true;
+        chain.ChainPolicy.ExtraStore.AddRange(known);
+        _ = chain.Build(server);
+        chain.ChainPolicy.ExtraStore.Clear();
+        chain.ChainPolicy.ExtraStore.AddRange(sent);
+        return chain;
+    }
+
     [Fact]
-    public async Task Handshake_AStoreThatIsNotManaged_ReportsTheCertificateItPresents()
+    public void Presented_TheStoreSendsItsRoot_AndTheBuiltChainStopsAtTheServerCertificate_ReportsTheRootItSent()
+    {
+        var generated = StoreTlsCertificates.Create("cert-test-host", IPAddress.Loopback, 10);
+        using var leaf = X509Certificate2.CreateFromPem(generated.ServerCertChainPem);
+        using var root = X509Certificate2.CreateFromPem(generated.RootCertPem);
+
+        /* The engine is given nothing but the server certificate, and the root was generated a moment ago, so no certificate store holds
+           it: the built chain is the server certificate alone. The store sent both. */
+        using var chain = BuiltChain(leaf, known: [], sent: [leaf, root]);
+        Assert.Single(chain.ChainElements);
+
+        var report = StoreServerCertificate.FromPresented(leaf, chain);
+
+        Assert.NotNull(report);
+        Assert.Equal("on", report.Tls);
+        Assert.Equal("tls_handshake", report.Source);
+        Assert.Equal(Hex(leaf), report.Server!.Sha256);
+        Assert.NotNull(report.Root);
+        Assert.Equal(Hex(root), report.Root.Sha256);
+        Assert.Equal(root.Subject, report.Root.Subject);
+    }
+
+    [Fact]
+    public void Presented_TheBuiltChainEndsInARootTheStoreDidNotSend_ReportsNoRoot()
+    {
+        var generated = StoreTlsCertificates.Create("cert-test-host", IPAddress.Loopback, 10);
+        using var leaf = X509Certificate2.CreateFromPem(generated.ServerCertChainPem);
+        using var root = X509Certificate2.CreateFromPem(generated.RootCertPem);
+
+        /* The engine finds the root on this machine, as it does when a certificate store holds it, so the built chain ends in it. The store
+           sent only its own certificate. */
+        using var chain = BuiltChain(leaf, known: [root], sent: [leaf]);
+        Assert.Equal(2, chain.ChainElements.Count);
+
+        var report = StoreServerCertificate.FromPresented(leaf, chain);
+
+        Assert.NotNull(report);
+        Assert.Equal(Hex(leaf), report.Server!.Sha256);
+        Assert.Null(report.Root);
+    }
+
+    [Fact]
+    public void Presented_NoCertificate_IsNull_AndNoChain_ReportsTheServerCertificateAlone()
+    {
+        var generated = StoreTlsCertificates.Create("cert-test-host", IPAddress.Loopback, 10);
+        using var leaf = X509Certificate2.CreateFromPem(generated.ServerCertChainPem);
+        using var chain = new X509Chain();
+
+        Assert.Null(StoreServerCertificate.FromPresented(null, chain));
+
+        var report = StoreServerCertificate.FromPresented(leaf, null);
+        Assert.NotNull(report);
+        Assert.Equal(Hex(leaf), report.Server!.Sha256);
+        Assert.Null(report.Root);
+    }
+
+    [Fact]
+    public async Task Handshake_AStoreThatSendsOnlyItsOwnCertificate_ReportsItAndNoRoot()
     {
         var ct = TestContext.Current.CancellationToken;
         var generated = StoreTlsCertificates.Create("cert-test-host", IPAddress.Loopback, 10);
         using var leaf = X509Certificate2.CreateFromPem(generated.ServerCertChainPem);
-        using var root = X509Certificate2.CreateFromPem(generated.RootCertPem);
         using var withKey = X509Certificate2.CreateFromPem(generated.ServerCertChainPem, generated.ServerKeyPem);
         using var usable = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
-        var context = SslStreamCertificateContext.Create(usable, new X509Certificate2Collection(root), offline: true);
+        var context = LeafOnlyContext(usable);
 
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -181,7 +260,7 @@ public sealed class StoreServerCertificateTests
             Assert.Equal("tls_handshake", report.Source);
             Assert.Equal(Hex(leaf), report.Server!.Sha256);
             Assert.Equal(leaf.NotAfter.ToUniversalTime(), report.Server.NotAfterUtc);
-            Assert.Equal(Hex(root), report.Root!.Sha256);
+            Assert.Null(report.Root);
             Assert.False(await sawStartup.Task.WaitAsync(TimeSpan.FromSeconds(10), ct), "the client sent bytes after the handshake");
         }
         finally
@@ -269,10 +348,9 @@ public sealed class StoreServerCertificateTests
     {
         var ct = TestContext.Current.CancellationToken;
         var generated = StoreTlsCertificates.Create("cert-cache-host", IPAddress.Loopback, 10);
-        using var root = X509Certificate2.CreateFromPem(generated.RootCertPem);
         using var withKey = X509Certificate2.CreateFromPem(generated.ServerCertChainPem, generated.ServerKeyPem);
         using var usable = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
-        var context = SslStreamCertificateContext.Create(usable, new X509Certificate2Collection(root), offline: true);
+        var context = LeafOnlyContext(usable);
 
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();

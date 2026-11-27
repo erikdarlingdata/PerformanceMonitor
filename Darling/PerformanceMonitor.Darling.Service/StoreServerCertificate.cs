@@ -29,8 +29,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// presents in the TLS handshake, through Npgsql's validation callback (<c>tls_handshake</c>). The handshake needs no password: the
 /// certificate arrives before sign-in. When the store's <c>ssl</c> setting is off, the answer is <c>off</c> and nothing else is read.</para>
 ///
-/// <para>The root is the self-signed certificate that is not the server's own: the one in the chain file or the handshake chain, else
-/// (managed) the <c>root.crt</c> beside it. A certificate that is its own root has none to report.</para>
+/// <para>The root is the self-signed certificate that is not the server's own: the one in the chain file or among the certificates the
+/// store sends in the handshake, else (managed) the <c>root.crt</c> beside it. A certificate that is its own root has none to report.</para>
 /// </summary>
 internal static class StoreServerCertificate
 {
@@ -177,8 +177,7 @@ internal static class StoreServerCertificate
     /// </summary>
     internal static async Task<Report> FromHandshakeAsync(string connectionString, CancellationToken cancellationToken)
     {
-        X509Certificate2? server = null;
-        var chain = new List<X509Certificate2>();
+        Report? presented = null;
         try
         {
             if (UsesUnixSocket(new NpgsqlConnectionStringBuilder(connectionString)))
@@ -198,21 +197,15 @@ internal static class StoreServerCertificate
                 CommandTimeout = (int)HandshakeTimeout.TotalSeconds,
             };
             var dataSourceBuilder = new NpgsqlDataSourceBuilder(PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
-            dataSourceBuilder.UseSslClientAuthenticationOptionsCallback(options => options.RemoteCertificateValidationCallback = (_, certificate, presentedChain, _) =>
+            dataSourceBuilder.UseSslClientAuthenticationOptionsCallback(options =>
             {
-                if (certificate is not null)
+                /* With no chain policy of the caller's, SslStream makes its own, whose ExtraStore then holds only what the store sent. */
+                options.CertificateChainPolicy = null;
+                options.RemoteCertificateValidationCallback = (_, certificate, presentedChain, _) =>
                 {
-                    server = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-                    if (presentedChain is not null)
-                    {
-                        foreach (var element in presentedChain.ChainElements)
-                        {
-                            chain.Add(X509CertificateLoader.LoadCertificate(element.Certificate.RawData));
-                        }
-                    }
-                }
-
-                return false;
+                    presented = FromPresented(certificate, presentedChain) ?? presented;
+                    return false;
+                };
             });
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -222,7 +215,7 @@ internal static class StoreServerCertificate
             {
                 await using var connection = await dataSource.OpenConnectionAsync(timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception) when (server is not null)
+            catch (Exception) when (presented is not null)
             {
                 /* The callback ended the handshake on purpose once it had the certificate. That failure is not what this read is for. */
             }
@@ -236,12 +229,27 @@ internal static class StoreServerCertificate
             return Unavailable($"The store did not complete a TLS handshake ({ex.GetType().Name}), so its certificate could not be read.");
         }
 
-        if (server is null)
+        return presented ?? Unavailable("The store did not complete a TLS handshake, so its certificate could not be read.");
+    }
+
+    /// <summary>
+    /// #9908: the answer for what a store sent in its handshake. <paramref name="certificate"/> is its server certificate and
+    /// <paramref name="presentedChain"/> is the chain SslStream hands the validation callback. The root is looked for in that chain's
+    /// <c>ChainPolicy.ExtraStore</c>, which SslStream fills with the certificates the store sent, on Windows and on Linux. It is not looked
+    /// for in <c>ChainElements</c>: that is the chain this machine's chain engine built, which can end in a root from this machine's
+    /// certificate stores that the store never sent, and can differ from one read of the same store to the next. So a store that sends
+    /// only its own certificate, or that and its intermediates, has no root in the answer, whatever this machine holds. Null when the store
+    /// presented no certificate.
+    /// </summary>
+    internal static Report? FromPresented(X509Certificate? certificate, X509Chain? presentedChain)
+    {
+        if (certificate is null)
         {
-            return Unavailable("The store did not complete a TLS handshake, so its certificate could not be read.");
+            return null;
         }
 
-        var root = FindRoot(chain, server);
+        using var server = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+        var root = presentedChain is null ? null : FindRoot(presentedChain.ChainPolicy.ExtraStore, server);
         return new Report(TlsOn, HandshakeSource, Describe(server), root is null ? null : Describe(root), null);
     }
 
