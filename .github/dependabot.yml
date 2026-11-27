@@ -29,29 +29,35 @@
 # does not issue, and a push made with GITHUB_TOKEN triggers no workflow run — so the healed commit would
 # carry no checks at all, which is a worse place to be than one red check that names its own remedy (#3143).
 #
-# ── Reviewing a Microsoft.Data.SqlClient or Azure.Identity bump ────────────────────────────────────────
+# ── Reviewing a Microsoft.Data.SqlClient or Azure.Core bump ────────────────────────────────────────────
 #
-# Read this before approving one. Lite's EntraDefaultCredential mode is broker-free only because
-# Azure.Identity.Broker is absent from the dependency graph: DefaultAzureCredential's chain DOES contain a
-# broker link (ExcludeBrokerCredential defaults to false, and SqlClient sets only
+# Read this before approving one. Lite's EntraDefaultCredential mode is broker-free only because the
+# Azure.Identity.Broker package is absent from the dependency graph. DefaultAzureCredential's chain DOES
+# contain a broker link (ExcludeBrokerCredential defaults to false, and SqlClient sets only
 # ExcludeInteractiveBrowserCredential), and that link is inert solely because it resolves its options by
-# reflection and gives up when the separate package is not referenced.
+# reflection and gives up when that separate package is not referenced. The call is
+# Type.GetType("Azure.Identity.Broker.DevelopmentBrokerOptions, Azure.Identity.Broker", false) in
+# DefaultAzureCredentialFactory.TryCreateDevelopmentBrokerOptions, read in Azure.Core 1.65.0 (#9869).
 #
-# Azure.Identity is not pinned in Directory.Packages.props. It arrives transitively through
-# Microsoft.Data.SqlClient.Extensions.Azure's version range, at one resolved version across the seven lock
-# files that carry it — so a SqlClient bump can move it without a props diff mentioning it, which is the
-# same transitive-closure blind spot the --force-evaluate step above exists for.
+# SqlClient 8.0.0 dropped the Azure.Identity package. The credential types (still in the Azure.Identity
+# namespace) and AzureIdentityEventSource now ship inside Azure.Core, which reaches the graph through
+# Microsoft.Data.SqlClient, then Microsoft.Data.SqlClient.Extensions.Azure, then Azure.Core. Azure.Core is
+# not pinned in Directory.Packages.props, so a SqlClient bump can move it without a props diff mentioning
+# it, which is the same transitive-closure blind spot the --force-evaluate step above exists for.
 #
 # Two pins in Lite.Tests/EntraDefaultCredentialTests.cs assert that absence, each with a positive control,
-# and BOTH of them assert the absence of that PACKAGE — today's mechanism, not the outcome. So check, by
-# hand, whether the bump changed either of:
+# and BOTH assert the absence of that ASSEMBLY, today's mechanism, not the outcome. So check, by hand,
+# whether the bump changed any of:
 #
-#   * ExcludeBrokerCredential's default, or which exclusions SqlClient sets when it builds the options.
-#     A default flipping to true, or SqlClient starting to set it, would make the pins redundant rather
-#     than wrong — worth knowing, and worth deleting them for.
-#   * the broker's PACKAGING. If a future Azure.Identity carries the broker options type itself, or
-#     resolves them from somewhere other than an Azure.Identity.Broker assembly, both pins stay green and
-#     the guarantee is gone with nothing to notice it.
+#   * the probe. Decompile the Azure.Core the bump resolves and read the call above. If it names another
+#     assembly or type, both pins stay green and the guarantee is gone with nothing to notice it.
+#   * ExcludeBrokerCredential's default, or which exclusions SqlClient sets when it builds the options
+#     (ActiveDirectoryAuthenticationProvider.CreateTokenCredentialInstance). A default flipping to true, or
+#     SqlClient starting to set it, would make the pins redundant rather than wrong, worth knowing, and
+#     worth deleting them for.
+#   * a package carrying Azure.Identity.Broker.DevelopmentBrokerOptions itself, or any assembly named
+#     Azure.Identity.Broker. Two things in the graph look like it and are not: Azure.Core's own internal
+#     Azure.Identity.DevelopmentBrokerOptions, and Microsoft.Identity.Client.Broker, which is MSAL's broker.
 #
 # Deliberately prose and not a check. Nothing in the graph can be asserted about a mechanism that does not
 # exist yet, and a test asserting today's shape harder is what is already there.
@@ -83,6 +89,14 @@ updates:
     # The WixToolset.Sdk version lives in the wixproj Sdk attribute, which Dependabot does not read.
     ignore:
       - dependency-name: "WixToolset.*"
+        update-types: ["version-update:semver-major"]
+      # The projects target net10.0, whose shared framework carries the 10.x set, and #9871 showed an 11.0 bump
+      # changing the service's exit code on a hosted-service failure and failing ViewerSettingsMemberRecoveryTests.
+      # Lift both entries when the projects move target framework. Microsoft.Extensions.Logging.Abstractions is
+      # already 11.0.0 on dev and stays there.
+      - dependency-name: "Microsoft.Extensions.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.AspNetCore.*"
         update-types: ["version-update:semver-major"]
   # The .NET SDK that global.json pins (#3906). This is the .NET RUNTIME for everything published
   # self-contained (Lite and the Viewer's Setup/Portable builds pack the runtime of whichever SDK built

@@ -92,8 +92,10 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     /* Azure.Identity 1.18.0, AzureIdentityEventSource.cs — every id and signature reflected below is
        read from that file at tag Azure.Identity_1.18.0, which is what this repository resolves
        transitively through Microsoft.Data.SqlClient.Extensions.Azure 7.0.2 (see #3219: it is not
-       pinned, which is exactly why the upstream contract is pinned HERE). */
-    private const string EventSourceTypeName = "Azure.Identity.AzureIdentityEventSource, Azure.Identity";
+       pinned, which is exactly why the upstream contract is pinned HERE).
+       Since Microsoft.Data.SqlClient 8.0.0 (#9869) the credential types and this event source ship inside
+       Azure.Core, still in the Azure.Identity namespace, so the type is looked up in Azure.Core. */
+    private const string EventSourceTypeName = "Azure.Identity.AzureIdentityEventSource, Azure.Core";
 
     /// <summary>:307 — the event this listener exists for. One <c>string credentialType</c>.</summary>
     private const string SelectedMethod = "DefaultAzureCredentialCredentialSelected";
