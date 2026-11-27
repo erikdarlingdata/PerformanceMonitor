@@ -78,10 +78,7 @@ public sealed class ReadScopeStatementCaptureLiveTests
             await Task.Delay(600);
         }
 
-        var totalMs = watch.ElapsedMilliseconds;
         var timing = Assert.Single(opened.Scope.Snapshot(), t => t.Label.StartsWith("SELECT g FROM generate_series", StringComparison.Ordinal));
-        System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pm5097-capture-evidence.txt"),
-            $"(b) firstRowMs={firstRowMs} totalMs={totalMs} activityMs={timing.DurationMs:F0} rows={timing.Rows?.ToString() ?? "null"}\n");
         Assert.True(timing.DurationMs >= 550, $"duration {timing.DurationMs} ms stops before the reader closed (first row at {firstRowMs} ms)");
     }
 
@@ -113,8 +110,6 @@ public sealed class ReadScopeStatementCaptureLiveTests
 
         string[] snapshot;
         lock (tags) { snapshot = tags.ToArray(); }
-        System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pm5097-capture-evidence.txt"),
-            "(c) tags: " + string.Join(" | ", snapshot.Select(t => t.Length > 90 ? t[..90] : t)) + "\n");
         Assert.NotEmpty(snapshot);
         Assert.Contains(snapshot, t => t.StartsWith("db.query.text=", StringComparison.Ordinal));
     }

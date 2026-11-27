@@ -24,7 +24,33 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// cost start instead of raw's data start.</para></summary>
 public sealed record ViewerQueryStoreRegressionsRead(
     List<ViewerQueryStoreRegressionRow> Rows, IReadOnlyList<string>? DatabasesLeftOut,
-    string Source = "raw", DateTime? CostBaselineStart = null, DateTime? FailureBaselineStart = null);
+    string Source = "raw", DateTime? CostBaselineStart = null, DateTime? FailureBaselineStart = null)
+{
+    /// <summary>#9889: how many regressions passed the read's flags before its cap, as the read counts them beside each row. Null when the read returned no row
+    /// or did not carry the count.</summary>
+    public long? TotalCount => Rows.Count > 0 ? Rows[0].TotalCount : null;
+
+    /// <summary>
+    /// #9889: what the grid says when this read stopped at its row cap, or null when the read held everything it found. A read that returned
+    /// <see cref="ViewerDataService.QueryStoreRegressionsRowCap"/> rows may have left more out. When the read counted its regressions
+    /// (<see cref="TotalCount"/>) the note is "Showing the top 50 of N" and appears only when N is more than the rows shown. When it did not
+    /// count them the note says only that the list is a top 50. Either way it names what the list is ranked by, as the caption does.
+    /// </summary>
+    public string? CapNote
+    {
+        get
+        {
+            var cap = ViewerDataService.QueryStoreRegressionsRowCap;
+            if (Rows.Count < cap || (TotalCount is long all && all <= Rows.Count))
+            {
+                return null;
+            }
+
+            var of = TotalCount is long n ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $" of {n:N0}") : string.Empty;
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Showing the top {cap}{of}, ranked by total added duration. Pick a database in the filter to read more of them.");
+        }
+    }
+}
 
 /// <summary>
 /// One Query-Store regression row — the viewer copy of the Dashboard's
@@ -65,6 +91,9 @@ public sealed class ViewerQueryStoreRegressionRow
     public int RecentPlanCount { get; set; }
     public string Severity { get; set; } = "";
     public string QueryTextSample { get; set; } = "";
+
+    /// <summary>#9889: the regressions that passed the read's flags before its row cap (#6128), the same on every row of one read. Null when a row was built without it.</summary>
+    public long? TotalCount { get; set; }
 
     /// <summary>Regression rows aggregate across plans, so there is no single stored plan to view (View Stored Plan hidden).</summary>
     public bool HasStoredPlan => false;
@@ -126,6 +155,9 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const int BaselineLookbackDays = 7;
 
+    /// <summary>#9889: the read's row cap, bound into the statement as its LIMIT. The grid's cap note compares the rows it got with this number.</summary>
+    public const int QueryStoreRegressionsRowCap = 50;
+
     /// <summary>
     /// The statement text of both forms (#5506): the arms (<see cref="QueryStoreRegressionBaseline.RawArmsSql"/> or
     /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates, and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>,
@@ -139,7 +171,7 @@ public sealed partial class ViewerDataService
     internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
+            "$5", "$6", "$7", "$8", QueryStoreRegressionsRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture), "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -468,6 +500,7 @@ public sealed partial class ViewerDataService
                 RecentAbortedPerHour = NullableMs(reader, 32),
                 BaselineExceptionPerHour = NullableMs(reader, 33),
                 RecentExceptionPerHour = NullableMs(reader, 34),
+                TotalCount = reader.FieldCount > 35 && !reader.IsDBNull(35) ? reader.GetInt64(35) : null,
             });
         }
 

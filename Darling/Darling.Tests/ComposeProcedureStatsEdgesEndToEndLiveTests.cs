@@ -48,6 +48,12 @@ public sealed class ComposeProcedureStatsEdgesEndToEndLiveTests
     private const string TopProcedures =
         "{\"source\":\"procedure_stats\",\"measure\":\"proc_worker_us\",\"aggregate\":\"sum\",\"topN\":50,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
 
+    /// <summary>#9883: the walked fleet cell, a summed measure with a second line and one <c>eq</c> filter, left on Auto.</summary>
+    private const string AutoSeries =
+        "{\"source\":\"procedure_stats\",\"measure\":\"proc_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\","
+        + "\"overlay\":{\"measure\":\"proc_executions\",\"aggregate\":\"sum\",\"unit\":\"count\"},"
+        + "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"usp_P0\"}]}";
+
     /// <summary>37 minutes and 21 seconds into an hour, so the window start is not on an hour and h1 is the next whole hour.</summary>
     private static readonly DateTime Anchor = new(2026, 1, 5, 12, 37, 21, DateTimeKind.Utc);
 
@@ -70,6 +76,40 @@ public sealed class ComposeProcedureStatsEdgesEndToEndLiveTests
             Assert.Contains(Hybrid, (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.True(raw.Count >= 6, "the seeded fixture ranks several procedures");
             Assert.Equal(raw.ToJsonString(), hybrid["rows"]!.ToJsonString());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>#9883: a fleet time series left on Auto over 24 hours is drawn by the hour, so it takes the hourly rollup route, says
+    /// why it is hourly in its notice, and returns the per-hour values the same cell with an explicit hour bucket reads from raw. The
+    /// explicit hour cell takes the route as well and carries no such note, because Auto chose nothing for it.</summary>
+    [Fact]
+    public async Task AFleetSeriesOnAuto_OverTwentyFourHours_TakesTheRoute_SaysItIsHourly_AndMatchesAnHourBucketReadRaw()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), "Set DARLING_TEST_PG to run the #9883 end-to-end live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await ProcedureStatsHourLedgerLiveTests.Rig.OpenAsync(ct, timescale: true);
+
+        var bodySucceeded = false;
+        try
+        {
+            await SeedThroughTheWriterAsync(rig, ct);
+            var hourSeries = AutoSeries.Replace("\"auto\"", "\"hour\"", StringComparison.Ordinal);
+            var (auto, rawByHour) = await RunBothAsync(rig, ct, AutoSeries, hourSeries);
+
+            Assert.Contains(Hybrid, (string)auto["sql"]!, StringComparison.Ordinal);
+            Assert.True(rawByHour.Count >= 24, $"the raw hour read returns a row per hour, got {rawByHour.Count}");
+            Assert.Equal(rawByHour.ToJsonString(), auto["rows"]!.ToJsonString());
+            Assert.Contains(ComposeSourceRouter.FleetAutoHourNote, (string?)auto["notice"] ?? string.Empty, StringComparison.Ordinal);
+
+            var (hour, _) = await RunBothAsync(rig, ct, hourSeries, hourSeries);
+            Assert.Contains(Hybrid, (string)hour["sql"]!, StringComparison.Ordinal);
+            Assert.Equal(auto["rows"]!.ToJsonString(), hour["rows"]!.ToJsonString());
+            Assert.DoesNotContain(ComposeSourceRouter.FleetAutoHourNote, (string?)hour["notice"] ?? string.Empty, StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally
@@ -177,16 +217,18 @@ public sealed class ComposeProcedureStatsEdgesEndToEndLiveTests
 
     /// <summary>Runs the cell through the runner (the 24 hour window ending at the anchor) and the same panel compiled for the raw
     /// route on its own connection, and returns both. The panel must be a candidate for exactly the hours the
-    /// fixture is laid out on.</summary>
-    private static async Task<(JsonObject Payload, JsonArray Raw)> RunBothAsync(ProcedureStatsHourLedgerLiveTests.Rig rig, CancellationToken ct)
+    /// fixture is laid out on. <paramref name="rawPanel"/> is the panel compiled for the raw route, when it is not the one the
+    /// runner is given (#9883: an Auto cell is compared with its explicit hour form).</summary>
+    private static async Task<(JsonObject Payload, JsonArray Raw)> RunBothAsync(
+        ProcedureStatsHourLedgerLiveTests.Rig rig, CancellationToken ct, string runnerPanel = TopProcedures, string rawPanel = TopProcedures)
     {
-        var body = new JsonObject { ["panel"] = JsonNode.Parse(TopProcedures), ["hours"] = 24 };
+        var body = new JsonObject { ["panel"] = JsonNode.Parse(runnerPanel), ["hours"] = 24 };
         var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(rig.DataSource, body, ct, nowUtc: Anchor);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
 
         var windowStart = Anchor.AddHours(-24);
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(rig.DataSource, ct);
-        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(TopProcedures)!, Array.Empty<string>());
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(rawPanel)!, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
 
         var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, Anchor, windowStart, Anchor, rollups, coverage);

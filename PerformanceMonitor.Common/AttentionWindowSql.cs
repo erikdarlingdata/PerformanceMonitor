@@ -186,14 +186,9 @@ public static class AttentionWindowSql
     /// A call that ran under the capture floor (<see cref="CapturedCallMinDurationUs"/>) is not a call here (#9538): an application cancel
     /// a few milliseconds into a call, such as a data layer cancelling before it closes a reader, is no command timeout, and a driver's
     /// command timeout runs about a second. The floor is the one the session captures from, so nothing it kept is thrown away here. A call with no recorded duration is left out too, as the collector always writes one.
-    /// <para>MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline, the planner built the hash join of the 7-day baseline
-    /// on the samples (about half a million rows spilled to disk) instead of on the few hundred calls, and the sample list ran the whole
-    /// call scan again for every listed sample. A plan check on a week at 60 samples a minute (#9507) took the window read from 138 ms to 26 ms
-    /// (dev: 6 ms) and the sample list from 72 ms to 4 ms (dev: 0.1 ms), with no new index.</para>
     /// </summary>
-    private static string CallsCte(string eventsRelation, string range) => $"""
-calls AS MATERIALIZED (
-    SELECT
+    private static string CallsSelect(string eventsRelation, string range) => $"""
+SELECT
         attention_event_id AS id,
         session_id,
         database_name,
@@ -207,6 +202,16 @@ calls AS MATERIALIZED (
     AND   interrupt_duration_us >= {CapturedCallMinDurationUs}
     AND   session_id IS NOT NULL
     AND   event_time IS NOT NULL
+""";
+
+    /// <summary>
+    /// The captured calls as a CTE named <c>calls</c>. MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline,
+    /// the sample list (<see cref="Samples"/>) runs the whole call scan again for every listed sample (#9507: 72 ms against 4 ms for a page of
+    /// samples on a week at 60 samples a minute).
+    /// </summary>
+    private static string CallsCte(string eventsRelation, string range) => $"""
+calls AS MATERIALIZED (
+    {CallsSelect(eventsRelation, range)}
 )
 """;
 
@@ -223,39 +228,57 @@ calls AS MATERIALIZED (
 """;
 
     /// <summary>
-    /// The under-floor samples that match a captured call, one row per sample id (#9507). A join, never a correlated EXISTS: the baseline reads
+    /// The under-floor samples that match a captured call, one row per sample (#9507). A join, never a correlated EXISTS: the baseline reads
     /// seven days of samples. Only samples under the floor are looked at, because a sample at or over the floor is judged anyway. Columns: id,
-    /// azdata_metadata and dbatools_metadata (the matched call is that tool's metadata work). On a store with no <c>aborted</c> rows the join
-    /// is empty and the read gives today's numbers.
+    /// the sample's own collection_time, database_name and client_app_name (what the readers group it by), and azdata_metadata and
+    /// dbatools_metadata: the sample is that tool's metadata work, by its own statement or by the statement of a call it matches. On a store
+    /// with no <c>aborted</c> rows the join is empty and the read gives the numbers of the samples alone.
+    /// <para>The readers never join this back to the samples row by row (#9881). They count the samples from each row's own columns, which runs
+    /// in parallel and sorts nothing wide, then correct the few groups that hold a matched sample with the counts of this CTE. A row-by-row
+    /// LEFT JOIN of this CTE into the sample stream made the 7-day grouping serial, with every sample's statement text in an on-disk sort.</para>
     /// </summary>
-    /* The relation is wrapped before it takes an alias: the Darling legacy-table read passes a derived table that already ends in
-       "AS attention_events" (AttentionReadRelation.DerivedRelation), and a second alias on it is a syntax error (42601). */
+    /* The id is unique in the table, so grouping by the sample's own columns beside it adds no group. The relation is read inside a derived
+       table before it takes an alias: the Darling legacy-table read passes a derived table that already ends in "AS attention_events"
+       (AttentionReadRelation.DerivedRelation), and a second alias on it is a syntax error (42601). */
     private static string MatchedCte(string eventsRelation, string range) => $"""
 matched AS (
     SELECT
         s.attention_event_id AS id,
-        bool_or(c.azdata_metadata) AS azdata_metadata,
-        bool_or(c.dbatools_metadata) AS dbatools_metadata
-    FROM (SELECT * FROM {eventsRelation}) AS s
+        s.collection_time,
+        s.database_name,
+        s.client_app_name,
+        bool_or(s.azdata_own OR c.azdata_metadata) AS azdata_metadata,
+        bool_or(s.dbatools_own OR c.dbatools_metadata) AS dbatools_metadata
+    FROM (
+        SELECT
+            attention_event_id,
+            collection_time,
+            database_name,
+            client_app_name,
+            session_id,
+            event_time,
+            COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_own,
+            COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_own
+        FROM {eventsRelation}
+        WHERE server_id = $1
+        AND   {range}
+        AND   event_kind = '{KindSample}'
+        AND   interrupt_duration_us < {MinInterruptDurationUs}
+    ) AS s
     INNER JOIN calls AS c
         ON {MatchOn("c", "s")}
-    WHERE s.server_id = $1
-    AND   {range.Replace("collection_time", "s.collection_time")}
-    AND   s.event_kind = '{KindSample}'
-    AND   s.interrupt_duration_us < {MinInterruptDurationUs}
-    GROUP BY s.attention_event_id
+    GROUP BY s.attention_event_id, s.collection_time, s.database_name, s.client_app_name
 )
 """;
 
-    /// <summary>A sample under the floor that no captured call explains: what <see cref="ShortDurationPredicate"/> alone used to mean (#9507).
-    /// Written against the <c>matched</c> CTE joined as <c>m</c>.</summary>
-    private static readonly string UnmatchedShortPredicate = $"(COALESCE({ShortDurationPredicate}, FALSE) AND m.id IS NULL)";
+    /// <summary>A sample under the floor, judged on the row alone: <see cref="ShortDurationPredicate"/>, FALSE for a missing duration.</summary>
+    private static readonly string ShortOwnPredicate = $"COALESCE({ShortDurationPredicate}, FALSE)";
 
-    /// <summary>A sample of Azure Data Studio metadata work, by its own statement or by the call matched to it (#9507).</summary>
-    private static readonly string AzdataEffectivePredicate = $"(COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE(m.azdata_metadata, FALSE))";
+    /// <summary>A sample of Azure Data Studio metadata work by its own statement, FALSE when the application or the text is NULL.</summary>
+    private static readonly string AzdataOwnPredicate = $"COALESCE({AzdataMetadataPredicate}, FALSE)";
 
-    /// <summary>A sample of dbatools SMO metadata work, by its own statement or by the call matched to it (#9507).</summary>
-    private static readonly string DbatoolsEffectivePredicate = $"(COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) OR COALESCE(m.dbatools_metadata, FALSE))";
+    /// <summary>A sample of dbatools SMO metadata work by its own statement, FALSE when the application or the text is NULL.</summary>
+    private static readonly string DbatoolsOwnPredicate = $"COALESCE({DbatoolsSmoMetadataPredicate}, FALSE)";
 
     /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
     /// does not count what happened after it. The alert's counts and sample groups pass <c>bounded: false</c> and have no ceiling; its top lists pass <c>true</c> since the final round of #5714 (L2).</summary>
@@ -323,19 +346,36 @@ counts AS (
     AND   event_kind = '{KindCount}'
     GROUP BY date_trunc('minute', collection_time)
 ),
-samples AS (
+sample_minutes AS (
     SELECT
         date_trunc('minute', collection_time) AS minute,
         CAST(COUNT(*) AS BIGINT) AS kept,
-        CAST(COUNT(*) FILTER (WHERE {UnmatchedShortPredicate} OR {AzdataEffectivePredicate} OR {DbatoolsEffectivePredicate} OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
+        CAST(COUNT(*) FILTER (WHERE {ShortOwnPredicate} OR {AzdataOwnPredicate} OR {DbatoolsOwnPredicate} OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out_alone
     FROM {eventsRelation}
-    LEFT JOIN matched AS m
-        ON m.id = attention_event_id
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time < $3
     AND   event_kind = '{KindSample}'
     GROUP BY date_trunc('minute', collection_time)
+),
+matched_minutes AS (
+    SELECT
+        date_trunc('minute', collection_time) AS minute,
+        CAST(COUNT(*) AS BIGINT) AS judged
+    FROM matched
+    WHERE NOT azdata_metadata
+    AND   NOT dbatools_metadata
+    AND   NOT COALESCE({ExcludedAppPredicate}, FALSE)
+    GROUP BY date_trunc('minute', collection_time)
+),
+samples AS (
+    SELECT
+        g.minute,
+        g.kept,
+        CAST(g.left_out_alone - COALESCE(j.judged, 0) AS BIGINT) AS left_out
+    FROM sample_minutes AS g
+    LEFT JOIN matched_minutes AS j
+        ON j.minute = g.minute
 )
 SELECT
     r.minute,
@@ -372,24 +412,49 @@ ORDER BY collection_time DESC
     /// that matches a captured call, <see cref="MatchOn"/>, and is not Azure Data Studio or dbatools metadata work. Such a sample is judged, not left out: the attention event timed the cancel, the call is what ran).</summary>
     public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
 WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
-{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))}
+{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
+matched_groups AS (
+    SELECT
+        collection_time,
+        database_name,
+        client_app_name,
+        CAST(COUNT(*) AS BIGINT) AS matched,
+        CAST(COUNT(*) FILTER (WHERE azdata_metadata) AS BIGINT) AS azdata_metadata,
+        CAST(COUNT(*) FILTER (WHERE dbatools_metadata) AS BIGINT) AS dbatools_metadata,
+        CAST(COUNT(*) FILTER (WHERE NOT azdata_metadata AND NOT dbatools_metadata) AS BIGINT) AS judged
+    FROM matched
+    GROUP BY collection_time, database_name, client_app_name
+),
+sample_groups AS (
+    SELECT
+        collection_time,
+        database_name,
+        client_app_name,
+        CAST(COUNT(*) AS BIGINT) AS samples,
+        CAST(COUNT(*) FILTER (WHERE {ShortOwnPredicate}) AS BIGINT) AS short_alone,
+        CAST(COUNT(*) FILTER (WHERE NOT {ShortOwnPredicate} AND {AzdataOwnPredicate}) AS BIGINT) AS azdata_alone,
+        CAST(COUNT(*) FILTER (WHERE NOT {ShortOwnPredicate} AND {DbatoolsOwnPredicate}) AS BIGINT) AS dbatools_alone
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   collection_time >= $2{Ceiling(bounded)}
+    AND   event_kind = '{KindSample}'
+    GROUP BY collection_time, database_name, client_app_name
+)
 SELECT
-    collection_time,
-    database_name,
-    client_app_name,
-    CAST(COUNT(*) AS BIGINT) AS samples,
-    CAST(COUNT(*) FILTER (WHERE {UnmatchedShortPredicate}) AS BIGINT) AS short_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT {UnmatchedShortPredicate} AND {AzdataEffectivePredicate}) AS BIGINT) AS azdata_metadata_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT {UnmatchedShortPredicate} AND {DbatoolsEffectivePredicate}) AS BIGINT) AS dbatools_metadata_samples,
-    CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) AND m.id IS NOT NULL AND NOT {AzdataEffectivePredicate} AND NOT {DbatoolsEffectivePredicate}) AS BIGINT) AS matched_samples
-FROM {eventsRelation}
-LEFT JOIN matched AS m
-    ON m.id = attention_event_id
-WHERE server_id = $1
-AND   collection_time >= $2{Ceiling(bounded)}
-AND   event_kind = '{KindSample}'
-GROUP BY collection_time, database_name, client_app_name
-ORDER BY collection_time DESC, database_name, client_app_name
+    g.collection_time,
+    g.database_name,
+    g.client_app_name,
+    g.samples,
+    CAST(g.short_alone - COALESCE(m.matched, 0) AS BIGINT) AS short_samples,
+    CAST(g.azdata_alone + COALESCE(m.azdata_metadata, 0) AS BIGINT) AS azdata_metadata_samples,
+    CAST(g.dbatools_alone + COALESCE(m.dbatools_metadata, 0) AS BIGINT) AS dbatools_metadata_samples,
+    CAST(COALESCE(m.judged, 0) AS BIGINT) AS matched_samples
+FROM sample_groups AS g
+LEFT JOIN matched_groups AS m
+    ON  m.collection_time = g.collection_time
+    AND m.database_name IS NOT DISTINCT FROM g.database_name
+    AND m.client_app_name IS NOT DISTINCT FROM g.client_app_name
+ORDER BY g.collection_time DESC, g.database_name, g.client_app_name
 """;
 
     /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events (count ties break by name in binary order,

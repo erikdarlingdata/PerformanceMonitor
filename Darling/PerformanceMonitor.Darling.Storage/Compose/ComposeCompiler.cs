@@ -619,7 +619,7 @@ public static class ComposeCompiler
            hourly-raw-edges route. IsCagg stays false, so everything but the FROM item stays on its raw path. */
         if (context.HourlyEdges is { } verdict
             && route.Tier == ComposeSourceTier.Raw
-            && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+            && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage, ComposeSourceRouter.IsFleetScope(context.Servers), out _) is { } candidate
             && string.Equals(verdict.SourceTable, candidate.SourceTable, StringComparison.Ordinal)
             && verdict.HourStartUtc == candidate.HourStartUtc
             && verdict.HourEndUtc == candidate.HourEndUtc
@@ -628,14 +628,16 @@ public static class ComposeCompiler
             route = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, candidate.SuccessorView, null, null, candidate.HourStartUtc, candidate.HourEndUtc);
         }
 
-        /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
-           a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
+        /* Auto resolves to a concrete grain from the window and the run's scope before anything downstream (ceiling + date_trunc):
+           a fleet read of 12 hours or more on a source the hourly rollup serves is hour (#9883, ComposeSourceRouter.ResolvePanelBucket),
+           and the candidate above resolves the same way. A non-Auto bucket passes through unchanged, so a panel with an explicit
+           bucket compiles byte-for-byte the same. */
         var effectiveBucket = plan.TimeBucket;
         var windowBuckets = 0d;
         if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
-            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
+            effectiveBucket = ComposeSourceRouter.ResolvePanelBucket(plan, windowSeconds, ComposeSourceRouter.IsFleetScope(context.Servers));
             /* A CAGG can't render finer than its own bucket — clamp the display grain up to the tier's grain
                (hourly -> at least hour, daily -> at least day) so date_trunc re-aggregates, never under-reads. */
             if (route.IsCagg)
@@ -2111,6 +2113,8 @@ public static class ComposeCompiler
         }
 
         var windowSeconds = (endUtc - startUtc).TotalSeconds;
+        /* Auto resolves from the window alone here: this asks about a Query Store panel on the wide route, and the fleet rule
+           (#9883) covers only the sources the hourly rollup serves, which Query Store is not, so CompileCore resolves the same bucket. */
         var bucketSeconds = MeasureCatalog.BucketSeconds(MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds));
         var buckets = bucketSeconds > 0 ? Math.Ceiling(windowSeconds / bucketSeconds) : 0d;
         return !PlanTakesSingleScan(plan, buckets, groupMembers);
