@@ -486,25 +486,34 @@ public sealed class WaitStatsDailyRollupLiveTests
     }
 
     /// <summary>Thirty days of waits every 20 minutes for two servers and five wait types, two of them one wait type under two spellings
-    /// (the trailing space the Daily Summary merges), some zero deltas the rollup filters, ending now. Compresses the chunks older than two
-    /// days where the store can.</summary>
+    /// (the trailing space the Daily Summary merges), some zero deltas the rollup filters, ending at <see cref="LiveClock.Now"/>: the days
+    /// the tests read are cut from the same clock, so the open day holds its midnight sample at any pinned hour (#9809). Compresses the
+    /// chunks older than two days where the store can.</summary>
     private static async Task SeedThirtyDaysAsync(NpgsqlConnection connection, CancellationToken ct, int minutes = 20)
     {
-        await ExecuteAsync(connection, @"
+        var now = LiveClock.Now();
+        await using (var seed = new NpgsqlCommand(@"
 INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds)
 SELECT 854900000 + row_number() OVER (), t, s.server_id, 'wait-rollup-server', w.wait_type, 5,
        CASE WHEN (extract(epoch FROM t)::bigint / 60 + w.k) % 11 = 0 THEN 0 ELSE ((extract(epoch FROM t)::bigint / 60 * w.k * 37 + w.k * 101 + s.server_id) % 997) + 1 END,
        60
-FROM generate_series(date_trunc('day', now() AT TIME ZONE 'utc') - interval '29 days', now() AT TIME ZONE 'utc', make_interval(mins => $1)) AS t
+FROM generate_series(date_trunc('day', $2::timestamp) - interval '29 days', $2::timestamp, make_interval(mins => $1)) AS t
 CROSS JOIN (VALUES (8549), (8550)) AS s(server_id)
-CROSS JOIN (VALUES ('SOS_SCHEDULER_YIELD', 1), ('PAGEIOLATCH_SH ', 2), ('PAGEIOLATCH_SH', 3), ('CXCONSUMER', 4), ('WRITELOG', 5)) AS w(wait_type, k)", ct, minutes);
+CROSS JOIN (VALUES ('SOS_SCHEDULER_YIELD', 1), ('PAGEIOLATCH_SH ', 2), ('PAGEIOLATCH_SH', 3), ('CXCONSUMER', 4), ('WRITELOG', 5)) AS w(wait_type, k)", connection) { CommandTimeout = 300 })
+        {
+            seed.Parameters.AddWithValue(minutes);
+            seed.Parameters.AddWithValue(now);
+            await seed.ExecuteNonQueryAsync(ct);
+        }
 
         if (await ScalarAsync<bool>(connection, "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL", ct)
             && await ScalarAsync<bool>(connection, "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'wait_stats')", ct))
         {
             await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
-            await ExecuteAsync(connection,
-                "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.wait_stats', older_than => (now() AT TIME ZONE 'utc') - interval '2 days') AS c", ct);
+            await using var compress = new NpgsqlCommand(
+                "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.wait_stats', older_than => $1::timestamp - interval '2 days') AS c", connection) { CommandTimeout = 300 };
+            compress.Parameters.AddWithValue(now);
+            await compress.ExecuteNonQueryAsync(ct);
         }
     }
 
