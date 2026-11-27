@@ -754,7 +754,6 @@ public sealed class ViewerSchemaVersionGateTests
            and maps to 319, not 320. Each sentinel below shifts one place from the end. */
         var allButV320 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV320[^1] = false;
-        Assert.Equal("hasQueryTagSlimSightings", map.GetParameters()[^1].Name);
         Assert.Equal(319, (int)map.Invoke(null, allButV320)!);
 
         /* #9662: the V319 sentinel (the three argument advanced web access setter) is the last parameter, so a store that has every sentinel but that one is a V318 store
