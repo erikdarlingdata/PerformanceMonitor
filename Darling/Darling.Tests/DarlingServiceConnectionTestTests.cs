@@ -449,7 +449,7 @@ public sealed class DarlingServiceConnectionTestTests
     [InlineData(false)]
     public void TheTrustFlag_RegistersTheServerWithTheTrustSettingTheFlagGave(bool expected, params string[] trustArgs)
     {
-        var args = new[] { "--host", "sql01", "--auth", "windows" }.Concat(trustArgs).ToArray();
+        string[] args = ["--host", "sql01", "--auth", "windows", .. trustArgs];
 
         Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
         Assert.Null(error);
