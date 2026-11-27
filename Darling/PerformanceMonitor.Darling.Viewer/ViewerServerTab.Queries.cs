@@ -585,9 +585,9 @@ public partial class ViewerServerTab
     /// Loads the Query Store Regressions grid — the Dashboard's regressions view (baseline-vs-recent Query
     /// Store performance) ported to Darling's store, over the toolbar's settable window. Like the Dashboard
     /// grid (and unlike the three per-source grids) it has no slicer / comparison / slicer-overlay: the read
-    /// is already a baseline-vs-recent contrast, not a single time series. The default sort matches the
-    /// Dashboard grid's (duration regression % descending) — a grid-view-only SortDescription that does NOT
-    /// touch the read's additional-duration ORDER BY (the TVF's ranking).
+    /// is already a baseline-vs-recent contrast, not a single time series. #9889: the default sort is Total Impact
+    /// descending, the order the caption above the grid names and the order the read ranks its top rows in — a
+    /// grid-view-only SortDescription that does NOT touch the read's additional-duration ORDER BY (the TVF's ranking).
     /// </summary>
     private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -600,15 +600,31 @@ public partial class ViewerServerTab
             dataStartProbe: floorTask); /* #6750: the rates divide from the data start the banner names. */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
         var read = floorReadTask.Result;
-        _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
-        ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
+        ShowQueryStoreRegressionsRows(read);
         /* #6750: when the interval tables served below raw's floor, the banner names where the cost baseline started, not raw's floor.
            The read has awaited the probe already, so swapping the task here loses nothing. */
         floorTask = ServedStartOr(read, floorTask);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         AddQueryStoreRegressionsEmptyBaselineNote(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
-        SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
+        SetQueryStoreRegressionsDefaultSort();
     }
+
+    /// <summary>The rows of one read, the databases it left out and the note that it stopped at its row cap (#9889).</summary>
+    internal void ShowQueryStoreRegressionsRows(ViewerQueryStoreRegressionsRead read)
+    {
+        _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
+        ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
+        var note = read.CapNote;
+        QueryStoreRegressionsCapNote.Text = note ?? string.Empty;
+        QueryStoreRegressionsCapNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// #9889: the grid opens by Total Impact, largest first, the order its caption names ("ranked by total added duration"). A sort the
+    /// user chose is kept, as <see cref="SetDefaultSortIfNone"/> allows.
+    /// </summary>
+    internal void SetQueryStoreRegressionsDefaultSort() =>
+        SetDefaultSortIfNone(QueryStoreRegressionsGrid, nameof(ViewerQueryStoreRegressionRow.AdditionalDurationMs), ListSortDirection.Descending);
 
     /// <summary>
     /// What the Query Store Regressions grid says when it has no rows. An empty answer is not always "nothing got worse": the read

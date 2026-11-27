@@ -141,7 +141,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.True(banner.Success, "QueryStoreRegressionsTruncationBanner is not declared in ViewerServerTab.xaml, in the row above the grid");
         Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
         Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
-        Assert.Matches(@"<DataGrid Grid\.Row=""3"" x:Name=""QueryStoreRegressionsGrid""", xaml);
+        Assert.Matches(@"<DataGrid Grid\.Row=""4"" x:Name=""QueryStoreRegressionsGrid""", xaml);
     }
 
     // ── What the banner shows ──
