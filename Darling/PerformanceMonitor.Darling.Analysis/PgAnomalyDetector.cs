@@ -86,7 +86,7 @@ public class PgAnomalyDetector : IAnomalyDetector
        its own, which the pass then writes out in detector order. Every other flow writes to the pass's logger. */
     private readonly AsyncLocal<ILogger?> _flowLogger = new();
 
-    private ILogger? Logger => _flowLogger.Value ?? _passLogger;
+    internal ILogger? Logger => _flowLogger.Value ?? _passLogger;
 
     /// <summary>
     /// The most detectors one pass runs at once (#9879). A detector holds its own pooled connection, and the I/O
