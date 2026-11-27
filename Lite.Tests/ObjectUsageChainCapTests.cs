@@ -67,7 +67,7 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
         () => capRows * (double)ObjectUsageChainBuilder.EstimatedBytesPerRow / (1048576.0 * ObjectUsageChainBuilder.CapShareOfResetPoint);
 
     private Task<string> ToolAsync(int daysBack) =>
-        McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, Database, daysBack, 500, 0, Now);
+        ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, Database, daysBack, 500, 0, Now));
 
     private async Task<long> ScalarAsync(string sql)
     {
@@ -221,7 +221,7 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
     private const string SmallDatabase = "Tiny";
 
     private Task<string> ToolAsync(string database, int daysBack) =>
-        McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, database, daysBack, 500, 0, Now);
+        ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, database, daysBack, 500, 0, Now));
 
     private Task<long> PairRowsAsync(string database) => ScalarAsync(
         $"SELECT (SELECT count(*) FROM object_usage_deltas WHERE database_name = '{database}') "

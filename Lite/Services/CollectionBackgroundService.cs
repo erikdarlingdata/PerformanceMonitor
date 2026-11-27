@@ -501,7 +501,7 @@ public class CollectionBackgroundService : BackgroundService
     /// dismissed-alert purge trims). The Query Store backfill and the scheduled analysis each get a loop of their own, so
     /// a long compaction does not hold either back; both carry their own per-server timeouts.
     /// </summary>
-    private IReadOnlyList<HousekeepingLoop> BuildHousekeepingLoops() =>
+    internal IReadOnlyList<HousekeepingLoop> BuildHousekeepingLoops() =>
     [
         new HousekeepingLoop("maintenance",
         [
@@ -530,6 +530,8 @@ public class CollectionBackgroundService : BackgroundService
         new HousekeepingLoop("object_usage_chain",
         [
             new HousekeepingStep("object_usage_chain", token => RunObjectUsageChainIfDueAsync(token)),
+            /* #9885: after the chain's first pass, the statement parse cache get_object_usage reads is filled once per start. */
+            new HousekeepingStep("object_usage_warm", token => RunObjectUsageWarmOnceAsync(token)),
         ]),
     ];
 
@@ -970,6 +972,7 @@ public class CollectionBackgroundService : BackgroundService
             _objectUsageChainBuilder ??= new ObjectUsageChainBuilder(_duckDb);
             var built = await _objectUsageChainBuilder.BuildPassAsync(ObjectUsageChainBuilder.MaxStepsPerPass, stoppingToken);
             _lastObjectUsageChainTime = DateTime.UtcNow;
+            _objectUsageChainPassEnded = true;
             if (built > 0)
             {
                 _logger?.LogInformation("Object usage chain: built {Snapshots} snapshots", built);
@@ -981,7 +984,76 @@ public class CollectionBackgroundService : BackgroundService
         }
         catch (Exception ex)
         {
+            _objectUsageChainPassEnded = true;
             _logger?.LogWarning(ex, "Object usage chain pass failed; the next pass retries");
+        }
+    }
+
+    /// <summary>#9885: the most one server's warm spends reading and parsing statement texts. The parse is about 1 ms a text, so this is tens of thousands
+    /// of texts; a store with more leaves the rest to the first reader, and what is parsed stays cached.</summary>
+    internal static readonly TimeSpan ObjectUsageWarmBudget = TimeSpan.FromMinutes(2);
+
+    private bool _objectUsageChainPassEnded;
+    private readonly HashSet<int> _objectUsageWarmedServers = [];
+
+    /// <summary>#9885: whether the MCP server is on. The warm runs only then, since only <c>get_object_usage</c> reads the cache it fills: a Lite with
+    /// MCP off pays nothing. Set by the window that starts the MCP server; off until then.</summary>
+    internal Func<bool> ObjectUsageWarmEnabled { get; set; } = static () => false;
+
+    /// <summary>The parse cache the warm fills: the one <c>get_object_usage</c> reads, unless a test counts the parses in its own.</summary>
+    internal PerformanceMonitor.Analysis.ObjectReferences.QueryTextScanCache ObjectUsageWarmCache { get; set; } = LocalDataService.ObjectUsageScanCache;
+
+    /// <summary>The time budget of one server's warm. A test shortens it.</summary>
+    internal TimeSpan ObjectUsageWarmBudgetPerServer { get; set; } = ObjectUsageWarmBudget;
+
+    /// <summary>
+    /// #9885: parses each enabled server's stored Query Store statement texts into the object usage parse cache, once per server per start, after
+    /// the chain's first pass has ended (so the warm never competes with the first backfill) and only while the MCP server is on. It runs on this
+    /// housekeeping loop, so no reader waits for it, ends with the loop's stop token, stops a server's warm at its time budget, and writes one
+    /// Information line per server. A reader that arrives meanwhile is answered (the cache is thread-safe). Never throws apart from the stop:
+    /// a failed server is logged and not retried until the next start.
+    /// </summary>
+    private async Task RunObjectUsageWarmOnceAsync(CancellationToken stoppingToken)
+    {
+        if (_duckDb == null || _serverManager == null || !_objectUsageChainPassEnded || !ObjectUsageWarmEnabled())
+        {
+            return;
+        }
+
+        var data = new LocalDataService(_duckDb);
+        var windowStart = DateTime.UtcNow.AddDays(-PerformanceMonitorLite.Mcp.McpObjectUsageTools.MaxDaysBack);
+        foreach (var server in _serverManager.GetEnabledServers())
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+            if (!ObjectUsageWarmEnabled())
+            {
+                return;
+            }
+
+            var serverName = RemoteCollectorService.GetServerNameForStorage(server);
+            var serverId = RemoteCollectorService.GetDeterministicHashCode(serverName);
+            if (!_objectUsageWarmedServers.Add(serverId))
+            {
+                continue;
+            }
+
+            try
+            {
+                var warm = await data.WarmObjectUsageParseCacheAsync(serverId, windowStart, ObjectUsageWarmBudgetPerServer, ObjectUsageWarmCache, stoppingToken);
+                _logger?.LogInformation(
+                    "Object usage parse cache warmed for {Server}: {Parsed} of {Texts} statement texts parsed in {Elapsed} ms{Stopped}",
+                    serverName, warm.Parsed, warm.Texts, (long)warm.Elapsed.TotalMilliseconds,
+                    warm.StoppedByBudget ? " (stopped at the time budget; the first reader parses the rest)"
+                        : warm.StoppedByCharCap ? " (stopped at the text size cap; the first reader parses the rest)" : "");
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Object usage parse cache warm failed for {Server}; the first reader parses its statements", serverName);
+            }
         }
     }
 

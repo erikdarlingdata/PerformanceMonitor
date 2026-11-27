@@ -143,27 +143,54 @@ public partial class LocalDataService
     private static string ParameterList(int first, int count) =>
         string.Join(", ", Enumerable.Range(first, count).Select(n => "$" + n.ToString(CultureInfo.InvariantCulture)));
 
+    /// <summary>The window the tables read found and the path that read it (#9885): <c>chain</c>, or <c>fold: </c> and the short reason the chain could not answer.</summary>
+    internal sealed record ObjectUsageTablesRead(ObjectUsageWindowResult Result, string AnsweredFrom);
+
+    /// <summary>The servers whose fold fallback was already logged at Information since this service started (#9885).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> _objectUsageFoldLogged = new();
+
     /// <summary>Reads the window for one database and runs it through <see cref="ObjectUsageWindow"/>: from the persisted chain where it can prove
     /// the full fold's answer, from every snapshot otherwise.</summary>
-    public async Task<ObjectUsageWindowResult> GetObjectUsageWindowAsync(int serverId, string databaseName, DateTime windowStartUtc)
+    public async Task<ObjectUsageWindowResult> GetObjectUsageWindowAsync(int serverId, string databaseName, DateTime windowStartUtc) =>
+        (await GetObjectUsageTablesAsync(serverId, databaseName, windowStartUtc)).Result;
+
+    /// <summary>The window and the path that read it. A fold fallback is logged at Information once per server per start with its reason (#9885),
+    /// and at Debug after that, so a slow first call can be told from a chain read that was slow.</summary>
+    internal async Task<ObjectUsageTablesRead> GetObjectUsageTablesAsync(int serverId, string databaseName, DateTime windowStartUtc)
     {
+        string foldReason;
         try
         {
             var (result, reason) = await TryReadObjectUsageChainAsync(serverId, databaseName, windowStartUtc);
             if (result is not null)
             {
-                return result;
+                return new ObjectUsageTablesRead(result, "chain");
             }
 
-            AppLogger.Debug("ObjectUsage", $"get_object_usage took the full fold for server {serverId}: {reason}");
+            foldReason = reason ?? "the chain could not prove the full fold's answer";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* A chain table that cannot be read (a v87 migration that failed, a file mid-rebuild) costs the speed, never the answer. */
             AppLogger.Warn("ObjectUsage", $"get_object_usage could not read the object usage chain and took the full fold: {ex.Message}");
+            foldReason = "the chain could not be read";
         }
 
-        return await GetObjectUsageWindowFullAsync(serverId, databaseName, windowStartUtc);
+        LogFold(serverId, foldReason);
+        return new ObjectUsageTablesRead(await GetObjectUsageWindowFullAsync(serverId, databaseName, windowStartUtc), "fold: " + foldReason);
+    }
+
+    private void LogFold(int serverId, string reason)
+    {
+        var message = $"get_object_usage took the full fold for server {serverId}: {reason}";
+        if (_objectUsageFoldLogged.TryAdd(serverId, 0))
+        {
+            AppLogger.Info("ObjectUsage", message);
+        }
+        else
+        {
+            AppLogger.Debug("ObjectUsage", message);
+        }
     }
 
     /// <summary>The persisted path. A null result comes with the reason the window cannot be answered from the chain.</summary>

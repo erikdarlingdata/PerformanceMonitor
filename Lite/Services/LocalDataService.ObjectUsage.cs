@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.ObjectReferences;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -131,22 +132,27 @@ GROUP BY
     database_name,
     query_id";
 
-    /// <summary>The parsed statements, shared across reads for the life of the app.</summary>
-    private static readonly QueryTextScanCache s_objectUsageScanCache = new();
+    /// <summary>The parsed statements, shared across reads for the life of the app. A statement text is parsed once whichever window asks for it (#9885).</summary>
+    internal static readonly QueryTextScanCache ObjectUsageScanCache = new();
 
     /// <summary>
     /// Reads the names the window's Query Store statements referenced that can be objects of <paramref name="databaseName"/> (#8784 part 2),
     /// parsing the stored text here at read time: Lite keeps its text for its whole retention, so it needs no summary. Lite keeps no object
     /// list, so a statement that does not parse is counted and not searched. The covered days are <paramref name="executions"/>' (the same
-    /// stored rows).
+    /// stored rows). With <paramref name="phases"/> the call's time is split into the statement read and the statement parse (#9885): the parse
+    /// is the time inside <see cref="ObjectReferenceAggregator.Add"/>, a hash lookup on a statement seen before and a parse on one that is new. A test passes its own
+    /// <paramref name="scanCache"/> to count the parses.
     /// </summary>
-    public async Task<ObjectReferenceWindow> GetObjectReferencesAsync(
-        int serverId, string databaseName, DateTime windowStartUtc, ObjectExecutionWindow executions)
+    internal async Task<ObjectReferenceWindow> GetObjectReferencesAsync(
+        int serverId, string databaseName, DateTime windowStartUtc, ObjectExecutionWindow executions, ReadPhaseSplit? phases = null,
+        QueryTextScanCache? scanCache = null)
     {
         ArgumentNullException.ThrowIfNull(databaseName);
         ArgumentNullException.ThrowIfNull(executions);
 
-        var aggregator = new ObjectReferenceAggregator(cache: s_objectUsageScanCache);
+        var aggregator = new ObjectReferenceAggregator(cache: scanCache ?? ObjectUsageScanCache);
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        long parseTicks = 0;
         using (var connection = await OpenConnectionAsync())
         using (var command = connection.CreateCommand())
         {
@@ -157,12 +163,20 @@ GROUP BY
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                aggregator.Add(
-                    reader.GetString(0),
-                    reader.IsDBNull(3) ? null : reader.GetString(3),
-                    reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
-                    reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+                var database = reader.GetString(0);
+                var text = reader.IsDBNull(3) ? null : reader.GetString(3);
+                var executionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+                var last = reader.IsDBNull(2) ? null : (DateTime?)reader.GetDateTime(2);
+                var parseStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                aggregator.Add(database, text, executionCount, last);
+                parseTicks += System.Diagnostics.Stopwatch.GetTimestamp() - parseStarted;
             }
+        }
+
+        if (phases is not null)
+        {
+            phases.Add("statement read", System.Diagnostics.Stopwatch.GetTimestamp() - readStarted - parseTicks);
+            phases.Add("statement parse", parseTicks);
         }
 
         return ToReferenceWindow(databaseName, aggregator, executions);

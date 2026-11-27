@@ -65,6 +65,8 @@ public sealed record ObjectInventory(DateTime CapturedAtUtc, IReadOnlyList<Objec
 /// <param name="Dependencies">The dependency list (Darling's <c>object_dependencies</c>), or null where none is kept.</param>
 /// <param name="InboundDependencies">The edges from the other databases' newest lists on the same server into this one
 /// (<see cref="ObjectDependencyFilter.ToInboundEdge"/>), each target taken as used, or null where none are kept.</param>
+/// <param name="AnsweredFrom">Which read answered the table window (#9885): <c>chain</c>, or <c>fold: </c> and the short reason the persisted chain could
+/// not answer it. Null where the product keeps no chain to choose between, and the reply then names no path.</param>
 public sealed record ObjectUsageSide(
     string ServerDisplayName,
     ObjectUsageWindowResult Tables,
@@ -73,7 +75,8 @@ public sealed record ObjectUsageSide(
     ObjectInventory? Inventory,
     ObjectReferenceWindow? References = null,
     ObjectDependencyList? Dependencies = null,
-    IReadOnlyList<ObjectDependency>? InboundDependencies = null);
+    IReadOnlyList<ObjectDependency>? InboundDependencies = null,
+    string? AnsweredFrom = null);
 
 /// <summary>
 /// The <c>get_object_usage</c> reply (#8784), built the same way on both products from each side's evidence, so Lite and Darling answer in
@@ -925,6 +928,17 @@ public static class ObjectUsageReport
         };
     }
 
+    /// <summary>Adds <c>answered_from</c> (#9885) so a slow first call can be told from a chain read. Left out where the product keeps no chain, so its reply is unchanged.</summary>
+    private static JsonObject WithAnsweredFrom(JsonObject tables, string? answeredFrom)
+    {
+        if (answeredFrom is not null)
+        {
+            tables["answered_from"] = answeredFrom;
+        }
+
+        return tables;
+    }
+
     private static JsonObject Coverage(ObjectUsageSide side, int daysBack, DateTime nowUtc)
     {
         var t = side.Tables;
@@ -935,7 +949,7 @@ public static class ObjectUsageReport
         return new JsonObject
         {
             ["server"] = side.ServerDisplayName,
-            ["tables"] = new JsonObject
+            ["tables"] = WithAnsweredFrom(new JsonObject
             {
                 ["covered_from_utc"] = Iso(t.CoveredFrom),
                 ["covered_to_utc"] = Iso(t.CoveredTo),
@@ -948,7 +962,7 @@ public static class ObjectUsageReport
                 ["index_resets"] = t.IndexResets,
                 ["resets"] = new JsonArray(t.Resets.Take(20).Select(ResetJson).ToArray()),
                 ["answering_servers"] = new JsonArray(t.AnsweringServerNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
-            },
+            }, side.AnsweredFrom),
             ["executions"] = side.Executions is { } e
                 ? new JsonObject
                 {

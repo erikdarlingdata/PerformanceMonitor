@@ -73,7 +73,7 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     private static DateTime Start(int daysBack) => DateTime.SpecifyKind(Now.AddDays(-daysBack), DateTimeKind.Unspecified);
 
     private Task<string> ToolAsync(int daysBack, string database = Database) =>
-        McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, database, daysBack, 500, 0, Now);
+        ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, database, daysBack, 500, 0, Now));
 
     private async Task SeedAsync(string database = Database, IEnumerable<ObjectUsageChainHistory.Row>? rows = null, long firstId = -1) =>
         await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, database, rows ?? ObjectUsageChainHistory.Generate(), firstId);
@@ -549,8 +549,8 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
             Scalar(old, "DROP TABLE object_usage_runs");
             Scalar(old, "UPDATE schema_version SET version = 86");
             var oldService = new LocalDataService(old);
-            before7 = await McpObjectUsageTools.GetObjectUsage(oldService, _serverManager, ServerName, Database, 7, 500, 0, Now);
-            before90 = await McpObjectUsageTools.GetObjectUsage(oldService, _serverManager, ServerName, Database, 90, 500, 0, Now);
+            before7 = await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(oldService, _serverManager, ServerName, Database, 7, 500, 0, Now));
+            before90 = await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(oldService, _serverManager, ServerName, Database, 90, 500, 0, Now));
             Assert.Contains("\"object_name\":\"Orders\"", before90, StringComparison.Ordinal);
         }
 
@@ -568,8 +568,8 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
         var (none, reason) = await service.TryReadObjectUsageChainAsync(_serverId, Database, Start(90));
         Assert.Null(none);
         Assert.Equal("no facts row at the baseline", reason);
-        Assert.Equal(before7, await McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 7, 500, 0, Now));
-        Assert.Equal(before90, await McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 90, 500, 0, Now));
+        Assert.Equal(before7, await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 7, 500, 0, Now)));
+        Assert.Equal(before90, await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 90, 500, 0, Now)));
 
         /* The background pass fills the chain from the oldest stored snapshot, and the answers do not move. */
         var built = await new ObjectUsageChainBuilder(upgraded, () => Now).BuildPassAsync(int.MaxValue, CancellationToken.None);
@@ -577,8 +577,8 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
         var (persisted, none2) = await service.TryReadObjectUsageChainAsync(_serverId, Database, Start(90));
         Assert.Null(none2);
         Assert.NotNull(persisted);
-        Assert.Equal(before7, await McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 7, 500, 0, Now));
-        Assert.Equal(before90, await McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 90, 500, 0, Now));
+        Assert.Equal(before7, await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 7, 500, 0, Now)));
+        Assert.Equal(before90, await ObjectUsageChainHistory.UnpathedAsync(McpObjectUsageTools.GetObjectUsage(service, _serverManager, ServerName, Database, 90, 500, 0, Now)));
     }
 
     private static string Scalar(DuckDbInitializer duckDb, string sql)
