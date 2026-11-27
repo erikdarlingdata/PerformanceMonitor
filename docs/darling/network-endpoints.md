@@ -4,7 +4,7 @@ Audience: operators.
 
 This page covers the opt-in LAN endpoints for the store, MCP and the web dashboard. It moved here from the Darling operator guide.
 
-By default all three network surfaces bind **loopback only** — the store to `127.0.0.1`, the MCP server and the web dashboard to `localhost` — exactly as they always have. Three optional, independent opt-ins let a remote viewer, MCP client, or browser on your **trusted LAN** reach them. This is a home-lab / trusted-subnet feature: **never expose any of these endpoints to the internet.** The store endpoint is **managed-mode only**, and the MCP and web endpoints are managed-mode or container only (a container's port mapping is its exposure boundary, [#1804](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1804)); elsewhere in bring-your-own mode your own PostgreSQL / reverse proxy governs exposure and the config is ignored with a warning. All three are **fail-closed** — any invalid or incomplete field degrades that endpoint back to loopback and logs a critical line rather than exposing it. Removing the config on the next restart closes the box again.
+By default all three network surfaces bind **loopback only** — the store to `127.0.0.1`, the MCP server and the web dashboard to `localhost` — exactly as they always have. Three optional, independent opt-ins let a remote viewer, MCP client, or browser on your **trusted LAN** reach them. This is a home-lab / trusted-subnet feature: **never expose any of these endpoints to the internet.** The store endpoint is **managed-mode only**. The MCP and web endpoints work with the bundled store and in the compose container (a container's port mapping is its exposure boundary, [#1804](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1804)). They also work with your own PostgreSQL outside a container, but only when that endpoint has its own store login, a login other than the store owner's. Without that login your own PostgreSQL install keeps the endpoint on loopback. All three are **fail-closed** — any invalid or incomplete field degrades that endpoint back to loopback and logs a critical line rather than exposing it. Removing the config on the next restart closes the box again.
 
 ## Guided setup (`--configure-network`)
 
@@ -95,7 +95,7 @@ On every start the service reconciles this against the live cluster: it adds the
 
 ## MCP endpoint (assistant over the LAN)
 
-Add a `network` block to `mcp` (managed mode, or the compose container; `mcp.enabled` must be `true`):
+Add a `network` block to `mcp` (`mcp.enabled` must be `true`). This works with the bundled store and in the compose container. With your own PostgreSQL outside a container, the MCP server also needs its own store login. Set `postgres.mcpConnectionString` to the `mcp` role that `provision-roles.sql` creates, as [Linux install](linux.md#the-web-dashboard-and-mcp) describes. It must name a login other than the one in `postgres.connectionString`. Without it, the MCP server stays on loopback and the service logs a critical line that names the setting. In the compose container the endpoint is exposed without it, and the service logs the same critical line at start when the MCP server has no login of its own.
 
 ```json
 "mcp": {
@@ -165,7 +165,7 @@ If your segment is not fully trusted, serve MCP over HTTPS with `mcp.network.tls
 
 ## Web endpoint (browser over the LAN)
 
-Add a `network` block to `web` (managed mode, or the compose container; `web.enabled` must be `true`):
+Add a `network` block to `web` (`web.enabled` must be `true`). This works with the bundled store and in the compose container. With your own PostgreSQL outside a container, the dashboard also needs its own store login. Set `postgres.webConnectionString` to the `web` role that `provision-roles.sql` creates, as [Linux install](linux.md#the-web-dashboard-and-mcp) describes. It must name a login other than the one in `postgres.connectionString`. Without it, the dashboard stays on loopback and the service logs a critical line that names the setting. In the compose container the endpoint is exposed without it, and the service logs the same critical line at start when the dashboard has no login of its own.
 
 ```json
 "web": {
