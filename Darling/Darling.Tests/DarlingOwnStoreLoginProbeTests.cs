@@ -831,6 +831,67 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         }
     }
 
+    /// <summary>A login whose session is switched to a low role at connect, in each of the three forms: <c>Options=-c role=...</c> on a superuser
+    /// (the session user is a superuser), the same on a member of the owner role (the session user is a member while the connected role is not),
+    /// and <c>Options=-c session_authorization=...</c> on a superuser (both names show the low role, and the session can switch back). Each is
+    /// refused, and the same low role connecting as itself passes, so the refusals are the switch and not the role.</summary>
+    [Fact]
+    public async Task TheProbe_RefusesASessionSwitchedToALowRole_InEachForm()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var superName = "probe_sw_super_" + suffix;
+        var memberName = "probe_sw_member_" + suffix;
+        var lowName = "probe_sw_low_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var ownerNameCommand = owner.CreateCommand("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'config'"))
+            {
+                var ownerName = (string)(await ownerNameCommand.ExecuteScalarAsync(ct))!;
+                await using var create = owner.CreateCommand(
+                    $"CREATE ROLE {superName} LOGIN SUPERUSER PASSWORD '{password}'; "
+                    + $"CREATE ROLE {lowName} LOGIN NOSUPERUSER PASSWORD '{password}'; "
+                    + $"CREATE ROLE {memberName} LOGIN NOSUPERUSER PASSWORD '{password}'; GRANT \"{ownerName}\" TO {memberName}; GRANT {lowName} TO {memberName}");
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            async Task<DarlingStoreLogins.LoginProbeResult> ProbeAsync(string user, string? options)
+            {
+                var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = user, Password = password, Pooling = false };
+                if (options is not null)
+                {
+                    builder.Options = options;
+                }
+
+                return await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+                    DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: builder.ConnectionString), ct);
+            }
+
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(lowName, null)).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(superName, $"-c role={lowName}")).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(memberName, $"-c role={lowName}")).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(superName, $"-c session_authorization={lowName}")).Verdict);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {memberName}; DROP ROLE IF EXISTS {superName}; DROP ROLE IF EXISTS {lowName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     /// <summary>The probe against a real server, for the logins the first live test does not reach: a login whose role is switched at connect (the
     /// session login is a superuser while the connected role is not), a member of the role that owns a store table when another role owns the
     /// schema, and a store with no config schema or none of its tables.</summary>
