@@ -309,6 +309,11 @@ public sealed class QueryTagMapBuilderLiveTests
 
     private sealed class RecordingLogger : Microsoft.Extensions.Logging.ILogger
     {
+        private readonly Action? _insideTheFirstWarning;
+
+        /// <param name="insideTheFirstWarning">Run inside the log call of the first warning, so before the code that logged it goes on.</param>
+        public RecordingLogger(Action? insideTheFirstWarning = null) => _insideTheFirstWarning = insideTheFirstWarning;
+
         public int Warnings { get; private set; }
 
         public IDisposable? BeginScope<TState>(TState state)
@@ -319,9 +324,9 @@ public sealed class QueryTagMapBuilderLiveTests
         public void Log<TState>(
             Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning && Warnings++ == 0)
             {
-                Warnings++;
+                _insideTheFirstWarning?.Invoke();
             }
         }
     }
@@ -452,6 +457,179 @@ public sealed class QueryTagMapBuilderLiveTests
             await Assert.ThrowsAsync<PostgresException>(() => QueryTagMapStore.ReplaceMapAsync(env.Store, Server, replacement, env.Ct));
 
             Assert.Equal(new[] { $"hash|0xAA|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    /*
+     * The inserts a map write sends to one store (#9705), read off Npgsql's own tracing: once a listener samples its "Npgsql"
+     * source it opens an activity per command, tagged with the database's name and the command's text, and stops it when the
+     * command has run. The tags are matched by value, as NpgsqlCommandCounter matches them, and the scratch database's name
+     * keeps another class's commands out. The text only tells which statement ran: the write's insert, and not the extend's
+     * upsert, which is the one that goes on to an ON CONFLICT. Each insert is noted with the number rowsTaken gives at the
+     * moment it ends.
+     */
+    private sealed class MapInsertLog : IDisposable
+    {
+        private readonly string _database;
+        private readonly Func<int> _rowsTaken;
+        private readonly System.Diagnostics.ActivityListener _listener;
+        private readonly List<int> _rowsTakenAtEachInsert = new();
+
+        public MapInsertLog(string database, Func<int>? rowsTaken = null)
+        {
+            _database = database;
+            _rowsTaken = rowsTaken ?? (static () => 0);
+            _listener = new System.Diagnostics.ActivityListener
+            {
+                ShouldListenTo = source => source.Name == "Npgsql",
+                Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) => System.Diagnostics.ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = OnStopped,
+            };
+            System.Diagnostics.ActivitySource.AddActivityListener(_listener);
+        }
+
+        /// <summary>One entry per insert, in the order they ended.</summary>
+        public List<int> RowsTakenAtEachInsert
+        {
+            get
+            {
+                lock (_rowsTakenAtEachInsert)
+                {
+                    return _rowsTakenAtEachInsert.ToList();
+                }
+            }
+        }
+
+        private void OnStopped(System.Diagnostics.Activity activity)
+        {
+            bool onThisDatabase = false;
+            bool isTheMapInsert = false;
+            foreach (var tag in activity.TagObjects)
+            {
+                if (tag.Value is not string value)
+                {
+                    continue;
+                }
+
+                if (string.Equals(value, _database, StringComparison.Ordinal))
+                {
+                    onThisDatabase = true;
+                }
+                else if (value.Contains("INSERT INTO config.query_tag_map", StringComparison.Ordinal) && !value.Contains("ON CONFLICT", StringComparison.Ordinal))
+                {
+                    isTheMapInsert = true;
+                }
+            }
+
+            if (onThisDatabase && isTheMapInsert)
+            {
+                lock (_rowsTakenAtEachInsert)
+                {
+                    _rowsTakenAtEachInsert.Add(_rowsTaken());
+                }
+            }
+        }
+
+        public void Dispose() => _listener.Dispose();
+    }
+
+    [Fact]
+    public async Task ARebuildThatWritesFourRowsAStatement_WritesExactlyItsTaggedKeys_AtEveryCountAroundABatchEnd_InOneInsertPerBatch()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int batch = 4;
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+
+            /* A key no rule tags, so the map is never just every key the server has. */
+            await SightAsync(env, HashSightings("0xEE", "App"));
+            var builder = new QueryTagMapBuilder(env.Source, mapWriteBatchRows: batch);
+
+            int sighted = 0;
+            foreach (int keys in new[] { 0, 1, batch - 1, batch, batch + 1, (2 * batch) + 1 })
+            {
+                for (; sighted < keys; sighted++)
+                {
+                    await SightAsync(env, HashSightings("0xA" + (sighted + 1).ToString(CultureInfo.InvariantCulture), "Report"));
+                }
+
+                /* A tag write bumps the rules version, so the pass rebuilds the map from nothing. */
+                await NewTagAsync(env, "Bump" + keys.ToString(CultureInfo.InvariantCulture));
+                using var inserts = new MapInsertLog(env.Store.Database);
+                Assert.True(await PassAsync(env, builder), $"the rebuild of {keys} tagged keys failed");
+
+                Assert.Equal(Enumerable.Range(1, keys).Select(i => $"hash|0xA{i}|{tag}|rule").ToList(), await MapAsync(env));
+                int insertsSeen = inserts.RowsTakenAtEachInsert.Count;
+                Assert.True((keys + batch - 1) / batch == insertsSeen, $"{keys} tagged keys in batches of {batch} were written in {insertsSeen} inserts");
+            }
+        });
+    }
+
+    [Fact]
+    public async Task AMapWriteOfNineRowsInBatchesOfFour_TakesItsRowsAsItWritesThem_InThreeInserts_NoneOfMoreThanFourRows()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int batch = 4;
+            int tag = await NewTagAsync(env, "Reports");
+
+            /* The rows are made as the write asks for them, and each one is counted as it is handed over. */
+            int[] taken = { 0 };
+            IEnumerable<QueryTagMapRow> Rows(int count)
+            {
+                for (int i = 1; i <= count; i++)
+                {
+                    taken[0]++;
+                    yield return new QueryTagMapRow("hash", "0xA" + i.ToString(CultureInfo.InvariantCulture), tag, "rule", null, "application", "Report");
+                }
+            }
+
+            using var inserts = new MapInsertLog(env.Store.Database, () => taken[0]);
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, Rows((2 * batch) + 1), env.Ct, batchRows: batch);
+
+            /* What the write had taken when each insert ended: an insert carries the rows taken since the insert before it, so
+               four, four and one. A write that sends every row in one statement, or that takes them all first, gives another list. */
+            Assert.Equal(new[] { 4, 8, 9 }, inserts.RowsTakenAtEachInsert);
+            Assert.Equal(Enumerable.Range(1, 9).Select(i => $"hash|0xA{i}|{tag}|rule").ToList(), await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AMapWriteThatFailsInItsSecondBatch_LeavesTheOldMapRowsAndTheOldStoredCursor()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await NewTagAsync(env, "Reports");
+            QueryTagMapRow Row(string key) => new("hash", key, tag, "rule", null, "application", "Report");
+
+            var original = new QueryTagMapStoredCursor(1, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), "hash", "0xAA");
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, new[] { Row("0xAA"), Row("0xAB"), Row("0xAC") }, env.Ct, original, batchRows: 2);
+            var oldMap = new[] { $"hash|0xAA|{tag}|rule", $"hash|0xAB|{tag}|rule", $"hash|0xAC|{tag}|rule" };
+            Assert.Equal(oldMap, await MapAsync(env));
+            Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+
+            /* Two rows a statement, so the first statement of each write succeeds, after the delete, and the second fails:
+               on its fourth row, which names a tag that does not exist, on its third row, which repeats the key of the first
+               row, and on its fourth row, whose source the map's CHECK refuses. */
+            var moved = original with { RulesVersion = 2, Since = original.Since.AddHours(1), AfterKey = "0xZZ" };
+            var failing = new (string Why, QueryTagMapRow[] Rows)[]
+            {
+                ("a tag that does not exist", new[] { Row("0xBA"), Row("0xBB"), Row("0xBC"), Row("0xBD") with { TagId = tag + 1000 }, Row("0xBE") }),
+                ("a repeated key", new[] { Row("0xBA"), Row("0xBB"), Row("0xBA"), Row("0xBD") }),
+                ("a source the CHECK refuses", new[] { Row("0xBA"), Row("0xBB"), Row("0xBC"), Row("0xBD") with { Source = "guess" } }),
+            };
+            foreach (var (why, rows) in failing)
+            {
+                await Assert.ThrowsAsync<PostgresException>(() => QueryTagMapStore.ReplaceMapAsync(env.Store, Server, rows, env.Ct, moved, batchRows: 2));
+                Assert.True(oldMap.SequenceEqual(await MapAsync(env)), $"the old map rows are not all there after a write that failed on {why}");
+                Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+            }
+
+            /* The connection still writes: the rows that are good replace the map and move the cursor. */
+            await QueryTagMapStore.ReplaceMapAsync(env.Store, Server, failing[0].Rows.Take(3), env.Ct, moved, batchRows: 2);
+            Assert.Equal(new[] { $"hash|0xBA|{tag}|rule", $"hash|0xBB|{tag}|rule", $"hash|0xBC|{tag}|rule" }, await MapAsync(env));
+            Assert.Equal(moved, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
         });
     }
 
@@ -1303,6 +1481,492 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
             DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
             Assert.True(clock - (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!.RebuiltAt < TimeSpan.FromMinutes(5));
+        });
+    }
+
+    /*
+     * Four servers a pass rebuilds together (#9705), their rows next to each other in the heap of both tables, under one
+     * rule (application Rpt*) whose matched value is the caller, so a row that reached another server's map shows in it:
+     *   NoRows has nothing in either table.
+     *   SlimOnly has 900 slim rows, K0001 to K0900, under RptS.
+     *   Both has 200 sightings, K0001 to K0200, under RptC, and 300 slim rows, K0101 to K0400, under RptOld: the first
+     *     hundred of them are keys it also sights, where only the sighting counts.
+     *   Ordered has 150 keys, K0001 to K0150, each sighted under RptB and then under RptA: the heap gives RptB first and
+     *     the order gives RptA, so every one of its keys is read back in order.
+     * Both tables are analyzed. A server with rows in a table is estimated at its rows there, and a server with none is
+     * one the statistics cannot place, taken at all the table's rows (1,200 slim rows, 500 sightings). So the store
+     * estimates 1,700, 1,400, 500 and 1,500 rows for the four.
+     */
+    private const int NoRows = 7310;
+    private const int SlimOnly = 7311;
+    private const int Both = 7312;
+    private const int Ordered = 7313;
+    private static readonly int[] GroupServers = { NoRows, SlimOnly, Both, Ordered };
+
+    /* The budgets that put the four servers in four groups of one, in two groups of two, and in one group. */
+    private const int BudgetOfOne = 1;
+    private const int BudgetOfTwo = 3200;
+    private const int BudgetOfAll = 10_000;
+
+    private static async Task SeedGroupServersAsync(Env env)
+    {
+        int reports = await NewTagAsync(env, "Reports");
+        await NewRuleAsync(env, reports, "application", "Rpt*");
+
+        const string key = "'K' || lpad(i::text, 4, '0')";
+        const string sample = "rpad('SELECT ' || i::text || ' ', 1000, md5(i::text))";
+        const string sightings = "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, database_name, application_name, login_name, host_name, text_sample) ";
+        const string slim = "INSERT INTO collect.query_tag_sightings_slim (server_id, key_kind, key, database_name, application_name, login_name, host_name, last_seen) ";
+        await ExecAsync(env, sightings
+            + $"SELECT s.id, 'hash', {key}, 'Sales', s.app, 'svc', 'H1', {sample} FROM generate_series(1, 200) AS i "
+            + $"CROSS JOIN (VALUES ({Both}, 'RptC'), ({Ordered}, 'RptB')) AS s(id, app) WHERE s.id = {Both} OR i <= 150 ORDER BY i, s.id");
+        await ExecAsync(env, sightings + $"SELECT {Ordered}, 'hash', {key}, 'Sales', 'RptA', 'svc', 'H1', {sample} FROM generate_series(1, 150) AS i");
+        await ExecAsync(env, slim
+            + $"SELECT s.id, 'hash', {key}, 'Sales', s.app, 'svc', 'H1', now() FROM generate_series(1, 900) AS i "
+            + $"CROSS JOIN (VALUES ({SlimOnly}, 'RptS'), ({Both}, 'RptOld')) AS s(id, app) WHERE s.id = {SlimOnly} OR i BETWEEN 101 AND 400 ORDER BY i, s.id");
+        await ExecAsync(env, "ANALYZE collect.query_tag_sightings");
+        await ExecAsync(env, "ANALYZE collect.query_tag_sightings_slim");
+    }
+
+    private static string Shape(List<List<int>> groups) => string.Join(" / ", groups.Select(group => string.Join(",", group)));
+
+    /* The groups the store's estimates and a budget give the servers, by the same two calls the builder makes. */
+    private static async Task<string> GroupsAsync(Env env, IReadOnlyList<int> servers, int budget) =>
+        Shape(QueryTagRebuildGroups.Form(servers, await QueryTagMapStore.ReadRebuildRowEstimatesAsync(env.Store, servers, env.Ct), budget));
+
+    /* Every column of every map row of one server, a NULL shown as "~", in key order, so two maps can be compared whole. */
+    private static async Task<List<string>> WholeMapOfAsync(Env env, int serverId)
+    {
+        var rows = new List<string>();
+        await using var command = new NpgsqlCommand(
+            "SELECT key_kind || '|' || key || '|' || tag_id || '|' || source || '|' || COALESCE(rule_id::text, '~') || '|' || COALESCE(matched_field, '~') || '|' || COALESCE(matched_value, '~') "
+            + "FROM config.query_tag_map WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " ORDER BY key_kind COLLATE \"C\", key COLLATE \"C\"",
+            env.Store);
+        await using var reader = await command.ExecuteReaderAsync(env.Ct);
+        while (await reader.ReadAsync(env.Ct))
+        {
+            rows.Add(reader.GetString(0));
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> BlocksOfAsync(Env env, string table) =>
+        long.Parse(await ScalarAsync(env, $"SELECT pg_relation_size('{table}') / current_setting('block_size')::bigint"), CultureInfo.InvariantCulture);
+
+    [Fact]
+    public async Task AGroupedRebuild_GivesEveryServerTheMapItsOwnRebuildGives_InGroupsOfOne_OfTwo_AndOfAll_AtPagesOfOneBlockAndOfTheWholeTable()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+            Assert.True(await BlocksOfAsync(env, "collect.query_tag_sightings") >= 9, "the sightings are under 9 blocks");
+            Assert.True(await BlocksOfAsync(env, "collect.query_tag_sightings_slim") >= 9, "the slim rows are under 9 blocks");
+
+            /* Each server rebuilt alone, in a pass of its own. */
+            var alone = new Dictionary<int, List<string>>();
+            foreach (int serverId in GroupServers)
+            {
+                Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(new[] { serverId }, env.Ct), $"the rebuild of server {serverId} alone failed");
+                alone[serverId] = await WholeMapOfAsync(env, serverId);
+            }
+
+            /* The four maps differ, a key of two servers is tagged by each server's own caller, and every key of the last
+               server took the caller its ordered rows give first, which the heap gives second. */
+            Assert.Empty(alone[NoRows]);
+            Assert.Equal(900, alone[SlimOnly].Count);
+            Assert.Equal(400, alone[Both].Count);
+            Assert.Equal(150, alone[Ordered].Count);
+            Assert.All(alone[SlimOnly], row => Assert.EndsWith("|application|RptS", row, StringComparison.Ordinal));
+            Assert.Equal(200, alone[Both].Count(row => row.EndsWith("|application|RptC", StringComparison.Ordinal)));
+            Assert.Equal(200, alone[Both].Count(row => row.EndsWith("|application|RptOld", StringComparison.Ordinal)));
+            Assert.All(alone[Ordered], row => Assert.EndsWith("|application|RptA", row, StringComparison.Ordinal));
+
+            foreach (var (budget, groups) in new[] { (BudgetOfOne, "7310 / 7311 / 7312 / 7313"), (BudgetOfTwo, "7310,7311 / 7312,7313"), (BudgetOfAll, "7310,7311,7312,7313") })
+            {
+                Assert.Equal(groups, await GroupsAsync(env, GroupServers, budget));
+                foreach (int pageBlocks in new[] { 1, 1_000_000 })
+                {
+                    /* A tag write bumps the rules version, so the pass rebuilds every server, and the maps are emptied first,
+                       so a map the pass did not write is not the map it is compared with. */
+                    await NewTagAsync(env, $"Bump{budget}x{pageBlocks}");
+                    await ExecAsync(env, "DELETE FROM config.query_tag_map");
+                    var builder = new QueryTagMapBuilder(env.Source, rebuildPageBlocks: pageBlocks, rebuildGroupRows: budget);
+                    Assert.True(await builder.RunMapPassAsync(GroupServers, env.Ct), $"the pass with a budget of {budget} rows and pages of {pageBlocks} blocks failed");
+                    foreach (int serverId in GroupServers)
+                    {
+                        Assert.True(
+                            alone[serverId].SequenceEqual(await WholeMapOfAsync(env, serverId)),
+                            $"server {serverId} has another map than its own rebuild gives, with a budget of {budget} rows and pages of {pageBlocks} blocks");
+                    }
+                }
+            }
+        });
+    }
+
+    [Fact]
+    public async Task APassThatRebuildsFourServers_ReadsEachTablesPagesOnceAGroup_NotOnceAServer()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+
+            /* The page statements the store receives, told by the store's own statement text. A page with an upper bound is
+               the same text with more after it, so each counter counts both kinds of page of its table. */
+            using var slimPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSlimSightings.LastPageSql);
+            using var sightingsPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSightings.LastPageSql);
+
+            /* The control: one read of each table through the store's reader, the whole table a page, is one page statement of
+               that table and none of the other. */
+            await using (var read = await QueryTagMapStore.BeginRebuildReadAsync(env.Store, env.Ct))
+            {
+                await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, GroupServers, QueryTagMapStore.RebuildSlimSightings, 1_000_000, env.Ct))
+                {
+                    Assert.Contains(row.ServerId, GroupServers);
+                }
+
+                Assert.Equal((1L, 0L), (slimPages.Count, sightingsPages.Count));
+                await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, GroupServers, QueryTagMapStore.RebuildSightings, 1_000_000, env.Ct))
+                {
+                    Assert.Contains(row.ServerId, GroupServers);
+                }
+
+                Assert.Equal((1L, 1L), (slimPages.Count, sightingsPages.Count));
+                await read.CommitAsync(env.Ct);
+            }
+
+            /* The page statements of one pass over the four servers. A tag write bumps the rules version, so it rebuilds them all. */
+            int passes = 0;
+            async Task<(long Slim, long Sightings)> PagesOfAPassAsync(int budget, int pageBlocks)
+            {
+                await NewTagAsync(env, "Bump" + (++passes).ToString(CultureInfo.InvariantCulture));
+                long slimBefore = slimPages.Count;
+                long sightingsBefore = sightingsPages.Count;
+                var builder = new QueryTagMapBuilder(env.Source, rebuildPageBlocks: pageBlocks, rebuildGroupRows: budget);
+                Assert.True(await builder.RunMapPassAsync(GroupServers, env.Ct), $"the pass with a budget of {budget} rows failed");
+                return (slimPages.Count - slimBefore, sightingsPages.Count - sightingsBefore);
+            }
+
+            /* With the whole table a page, a group is one page statement of each table: one group of four servers reads each
+               table once and not four times, two groups twice, and four groups of one four times. */
+            Assert.Equal("7310,7311,7312,7313", await GroupsAsync(env, GroupServers, BudgetOfAll));
+            Assert.Equal((1L, 1L), await PagesOfAPassAsync(BudgetOfAll, 1_000_000));
+            Assert.Equal("7310,7311 / 7312,7313", await GroupsAsync(env, GroupServers, BudgetOfTwo));
+            Assert.Equal((2L, 2L), await PagesOfAPassAsync(BudgetOfTwo, 1_000_000));
+            Assert.Equal("7310 / 7311 / 7312 / 7313", await GroupsAsync(env, GroupServers, BudgetOfOne));
+            Assert.Equal((4L, 4L), await PagesOfAPassAsync(BudgetOfOne, 1_000_000));
+
+            /* With a block a page, one group reads each block of each table in one statement, once. */
+            long slimBlocks = await BlocksOfAsync(env, "collect.query_tag_sightings_slim");
+            long sightingsBlocks = await BlocksOfAsync(env, "collect.query_tag_sightings");
+            Assert.True(slimBlocks >= 9 && sightingsBlocks >= 9, $"the tables are only {slimBlocks} and {sightingsBlocks} blocks");
+            Assert.Equal((slimBlocks, sightingsBlocks), await PagesOfAPassAsync(BudgetOfAll, 1));
+        });
+    }
+
+    /* The servers of the two failure tests: the three that have rows, which the shipped budget puts in one group. */
+    private static readonly int[] FailureServers = { SlimOnly, Both, Ordered };
+
+    /* Builds the three maps, then takes ten keys from every server's rows and bumps the rules version: the next pass rebuilds
+       all three, and each new map is the old one without those ten keys. Returns the old maps and the old stored cursors. */
+    private static async Task<(Dictionary<int, List<string>> Maps, Dictionary<int, QueryTagMapStoredCursor?> Cursors)> BuildThenChangeGroupAsync(Env env, QueryTagMapBuilder builder)
+    {
+        await SeedGroupServersAsync(env);
+        Assert.Equal("7311,7312,7313", await GroupsAsync(env, FailureServers, QueryTagMapStore.RebuildGroupRows));
+        Assert.True(await builder.RunMapPassAsync(FailureServers, env.Ct));
+
+        var maps = new Dictionary<int, List<string>>();
+        var cursors = new Dictionary<int, QueryTagMapStoredCursor?>();
+        foreach (int serverId in FailureServers)
+        {
+            maps[serverId] = await WholeMapOfAsync(env, serverId);
+            cursors[serverId] = await QueryTagMapStore.ReadCursorAsync(env.Store, serverId, env.Ct);
+            Assert.Contains(maps[serverId], row => row.StartsWith("hash|K0010|", StringComparison.Ordinal));
+            Assert.NotNull(cursors[serverId]);
+        }
+
+        await ExecAsync(env, "DELETE FROM collect.query_tag_sightings WHERE key < 'K0011'");
+        await ExecAsync(env, "DELETE FROM collect.query_tag_sightings_slim WHERE key < 'K0011'");
+        await NewTagAsync(env, "Bump");
+        return (maps, cursors);
+    }
+
+    private static List<string> WithoutTheTenKeys(List<string> map) =>
+        map.Where(row => string.CompareOrdinal(row.Split('|')[1], "K0011") >= 0).ToList();
+
+    [Fact]
+    public async Task AMapWriteThatFailsForOneServerOfAGroup_LeavesThatServerItsOldMapAndCursor_AndWritesTheOthers()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var builder = new QueryTagMapBuilder(env.Source);
+            var (oldMaps, oldCursors) = await BuildThenChangeGroupAsync(env, builder);
+
+            /* The write of the group's second server fails: the delete of its map rows raises. */
+            await FailMapDeleteForAsync(env, Both);
+            Assert.False(await builder.RunMapPassAsync(FailureServers, env.Ct));
+
+            Assert.Equal(oldMaps[Both], await WholeMapOfAsync(env, Both));
+            Assert.Equal(oldCursors[Both], await QueryTagMapStore.ReadCursorAsync(env.Store, Both, env.Ct));
+            foreach (int serverId in new[] { SlimOnly, Ordered })
+            {
+                Assert.Equal(WithoutTheTenKeys(oldMaps[serverId]), await WholeMapOfAsync(env, serverId));
+                Assert.NotEqual(oldCursors[serverId], await QueryTagMapStore.ReadCursorAsync(env.Store, serverId, env.Ct));
+            }
+
+            /* With the failure gone the next pass writes the server that failed. */
+            await ExecAsync(env, "DROP TRIGGER fail_map_delete ON config.query_tag_map");
+            Assert.True(await builder.RunMapPassAsync(FailureServers, env.Ct));
+            foreach (int serverId in FailureServers)
+            {
+                Assert.Equal(WithoutTheTenKeys(oldMaps[serverId]), await WholeMapOfAsync(env, serverId));
+            }
+        });
+    }
+
+    [Fact]
+    public async Task AGroupReadThatFailsOnOneServersRow_LeavesThatServerItsOldMapAndCursor_AndRebuildsTheOthersAloneInTheSamePass()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var builder = new QueryTagMapBuilder(env.Source);
+            var (oldMaps, oldCursors) = await BuildThenChangeGroupAsync(env, builder);
+
+            /* The slim table of this scratch store takes a row no read can take, a key that is NULL, under the group's
+               second server. The read of the group fails on it, and so does that server's read alone. A read of either
+               other server alone never asks for it. */
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim ALTER COLUMN key DROP NOT NULL");
+            await ExecAsync(env, $"INSERT INTO collect.query_tag_sightings_slim (server_id, key_kind, key, last_seen) VALUES ({Both}, 'hash', NULL, now())");
+            using var slimPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSlimSightings.LastPageSql);
+            using var sightingsPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSightings.LastPageSql);
+            Assert.False(await builder.RunMapPassAsync(FailureServers, env.Ct));
+
+            /* The server whose own read fails keeps its map and cursor, and the two others have their new maps already. */
+            Assert.Equal(oldMaps[Both], await WholeMapOfAsync(env, Both));
+            Assert.Equal(oldCursors[Both], await QueryTagMapStore.ReadCursorAsync(env.Store, Both, env.Ct));
+            foreach (int serverId in new[] { SlimOnly, Ordered })
+            {
+                Assert.Equal(WithoutTheTenKeys(oldMaps[serverId]), await WholeMapOfAsync(env, serverId));
+                Assert.NotEqual(oldCursors[serverId], await QueryTagMapStore.ReadCursorAsync(env.Store, serverId, env.Ct));
+            }
+
+            /* The slim table was read four times, once for the group and once for each server alone, and the sightings
+               table twice, for the two servers whose slim read went through. */
+            Assert.Equal((4L, 2L), (slimPages.Count, sightingsPages.Count));
+
+            /* Without that row the next pass rebuilds the server that failed. */
+            await ExecAsync(env, "DELETE FROM collect.query_tag_sightings_slim WHERE key IS NULL");
+            Assert.True(await builder.RunMapPassAsync(FailureServers, env.Ct));
+            foreach (int serverId in FailureServers)
+            {
+                Assert.Equal(WithoutTheTenKeys(oldMaps[serverId]), await WholeMapOfAsync(env, serverId));
+                Assert.NotEqual(oldCursors[serverId], await QueryTagMapStore.ReadCursorAsync(env.Store, serverId, env.Ct));
+            }
+        });
+    }
+
+    [Fact]
+    public async Task AnAgePickedServerInAPassWithAGroupOfTwo_IsReadAloneAndBacksOffWhenItsRebuildFails_AndTheGroupIsReadOnce()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(FailureServers, env.Ct));
+            var oldMaps = new Dictionary<int, List<string>>();
+            foreach (int serverId in FailureServers)
+            {
+                oldMaps[serverId] = await WholeMapOfAsync(env, serverId);
+            }
+
+            /* Two servers lose their stored cursors, so a new builder rebuilds them, and the estimates put them in one
+               group. The third keeps its cursor, rebuilt eight days ago, so the same pass picks it for age, and the write of
+               its rebuild fails. Ten keys leave every server's rows, and the third server sights a new key. */
+            await QueryTagMapStore.DropCursorsOutsideAsync(env.Store, new[] { Both }, env.Ct);
+            await StoreRebuiltAtAsync(env, Both, TimeSpan.FromDays(8));
+            await FailMapDeleteForAsync(env, Both);
+            await ExecAsync(env, "DELETE FROM collect.query_tag_sightings WHERE key < 'K0011'");
+            await ExecAsync(env, "DELETE FROM collect.query_tag_sightings_slim WHERE key < 'K0011'");
+            await SightOnAsync(env, Both, HashSightings("0xCC", "RptNew"));
+            Assert.Equal("7311,7313", await GroupsAsync(env, new[] { SlimOnly, Ordered }, QueryTagMapStore.RebuildGroupRows));
+
+            using var slimPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSlimSightings.LastPageSql);
+            using var sightingsPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSightings.LastPageSql);
+            var builder = new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero);
+            Assert.False(await builder.RunMapPassAsync(FailureServers, env.Ct));
+
+            /* Each table was read twice: once for the group of two and once for the age-picked server alone. */
+            Assert.Equal((2L, 2L), (slimPages.Count, sightingsPages.Count));
+            foreach (int serverId in new[] { SlimOnly, Ordered })
+            {
+                Assert.Equal(WithoutTheTenKeys(oldMaps[serverId]), await WholeMapOfAsync(env, serverId));
+            }
+
+            /* The age-picked server's failed rebuild left its map, the ten keys still in it, and it was extended from its
+               cursor: the new key is mapped. */
+            var extended = await WholeMapOfAsync(env, Both);
+            Assert.Contains(extended, row => row.StartsWith("hash|K0010|", StringComparison.Ordinal));
+            Assert.Contains(extended, row => row.StartsWith("hash|0xCC|", StringComparison.Ordinal));
+
+            /* It is backed off: the next pass picks no server for age, reads no page and is clean. */
+            Assert.True(await builder.RunMapPassAsync(FailureServers, env.Ct));
+            Assert.Equal((2L, 2L), (slimPages.Count, sightingsPages.Count));
+        });
+    }
+
+    /* The node types of a plan and of every plan under it. */
+    private static IEnumerable<string> PlanNodeTypes(System.Text.Json.JsonElement plan)
+    {
+        yield return plan.GetProperty("Node Type").GetString()!;
+        if (plan.TryGetProperty("Plans", out var inner))
+        {
+            foreach (var type in inner.EnumerateArray().SelectMany(PlanNodeTypes))
+            {
+                yield return type;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task APageStatementOfThreeServers_IsOneTidRangeScan_InTheRebuildsReadTransaction()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+
+            /* The plan the store gives the statement the rebuild sends, with its parameters, inside the read transaction
+               the rebuild opens: a page with an upper bound and the last page, of each table, for three servers. */
+            await using var connection = await env.Source.OpenConnectionAsync(env.Ct);
+            await using var read = await QueryTagMapStore.BeginRebuildReadAsync(connection, env.Ct);
+            foreach (var table in new[] { QueryTagMapStore.RebuildSlimSightings, QueryTagMapStore.RebuildSightings })
+            {
+                long blocks = await BlocksOfAsync(env, table.Table);
+                Assert.True(blocks >= 9, $"{table.Table} is only {blocks} blocks");
+                foreach (var (from, to) in new (long, long?)[] { (2, 3), (blocks - 1, null) })
+                {
+                    await using var command = QueryTagMapStore.RebuildPageCommand(connection, table, FailureServers, from, to);
+                    command.CommandText = "EXPLAIN (FORMAT JSON) " + command.CommandText;
+                    using var plan = System.Text.Json.JsonDocument.Parse((string)(await command.ExecuteScalarAsync(env.Ct))!);
+                    Assert.Equal(new[] { "Tid Range Scan" }, PlanNodeTypes(plan.RootElement[0].GetProperty("Plan")).ToArray());
+                }
+            }
+
+            await read.CommitAsync(env.Ct);
+        });
+    }
+
+    [Fact]
+    public async Task ASlimTableThatIsNotAPlainTable_GivesNoEstimate_SoEveryServerIsAGroupOfOne()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+            Assert.Equal("7310,7311,7312,7313", await GroupsAsync(env, GroupServers, QueryTagMapStore.RebuildGroupRows));
+
+            /* The slim table of this scratch store becomes a partitioned table whose one partition holds its rows: the
+               table of that name has no blocks of its own, which is what an empty table looks like. */
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim RENAME TO query_tag_sightings_slim_rows");
+            await ExecAsync(env, "CREATE TABLE collect.query_tag_sightings_slim (LIKE collect.query_tag_sightings_slim_rows) PARTITION BY RANGE (server_id)");
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim ATTACH PARTITION collect.query_tag_sightings_slim_rows DEFAULT");
+            await ExecAsync(env, "ANALYZE collect.query_tag_sightings_slim");
+
+            Assert.Empty(await QueryTagMapStore.ReadRebuildRowEstimatesAsync(env.Store, GroupServers, env.Ct));
+            Assert.Equal("7310 / 7311 / 7312 / 7313", await GroupsAsync(env, GroupServers, QueryTagMapStore.RebuildGroupRows));
+        });
+    }
+
+    [Fact]
+    public async Task WhenTheRowEstimatesCannotBeRead_ThePassWarnsOnce_ReadsEachServerAlone_AndWritesEveryMap()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedGroupServersAsync(env);
+            Assert.Equal("7310,7311,7312,7313", await GroupsAsync(env, GroupServers, QueryTagMapStore.RebuildGroupRows));
+
+            /* A new session of this scratch database gives up a wait for a lock after 300 ms. The pool's idle sessions are
+               closed, so the session the builder reads the estimates on is a new one. The setting is taken back, and the
+               pool's idle sessions closed again, inside the builder's first warning, so that session is the only one that
+               has it. */
+            await ExecAsync(env, $"ALTER DATABASE \"{env.Store.Database}\" SET lock_timeout = '300ms'");
+            env.Source.Clear();
+
+            using var slimPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSlimSightings.LastPageSql);
+            using var sightingsPages = new NpgsqlCommandCounter(env.Store.Database!, QueryTagMapStore.RebuildSightings.LastPageSql);
+
+            /* The estimate asks for the blocks the slim table has now, which waits for a lock on the table. This session holds
+               the whole table locked, so that statement fails, and lets go inside the log call of the builder's first warning:
+               the builder goes on only after the table is free, and reads it. */
+            await using var holder = await env.Store.BeginTransactionAsync(env.Ct);
+            await ExecAsync(env, "LOCK TABLE collect.query_tag_sightings_slim IN ACCESS EXCLUSIVE MODE");
+            var logger = new RecordingLogger(insideTheFirstWarning: () =>
+            {
+                holder.Rollback();
+                using var reset = new NpgsqlCommand($"ALTER DATABASE \"{env.Store.Database}\" RESET lock_timeout", env.Store);
+                reset.ExecuteNonQuery();
+                env.Source.Clear();
+            });
+            var builder = new QueryTagMapBuilder(env.Source, logger, rebuildPageBlocks: 1_000_000);
+            Assert.True(await builder.RunMapPassAsync(GroupServers, env.Ct));
+
+            /* One warning, and with the whole table a page each of the four servers was read in a group of its own: four page
+               statements a table, where the estimates give one group and one statement. */
+            Assert.Equal(1, logger.Warnings);
+            Assert.Equal((4L, 4L), (slimPages.Count, sightingsPages.Count));
+            await using (var later = await env.Source.OpenConnectionAsync(env.Ct))
+            await using (var show = new NpgsqlCommand("SHOW lock_timeout", later))
+            {
+                Assert.Equal("0", (string)(await show.ExecuteScalarAsync(env.Ct))!);
+            }
+
+            Assert.Empty(await WholeMapOfAsync(env, NoRows));
+            Assert.Equal(900, (await WholeMapOfAsync(env, SlimOnly)).Count);
+            Assert.Equal(400, (await WholeMapOfAsync(env, Both)).Count);
+            Assert.Equal(150, (await WholeMapOfAsync(env, Ordered)).Count);
+        });
+    }
+
+    [Fact]
+    public async Task ATableAnalyzedEmptyAndFilledSince_IsTakenAtTheMostItsBlocksCanHold_AndOneAnalyzedAndGrownSince_IsEstimatedByTheBlocksItHasNow()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7304;
+            var servers = new[] { Server, other };
+            Task<Dictionary<int, double>> EstimatesAsync() => QueryTagMapStore.ReadRebuildRowEstimatesAsync(env.Store, servers, env.Ct);
+            Task FillSlimAsync(int from, int to) => ExecAsync(env,
+                "INSERT INTO collect.query_tag_sightings_slim (server_id, key_kind, key, database_name, application_name, login_name, host_name, last_seen) "
+                + $"SELECT s.id, 'hash', 'K' || lpad(i::text, 6, '0'), 'Sales', 'App', 'svc', 'H1', now() FROM generate_series({from}, {to}) AS i CROSS JOIN (VALUES ({Server}), ({other})) AS s(id)");
+
+            /* Only this test analyzes the scratch store's two tables. */
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings SET (autovacuum_enabled = off)");
+            await ExecAsync(env, "ALTER TABLE collect.query_tag_sightings_slim SET (autovacuum_enabled = off)");
+
+            /* Both tables analyzed empty: each server has no rows. */
+            await ExecAsync(env, "ANALYZE collect.query_tag_sightings");
+            await ExecAsync(env, "ANALYZE collect.query_tag_sightings_slim");
+            var empty = await EstimatesAsync();
+            Assert.Equal(0, empty[Server], 6);
+            Assert.Equal(0, empty[other], 6);
+
+            /* The slim table filled and not analyzed: the count still says no rows in no blocks, and the column has no
+               statistics. Each server is taken at the most the table's blocks can hold, which is over the 4,000 rows it has. */
+            await FillSlimAsync(1, 2000);
+            long blocks = await BlocksOfAsync(env, "collect.query_tag_sightings_slim");
+            int blockSize = int.Parse(await ScalarAsync(env, "SHOW block_size"), CultureInfo.InvariantCulture);
+            var filled = await EstimatesAsync();
+            Assert.Equal((double)(blocks * QueryTagRebuildGroups.MaxHeapTuplesPerPage(blockSize)), filled[Server], 6);
+            Assert.Equal(filled[Server], filled[other], 6);
+            Assert.True(filled[Server] >= 4000, $"the ceiling of {blocks} blocks is {filled[Server]} rows, under the 4,000 the table has");
+
+            /* Analyzed at 2,000 rows a server, then grown to 10,000 a server and not analyzed: the count says 2,000 and the
+               estimate follows the table's blocks to about 10,000. */
+            await ExecAsync(env, "ANALYZE collect.query_tag_sightings_slim");
+            var counted = await EstimatesAsync();
+            Assert.InRange(counted[Server], 1900, 2100);
+            Assert.InRange(counted[other], 1900, 2100);
+            await FillSlimAsync(2001, 10_000);
+            var grown = await EstimatesAsync();
+            Assert.InRange(grown[Server], 9000, 11_000);
+            Assert.InRange(grown[other], 9000, 11_000);
         });
     }
 }
