@@ -189,10 +189,15 @@ public sealed class AlwaysOnXeReadOnlyIntentDatabase : IAlwaysOnXeDatabase, IDis
 /// (<see cref="LongQueryCompletionsCollector.XeSessionNameFor"/>), and the two capture suffixes are cut from the shared
 /// names, so no second spelling of either exists.</para>
 ///
-/// <para><b>Nothing here drops a session it did not make, with one exception.</b> The drop builder takes an own name, and refuses any other.
-/// The shared session is not dropped, because another install may be reading it. The exception is the shared client-timeout
-/// session with an older definition of the same session (#9507): <see cref="BuildAzureSharedAttentionDropSql"/> drops it so it
-/// can be created again with the current one.</para>
+/// <para><b>The client-timeout capture has no shared session in this build (#9895).</b> Two installs at different builds that
+/// monitor one server used to replace each other's <c>PerformanceMonitor_Attention</c> session, each dropping the other's
+/// definition on connect. Every install now makes and reads only its own, <c>PerformanceMonitor_{product}_{id}_Attention</c>, on
+/// a server and in an Azure SQL Database alike, the way the long-query completions session has been named since #1496. The shared
+/// name (<see cref="AttentionXeSessionName"/>) is the one older builds make: no builder here creates, starts, reads, stops or drops
+/// it, because an older install may still read it.</para>
+///
+/// <para><b>Nothing here drops a session it did not make.</b> The drop builder takes an own name, and refuses any other.
+/// A shared deadlock or blocked-process session is not dropped, because another install may be reading it.</para>
 /// </summary>
 public static class AlwaysOnXeSessions
 {
@@ -238,8 +243,9 @@ public static class AlwaysOnXeSessions
     };
 
     /// <summary>
-    /// The shared name of the client-timeout capture (#5640), the one every install and both products read. It is the
-    /// attention collector's own constant, so the reader and this lifecycle can never disagree.
+    /// The shared name of the client-timeout capture (#5640), the one every install and both products read before #9895. It is
+    /// the attention collector's own constant. A build with #9895 never creates, reads, alters or drops it (an older install may
+    /// still read it), so it stays only to cut the capture's suffix from, and for the verb an operator runs to drop sessions.
     /// </summary>
     public const string AttentionXeSessionName = AttentionCollector.XeSessionName;
 
@@ -308,6 +314,23 @@ public static class AlwaysOnXeSessions
     /// </summary>
     public static string ReadNameFor(AlwaysOnXeSessionKind kind, string? chosen)
     {
+        /* #9895: the client-timeout read names this install's own session only. With no name (an install with no id) there is no
+           session to read, and the shared one is another install's, so the read refuses instead of falling back to it. */
+        if (kind == AlwaysOnXeSessionKind.Attention)
+        {
+            if (string.IsNullOrEmpty(chosen))
+            {
+                throw new InvalidOperationException(NoOwnAttentionSessionMessage);
+            }
+
+            if (!IsOwnName(chosen, kind))
+            {
+                throw new ArgumentException("The client-timeout session name must be this install's own name.", nameof(chosen));
+            }
+
+            return chosen;
+        }
+
         if (string.IsNullOrEmpty(chosen))
         {
             return SharedNameFor(kind);
@@ -321,9 +344,15 @@ public static class AlwaysOnXeSessions
         return chosen;
     }
 
+    /// <summary>What a client-timeout read, create or start says when this install has no id to name its own session with (#9895).</summary>
+    public const string NoOwnAttentionSessionMessage =
+        "The client-timeout session is one per install, named from the install's id, and this install has no id for now, so there is no session to create or read.";
+
     private static void RequireName(AlwaysOnXeSessionKind kind, string sessionName)
     {
-        if (!string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal) && !IsOwnName(sessionName, kind))
+        /* #9895: no shared client-timeout session is made, started or read any more. */
+        var sharedAllowed = kind != AlwaysOnXeSessionKind.Attention;
+        if (!(sharedAllowed && string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal)) && !IsOwnName(sessionName, kind))
         {
             throw new ArgumentException("The session name is neither the shared name nor an own name of this capture.", nameof(sessionName));
         }
@@ -348,7 +377,10 @@ public static class AlwaysOnXeSessions
         AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false, int? ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         RequireName(kind, sessionName);
-        var shared = string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal);
+        /* An own deadlock or blocked-process session is a fallback and does not start with the database (OFF). The client-timeout
+           session is always own (#9895) and is the install's only one, so it starts with the database as a shared one did. */
+        var startsWithDatabase = kind == AlwaysOnXeSessionKind.Attention
+            || string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal);
         /* One arm per kind, so a new kind cannot fall into the deadlock arm (#5640). */
         var (eventClause, targets, retention) = kind switch
         {
@@ -375,7 +407,7 @@ public static class AlwaysOnXeSessions
             + "(\n"
             + "    MAX_DISPATCH_LATENCY = 5 SECONDS,\n"
             + retention
-            + "    STARTUP_STATE = " + (shared ? "ON" : "OFF") + "\n"
+            + "    STARTUP_STATE = " + (startsWithDatabase ? "ON" : "OFF") + "\n"
             + ");\n";
     }
 
@@ -499,10 +531,12 @@ public static class AlwaysOnXeSessions
     /// The create and the start of the client-timeout session on a server, box, VM, managed instance, RDS or a read replica
     /// (#5640): <c>ON SERVER</c>, <c>MEMORY_PARTITION_MODE = NONE</c> (AWS RDS requires it), <c>STARTUP_STATE = ON</c>. Both
     /// products build it here, so there is one copy of this statement; the deadlock and blocked-process statements are still
-    /// spelled out by each host. The name is the shared one: a server-scoped session is shared by every install.
+    /// spelled out by each host. <paramref name="sessionName"/> is this install's own session (<see cref="OwnNameFor"/>, #9895):
+    /// the shared name older builds make is refused, so a build never creates the session another install reads. Throws for any
+    /// other name.
     /// </summary>
-    public static string BuildAttentionServerCreateSql() =>
-        "\nCREATE EVENT SESSION [" + AttentionXeSessionName + "]\n"
+    public static string BuildAttentionServerCreateSql(string sessionName) =>
+        "\nCREATE EVENT SESSION [" + RequireOwnAttention(sessionName) + "]\n"
         + "ON SERVER\n"
         + AttentionEventClause(azure: false)
         + AttentionTargets
@@ -514,15 +548,28 @@ public static class AlwaysOnXeSessions
         + "    STARTUP_STATE = ON\n"
         + ");\n"
         + "\n"
-        + BuildAttentionServerStartSql();
+        + BuildAttentionServerStartSql(sessionName);
 
-    /// <summary>The start of the server-scoped client-timeout session (#5640).</summary>
-    public static string BuildAttentionServerStartSql() =>
-        "ALTER EVENT SESSION [" + AttentionXeSessionName + "] ON SERVER STATE = START;";
+    /// <summary>The start of the server-scoped client-timeout session (#5640). Own name only, as <see cref="BuildAttentionServerCreateSql"/>.</summary>
+    public static string BuildAttentionServerStartSql(string sessionName) =>
+        "ALTER EVENT SESSION [" + RequireOwnAttention(sessionName) + "] ON SERVER STATE = START;";
 
-    /// <summary>The drop of the server-scoped client-timeout session (#5640), for a session with another definition. The name is ours.</summary>
-    public static string BuildAttentionServerDropSql() =>
-        "DROP EVENT SESSION [" + AttentionXeSessionName + "] ON SERVER;";
+    /// <summary>
+    /// The drop of the server-scoped client-timeout session (#5640), for this install's own session with another definition.
+    /// Own name only: a session under the shared name belongs to an older install, and is never dropped here (#9895).
+    /// </summary>
+    public static string BuildAttentionServerDropSql(string sessionName) =>
+        "DROP EVENT SESSION [" + RequireOwnAttention(sessionName) + "] ON SERVER;";
+
+    private static string RequireOwnAttention(string sessionName)
+    {
+        if (!IsOwnName(sessionName, AlwaysOnXeSessionKind.Attention))
+        {
+            throw new ArgumentException("Only this install's own client-timeout session is created, started or dropped, never the shared one.", nameof(sessionName));
+        }
+
+        return sessionName;
+    }
 
     /// <summary>The <see cref="BuildAttentionServerProbeSql"/> answer for a session that exists with another definition (#5640).</summary>
     public const int AttentionDefinitionMismatch = 2;
@@ -531,7 +578,7 @@ public static class AlwaysOnXeSessions
     /// The presence probe for the server-scoped client-timeout session (#5640): no row when the session does not exist, and
     /// <c>session_state</c> 0 (stopped), 1 (running) or <see cref="AttentionDefinitionMismatch"/> (2: it exists with events, actions or
     /// targets other than the ones <see cref="BuildAttentionServerCreateSql"/> makes, which is an older definition of our own
-    /// session, since the name is ours). <c>@session_name</c> is the shared name. <paramref name="appTag"/> is the host's own
+    /// session, since the name is ours). <c>@session_name</c> is this install's own name. <paramref name="appTag"/> is the host's own
     /// comment tag. The first read of an ensure is a dirty read, so it sees a session another caller is still creating, which can
     /// read as another definition (#9675): <paramref name="committedRead"/> asks for the read that waits for that create to commit,
     /// and the confirming read of <see cref="ConfirmAttentionMismatchAsync"/> uses it.
@@ -730,7 +777,7 @@ WHERE ses.name = @session_name;";
 
     /// <summary>
     /// The drop of one session. Takes an own name only: the shared session is not dropped by this builder, because another
-    /// install may be reading it (the one case that is, is <see cref="BuildAzureSharedAttentionDropSql"/>). Throws for any other name.
+    /// install may be reading it. Throws for any other name.
     /// </summary>
     public static string BuildAzureDropSql(AlwaysOnXeSessionKind kind, string sessionName)
     {
@@ -741,18 +788,6 @@ WHERE ses.name = @session_name;";
 
         return "DROP EVENT SESSION [" + sessionName + "] ON DATABASE;";
     }
-
-    /// <summary>
-    /// The drop of the shared client-timeout session, for the one case an install may drop a shared session (#9507): its
-    /// definition is an older one of this product's own, so it lacks the events a read needs. See <see cref="BuildAzureDropSql"/>
-    /// for every other name.
-    /// </summary>
-    public static string BuildAzureSharedAttentionDropSql() =>
-        "DROP EVENT SESSION [" + SharedNameFor(AlwaysOnXeSessionKind.Attention) + "] ON DATABASE;";
-
-    /// <summary>The stop that goes before <see cref="BuildAzureSharedAttentionDropSql"/> over a read-only connection (#4961).</summary>
-    public static string BuildAzureSharedAttentionStopSql() =>
-        "ALTER EVENT SESSION [" + SharedNameFor(AlwaysOnXeSessionKind.Attention) + "] ON DATABASE STATE = STOP;";
 
     /// <summary>
     /// The catalog probe: one scalar, the <see cref="AlwaysOnXeCatalog"/> value as an integer, for the session named by
@@ -794,7 +829,7 @@ SELECT /* " + appTag + @" */
         END;";
             case AlwaysOnXeSessionKind.Attention:
                 /* #5640: present (2) only with the client-timeout definition; another definition under our name is 1. The Azure ensure
-                   drops and creates again an own session or the shared one (#9507), and leaves any other kind's shared session alone. */
+                   drops and creates again this install's own session (#9507, #9895), and leaves every shared session alone. */
                 return @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -948,14 +983,6 @@ public sealed class AlwaysOnXeChoices
     public bool MarkReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
         _readOnlyRefusals.TryAdd(KeyOf(serverKey, database, kind), true);
 
-    /* The databases whose shared client-timeout session this run has replaced (#9507). Not forgotten with the registration: the
-       rule is once per run of the app, as the on-premises session's is. */
-    private readonly ConcurrentDictionary<string, bool> _attentionReplaced = new(StringComparer.Ordinal);
-
-    /// <summary>True the first time in this run for one database, so the host replaces an older shared client-timeout session once and no more.</summary>
-    public bool TryClaimAttentionReplace(string serverKey, string database) =>
-        _attentionReplaced.TryAdd(KeyOf(serverKey, database, AlwaysOnXeSessionKind.Attention), true);
-
     /// <summary>Forgets the refusal of one database, after a pass that did not hit it.</summary>
     public void ClearReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
         _readOnlyRefusals.TryRemove(KeyOf(serverKey, database, kind), out _);
@@ -965,7 +992,9 @@ public sealed class AlwaysOnXeChoices
     /// an own name, else the shared name.
     /// </summary>
     public string NameFor(string serverKey, string database, AlwaysOnXeSessionKind kind, string? ownName) =>
-        Get(serverKey, database, kind) == AlwaysOnXeChoice.Own && ownName is not null
+        kind == AlwaysOnXeSessionKind.Attention
+            ? AlwaysOnXeSessions.ReadNameFor(kind, ownName)
+            : Get(serverKey, database, kind) == AlwaysOnXeChoice.Own && ownName is not null
             ? AlwaysOnXeSessions.ReadNameFor(kind, ownName)
             : AlwaysOnXeSessions.SharedNameFor(kind);
 
@@ -1047,9 +1076,8 @@ public static class AlwaysOnXeAzureEnsure
     /// <summary>
     /// One pass of the ensure in one database. <paramref name="ownName"/> is null for a host with no install id, and
     /// <paramref name="idFailure"/> is why, when the host's id store knows (see <see cref="NoOwnSessionMessage"/>).
-    /// <paramref name="claimSharedAttentionReplace"/> is the host's once-per-run claim for one database (true the first time):
-    /// a shared client-timeout session whose definition is older than this version's is dropped and created again only when the
-    /// claim is true (#9507). Without it, such a session is left as it is, as for every other kind.
+    /// The client-timeout kind has no shared session (#9895): it is ensured as this install's own session and never falls back to
+    /// the shared one an older install may read, so it throws when the host has no own name.
     /// </summary>
     public static async Task<AlwaysOnXeAzureResult> RunAsync(
         IAlwaysOnXeDatabase database,
@@ -1058,17 +1086,29 @@ public static class AlwaysOnXeAzureEnsure
         AlwaysOnXeChoice current,
         CancellationToken cancellationToken,
         string? idFailure = null,
-        int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents,
-        Func<bool>? claimSharedAttentionReplace = null)
+        int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         ArgumentNullException.ThrowIfNull(database);
+
+        if (kind == AlwaysOnXeSessionKind.Attention)
+        {
+            if (ownName is null)
+            {
+                throw new InvalidOperationException(idFailure is { } failure
+                    ? $"{AlwaysOnXeSessions.NoOwnAttentionSessionMessage} The id store says: {failure}. The next cycle tries again."
+                    : AlwaysOnXeSessions.NoOwnAttentionSessionMessage);
+            }
+
+            var attentionChange = await EnsureOwnAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
+            return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Own, attentionChange);
+        }
 
         if (current == AlwaysOnXeChoice.Own && ownName is not null)
         {
             (bool Usable, AlwaysOnXeChange Change) shared;
             try
             {
-                shared = await TrySharedAsync(database, kind, ringBufferMaxEvents, claimSharedAttentionReplace, cancellationToken);
+                shared = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1086,7 +1126,7 @@ public static class AlwaysOnXeAzureEnsure
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Own, ownChange);
         }
 
-        var first = await TrySharedAsync(database, kind, ringBufferMaxEvents, claimSharedAttentionReplace, cancellationToken);
+        var first = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
         if (first.Usable)
         {
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Shared, first.Change);
@@ -1102,7 +1142,7 @@ public static class AlwaysOnXeAzureEnsure
     }
 
     private static async Task<(bool Usable, AlwaysOnXeChange Change)> TrySharedAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, int ringBufferMaxEvents, Func<bool>? claimSharedAttentionReplace, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, int ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
         var catalog = await database.ReadCatalogAsync(kind, shared, cancellationToken);
@@ -1110,20 +1150,8 @@ public static class AlwaysOnXeAzureEnsure
         switch (catalog)
         {
             case AlwaysOnXeCatalog.WrongEvent:
-                /* Not dropped: another install may be reading it. This install reads its own instead. The client-timeout session is
-                   the exception (#9507): its name is this product's own, and the definition under it is an older one of the same
-                   session, without the completed events a read now needs. Left running, it would sit unread with STARTUP_STATE = ON
-                   while every install fell back to a session of its own. It is dropped and created again once per run, as the
-                   on-premises session is, and then read as the shared one. A deadlock session without its event may be another
-                   tool's, so that one stays. */
-                if (kind != AlwaysOnXeSessionKind.Attention || claimSharedAttentionReplace is null || !claimSharedAttentionReplace())
-                {
-                    return (false, AlwaysOnXeChange.None);
-                }
-
-                await DropByStatementsAsync(
-                    database, shared, AlwaysOnXeSessions.BuildAzureSharedAttentionStopSql(), AlwaysOnXeSessions.BuildAzureSharedAttentionDropSql(), cancellationToken);
-                return await CreateSharedAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
+                /* Not dropped: another install may be reading it. This install reads its own instead. */
+                return (false, AlwaysOnXeChange.None);
 
             case AlwaysOnXeCatalog.Present:
                 if (await database.IsStartedAsync(shared, cancellationToken))

@@ -37,7 +37,7 @@ public sealed class AttentionXeSessionLiteTests
     [Fact]
     public void TheBuilderMakesTheSameStatementBothProductsSend()
     {
-        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql();
+        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql("PerformanceMonitor_Lite_0a1b2c3d_Attention");
 
         Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
         Assert.Contains("ADD EVENT sqlserver.attention", sql, StringComparison.Ordinal);
@@ -58,7 +58,7 @@ public sealed class AttentionXeSessionLiteTests
 
         Assert.DoesNotContain("sqlserver.attention", ensure, StringComparison.Ordinal);
         Assert.DoesNotContain("CREATE EVENT SESSION", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql()", ensure, StringComparison.Ordinal);
+        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql(AttentionXeSessionName)", ensure, StringComparison.Ordinal);
         Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerProbeSql(", ensure, StringComparison.Ordinal);
         Assert.Contains("AlwaysOnXeSessionKind.Attention", ensure, StringComparison.Ordinal);
     }

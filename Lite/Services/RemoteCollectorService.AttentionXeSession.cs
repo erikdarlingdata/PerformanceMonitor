@@ -17,9 +17,11 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
-    /* The client-timeout session's name lives in the shared builder (#5640) so the attention read and this lifecycle can
-       never disagree on it. */
-    private const string AttentionXeSessionName = AlwaysOnXeSessions.AttentionXeSessionName;
+    /* The client-timeout session is this install's own, named from its id (#9895): this build never creates, reads, alters or drops
+       the shared name an older install may still read. The name comes from the shared builder (#5640) so the attention read and
+       this lifecycle can never disagree on it. */
+    private string AttentionXeSessionName => AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention)
+        ?? throw new InvalidOperationException(AlwaysOnXeSessions.NoOwnAttentionSessionMessage);
 
     /* #5640 (L4): the servers whose client-timeout session this run of the app has already dropped and created again for another
        definition. A second mismatch on the same server is left alone, so a probe that cannot be satisfied never drops every cycle. */
@@ -102,7 +104,7 @@ public partial class RemoteCollectorService
                     await AlwaysOnXeSessions.DropAttentionMismatchAsync(
                         async token =>
                         {
-                            using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                            using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(AttentionXeSessionName), connection);
                             dropCmd.CommandTimeout = CommandTimeoutSeconds;
                             await dropCmd.ExecuteNonQueryAsync(token);
                         },
@@ -115,7 +117,7 @@ public partial class RemoteCollectorService
                     {
                         /* Session exists but is stopped - start it. A failure is not logged here: it propagates to the ensure's catch, which applies the #4964
                            log-once rule (Warn or Error on the first failing cycle, Debug after it). A line here would repeat at full level every cycle (#5640). */
-                        using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(), connection);
+                        using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(AttentionXeSessionName), connection);
                         startCmd.CommandTimeout = CommandTimeoutSeconds;
                         await startCmd.ExecuteNonQueryAsync(cancellationToken);
                         AppLogger.Info("XeSession", $"[{server.DisplayName}] Started client timeout XE session");
@@ -130,7 +132,7 @@ public partial class RemoteCollectorService
         }
 
         /* No catch here: a failure propagates to the ensure's catch, which logs it once at Warn or Error and then at Debug (#4964). */
-        using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
+        using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(AttentionXeSessionName), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started client timeout XE session");

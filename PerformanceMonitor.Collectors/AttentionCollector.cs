@@ -62,7 +62,12 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     {
     }
 
-    /// <summary>The app-managed session. The ensure (AlwaysOnXeSessions) creates it; this read names it.</summary>
+    /// <summary>
+    /// The shared name older builds make and every install used to read. Since #9895 a build makes and reads only its own session,
+    /// <c>PerformanceMonitor_{product}_{id}_Attention</c> (<see cref="AlwaysOnXeSessions.OwnNameFor"/>), and never creates, reads,
+    /// alters or drops this one, because an older install may still read it. It stays to cut the own name's suffix from, and for
+    /// the operator's verb that drops sessions by name.
+    /// </summary>
     public const string XeSessionName = "PerformanceMonitor_Attention";
 
     /// <summary>A run's counter row, written only when the delta is above zero: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>

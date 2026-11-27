@@ -24,6 +24,7 @@ namespace Darling.Tests;
 public sealed class AttentionXeSessionTests
 {
     private const string InstallIdValue = "0a1b2c3d";
+    private static readonly string OwnName = "PerformanceMonitor_Darling_0a1b2c3d_Attention";
     private const AlwaysOnXeSessionKind Attention = AlwaysOnXeSessionKind.Attention;
 
     [Fact]
@@ -52,9 +53,9 @@ public sealed class AttentionXeSessionTests
     [Fact]
     public void TheServerScopedStatement_IsServerScoped_WithTheTwoTargetsTheFiveActionsAndNoHash()
     {
-        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql();
+        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql(OwnName);
 
-        Assert.Contains("CREATE EVENT SESSION [PerformanceMonitor_Attention]", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE EVENT SESSION [PerformanceMonitor_Darling_0a1b2c3d_Attention]", sql, StringComparison.Ordinal);
         Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON DATABASE", sql, StringComparison.Ordinal);
         Assert.Contains("ADD EVENT sqlserver.attention", sql, StringComparison.Ordinal);
@@ -72,7 +73,7 @@ public sealed class AttentionXeSessionTests
         Assert.Contains("MEMORY_PARTITION_MODE = NONE", sql, StringComparison.Ordinal);
         Assert.Contains("STARTUP_STATE = ON", sql, StringComparison.Ordinal);
         Assert.Contains("EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS", sql, StringComparison.Ordinal);
-        Assert.EndsWith("ALTER EVENT SESSION [PerformanceMonitor_Attention] ON SERVER STATE = START;", sql, StringComparison.Ordinal);
+        Assert.EndsWith("ALTER EVENT SESSION [PerformanceMonitor_Darling_0a1b2c3d_Attention] ON SERVER STATE = START;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -198,8 +199,8 @@ public sealed class AttentionXeSessionTests
     {
         var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
 
-        Assert.Contains("await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql()", source, StringComparison.Ordinal);
+        Assert.Contains("await EnsureAttentionOnPremAsync(connection, server, attentionName, logger, cancellationToken);", source, StringComparison.Ordinal);
+        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)", source, StringComparison.Ordinal);
         Assert.Contains("AlwaysOnXeSessionKind.Attention, \"client timeout\"", source, StringComparison.Ordinal);
         Assert.DoesNotContain("sqlserver.attention", source, StringComparison.Ordinal);
 

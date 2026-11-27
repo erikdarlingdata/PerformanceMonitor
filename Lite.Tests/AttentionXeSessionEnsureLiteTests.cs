@@ -81,10 +81,10 @@ public sealed class AttentionXeSessionEnsureLiteTests
         var source = ReadLite("Lite/Services/RemoteCollectorService.AttentionXeSession.cs");
 
         Assert.Contains("mismatch == AlwaysOnXeSessions.AttentionDefinitionMismatch", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerDropSql()", source, StringComparison.Ordinal);
+        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerDropSql(AttentionXeSessionName)", source, StringComparison.Ordinal);
         Assert.Contains("_attentionDefinitionReplaced.TryAdd(server.Id, true)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("DROP EVENT SESSION", source, StringComparison.Ordinal);
-        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql());
+        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Lite_0a1b2c3d_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql("PerformanceMonitor_Lite_0a1b2c3d_Attention"));
     }
 
     /// <summary>L6: the Azure create the engine refuses for an unproved action is retried by the shared driver; Lite words the note.</summary>
