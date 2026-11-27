@@ -32,7 +32,8 @@ public sealed class McpSlowCallTools
         "rows_returned (the reply's own count, else the length of the one array it holds, null when it carries neither); call_time_utc (when it started); outcome (ok, error, exception or cancelled); " +
         "total_ms (whole call); lock_wait_ms (time waiting for the local store's read lock, added up over every connection the call opened); " +
         "hot_ms and archive_ms (the part of total_ms spent outside and inside the archive span reads) and archive_files (archive files those reads opened), " +
-        "which are null for a tool that keeps no phase split (only get_query_store_top does), so null means not measured, not zero; " +
+        "which are null for a tool that keeps no hot and archive split (only get_query_store_top does), so null means not measured, not zero; " +
+        "answered_from (get_object_usage only: chain, or fold and its short reason, as the reply's coverage says it, null for any other tool) and phase_split (get_object_usage only: the phases of the call in the order they ran, in words, null for any other tool); " +
         "response_bytes (size of the reply text the tool returned, before MCP's JSON-RPC encoding, so the body on the wire is larger); hours_back (the window the call asked for, null when it had none); " +
         "process_peak_working_set_bytes (highest working set of the whole Lite process read while the call ran) and duckdb_peak_memory_bytes (highest duckdb_memory() total read while the call ran, " +
         "null when the store lock was busy at every read), the same two figures the compaction history carries. Both are for the whole process, not the call alone: when calls overlap, " +
@@ -95,6 +96,8 @@ public sealed class McpSlowCallTools
                     hot_ms = r.HotMs,
                     archive_ms = r.ArchiveMs,
                     archive_files = r.ArchiveFiles,
+                    answered_from = r.AnsweredFrom,
+                    phase_split = r.PhaseSplit,
                     response_bytes = r.ResponseBytes,
                     hours_back = r.HoursBack,
                     process_peak_working_set_bytes = r.ProcessPeakWorkingSetBytes,

@@ -11,6 +11,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace PerformanceMonitor.Analysis.ObjectReferences;
 
@@ -69,6 +70,7 @@ public sealed class QueryTextScanCache
     private Dictionary<UInt128, QueryTextScan> _previous = new();
     private readonly object _gate = new();
     private readonly int _capacity;
+    private long _scans;
 
     /// <summary>Creates a cache whose generations hold at most <paramref name="capacity"/> scans each.</summary>
     public QueryTextScanCache(int capacity = 200_000)
@@ -88,6 +90,9 @@ public sealed class QueryTextScanCache
             }
         }
     }
+
+    /// <summary>How many texts this cache has parsed since it was created: a hit adds none (#9885).</summary>
+    public long Scans => Interlocked.Read(ref _scans);
 
     /// <summary>The scan of <paramref name="text"/>, parsed on a miss.</summary>
     public QueryTextScan GetOrScan(string text)
@@ -111,6 +116,7 @@ public sealed class QueryTextScanCache
             }
         }
 
+        Interlocked.Increment(ref _scans);
         var scan = QueryTextReferenceScanner.Scan(text);
         if (!scan.Parsed)
         {
