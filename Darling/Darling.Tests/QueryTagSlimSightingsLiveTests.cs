@@ -268,121 +268,219 @@ public sealed class QueryTagSlimSightingsLiveTests
         });
     }
 
-    /* Every column of every map row of the server, ordered, so two rebuilds can be compared whole. */
-    private static Task<string> WholeMapAsync(Env env) =>
-        ScalarAsync(env,
-            "SELECT COALESCE(string_agg(concat_ws('|', key_kind, key, tag_id, source, rule_id, matched_field, matched_value), ',' ORDER BY key_kind, key), '') "
-            + "FROM config.query_tag_map WHERE server_id = " + Server);
+    private const int OtherServer = Server + 1;
 
     /*
-     * A server whose keys span several rebuild pages, in both tables. 0xP05 is the key a page end lands inside: it has two
-     * sightings (AppA, AppB) and two slim rows (AppY, AppZ), and the rule that wins it matches only AppZ, its last row. The
-     * rule after it matches AppA, so a page that held only part of 0xP05 would tag it Front, or twice.
+     * The one-statement read of a server's rows from both tables, in the order SightingsOfKeysSql gives one key's rows: the
+     * reference a rebuild's map is compared with. The test owns this text.
      */
-    private static async Task<(int Last, int Front, int Sales)> SeedPagedServerAsync(Env env)
+    private const string ReferenceRowsSql = """
+SELECT u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample
+FROM (
+    SELECT key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, 0 AS tier
+    FROM collect.query_tag_sightings
+    WHERE server_id = $1
+    UNION ALL
+    SELECT key_kind, key, NULLIF(database_name, ''), object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text, 1
+    FROM collect.query_tag_sightings_slim
+    WHERE server_id = $1
+) AS u
+ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.application_name, ''), COALESCE(u.login_name, ''), COALESCE(u.host_name, ''), u.tier
+""";
+
+    private static string RowText(QueryTagMapRow row) =>
+        string.Join("|", row.KeyKind, row.Key, row.TagId.ToString(CultureInfo.InvariantCulture), row.Source,
+            row.RuleId?.ToString(CultureInfo.InvariantCulture) ?? "~", row.MatchedField ?? "~", row.MatchedValue ?? "~");
+
+    /* Every column of every map row of the server, a NULL shown as "~", in ordinal order, so two maps can be compared whole. */
+    private static async Task<List<string>> WholeMapAsync(Env env)
     {
-        int last = await NewTagAsync(env, "Last");
-        int front = await NewTagAsync(env, "Front");
-        int sales = await NewTagAsync(env, "SalesDb");
-        await NewRuleAsync(env, last, "application", "AppZ");
-        await NewRuleAsync(env, front, "application", "AppA");
-        await NewRuleAsync(env, sales, "database", "Sales");
+        var rows = new List<string>();
+        await using var command = new NpgsqlCommand(
+            "SELECT key_kind, key, tag_id, source, rule_id, matched_field, matched_value FROM config.query_tag_map WHERE server_id = " + Server, env.Store);
+        await using var reader = await command.ExecuteReaderAsync(env.Ct);
+        while (await reader.ReadAsync(env.Ct))
+        {
+            rows.Add(RowText(new QueryTagMapRow(
+                reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6))));
+        }
 
-        /* The rows that end in the slim table: 0xP05 under two older callers, and three keys seen only long ago. */
-        await SightAsync(env, HashSightings("0xP05", "AppY"), HashSightings("0xP05", "AppZ"),
-            HashSightings("0xP02", "Old"), HashSightings("0xP07", "Old"), HashSightings("0xP11", "Old"));
-        await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET first_seen = now() - interval '{SightingsDays + 5} days', last_seen = now() - interval '{SightingsDays + 5} days'");
-        await PurgeAsync(env);
-        Assert.Equal(string.Empty, await SightedKeysAsync(env));
+        rows.Sort(StringComparer.Ordinal);
+        return rows;
+    }
 
-        /* The rows that stay sightings: 0xP05 again under two new callers, 0xP07 again, and keys before and after them. */
-        await SightAsync(env, HashSightings("0xP05", "AppA"), HashSightings("0xP05", "AppB"), HashSightings("0xP07", "Old"),
-            HashSightings("0xP01", "New"), HashSightings("0xP03", "New"), HashSightings("0xP04", "New", database: "Other"), HashSightings("0xP06", "New"),
-            HashSightings("0xP08", "New"), HashSightings("0xP09", "New"), HashSightings("0xP10", "New", database: "Other"), HashSightings("0xP12", "New"));
-        return (last, front, sales);
+    /* The server's rows from both tables in the reference order, as the sightings the resolver reads. */
+    private static async Task<List<QueryTagSighting>> ReferenceRowsAsync(Env env)
+    {
+        var rows = new List<QueryTagSighting>();
+        await using var command = new NpgsqlCommand(ReferenceRowsSql, env.Store);
+        command.Parameters.Add(new NpgsqlParameter { Value = Server });
+        await using var reader = await command.ExecuteReaderAsync(env.Ct);
+        while (await reader.ReadAsync(env.Ct))
+        {
+            string? Text(int at) => reader.IsDBNull(at) ? null : reader.GetString(at);
+            var kind = reader.GetString(0) switch { "hash" => QueryTagKeyKind.Hash, "object" => QueryTagKeyKind.Object, _ => QueryTagKeyKind.Caller };
+            string key = reader.GetString(1);
+            var objectRef = QueryTagMapStore.ParseQualified(Text(3) ?? (kind == QueryTagKeyKind.Object ? key : null), Text(2));
+            rows.Add(new QueryTagSighting(kind, key, Text(2), objectRef, Text(4), Text(5), Text(6), Text(7)));
+        }
+
+        return rows;
+    }
+
+    /* The reference map: each key's rows in the reference order through the resolver, one key at a time. */
+    private static List<string> ReferenceMap(List<QueryTagSighting> ordered, QueryTagMapSnapshot snapshot)
+    {
+        var map = new List<string>();
+        foreach (var key in ordered.GroupBy(row => (row.KeyKind, row.Key)))
+        {
+            var resolution = QueryTagResolver.Resolve(Server, key.ToList(), snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName);
+            if (resolution.HasTag)
+            {
+                map.Add(RowText(QueryTagMapStore.MapRow(key.Key.KeyKind, key.Key.Key, resolution)));
+            }
+        }
+
+        map.Sort(StringComparer.Ordinal);
+        return map;
+    }
+
+    private static async Task<long> BlocksAsync(Env env, string table) =>
+        long.Parse(await ScalarAsync(env, $"SELECT pg_relation_size('{table}') / current_setting('block_size')::bigint"), CultureInfo.InvariantCulture);
+
+    /*
+     * A server whose rows span many heap blocks of both tables, with another server's rows between them (under a caller the
+     * first rule would tag). 300 hash keys K0001 to K0300 have a sighting with a text sample of 1000 characters, 1200 keys
+     * S0001 to S1200 have only a slim row. The keys that need their rows in order are written so the row the heap gives first
+     * is not the row the order gives first:
+     *   K...1: two callers, RptB written before RptA, both matching the rule Rpt* (the matched value differs).
+     *   K...2: a sighting under RptZ and a slim row under RptA (the slim table is read after the sightings).
+     *   K...3: two callers whose text names a tag in a comment, Beta written before Alpha (the text_tag rule gives two tags).
+     *   S0150, S0300 and on to S1200: two slim rows in the databases Arch1 and Arch0, Arch1 written first (the rule Arch*).
+     * K0011 also has a hand assignment, which wins over its two Rpt callers.
+     */
+    private static async Task SeedBlockPagedServerAsync(Env env)
+    {
+        int reports = await NewTagAsync(env, "Reports");
+        await NewTagAsync(env, "Alpha");
+        await NewTagAsync(env, "Beta");
+        int archive = await NewTagAsync(env, "Archive");
+        int orders = await NewTagAsync(env, "Orders");
+        int hand = await NewTagAsync(env, "Hand");
+        await NewRuleAsync(env, reports, "application", "Rpt*");
+        await ExecAsync(env, "INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES (NULL, 'text_tag', '*', 'test')");
+        await NewRuleAsync(env, archive, "database", "Arch*");
+        await NewRuleAsync(env, orders, "text", "*orders*");
+        await ExecAsync(env, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({hand}, 'hash', 'K0011', 'test')");
+
+        const string key = "'K' || lpad(i::text, 4, '0')";
+        const string sample = "rpad(CASE WHEN i % 5 = 0 THEN 'SELECT * FROM dbo.orders WHERE id = ' ELSE 'SELECT ' END || i::text || ' ', 1000, md5(i::text))";
+        const string sightings = "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, database_name, application_name, login_name, host_name, text_sample) ";
+        const string slim = "INSERT INTO collect.query_tag_sightings_slim (server_id, key_kind, key, database_name, application_name, login_name, host_name, last_seen) ";
+        string servers = $"CROSS JOIN (VALUES ({Server}), ({OtherServer})) AS s(id)";
+
+        await ExecAsync(env, sightings
+            + $"SELECT s.id, 'hash', {key}, CASE WHEN i % 6 = 0 THEN 'Arch0' ELSE 'Sales' END, CASE WHEN s.id = {Server} THEN 'App' || (i % 7)::text ELSE 'RptQ' END, 'svc', 'H1', {sample} "
+            + $"FROM generate_series(1, 300) AS i {servers} ORDER BY i, s.id");
+        foreach (string caller in new[] { "RptB", "RptA" })
+        {
+            await ExecAsync(env, sightings + $"SELECT {Server}, 'hash', {key}, 'Sales', '{caller}', 'svc', 'H1', {sample} FROM generate_series(1, 300) AS i WHERE i % 10 = 1");
+        }
+
+        await ExecAsync(env, sightings + $"SELECT {Server}, 'hash', {key}, 'Sales', 'RptZ', 'svc', 'H1', {sample} FROM generate_series(1, 300) AS i WHERE i % 10 = 2");
+        foreach (var (caller, tag) in new[] { ("TagB", "Beta"), ("TagA", "Alpha") })
+        {
+            await ExecAsync(env, sightings
+                + $"SELECT {Server}, 'hash', {key}, 'Sales', '{caller}', 'svc', 'H1', rpad('/* tag:{tag} */ SELECT ' || i::text || ' ', 1000, md5(i::text)) FROM generate_series(1, 300) AS i WHERE i % 10 = 3");
+        }
+
+        await ExecAsync(env, slim
+            + $"SELECT s.id, 'hash', 'S' || lpad(i::text, 4, '0'), CASE i % 3 WHEN 0 THEN 'Arch1' WHEN 1 THEN 'Other' ELSE 'Sales' END, CASE WHEN s.id = {Server} THEN 'Old' ELSE 'RptQ' END, 'svc', 'H1', now() "
+            + $"FROM generate_series(1, 1200) AS i {servers} ORDER BY i, s.id");
+        await ExecAsync(env, slim + $"SELECT {Server}, 'hash', 'S' || lpad(i::text, 4, '0'), 'Arch0', 'Old', 'svc', 'H1', now() FROM generate_series(1, 1200) AS i WHERE i % 50 = 0");
+        await ExecAsync(env, slim + $"SELECT {Server}, 'hash', {key}, 'Sales', 'RptA', 'svc', 'H1', now() FROM generate_series(1, 300) AS i WHERE i % 10 = 2");
     }
 
     [Fact]
-    public async Task ARebuildReadInPages_BuildsTheMapOfAOnePageRead_AndAKeyWhoseCallersSitOnAPageEndIsResolvedFromAllOfThem()
+    public async Task ARebuildReadInBlockPages_BuildsTheMapOfTheOneStatementOrderedRead_AtEveryPageSize()
     {
         await WithStoreAsync(async env =>
         {
-            var (last, _, sales) = await SeedPagedServerAsync(env);
+            await SeedBlockPagedServerAsync(env);
+            var snapshot = await QueryTagMapStore.ReadSnapshotAsync(env.Store, env.Ct);
+            var ordered = await ReferenceRowsAsync(env);
+            var reference = ReferenceMap(ordered, snapshot);
+            Assert.True(reference.Count > 300, $"the reference map has only {reference.Count} rows");
 
-            /* One page holds the whole server: the read is one statement for each kind of key. */
-            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildPageRows: 1_000_000)));
-            string onePage = await WholeMapAsync(env);
-            Assert.Contains($"hash|0xP05|{last}|rule|", onePage, StringComparison.Ordinal);
-            Assert.Contains($"hash|0xP11|{sales}|rule|", onePage, StringComparison.Ordinal);
-            Assert.DoesNotContain("0xP04", onePage, StringComparison.Ordinal);
-            Assert.Equal(10, onePage.Split(',').Length);
+            /* Both tables are several pages at every small page size, so a page end falls inside each of them. */
+            long sightingsBlocks = await BlocksAsync(env, "collect.query_tag_sightings");
+            long slimBlocks = await BlocksAsync(env, "collect.query_tag_sightings_slim");
+            Assert.True(sightingsBlocks >= 9, $"the sightings are only {sightingsBlocks} blocks");
+            Assert.True(slimBlocks >= 9, $"the slim rows are only {slimBlocks} blocks");
 
-            /* Every page size puts a page end at a different row of 0xP05, in the sightings table or in the slim one. A tag
-               write bumps the rules version, so each pass rebuilds the map from nothing. */
-            foreach (int pageRows in new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 })
+            /* Keys of each kind of disagreement need their rows in order, so every rebuild below takes the ordered re-read. */
+            var merge = new QueryTagRebuildMerge(Server, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName);
+            foreach (var row in Enumerable.Reverse(ordered))
             {
-                await NewTagAsync(env, "Bump" + pageRows.ToString(CultureInfo.InvariantCulture));
-                Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildPageRows: pageRows)), $"the rebuild with pages of {pageRows} rows failed");
-                Assert.Equal(onePage, await WholeMapAsync(env));
+                merge.Add(row);
+            }
+
+            var needOrder = merge.Finish().KeysNeedingOrder.Select(k => k.Key).ToHashSet();
+            Assert.Contains("K0021", needOrder);
+            Assert.Contains("K0002", needOrder);
+            Assert.Contains("K0003", needOrder);
+            Assert.Contains("S0150", needOrder);
+            Assert.DoesNotContain("K0011", needOrder);
+            Assert.True(needOrder.Count > 60, $"only {needOrder.Count} keys need order");
+
+            /* A tag write bumps the rules version, so each pass rebuilds the map from nothing. The last page size holds each
+               table in one page, and the second reads the keys that need order in several statements. */
+            foreach (int pageBlocks in new[] { 1, 2, 3, 1_000_000 })
+            {
+                await NewTagAsync(env, "Bump" + pageBlocks.ToString(CultureInfo.InvariantCulture));
+                var builder = new QueryTagMapBuilder(env.Source, rebuildPageBlocks: pageBlocks, keysPerServerPerPass: pageBlocks == 2 ? 7 : QueryTagMapBuilder.MapKeysPerServerPerPass);
+                Assert.True(await PassAsync(env, builder), $"the rebuild with pages of {pageBlocks} blocks failed");
+                Assert.Equal(reference, await WholeMapAsync(env));
             }
         });
     }
 
     [Fact]
-    public async Task ARebuildPage_EndsOnAKey_HoldsEveryRowOfItsKeysFromBothTables_AndIsNeverMuchMoreThanThePageSize()
+    public async Task ARebuildsRead_GivesEveryRowOfTheServerOnce_FromEachTable_AtEveryPageSize()
     {
         await WithStoreAsync(async env =>
         {
-            await SeedPagedServerAsync(env);
-            const int pageRows = 3;
-            const int mostRowsOfOneKey = 4;
-
-            var pages = new List<List<List<QueryTagSighting>>>();
-            string after = string.Empty;
-            while (true)
+            await SeedBlockPagedServerAsync(env);
+            static string Row(QueryTagSighting s) => string.Join("|", s.Key, s.Database ?? "~", s.Application ?? "~", s.TextSample is null ? "~" : s.TextSample.Length.ToString(CultureInfo.InvariantCulture));
+            var ordered = await ReferenceRowsAsync(env);
+            var tables = new[]
             {
-                string? through = await QueryTagMapStore.ReadRebuildPageBoundAsync(env.Store, Server, "hash", after, pageRows, env.Ct);
-                var page = new List<List<QueryTagSighting>>();
-                await foreach (var key in QueryTagMapStore.ReadRebuildPageByKeyAsync(env.Store, Server, "hash", after, through, env.Ct))
-                {
-                    page.Add(key);
-                }
+                (Table: QueryTagMapStore.RebuildSightings, Expected: ordered.Where(s => s.TextSample is not null).Select(Row).OrderBy(r => r, StringComparer.Ordinal).ToList()),
+                (Table: QueryTagMapStore.RebuildSlimSightings, Expected: ordered.Where(s => s.TextSample is null).Select(Row).OrderBy(r => r, StringComparer.Ordinal).ToList()),
+            };
+            Assert.Equal(450, tables[0].Expected.Count);
+            Assert.Equal(1254, tables[1].Expected.Count);
 
-                pages.Add(page);
-                if (through is null)
-                {
-                    break;
-                }
-
-                Assert.Equal(through, page[^1][0].Key);
-                after = through;
-            }
-
-            /* 16 rows of 12 keys in pages of 3: several pages, each a whole number of keys, no key twice. */
-            Assert.True(pages.Count >= 4, $"expected several pages, got {pages.Count}");
-            var keys = pages.SelectMany(page => page.Select(key => key[0].Key)).ToList();
-            Assert.Equal(new[] { "0xP01", "0xP02", "0xP03", "0xP04", "0xP05", "0xP06", "0xP07", "0xP08", "0xP09", "0xP10", "0xP11", "0xP12" }, keys);
-            Assert.Equal(16, pages.Sum(page => page.Sum(key => key.Count)));
-            foreach (var page in pages.Take(pages.Count - 1))
+            foreach (var (table, expected) in tables)
             {
-                int rows = page.Sum(key => key.Count);
-                Assert.InRange(rows, pageRows, pageRows + mostRowsOfOneKey - 1);
+                foreach (int pageBlocks in new[] { 1, 2, 3, 1_000_000 })
+                {
+                    var read = new List<string>();
+                    await using (var transaction = await QueryTagMapStore.BeginRebuildReadAsync(env.Store, env.Ct))
+                    {
+                        await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, Server, table, pageBlocks, env.Ct))
+                        {
+                            read.Add(Row(row));
+                        }
+
+                        await transaction.CommitAsync(env.Ct);
+                    }
+
+                    read.Sort(StringComparer.Ordinal);
+                    Assert.Equal(expected, read);
+                }
             }
-
-            Assert.True(pages[^1].Sum(key => key.Count) < pageRows);
-
-            /* The key on a page end: its two sightings, then its two slim rows, which carry no text sample. */
-            var boundary = pages.SelectMany(page => page).Single(key => key[0].Key == "0xP05");
-            Assert.Equal(new[] { "AppA", "AppB", "AppY", "AppZ" }, boundary.Select(s => s.Application));
-            Assert.Equal(new[] { true, true, false, false }, boundary.Select(s => s.TextSample is not null));
-
-            /* A key in both tables under one caller reads its sighting first. */
-            var both = pages.SelectMany(page => page).Single(key => key[0].Key == "0xP07");
-            Assert.Equal(new[] { "Old", "Old" }, both.Select(s => s.Application));
-            Assert.Equal(new[] { true, false }, both.Select(s => s.TextSample is not null));
-
-            /* The other kinds have no rows on this server: one empty last page each. */
-            Assert.Null(await QueryTagMapStore.ReadRebuildPageBoundAsync(env.Store, Server, "object", string.Empty, pageRows, env.Ct));
         });
     }
 }

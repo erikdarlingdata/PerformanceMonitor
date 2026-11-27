@@ -140,66 +140,61 @@ ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.applicatio
 """;
 
     /// <summary>
-    /// The sighting rows a rebuild page aims for (#9705). A rebuild reads a server's keys in pages, so no statement of it grows
-    /// with the server: a page is the next keys whose rows add up to this many, plus the rest of the last key's rows, and each
-    /// row costs one index entry and one heap row. One statement for a whole server scans both tables and sorts every row of the
-    /// server before its first row comes back, which at 16.5 million rows on a lab store is past <see cref="CommandTimeoutSeconds"/>.
-    /// The value is threaded into the SQL as a parameter (#3684).
+    /// The heap blocks one page of a rebuild's read covers (#9705): 65536 blocks of 8 kB is 512 MB of one table. A rebuild reads
+    /// each sightings table in block-range pages, front to back with no index, so no statement of it grows with the server. A
+    /// sighting row carries its text sample, so no index can cover it, and a read through an index costs one random heap read
+    /// per row (about 80 minutes for a server of 16 million rows on a lab store). A server with a large share of the rows has a
+    /// row on nearly every heap block, so the sequential read is the cheap one. The value is threaded into the read as a
+    /// parameter (#3684).
     /// </summary>
-    public const int RebuildPageRows = 20000;
+    public const int RebuildPageBlocks = 65536;
 
     /// <summary>
-    /// The last key of the next rebuild page (#9705): the key that holds row number $4 among one kind's rows after key $3, counted
-    /// across the sightings table and the slim table in key order. No row means fewer than $4 rows are left, so the last page has
-    /// no upper key. Each branch stops at $4 index entries in the order its unique index already has (server, kind, key), so
-    /// the statement reads at most twice $4 entries however many the server has. $1 server_id, $2 key_kind, $3 the key the last
-    /// page ended at (an empty string before the first: no stored key is empty), $4 the page's rows.
+    /// The settings of a rebuild's read transaction (#9705): read only, and no index, bitmap or parallel plan for the block-range
+    /// pages. A page must stay a Tid Range Scan: with a low row estimate for the server the planner would otherwise pick an
+    /// index scan filtered on ctid, which fetches every row of the server once per page, or a parallel sequential scan of the
+    /// whole table per page.
     /// </summary>
-    internal const string RebuildPageBoundSql = """
-SELECT b.key
-FROM (
-    (SELECT key
-     FROM collect.query_tag_sightings
-     WHERE server_id = $1 AND key_kind = $2 AND key > $3
-     ORDER BY key
-     LIMIT $4)
-    UNION ALL
-    (SELECT key
-     FROM collect.query_tag_sightings_slim
-     WHERE server_id = $1 AND key_kind = $2 AND key > $3
-     ORDER BY key
-     LIMIT $4)
-) AS b
-ORDER BY b.key
-OFFSET $4 - 1
-LIMIT 1
-""";
+    internal const string RebuildReadSettingsSql =
+        "SET TRANSACTION READ ONLY; SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off; SET LOCAL enable_indexonlyscan = off; SET LOCAL max_parallel_workers_per_gather = 0";
 
     /// <summary>
-    /// One rebuild page (#9705): every sighting row and every slim row of one kind's keys after $3 and up to and including $4, in
-    /// the same total order as <see cref="SightingsOfKeysSql"/> so a reader can resolve one key at a time. The page's ends are
-    /// keys, never row counts, so a key's rows (its callers and databases, in both tables) are always in one page. A plain
-    /// equality on the kind and a range on the key, so the planner sizes the range from the key's own statistics.
-    /// $1 server_id, $2 key_kind, $3 the key before the page, $4 the page's last key.
+    /// Puts the plan settings of <see cref="RebuildReadSettingsSql"/> back for the rest of the read transaction (#9705): the
+    /// ordered read of the keys that need order (<see cref="SightingsOfKeysSql"/>) finds each key through the unique index, as
+    /// the extend's does, and with index scans off it would scan both tables.
     /// </summary>
-    internal static readonly string RebuildPageSql = RebuildPage(" AND key <= $4");
+    internal const string RebuildOrderedReadSettingsSql =
+        "SET LOCAL enable_indexscan TO DEFAULT; SET LOCAL enable_bitmapscan TO DEFAULT; SET LOCAL enable_indexonlyscan TO DEFAULT; SET LOCAL max_parallel_workers_per_gather TO DEFAULT";
 
-    /// <summary>The last rebuild page of one kind (#9705): every row after key $3. $1 server_id, $2 key_kind, $3 the key before the page.</summary>
-    internal static readonly string RebuildLastPageSql = RebuildPage(string.Empty);
+    /// <summary>
+    /// One of the two tables a rebuild reads (#9705), with its three statements. <see cref="BlocksSql"/> is the table's heap
+    /// block count. <see cref="PageSql"/> is one block-range page: the rows of server $1 whose ctid is at or after $2 and before
+    /// $3, both the first row slot of a block, so a page is whole blocks and every block is in exactly one page.
+    /// <see cref="LastPageSql"/> has no upper bound, so a block added after the count was read is still read. Both tables are
+    /// plain tables (never a hypertable), so a ctid names one row of the one heap. The columns come back in the order of
+    /// <see cref="SightingsOfKeysSql"/>, a slim row with its empty strings as NULL and no text sample.
+    /// </summary>
+    internal sealed record RebuildTable(string BlocksSql, string PageSql, string LastPageSql);
 
-    private static string RebuildPage(string upTo) => $"""
-SELECT u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample
-FROM (
-    SELECT key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, 0 AS tier
-    FROM collect.query_tag_sightings
-    WHERE server_id = $1 AND key_kind = $2 AND key > $3{upTo}
-    UNION ALL
-    SELECT key_kind, key, NULLIF(database_name, ''), object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text, 1
-    FROM collect.query_tag_sightings_slim
-    WHERE server_id = $1 AND key_kind = $2 AND key > $3{upTo}
-) AS u
-ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.application_name, ''), COALESCE(u.login_name, ''), COALESCE(u.host_name, ''), u.tier
-""";
+    internal static readonly RebuildTable RebuildSightings = RebuildTableOf(
+        "collect.query_tag_sightings",
+        "key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample");
+
+    internal static readonly RebuildTable RebuildSlimSightings = RebuildTableOf(
+        "collect.query_tag_sightings_slim",
+        "key_kind, key, NULLIF(database_name, ''), object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text");
+
+    /// <summary>The tables a rebuild reads, in the order it reads them: the sightings, then the slim rows (#9705).</summary>
+    internal static readonly IReadOnlyList<RebuildTable> RebuildTables = new[] { RebuildSightings, RebuildSlimSightings };
+
+    private static RebuildTable RebuildTableOf(string table, string columns)
+    {
+        string page = $"SELECT {columns} FROM {table} WHERE server_id = $1 AND ctid >= $2";
+        return new RebuildTable(
+            $"SELECT pg_relation_size('{table}'::regclass) / current_setting('block_size')::bigint",
+            page + " AND ctid < $3",
+            page);
+    }
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";
 
@@ -417,96 +412,94 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
     }
 
     /// <summary>
-    /// Streams every sighting of one server and every slim row (#9705), one key's rows at a time, so a rebuild tags a key for as
-    /// long as its usage rows are kept and never holds more than one key's sightings plus the (small) rows it resolved. It reads
-    /// one kind at a time in pages of about <paramref name="pageRows"/> rows (<see cref="RebuildPageBoundSql"/>, then
-    /// <see cref="RebuildPageSql"/>), so each statement is bounded by the page, not by the server. A key is resolved from its own
-    /// rows alone, so the order the keys arrive in does not change the map.
+    /// Opens the one transaction a rebuild reads in (#9705): REPEATABLE READ, so every page and the ordered re-read see one
+    /// snapshot, as one statement would, and a purge that moves a sighting to the slim table between two pages cannot hide the
+    /// row from both. The caller commits it when the read is done, before the map write.
     /// </summary>
-    public static async IAsyncEnumerable<List<QueryTagSighting>> ReadAllSightingsByKeyAsync(
-        NpgsqlConnection connection,
-        int serverId,
-        int pageRows,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    internal static async Task<NpgsqlTransaction> BeginRebuildReadAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        foreach (QueryTagKeyKind kind in Enum.GetValues<QueryTagKeyKind>())
+        var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false);
+        try
         {
-            string kindText = QueryTagSightingWriter.KindText(kind);
-            string after = string.Empty;
-            while (true)
-            {
-                string? through = await ReadRebuildPageBoundAsync(connection, serverId, kindText, after, pageRows, cancellationToken).ConfigureAwait(false);
-                await foreach (var sightings in ReadRebuildPageByKeyAsync(connection, serverId, kindText, after, through, cancellationToken).ConfigureAwait(false))
-                {
-                    yield return sightings;
-                }
-
-                if (through is null)
-                {
-                    break;
-                }
-
-                after = through;
-            }
+            await using var command = new NpgsqlCommand(RebuildReadSettingsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+        catch
+        {
+            await transaction.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return transaction;
     }
 
-    /// <summary>The last key of the page after <paramref name="afterKey"/>, or null when the rows left are fewer than a page (<see cref="RebuildPageBoundSql"/>).</summary>
-    internal static async Task<string?> ReadRebuildPageBoundAsync(
-        NpgsqlConnection connection, int serverId, string keyKind, string afterKey, int pageRows, CancellationToken cancellationToken)
+    /// <summary>Inside a rebuild's read transaction: lets the ordered read of a few keys use the indexes again (<see cref="RebuildOrderedReadSettingsSql"/>).</summary>
+    internal static async Task UseOrderedReadPlansAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(RebuildPageBoundSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = keyKind });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = afterKey });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Math.Max(1, pageRows) });
-        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        await using var command = new NpgsqlCommand(RebuildOrderedReadSettingsSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// One page's rows grouped by key: the keys of <paramref name="keyKind"/> after <paramref name="afterKey"/> up to and
-    /// including <paramref name="throughKey"/>, or to the end of the kind when that is null.
+    /// Streams every row of one server from one of the rebuild's tables (#9705), each row once, in heap order, in pages of
+    /// <paramref name="pageBlocks"/> heap blocks, so each statement is bounded by the page and not by the server, and no list of
+    /// the server's rows is held. The block count is read first, inside the caller's snapshot when it has one
+    /// (<see cref="BeginRebuildReadAsync"/>). The rows come in no key order: <see cref="QueryTagRebuildMerge"/> resolves them.
     /// </summary>
-    internal static async IAsyncEnumerable<List<QueryTagSighting>> ReadRebuildPageByKeyAsync(
+    internal static async IAsyncEnumerable<QueryTagSighting> ReadRebuildRowsAsync(
         NpgsqlConnection connection,
         int serverId,
-        string keyKind,
-        string afterKey,
-        string? throughKey,
+        RebuildTable table,
+        int pageBlocks,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(throughKey is null ? RebuildLastPageSql : RebuildPageSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = keyKind });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = afterKey });
-        if (throughKey is not null)
+        long blocks;
+        await using (var count = new NpgsqlCommand(table.BlocksSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = throughKey });
+            blocks = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-
-        List<QueryTagSighting>? current = null;
-        string? key = null;
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        long step = Math.Max(1, pageBlocks);
+        long from = 0;
+        while (true)
         {
-            string rowKey = reader.GetString(1);
-            if (current is not null && key != rowKey)
+            long to = from + step;
+            bool last = to >= blocks;
+            await using var command = new NpgsqlCommand(last ? table.LastPageSql : table.PageSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)from, 0) });
+            if (!last)
             {
-                yield return current;
-                current = null;
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Tid, Value = new NpgsqlTid((uint)to, 0) });
             }
 
-            current ??= new List<QueryTagSighting>();
-            key = rowKey;
-            current.Add(ReadSighting(reader));
-        }
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    yield return ReadSighting(reader);
+                }
+            }
 
-        if (current is not null)
-        {
-            yield return current;
+            if (last)
+            {
+                yield break;
+            }
+
+            from = to;
         }
     }
+
+    /// <summary>The map row of a key that resolved to a tag.</summary>
+    internal static QueryTagMapRow MapRow(QueryTagKeyKind kind, string key, QueryTagResolution resolution) =>
+        new(
+            QueryTagSightingWriter.KindText(kind),
+            key,
+            checked((int)resolution.TagId!.Value),
+            SourceText(resolution.Source),
+            resolution.RuleId is { } ruleId ? checked((int)ruleId) : null,
+            resolution.MatchedField is { } field ? FieldText(field) : null,
+            resolution.MatchedValue);
 
     /// <summary>
     /// Replaces one server's map rows with <paramref name="rows"/> in one transaction: a reader sees the old map or

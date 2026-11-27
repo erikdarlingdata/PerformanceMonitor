@@ -32,9 +32,16 @@ namespace PerformanceMonitor.Darling.Storage;
 /// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
 /// next one. A rebuild also reads <c>collect.query_tag_sightings_slim</c> (#9705), where the retention purge keeps a sighting's key and
 /// short match fields until the key's usage rows age out, so a key leaves the map at the first rebuild after both are gone; the
-/// extend path never deletes. A slim row has no text sample, so a text rule tags a key only while it has a sighting. A rebuild
-    /// reads a server's keys in pages (<see cref="QueryTagMapStore.RebuildPageRows"/> rows, never part of a key), so no statement
-    /// of the read grows with the server, and it writes the map once, after the last page.</para>
+/// extend path never deletes. A slim row has no text sample, so a text rule tags a key only while it has a sighting.</para>
+///
+/// <para><b>A rebuild reads both tables front to back, in one snapshot (#9705).</b> It reads each table in pages of
+/// <see cref="QueryTagMapStore.RebuildPageBlocks"/> heap blocks (<see cref="QueryTagMapStore.ReadRebuildRowsAsync"/>), so no
+/// statement of the read grows with the server and no row is fetched through an index. The rows arrive in no key order, so
+/// each goes to <see cref="QueryTagRebuildMerge"/> as it is read: it keeps one small state per key, and names the few keys
+/// whose tag depends on which of their rows comes first. Those are read in order, as the extend reads its keys
+/// (<see cref="QueryTagMapStore.ReadSightingsOfKeysAsync"/>), at most <see cref="MapKeysPerServerPerPass"/> a statement. Every
+/// page and the ordered read share one REPEATABLE READ, read only transaction, so the map is the one a single statement over
+/// both tables would give, and the map is written once, after the read commits.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
 /// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
@@ -74,7 +81,7 @@ public sealed class QueryTagMapBuilder
     /// runs every enabled rule over them, which at 5000 keys is tens of milliseconds to a couple of seconds and one
     /// bounded upsert, well inside a pass interval. The cap pages the extend, which reads only what changed after the
     /// cursor (the last two minutes, or the tail of a burst), never the whole history: a server's whole history is read
-    /// by a rebuild, in pages, and written in one transaction. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
+    /// by a rebuild, in block-range pages, and written in one transaction. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
     /// both stores share, so neither store's pass can outgrow the other's. The value is threaded into the SQL as a
     /// parameter (#3684), never written there.
     /// </summary>
@@ -110,17 +117,17 @@ public sealed class QueryTagMapBuilder
     private readonly Dictionary<int, DateTime> _ageBackoffUntil = new();
     private readonly Stopwatch _sinceConstruction = Stopwatch.StartNew();
     private readonly int _keysPerServerPerPass;
-    private readonly int _rebuildPageRows;
+    private readonly int _rebuildPageBlocks;
     private readonly QueryTagSightingBuffer? _sightings;
     private readonly Dictionary<int, Cursor> _cursors = new();
 
     /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
     /// reads sightings other code wrote.</param>
-    /// <param name="rebuildPageRows">The sighting rows one page of a rebuild's read aims for (<see cref="QueryTagMapStore.RebuildPageRows"/>).</param>
+    /// <param name="rebuildPageBlocks">The heap blocks one page of a rebuild's read covers (<see cref="QueryTagMapStore.RebuildPageBlocks"/>).</param>
     public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null,
-        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null, int rebuildPageRows = QueryTagMapStore.RebuildPageRows)
+        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null, int rebuildPageBlocks = QueryTagMapStore.RebuildPageBlocks)
     {
-        _rebuildPageRows = rebuildPageRows > 0 ? rebuildPageRows : QueryTagMapStore.RebuildPageRows;
+        _rebuildPageBlocks = rebuildPageBlocks > 0 ? rebuildPageBlocks : QueryTagMapStore.RebuildPageBlocks;
         _maxRebuildAge = maxRebuildAge ?? MaxRebuildAge;
         _rebuildStartupGrace = rebuildStartupGrace ?? RebuildStartupGrace;
         _ageRebuildBackoff = ageRebuildBackoff ?? AgeRebuildBackoff;
@@ -339,10 +346,40 @@ public sealed class QueryTagMapBuilder
         /* The clock is read before the sightings, so a sighting written while the rebuild runs is at or after the cursor. */
         DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
 
+        var merge = new QueryTagRebuildMerge(serverId, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName);
         var rows = new List<QueryTagMapRow>();
-        await foreach (var sightings in QueryTagMapStore.ReadAllSightingsByKeyAsync(connection, serverId, _rebuildPageRows, cancellationToken).ConfigureAwait(false))
+        await using (var read = await QueryTagMapStore.BeginRebuildReadAsync(connection, cancellationToken).ConfigureAwait(false))
         {
-            AddResolved(rows, serverId, sightings, snapshot);
+            foreach (var table in QueryTagMapStore.RebuildTables)
+            {
+                await foreach (var row in QueryTagMapStore.ReadRebuildRowsAsync(connection, serverId, table, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
+                {
+                    merge.Add(row);
+                }
+            }
+
+            var merged = merge.Finish();
+            rows.AddRange(merged.Rows);
+
+            /* The keys whose winning rows disagree: the first row in order decides, so they are read in order, in the same snapshot. */
+            if (merged.KeysNeedingOrder.Count > 0)
+            {
+                await QueryTagMapStore.UseOrderedReadPlansAsync(connection, cancellationToken).ConfigureAwait(false);
+                for (int at = 0; at < merged.KeysNeedingOrder.Count; at += _keysPerServerPerPass)
+                {
+                    var batch = merged.KeysNeedingOrder.Skip(at).Take(_keysPerServerPerPass).ToList();
+                    var sightingsByKey = await QueryTagMapStore.ReadSightingsOfKeysAsync(connection, serverId, batch, cancellationToken).ConfigureAwait(false);
+                    foreach (var key in batch)
+                    {
+                        if (sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings))
+                        {
+                            AddResolved(rows, serverId, sightings, snapshot);
+                        }
+                    }
+                }
+            }
+
+            await read.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, clock);
@@ -418,15 +455,7 @@ public sealed class QueryTagMapBuilder
             return;
         }
 
-        var first = sightings[0];
-        rows.Add(new QueryTagMapRow(
-            QueryTagSightingWriter.KindText(first.KeyKind),
-            first.Key,
-            checked((int)resolution.TagId!.Value),
-            QueryTagMapStore.SourceText(resolution.Source),
-            resolution.RuleId is { } ruleId ? checked((int)ruleId) : null,
-            resolution.MatchedField is { } field ? QueryTagMapStore.FieldText(field) : null,
-            resolution.MatchedValue));
+        rows.Add(QueryTagMapStore.MapRow(sightings[0].KeyKind, sightings[0].Key, resolution));
     }
 
     private readonly record struct Cursor(DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt);
