@@ -371,7 +371,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.2, )",
-          "PerformanceMonitor.Common": "[3.13.0, )",
+          "PerformanceMonitor.Common": "[3.14.0, )",
           "System.Security.Cryptography.Pkcs": "[10.0.15, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.15, )"
         }

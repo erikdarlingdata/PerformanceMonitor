@@ -430,22 +430,22 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Collectors": "[3.13.0, )",
-          "PerformanceMonitor.Common": "[3.13.0, )",
-          "PerformanceMonitor.Notifications": "[3.13.0, )"
+          "PerformanceMonitor.Collectors": "[3.14.0, )",
+          "PerformanceMonitor.Common": "[3.14.0, )",
+          "PerformanceMonitor.Notifications": "[3.14.0, )"
         }
       },
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.154.0, )",
-          "PerformanceMonitor.Common": "[3.13.0, )"
+          "PerformanceMonitor.Common": "[3.14.0, )"
         }
       },
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.13.0, )"
+          "PerformanceMonitor.Common": "[3.14.0, )"
         }
       },
       "performancemonitor.common": {
@@ -462,12 +462,12 @@
           "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
           "ModelContextProtocol": "[2.4.0, )",
           "Npgsql": "[11.0.0, )",
-          "PerformanceMonitor.Alerting": "[3.13.0, )",
-          "PerformanceMonitor.Analysis": "[3.13.0, )",
-          "PerformanceMonitor.Collectors": "[3.13.0, )",
-          "PerformanceMonitor.Common": "[3.13.0, )",
-          "PerformanceMonitor.Notifications": "[3.13.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.13.0, )",
+          "PerformanceMonitor.Alerting": "[3.14.0, )",
+          "PerformanceMonitor.Analysis": "[3.14.0, )",
+          "PerformanceMonitor.Collectors": "[3.14.0, )",
+          "PerformanceMonitor.Common": "[3.14.0, )",
+          "PerformanceMonitor.Notifications": "[3.14.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.14.0, )",
           "System.Security.Cryptography.Pkcs": "[10.0.15, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.15, )"
         }
@@ -476,14 +476,14 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
-          "PerformanceMonitor.Analysis": "[3.13.0, )"
+          "PerformanceMonitor.Analysis": "[3.14.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.2, )",
-          "PerformanceMonitor.Common": "[3.13.0, )",
+          "PerformanceMonitor.Common": "[3.14.0, )",
           "System.Security.Cryptography.Pkcs": "[10.0.15, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.15, )"
         }
