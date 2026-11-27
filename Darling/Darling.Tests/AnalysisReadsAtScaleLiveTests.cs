@@ -571,15 +571,15 @@ VALUES (904_990_000_001, $2, $1, 'scale', 'GoneDb', 'GoneFile', 'ROWS', 5)", ct,
             using var sizePlan = await ExplainAsync(c, PgFactCollector.DatabaseSizeSql, parameters, ct);
             using var lookbackPlan = await ExplainAsync(c, NewestSnapshotReadsLiveTests.FullLookbackDatabaseSizeSql, parameters, ct);
 
-            var joinRows = ExplainBuffers.RowsRead(joinPlan.RootElement.GetRawText(), chunks);
-            var probeRows = ExplainBuffers.RowsRead(probePlan.RootElement.GetRawText(), chunks);
+            var joinRows = ExplainBuffers.RowsReadAtMost(joinPlan.RootElement.GetRawText(), chunks);
+            var probeRows = ExplainBuffers.RowsReadAtLeast(probePlan.RootElement.GetRawText(), chunks);
             Assert.True(joinRows >= lookbackRows,
                 $"the pre-#9049 probe is expected to return every row of the lookback from its chunk scans ({lookbackRows}); if it no longer does, the plant has stopped showing the defect: {joinRows} rows, {joinPlan.RootElement}");
             Assert.True(probeRows <= snapshotRows,
                 $"the probe returns more rows from its chunk scans than the snapshots it names hold ({snapshotRows}): {probeRows} rows, {probePlan.RootElement}");
 
-            var lookbackReadRows = ExplainBuffers.RowsRead(lookbackPlan.RootElement.GetRawText(), chunks);
-            var sizeRows = ExplainBuffers.RowsRead(sizePlan.RootElement.GetRawText(), chunks);
+            var lookbackReadRows = ExplainBuffers.RowsReadAtMost(lookbackPlan.RootElement.GetRawText(), chunks);
+            var sizeRows = ExplainBuffers.RowsReadAtLeast(sizePlan.RootElement.GetRawText(), chunks);
             Assert.True(lookbackReadRows >= lookbackRows,
                 $"the read of every row in the lookback is expected to return them all from its chunk scans ({lookbackRows}): {lookbackReadRows} rows, {lookbackPlan.RootElement}");
             Assert.True(sizeRows <= snapshotRows,

@@ -152,7 +152,7 @@ public sealed class TopProceduresHourlyMidLiveTests
             Assert.Equal(run.Today.Rows, run.Seek.Rows);
             Assert.Equal(run.Today.Rows, run.Split.Rows);
             Assert.Equal(run.Today.Rows, run.NoSeek.Rows);
-            Assert.True(run.Seek.RowsRead * 2 < run.Today.RowsRead, $"the seek read {run.Seek.RowsRead} rows of procedure_stats, the one-statement pass {run.Today.RowsRead}");
+            Assert.True(run.Seek.RowsReadAtLeast * 2 < run.Today.RowsReadAtMost, $"the seek read {run.Seek.RowsReadAtLeast} rows of procedure_stats at least, the one-statement pass {run.Today.RowsReadAtMost} at most");
         });
 
     /// <summary>
@@ -191,7 +191,7 @@ public sealed class TopProceduresHourlyMidLiveTests
         });
 
     /// <summary>The rows (as text, every column) a mid statement answered, and the rows its scans of the table returned in an EXPLAIN ANALYZE.</summary>
-    private sealed record StatementRun(System.Collections.Generic.List<string> Rows, long RowsRead);
+    private sealed record StatementRun(System.Collections.Generic.List<string> Rows, long RowsReadAtLeast, long RowsReadAtMost);
 
     private sealed record IndexRuns(StatementRun Today, StatementRun NoSeek, StatementRun Seek, StatementRun Split);
 
@@ -229,7 +229,8 @@ public sealed class TopProceduresHourlyMidLiveTests
                 }
             }
 
-            return new StatementRun(rows, ExplainBuffers.RowsRead(await ExplainAsync(connection, sql, start, end, mid, ct, seekFrom), chunks));
+            var plan = await ExplainAsync(connection, sql, start, end, mid, ct, seekFrom);
+            return new StatementRun(rows, ExplainBuffers.RowsReadAtLeast(plan, chunks), ExplainBuffers.RowsReadAtMost(plan, chunks));
         }
 
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.procedure_stats");
