@@ -44,8 +44,9 @@ public class CollectorSelfQueryMarkerCensusTests
         new() { SqlMajorVersion = 15, IsAwsRds = true },
     };
 
-    private static CollectorContext Context(CollectorTargetInfo target, bool collectedBefore, bool planAndTextBySeparateFetch = false) => new()
+    private static CollectorContext Context(CollectorTargetInfo target, bool collectedBefore, bool planAndTextBySeparateFetch = false, string? alwaysOnSessionName = null) => new()
     {
+        AlwaysOnSessionName = alwaysOnSessionName,
         CapturePlanXml = planAndTextBySeparateFetch,
         FetchQueryTextSeparately = planAndTextBySeparateFetch,
         ServerId = 42,
@@ -61,6 +62,11 @@ public class CollectorSelfQueryMarkerCensusTests
     private static IEnumerable<(string Where, CollectorQuery Query)> QueriesOf(ICollectorSchemaInfo schema, List<string> unbuildable)
     {
         var type = schema.GetType();
+
+        /* #9895: the client-timeout read names this install's own session, so its context carries one. */
+        var ownSession = schema.Name == AttentionCollector.Instance.Name
+            ? AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, "0a1b2c3d", AlwaysOnXeSessionKind.Attention)
+            : null;
 
         foreach (var target in s_targets)
         {
@@ -82,8 +88,8 @@ public class CollectorSelfQueryMarkerCensusTests
                     }
 
                     var args = method.GetParameters().Length == 2
-                        ? new object?[] { "SomeDatabase", Context(target, collectedBefore) }
-                        : new object?[] { Context(target, collectedBefore) };
+                        ? new object?[] { "SomeDatabase", Context(target, collectedBefore, alwaysOnSessionName: ownSession) }
+                        : new object?[] { Context(target, collectedBefore, alwaysOnSessionName: ownSession) };
 
                     object? result;
 
