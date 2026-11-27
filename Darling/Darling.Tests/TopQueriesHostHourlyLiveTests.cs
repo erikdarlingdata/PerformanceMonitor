@@ -17,7 +17,6 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
-using PerformanceMonitor.Darling.Viewer;
 using Darling.Tests;
 using Xunit;
 
@@ -32,13 +31,15 @@ namespace PerformanceMonitor.Darling.Tests;
 /// seed has a NULL database, a NULL hash, ad-hoc and proc-hosted rows, a CPU tie, zero-interval rows that hold the newest text, texts that
 /// change by hour, an inline text, a text with no dimension row and a WAITFOR statement the page drops.
 /// </summary>
+/* #9686: the two tests of the Viewer's Top Queries page are in TopQueriesHostHourlyViewerLiveTests, so this file compiles in the build without
+   the Viewer and its tests run on Linux. The server, the store shape and WithStoreAsync are internal for that class. */
 public sealed class TopQueriesHostHourlyLiveTests
 {
-    private const int ServerId = -916401;
-    private const string ServerName = "a9164-top-queries-host-hourly";
+    internal const int ServerId = -916401;
+    internal const string ServerName = "a9164-top-queries-host-hourly";
     private const int Queries = 40;
 
-    private enum Shape
+    internal enum Shape
     {
         Plain,
         Bounds,
@@ -263,61 +264,6 @@ public sealed class TopQueriesHostHourlyLiveTests
         });
 
     [Fact]
-    public Task TheViewersTopQueries_AreTheRawPageRowForRow_WhenRankedFromTheRollup() =>
-        WithStoreAsync(async (scratch, connection, start, end, ct) =>
-        {
-            await using var viewer = new ViewerDataService(scratch.ConnectionString);
-
-            /* A restart row (interval 0) in a whole hour, after the build: raw's ranking sums it, the rollup's sums leave it out, so the
-               statement reads such rows from raw. It outweighs every other statement, so it must lead the page. */
-            var at = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0).AddHours(12).AddMinutes(30);
-            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
-                INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count,
-                                                 delta_worker_time, delta_elapsed_time, sample_interval_seconds)
-                VALUES (916430000001, $1, {ServerId}, '{ServerName}', 'dbV', 'V_RESTART', 1, 1, 9000000000, 0)
-                """, at);
-
-            var routed = await ViewerPageAsync(viewer, start, end, ct);
-            Assert.Contains("V_RESTART", routed);
-            Assert.Contains("H003", routed);
-
-            /* The rollup must be what ranked it: twelve statements the rollup calls enormous crowd the real top five (H003 among them, ranked there by its restart rows) out of the candidates. */
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                "UPDATE collect.query_stats_host_hourly SET total_elapsed_us = 1000000000000 WHERE query_hash >= 'H029'");
-            Assert.DoesNotContain("H003", await ViewerPageAsync(viewer, start, end, ct));
-
-            /* With the build rows gone the read is the raw statement, and its page is the page the rollup ranked before it was altered. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_host_hourly_built");
-            Assert.Equal(await ViewerPageAsync(viewer, start, end, ct), routed);
-        });
-
-    [Fact]
-    public Task TheViewersTopQueries_WithAHoleInTheRollup_ReadRawWithTheRawAnswer() =>
-        WithStoreAsync(async (scratch, connection, start, end, ct) =>
-        {
-            await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            var whole = await ViewerPageAsync(viewer, start, end, ct);
-
-            /* An hour with no build sends the read to raw: an altered rollup changes nothing, and the answer is the same page. */
-            var hour = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0).AddHours(9);
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_host_hourly_built WHERE server_id = $1 AND bucket = $2", ServerId, hour);
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                "UPDATE collect.query_stats_host_hourly SET total_elapsed_us = 1000000000000 WHERE query_hash >= 'H029'");
-            Assert.Equal(whole, await ViewerPageAsync(viewer, start, end, ct));
-        });
-
-    /// <summary>The Viewer's Top Queries page as JSON, every column of every row, in page order.</summary>
-    private static async Task<string> ViewerPageAsync(ViewerDataService viewer, DateTime start, DateTime end, CancellationToken ct)
-    {
-        /* Every plain column of every row (the row also carries a tag-label member that is not data). */
-        var columns = typeof(ViewerQueryStatsRow).GetProperties()
-            .Where(p => (Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) is { } t && (t.IsPrimitive || t == typeof(string) || t == typeof(DateTime) || t == typeof(decimal)))
-            .ToArray();
-        var rows = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end, 5, null, null, ct);
-        return JsonSerializer.Serialize(rows.Select(r => columns.ToDictionary(c => c.Name, c => c.GetValue(r))));
-    }
-
-    [Fact]
     public Task AStoreWithoutTheRollupTables_ReadsRaw() =>
         WithStoreAsync(async (scratch, connection, start, end, ct) =>
         {
@@ -477,7 +423,7 @@ public sealed class TopQueriesHostHourlyLiveTests
     /// an hour of the previous UTC day (on the seed's grid, so a row sits exactly on its end and exactly on its start) and is inside
     /// raw retention, so both of its ends are raw edges and every hour between them is whole.
     /// </summary>
-    private static async Task WithStoreAsync(Func<ScratchPostgres, NpgsqlConnection, DateTime, DateTime, CancellationToken, Task> body, Shape shape = Shape.Plain)
+    internal static async Task WithStoreAsync(Func<ScratchPostgres, NpgsqlConnection, DateTime, DateTime, CancellationToken, Task> body, Shape shape = Shape.Plain)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),

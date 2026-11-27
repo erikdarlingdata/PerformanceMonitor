@@ -14,7 +14,6 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
-using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -26,6 +25,8 @@ namespace Darling.Tests;
 /// again, and the tick prunes the hours raw's retention took.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
+/* #9686: the test of this rollup that names the Viewer is in QueryStatsHostHourlyViewerLiveTests, so this file compiles in the build without
+   the Viewer and its tests run on Linux. The connection string and the three SQL helpers are internal for that class. */
 public sealed class QueryStatsHostHourlyLiveTests
 {
     private const int ServerId = -9164287;
@@ -37,36 +38,7 @@ public sealed class QueryStatsHostHourlyLiveTests
     private static readonly DateTime ClosedHour = new(2026, 9, 15, 9, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime GraceHour = new(2026, 9, 15, 11, 0, 0, DateTimeKind.Unspecified);
 
-    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-    /// <summary>The migration, run twice over a store that has no trace of it, leaves the same tables, columns and indexes, and no rows.</summary>
-    [Fact]
-    public async Task TheMigration_AppliedTwice_LeavesTheSameSchema()
-    {
-        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, null, ct);
-
-        /* Found by its version, not as the newest rung, so a later rung does not break this test. */
-        var rung = PgMigrations.Scripts.Single(s => s.Version == QueryStatsHostHourly.Version);
-
-        await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.query_stats_host_hourly; DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;", ct);
-        await ExecuteAsync(connection, rung.Sql, ct);
-        var once = await SchemaAsync(connection, ct);
-        await ExecuteAsync(connection, rung.Sql, ct);
-        var twice = await SchemaAsync(connection, ct);
-
-        Assert.NotEmpty(once);
-        Assert.Equal(once, twice);
-        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly", ct));
-        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built", ct));
-
-        await using var viewer = new ViewerDataService(scratch.ConnectionString);
-        Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
-    }
+    internal static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
     /// A tick on a seeded store builds the closed hour (two keys, one of them from two raw rows), records it as built, and leaves the hour
@@ -876,7 +848,7 @@ VALUES (@collection_id, @at, @server_id, 'hourly-9164', @database, @hash, @hash,
             ("collection_id", collectionId), ("at", at), ("server_id", ServerId), ("database", database), ("hash", hash));
 
     /// <summary>The two tables' columns and indexes as sorted text, so a second run that changed either shows as a different list.</summary>
-    private static async Task<List<string>> SchemaAsync(NpgsqlConnection connection, CancellationToken ct)
+    internal static async Task<List<string>> SchemaAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var lines = new List<string>();
         await using var command = new NpgsqlCommand(@"
@@ -897,7 +869,7 @@ ORDER BY 1", connection);
         return lines;
     }
 
-    private static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
@@ -908,7 +880,7 @@ ORDER BY 1", connection);
         return await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
