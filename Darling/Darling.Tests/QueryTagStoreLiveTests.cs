@@ -326,6 +326,29 @@ public sealed class QueryTagStoreLiveTests
         Assert.Equal("0", await ScalarAsync(store, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {ServerB}", ct));
     }
 
+    /* #9796: the sightings purge reads each slice's bounds and deletes it as two statements. Three aged days are three slices, so a
+       drain that stopped after its first slice leaves the two newer aged days behind. */
+    [Fact]
+    public async Task Retention_DrainsEveryAgedDayOfSightings_OneSliceAfterAnother_AndKeepsTheRecentOnes()
+    {
+        await WithStoreAsync(async (store, connectionString, ct) =>
+        {
+            await ExecAsync(store,
+                $"INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, first_seen, last_seen)"
+                + $" SELECT {ServerA}, 'hash', 'aged-' || d || '-' || n, now() - make_interval(days => 3650 - d), now() - make_interval(days => 3650 - d)"
+                + " FROM generate_series(0, 2) AS d CROSS JOIN generate_series(1, 40) AS n", ct);
+            await ExecAsync(store,
+                $"INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, first_seen, last_seen)"
+                + $" SELECT {ServerB}, 'hash', 'recent-' || n, now(), now() FROM generate_series(1, 5) AS n", ct);
+
+            await using var source = NpgsqlDataSource.Create(connectionString);
+            var summary = await DarlingRetention.PurgeAsync(source, timescaleAvailable: false, logger: null, ct);
+
+            Assert.Equal("5|5", await ScalarAsync(store, "SELECT count(*) || '|' || count(*) FILTER (WHERE key LIKE 'recent-%') FROM collect.query_tag_sightings", ct));
+            Assert.True(summary.RowsDeleted >= 120, $"the purge reports {summary.RowsDeleted} row(s) deleted, 120 aged sightings were seeded");
+        });
+    }
+
     [Fact]
     public async Task Retention_PrunesAgedSightings_KeepsRecentOnes_AndNeverTouchesTheTagRows()
     {
