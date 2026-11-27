@@ -10,7 +10,7 @@
   <ItemGroup>
     <PackageVersion Include="AWSSDK.PI" Version="4.1.0.2" />
     <PackageVersion Include="AWSSDK.RDS" Version="4.1.1.1" />
-    <PackageVersion Include="AWSSDK.S3" Version="4.1.2" />
+    <PackageVersion Include="AWSSDK.S3" Version="4.1.2.1" />
     <PackageVersion Include="AWSSDK.SecurityToken" Version="4.1.1.1" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.1.0" />
     <PackageVersion Include="Azure.Storage.Blobs" Version="12.30.2" />
@@ -20,8 +20,8 @@
     <PackageVersion Include="DuckDB.NET.Data" Version="1.5.6.1" />
     <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
-    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.2" />
-    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.2" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="8.0.0" />
+    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="8.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.15" />

@@ -789,12 +789,21 @@ public static partial class DarlingCliCommands
     /// <summary>The usage text for <c>--help</c> and the unknown-option error. Pure ASCII, one verb per line.</summary>
     public static string UsageText() => UsageText(OperatorVerbForm.EntryPointHere());
 
+    /// <summary>#9851: what starts the service on the host the help is printed for, named in the first usage line. The Windows form is the one
+    /// whose entry point is <see cref="OperatorVerbForm.WindowsEntryPoint"/> (<see cref="OperatorVerbForm.EntryPoint"/> returns it for every
+    /// Windows folder), so the Service Control Manager is named only there. Every other form is the <c>dotnet</c> one, which the systemd unit
+    /// of the Linux tarball starts on a host and the image's entry point starts in a container, so both are named.</summary>
+    private static string ServiceStarterText(string entryPoint) =>
+        string.Equals(entryPoint, OperatorVerbForm.WindowsEntryPoint, StringComparison.Ordinal)
+            ? "the Windows Service Control Manager"
+            : "the darling.service systemd unit or the container's entry point";
+
     /// <summary>The same text for an entry point given by the caller, so a test can ask for the Windows and the Linux form without changing the platform (#9751). Every usage line starts with <paramref name="entryPoint"/>, and the descriptions keep their relative spacing because every line shares that prefix.</summary>
     public static string UsageText(string entryPoint) =>
         "PerformanceMonitor Darling service." + Environment.NewLine +
         Environment.NewLine +
         "Usage:" + Environment.NewLine +
-        "  " + entryPoint + "                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
+        "  " + entryPoint + "                     Run the service (also how " + ServiceStarterText(entryPoint) + " starts it)." + Environment.NewLine +
         "  " + entryPoint + " --version, -v       Print the product version and exit." + Environment.NewLine +
         "  " + entryPoint + " --help, -h          Print this help and exit." + Environment.NewLine +
         "  " + entryPoint + " --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list). A Windows-authentication server is tested by the running service, as its own account; if the service is not running the test runs as you and says so." + Environment.NewLine +

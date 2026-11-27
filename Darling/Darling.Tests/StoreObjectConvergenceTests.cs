@@ -69,23 +69,21 @@ public sealed class StoreObjectConvergenceTests
         /* One list, declared once. */
         Assert.Equal(1, CountOf(code, ListDeclaration));
 
-        /* The hourly pass iterates the WHOLE list — no second sequence, and ONE filter: the TimescaleDB one,
-           applied only on a store without it (#3913), which skips exactly the stages the start path runs
-           inside its own TimescaleDB gate. A second stage test here would be a step one cadence runs and the
-           other does not. */
-        var hourly = MethodBody(code, HourlySignature);
-        Assert.False(string.IsNullOrEmpty(hourly), "could not locate ConvergeStoreObjectsAsync — this pin cannot silently pass on a parse miss");
-        Assert.Contains("foreach (var step in s_storeObjectConvergence)", hourly, StringComparison.Ordinal);
-        Assert.Contains("if (!timescaleAvailable && NeedsTimescale(step.Stage))", hourly, StringComparison.Ordinal);
-        Assert.Equal(1, CountOf(hourly, "Stage"));
+        /* The hourly pass takes its steps from the WHOLE list through ONE selection, whose only filter is the TimescaleDB one,
+           applied only on a store without it (#3913): it skips exactly the stages the start path runs inside its own TimescaleDB
+           gate. A second filter would be a step one cadence runs and the other does not. #9858 added the one other input, the
+           steps this start already ran, and the behaviour is held in StoreObjectConvergenceOncePerStartTests. */
+        var plainStoreSteps = DarlingWorker.SelectHourlyConvergenceSteps(DarlingWorker.StoreObjectConvergence, timescaleAvailable: false, ranAtStartup: null, out _);
+        Assert.Equal(
+            DarlingWorker.StoreObjectConvergence.Where(st => !DarlingWorker.NeedsTimescale(st.Stage)).Select(st => st.Name),
+            plainStoreSteps.Select(st => st.Name));
         Assert.True(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Timescale));
         Assert.True(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.TimescaleAfterRepairLaunch));
         Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Ungated));
         Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Tuning));
 
-        /* The start path reaches the list ONLY through the segment walk, and the segment walk is the only
-           other iteration of it. Two iterations in the product: the hourly one above and the segment one. */
-        Assert.Equal(2, CountOf(code, "foreach (var step in s_storeObjectConvergence)"));
+        /* The start path reaches the list through the segment walk. That the hourly pass goes through the selection above is held by
+           the behaviour tests in StoreObjectConvergenceOncePerStartTests, which drive ConvergeStoreObjectsAsync itself. */
         var segment = MethodBody(code, SegmentSignature);
         Assert.False(string.IsNullOrEmpty(segment));
         Assert.Contains("foreach (var step in s_storeObjectConvergence)", segment, StringComparison.Ordinal);

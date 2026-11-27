@@ -1066,7 +1066,13 @@ public sealed partial class DarlingWorker
                MinValue), and that is deliberate for the reason #3812 gives about its own: the
                "Store object convergence:" line without the "at startup" prefix is the proof the
                hourly path is wired on THIS store, in the same log window an operator reads after a
-               restart. On a converged store that pass costs catalog reads and two metadata ALTERs.
+               restart (#3817). #9858: that pass leaves out every step the start's own pass ran
+               without throwing (ConvergeStoreObjectsAsync takes the set the start path left),
+               because it re-ran all 21 steps and wrote the tuning and group-index lines a second
+               time in the same start. It still writes the line, saying it ran 0 steps because they
+               all ran at start, so the proof survives without the duplicate work. It still runs a
+               step the start threw on or never reached, so a failure heals within seconds as
+               before. Every pass after the first runs the whole list.
 
                #5094: the FIFTH tenant, same contract — its own method, its own catch-all, one awaited
                statement, LAST. The Query Store daily summary builder runs after the convergence pass
