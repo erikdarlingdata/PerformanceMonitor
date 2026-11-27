@@ -35,6 +35,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>The service records the file</b> (<see cref="UpgradeRunPickup"/>) at its start after the migrations and again on the
 /// five-minute store-side pass. The upgrade restarts the service before the script ends, so the end state and the verified state
 /// are only ever seen by a pass. One row per run id: <c>in_progress</c>, the result and <c>verified</c> land on the same row.</para>
+///
+/// <para><b>A rollback is a run of its own</b> (#9821). <c>upgrade-darling.sh --rollback</c> writes a file with a new run id into the
+/// folder of the build it puts back, with the states and fields of an upgrade: <c>target_build</c> is the build that is back and
+/// <c>rollback_folder</c> is the folder that holds the build it replaced. It is a second row, so the row of the upgrade it undid stays
+/// as it was, whatever its state, and the newest row names the build that runs.</para>
 /// </summary>
 public static class UpgradeRuns
 {

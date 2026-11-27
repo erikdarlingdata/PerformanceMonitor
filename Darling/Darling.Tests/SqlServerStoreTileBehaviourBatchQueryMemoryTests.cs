@@ -117,6 +117,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             {
                 await CleanupBatchAsync(cleanup, serverId, cleanupCt);
                 await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+                await DropEmptiedChunksAsync(cleanup, cleanupCt);
             });
         }
     }
@@ -209,6 +210,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             {
                 await CleanupMemoryAsync(cleanup, serverId, cleanupCt);
                 await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+                await DropEmptiedChunksAsync(cleanup, cleanupCt);
             });
         }
     }
@@ -304,6 +306,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
                 await InsertAsync(cleanup, "DELETE FROM collection_log WHERE server_id = $1", serverId);
                 await CleanupCanaryAsync(cleanup, serverId, cleanupCt);
                 await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+                await DropEmptiedChunksAsync(cleanup, cleanupCt);
             });
         }
     }
@@ -389,6 +392,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
                 await InsertAsync(cleanup, "DELETE FROM collection_log WHERE server_id = $1", serverId);
                 await CleanupCanaryAsync(cleanup, serverId, cleanupCt);
                 await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+                await DropEmptiedChunksAsync(cleanup, cleanupCt);
             });
         }
     }
@@ -527,6 +531,54 @@ CROSS JOIN LATERAL (SELECT $1::timestamp + i * INTERVAL '5 minutes') AS _(ts)", 
         await using var cleanup = new NpgsqlCommand($"DELETE FROM memory_stats WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
         await CleanupCanaryAsync(connection, serverId, ct);
+    }
+
+    /// <summary>The hypertables the seeds write history into.</summary>
+    private static readonly string[] SeededHypertables = ["cpu_utilization_stats", "memory_stats", "perfmon_stats", "query_stats", "session_stats", "wait_stats"];
+
+    /// <summary>
+    /// Drops the chunks the seeds made once the rows are deleted (#9809). The seeds sit on the fixed anchor <see cref="T"/>, 21 weeks of weekly
+    /// history back from it, so on a store whose tables are hypertables they make a chunk a week that the delete empties and leaves in place.
+    /// The dimension GC reads its fact floor from the oldest chunk of the digest tables, emptied chunks included, so a chunk left at a fixed
+    /// date drifts older against the live clock until it holds the floor below content other classes plant relative to the clock. Only a
+    /// chunk in the seeded range that holds no row and is not compressed is dropped, so a row another class still needs is never lost.
+    /// A plain table, or a store without TimescaleDB, has no chunks and nothing to drop.
+    /// </summary>
+    private static async Task DropEmptiedChunksAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using (var probe = new NpgsqlCommand("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL", connection))
+        {
+            if (!(bool)(await probe.ExecuteScalarAsync(ct))!)
+            {
+                return;
+            }
+        }
+
+        var chunks = new List<string>();
+        await using (var list = new NpgsqlCommand(
+            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks " +
+            "WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1) AND NOT is_compressed " +
+            "AND (range_end AT TIME ZONE 'UTC') > $2 AND (range_start AT TIME ZONE 'UTC') < $3", connection))
+        {
+            list.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = SeededHypertables });
+            list.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = T.AddDays(-7 * 22) });
+            list.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = T.AddDays(2) });
+            await using var reader = await list.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                chunks.Add(reader.GetString(0));
+            }
+        }
+
+        foreach (var chunk in chunks)
+        {
+            await using var empty = new NpgsqlCommand($"SELECT NOT EXISTS (SELECT 1 FROM {chunk})", connection);
+            if ((bool)(await empty.ExecuteScalarAsync(ct))!)
+            {
+                await using var drop = new NpgsqlCommand($"DROP TABLE {chunk}", connection);
+                await drop.ExecuteNonQueryAsync(ct);
+            }
+        }
     }
 
     private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)

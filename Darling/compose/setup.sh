@@ -47,8 +47,23 @@ mkdir -p "$secrets"
 chmod 700 "$secrets"
 
 # random_string LENGTH: letters and digits only, so the value is safe inside a connection string.
+# It reads a finite block of random bytes, so `tr` always reaches the end of its input and never writes into a pipe
+# that `head` has closed (#9826: `tr -dc ... < /dev/urandom | head -c N` printed `tr: write error: Broken pipe`
+# on a clean run). About a quarter of random bytes are letters or digits, so a block of eight times LENGTH
+# usually holds enough. The loop adds blocks until it does, so a short read never gives a short value.
 random_string() {
-  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"
+  _want=$1
+  _have=
+  _tries=0
+  while [ "${#_have}" -lt "$_want" ]; do
+    _tries=$((_tries + 1))
+    if [ "$_tries" -gt 20 ]; then
+      echo "setup.sh: could not read enough random bytes from /dev/urandom." >&2
+      exit 1
+    fi
+    _have="$_have$(head -c "$((_want * 8))" /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  printf "%.${_want}s" "$_have"
 }
 
 # write_secret FILE VALUE: a private file holding VALUE and a newline (references trim it).
@@ -102,7 +117,9 @@ for name in web_token.txt mcp_token.txt; do
   if [ -e "$secrets/$name" ]; then
     note_kept "$secrets/$name"
   else
-    write_secret "$secrets/$name" "$(random_string 48)"
+    token=$(random_string 48)
+    write_secret "$secrets/$name" "$token"
+    token=
     note_made "$secrets/$name"
   fi
 done

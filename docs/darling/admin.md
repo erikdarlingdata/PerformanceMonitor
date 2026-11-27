@@ -28,7 +28,7 @@ Run the command line verbs on the service host, from the folder that holds `Perf
 
 ## Add a server
 
-1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
+1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. On Docker Compose, run `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host>` from the compose folder. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
 2. Add the server in one of these ways:
    - In the Viewer, click **Add Server** in the sidebar, fill in the dialog and save.
    - On the command line, for a Windows-authentication server, run `.\PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows`.
@@ -227,7 +227,7 @@ Everything it can name provably came out of one of our own zips, because the man
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes. An upgrade that changes the attention Extended Events session also logs one Warning for each monitored server, `The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again`. It is expected and is not a failed check. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition.
 
 #### Rolling back to an older build
 
@@ -323,7 +323,7 @@ The project name is `performancemonitor-darling` in every release, so the new fo
    The `/.` after `old/secrets` matters. The new archive ships `secrets/README.md`, so `new/secrets/` exists. `cp -a old/secrets new/secrets` then copies the old folder inside it, to `new/secrets/secrets/`. Compose does not find the files it mounts, stops with `bind source path does not exist: .../secrets/store_password.txt`, and exits 1. The only line it prints on screen is `Container store Recreate`, so read the whole output if an upgrade fails. `old/secrets/.` copies the files in the folder, and `-a` keeps their modes. A `password_key` file keeps its owner (user 1654) only when `cp` runs as root, so use `sudo cp` if you keep one.
 
    `setup.sh` is not needed, because every secret file and `darling.json` is already there. The new `darling.sample.json` is for reference only.
-3. Make again in `new/docker-compose.yml` every edit you made in `old/docker-compose.yml`. The new file replaces yours, so the `mcp_token` and TLS secrets, a changed port mapping, a `mem_limit` and any added library in the store's preload list are gone until you make them again. Run `diff old/docker-compose.yml new/docker-compose.yml` to see them next to what the release changed.
+3. Make again in `new/docker-compose.yml` every edit you made in `old/docker-compose.yml`. The new file replaces yours, so the `mcp_token` and TLS secrets, a changed port mapping, a `mem_limit` and any added library in the store's preload list are gone until you make them again. Run `diff old/docker-compose.yml new/docker-compose.yml` to see them next to what the release changed. To have nothing to make again, keep your edits in `docker-compose.override.yml` and `.env` beside the compose file, which `docker compose` reads on top of the release's file, and copy those two files into `new` along with `darling.json` and `secrets/` in step 2.
 4. From the new folder, pull the images and start the stack. Use `up -d` and not `restart`. `restart` keeps each container as it was made, with the old image, the old flags and the old secrets, and only `up -d` recreates a container whose compose file changed:
 
    ```bash
@@ -343,6 +343,14 @@ The project name is `performancemonitor-darling` in every release, so the new fo
    ```bash
    docker compose exec store psql -U darling -d darling -c "SET search_path = collect, config, public; SELECT max(version) FROM darling_schema_version"
    ```
+
+   An upgrade that changes the attention Extended Events session logs one Warning for each monitored server, once, and it reads like a fault:
+
+   ```text
+   [<server>] The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again
+   ```
+
+   It is expected, and nothing needs doing. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition. It logs this once for each server after an upgrade that changes the session.
 
    If the line does not appear, read `docker compose logs darling` from the start for the reason. `docker compose ps` showing `darling` as `unhealthy` means that startup stopped for good (see the container health note in the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804)).
 
