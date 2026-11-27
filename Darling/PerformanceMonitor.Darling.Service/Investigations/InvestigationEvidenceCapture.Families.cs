@@ -175,7 +175,10 @@ LIMIT $6";
     /// indexes its resources name, read from the graph at capture and COPIED into the row. A temporary object's generated name
     /// (<c>#orders_____…</c>) is kept as the graph spells it. The whole graph goes through the statement filter (#4348) before
     /// it is parsed or any statement is cut, so a cut can never hide a statement the filter would name. A deadlock keeps
-    /// <see cref="DeadlockPartiesMax"/> parties and <see cref="DeadlockObjectsMax"/> objects, with counts of the rest.
+    /// <see cref="DeadlockPartiesMax"/> parties and <see cref="DeadlockObjectsMax"/> objects, with counts of the rest. A graph
+    /// the filter withholds whole (#9873: its read budget ran out, or it could not be read safely) has no parties or objects
+    /// and carries <c>graph_withheld</c> with the reason, so a row with no parties is never read as a deadlock that had none;
+    /// the time, database and victim id come from the row's own columns.
     /// </summary>
     private async Task<List<JsonObject>> ReadDeadlocksAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
@@ -187,53 +190,75 @@ LIMIT $6";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            var graph = SensitiveStatements.Xml(reader.GetString(3)) ?? "";
-            var model = DeadlockGraphParser.Parse(graph);
-            var parties = new JsonArray();
-            /* The victims first, then graph order, so the cap never drops the victim. */
-            var kept = model.Processes.OrderByDescending(p => p.IsVictim).Take(DeadlockPartiesMax).ToList();
-            foreach (var p in kept)
-            {
-                parties.Add(new JsonObject
-                {
-                    ["process_id"] = p.Id,
-                    ["spid"] = p.Spid,
-                    ["is_victim"] = p.IsVictim,
-                    ["database_name"] = p.DatabaseName,
-                    ["proc_name"] = p.ProcName,
-                    ["lock_mode"] = p.LockMode,
-                    ["wait_resource"] = p.WaitResource,
-                    ["contentious_object"] = p.ContentiousObject,
-                    ["isolation_level"] = p.IsolationLevel,
-                    ["login_name"] = p.LoginName,
-                    ["host_name"] = p.HostName,
-                    ["client_app"] = p.ClientApp,
-                    ["sql_text"] = Cut(p.SqlText, DeadlockStatementMaxChars),
-                });
-            }
-
-            var objects = DeadlockObjects(graph);
-            var objectsDropped = Math.Max(0, objects.Count - DeadlockObjectsMax);
-            for (var i = 0; i < objectsDropped; i++)
-                objects.RemoveAt(objects.Count - 1);
-            var row = new JsonObject
-            {
-                ["deadlock_time"] = Value(reader.GetDateTime(0)),
-                ["database_name"] = reader.IsDBNull(1) ? null : reader.GetString(1),
-                ["victim_process_id"] = reader.IsDBNull(2) ? null : reader.GetString(2),
-                ["is_parallel"] = model.IsParallel,
-                ["objects"] = objects,
-                ["parties"] = parties,
-            };
-            if (objectsDropped > 0)
-                row["objects_dropped"] = objectsDropped;
-            if (model.Processes.Count > kept.Count)
-                row["parties_dropped"] = model.Processes.Count - kept.Count;
-            rows.Add(row);
+            rows.Add(DeadlockRow(
+                reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2),
+                FilterXml(reader.GetString(3)) ?? ""));
         }
 
         return rows;
     }
+
+    /// <summary>One <c>deadlocks</c> row from the row's own columns and its graph AFTER the statement filter (#9873). A graph the
+    /// filter withheld whole parses to no process, which would read as a deadlock that had none, so the row says the graph was
+    /// withheld (<c>graph_withheld</c>), leaves the parties and objects empty and does not say whether the deadlock was parallel.
+    /// A graph the filter only cut values out of is read as usual.</summary>
+    internal static JsonObject DeadlockRow(DateTime deadlockTime, string? database, string? victimProcessId, string graph)
+    {
+        var withheld = IsWithheldWhole(graph);
+        var model = withheld ? DeadlockGraphParser.Parse("") : DeadlockGraphParser.Parse(graph);
+        var parties = new JsonArray();
+        /* The victims first, then graph order, so the cap never drops the victim. */
+        var kept = model.Processes.OrderByDescending(p => p.IsVictim).Take(DeadlockPartiesMax).ToList();
+        foreach (var p in kept)
+        {
+            parties.Add(new JsonObject
+            {
+                ["process_id"] = p.Id,
+                ["spid"] = p.Spid,
+                ["is_victim"] = p.IsVictim,
+                ["database_name"] = p.DatabaseName,
+                ["proc_name"] = p.ProcName,
+                ["lock_mode"] = p.LockMode,
+                ["wait_resource"] = p.WaitResource,
+                ["contentious_object"] = p.ContentiousObject,
+                ["isolation_level"] = p.IsolationLevel,
+                ["login_name"] = p.LoginName,
+                ["host_name"] = p.HostName,
+                ["client_app"] = p.ClientApp,
+                ["sql_text"] = Cut(p.SqlText, DeadlockStatementMaxChars),
+            });
+        }
+
+        var objects = withheld ? new JsonArray() : DeadlockObjects(graph);
+        var objectsDropped = Math.Max(0, objects.Count - DeadlockObjectsMax);
+        for (var i = 0; i < objectsDropped; i++)
+            objects.RemoveAt(objects.Count - 1);
+        var row = new JsonObject
+        {
+            ["deadlock_time"] = Value(deadlockTime),
+            ["database_name"] = database,
+            ["victim_process_id"] = victimProcessId,
+            ["is_parallel"] = withheld ? null : model.IsParallel,
+            ["objects"] = objects,
+            ["parties"] = parties,
+        };
+        if (withheld)
+            row["graph_withheld"] = InvestigationEvidenceWithheld.GraphReason;
+        if (objectsDropped > 0)
+            row["objects_dropped"] = objectsDropped;
+        if (model.Processes.Count > kept.Count)
+            row["parties_dropped"] = model.Processes.Count - kept.Count;
+        return row;
+    }
+
+    /// <summary>Runs one whole document (a deadlock graph, a blocked-process report, a plan) through the statement filter
+    /// under a fresh budget from <see cref="_newJudgeBudget"/> (#9873).</summary>
+    private string? FilterXml(string? xml) =>
+        string.IsNullOrEmpty(xml) ? xml : SensitiveStatements.Xml(xml, _newJudgeBudget());
+
+    /// <summary>Whether the filter's answer for a document is the marker it returns for a document it withheld whole (#9873).
+    /// A document the filter only cut values out of is not that marker.</summary>
+    private static bool IsWithheldWhole(string? filtered) => SensitiveStatements.IsWithheldPlan(filtered);
 
     /// <summary>The objects and indexes a deadlock graph's resources name, once each: (resource kind, object name, index
     /// name, lock mode), in graph order. A graph that does not parse names none.</summary>
@@ -346,7 +371,7 @@ LIMIT $6";
                     ["report_xml"] = null,
                 });
         /* #4348: each report goes through the statement filter whole, before FitReportXml cuts it. */
-        return new SectionRead(rows, ReportXml: chains.ConvertAll(r => SensitiveStatements.Xml(r.ReportXml)));
+        return new SectionRead(rows, ReportXml: chains.ConvertAll(r => FilterXml(r.ReportXml)));
     }
 
     /// <summary>
@@ -464,7 +489,8 @@ LIMIT $6";
             .Take(SectionRows)
             .Select(h => (Newest: h.Newest!, h.Blocked, h.MaxWait,
                           /* #4348: the report goes through the statement filter whole before it is parsed. */
-                          Process: BlockingProcess(SensitiveStatements.Xml(h.Newest!.ReportXml))))
+                          Filtered: FilterXml(h.Newest!.ReportXml)))
+            .Select(h => (h.Newest, h.Blocked, h.MaxWait, Process: BlockingProcess(h.Filtered), Withheld: IsWithheldWhole(h.Filtered)))
             .ToList();
 
         var statements = await ReadStatementsAsync(
@@ -472,14 +498,14 @@ LIMIT $6";
             cancellationToken).ConfigureAwait(false);
 
         var rows = new List<JsonObject>();
-        foreach (var (newest, blocked, maxWait, process) in heads)
+        foreach (var (newest, blocked, maxWait, process, withheld) in heads)
         {
             string? statement = null;
             if (process.SqlHandle is not null)
                 statements.TryGetValue((process.SqlHandle, process.StmtStart, process.StmtEnd), out statement);
 
             var exact = statement is not null;
-            rows.Add(new JsonObject
+            var row = new JsonObject
             {
                 ["spid"] = newest.BlockingSpid,
                 ["ecid"] = newest.BlockingEcid,
@@ -497,7 +523,12 @@ LIMIT $6";
                 ["statement_text"] = exact ? statement : process.InputBuffer ?? newest.BlockingSql,
                 ["input_buffer"] = process.InputBuffer,
                 ["report_time"] = Value(newest.EventTime),
-            });
+            };
+            /* #9873: a report the filter withheld whole has no frame or input buffer to read, which would pass for a blocker with
+               none. The row says the report was withheld. */
+            if (withheld)
+                row["report_withheld"] = InvestigationEvidenceWithheld.ReportReason;
+            rows.Add(row);
         }
 
         return rows;
@@ -597,9 +628,16 @@ LIMIT $6";
             /* #4348 review: each plan goes through the statement filter, as every MCP plan read does (DarlingStoredPlanReader),
                before a compiled value is read from it: a value inside a statement the filter names comes back withheld, and
                CompiledValues returns null for a plan with a withheld value or the withheld placeholder. */
-            target["good_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(good)));
+            var goodPlan = FilterXml(plans.GetValueOrDefault(good));
+            target["good_compiled"] = Compiled(goodPlan);
+            /* #9873: a plan the filter withheld whole has null compiled values, as a missing plan has; the target says it was withheld. */
+            if (IsWithheldWhole(goodPlan))
+                target["good_plan_withheld"] = InvestigationEvidenceWithheld.PlanReason;
             cancellationToken.ThrowIfCancellationRequested();
-            target["bad_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(bad)));
+            var badPlan = FilterXml(plans.GetValueOrDefault(bad));
+            target["bad_compiled"] = Compiled(badPlan);
+            if (IsWithheldWhole(badPlan))
+                target["bad_plan_withheld"] = InvestigationEvidenceWithheld.PlanReason;
             target["stopped_running"] = target["window_executions"]?.GetValue<long>() == 0;
         }
 

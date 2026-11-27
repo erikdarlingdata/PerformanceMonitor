@@ -212,7 +212,7 @@ Use a machine with no prior install and no `C:\ProgramData\PerformanceMonitorDar
 
 Pass means three things. The pre-flight `--test-connection` shows PASS for each server. The service is created on its virtual account and reaches Running. The same five store checks hold after 10 to 15 minutes.
 
-Then run `uninstall-darling.ps1`, with `-PurgeData` on a machine you will reuse, and confirm the service is gone. Record the pre-flight lines and the five check results.
+Then run `uninstall-darling.ps1`, with `-PurgeData` on a machine you will reuse (it asks for a typed DELETE, so a run that cannot answer the prompt passes `-PurgeData -ConfirmPurge`), and confirm the service is gone. Record the pre-flight lines and the five check results.
 
 #### (d) The Linux tarball and the container image
 
