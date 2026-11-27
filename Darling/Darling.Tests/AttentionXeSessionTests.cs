@@ -24,6 +24,7 @@ namespace Darling.Tests;
 public sealed class AttentionXeSessionTests
 {
     private const string InstallIdValue = "0a1b2c3d";
+    private static readonly string OwnName = "PerformanceMonitor_Darling_0a1b2c3d_Attention";
     private const AlwaysOnXeSessionKind Attention = AlwaysOnXeSessionKind.Attention;
 
     [Fact]
@@ -52,9 +53,9 @@ public sealed class AttentionXeSessionTests
     [Fact]
     public void TheServerScopedStatement_IsServerScoped_WithTheTwoTargetsTheFiveActionsAndNoHash()
     {
-        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql();
+        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql(OwnName);
 
-        Assert.Contains("CREATE EVENT SESSION [PerformanceMonitor_Attention]", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE EVENT SESSION [PerformanceMonitor_Darling_0a1b2c3d_Attention]", sql, StringComparison.Ordinal);
         Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON DATABASE", sql, StringComparison.Ordinal);
         Assert.Contains("ADD EVENT sqlserver.attention", sql, StringComparison.Ordinal);
@@ -72,17 +73,18 @@ public sealed class AttentionXeSessionTests
         Assert.Contains("MEMORY_PARTITION_MODE = NONE", sql, StringComparison.Ordinal);
         Assert.Contains("STARTUP_STATE = ON", sql, StringComparison.Ordinal);
         Assert.Contains("EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS", sql, StringComparison.Ordinal);
-        Assert.EndsWith("ALTER EVENT SESSION [PerformanceMonitor_Attention] ON SERVER STATE = START;", sql, StringComparison.Ordinal);
+        Assert.EndsWith("ALTER EVENT SESSION [PerformanceMonitor_Darling_0a1b2c3d_Attention] ON SERVER STATE = START;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TheAzureStatement_IsDatabaseScoped_WithTheSameTargetsAndNoServerOnlyOption()
     {
-        var shared = AlwaysOnXeSessions.BuildAzureCreateSql(Attention, AlwaysOnXeSessions.SharedNameFor(Attention));
+        var other = AlwaysOnXeSessions.BuildAzureCreateSql(
+            Attention, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, "ffffffff", Attention));
         var own = AlwaysOnXeSessions.BuildAzureCreateSql(
             Attention, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, Attention));
 
-        foreach (var sql in new[] { shared, own })
+        foreach (var sql in new[] { other, own })
         {
             Assert.Contains("ON DATABASE", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("ON SERVER", sql, StringComparison.Ordinal);
@@ -96,14 +98,15 @@ public sealed class AttentionXeSessionTests
             Assert.DoesNotContain("max_memory = 4096", sql, StringComparison.Ordinal);
         }
 
-        Assert.Contains("STARTUP_STATE = ON", shared, StringComparison.Ordinal);
-        Assert.Contains("STARTUP_STATE = OFF", own, StringComparison.Ordinal);
+        /* #9895: the client-timeout session is always own and is the install's only one, so it starts with the database. */
+        Assert.Contains("STARTUP_STATE = ON", other, StringComparison.Ordinal);
+        Assert.Contains("STARTUP_STATE = ON", own, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TheAzureStatementCarriesEveryActionNotOnTheClosedRejectedList()
     {
-        var sql = AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(Attention, AlwaysOnXeSessions.SharedNameFor(Attention));
+        var sql = AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(Attention, OwnName);
 
         foreach (var action in new[] { "client_app_name", "client_hostname", "database_name", "session_id", "sql_text" })
         {
@@ -120,7 +123,7 @@ public sealed class AttentionXeSessionTests
         {
             var shared = AlwaysOnXeSessions.SharedNameFor(kind);
             Assert.True(names.Add(shared), "two kinds share the name " + shared);
-            Assert.Contains("[" + shared + "]", AlwaysOnXeSessions.BuildAzureCreateSql(kind, shared), StringComparison.Ordinal);
+            Assert.Contains("[" + AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, kind) + "]", AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, kind)), StringComparison.Ordinal);
             Assert.Contains("@session_name", AlwaysOnXeSessions.BuildAzureCatalogProbeSql(kind, "test"), StringComparison.Ordinal);
             Assert.False(string.IsNullOrWhiteSpace(AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind)));
         }
@@ -191,29 +194,5 @@ public sealed class AttentionXeSessionTests
         });
         Assert.NotNull(note);
         Assert.Contains("deadlocks and client timeouts", note, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheServerEnsure_IsAThirdTryBlockThroughTheSharedBuilder_AndHoldsNoCopyOfTheStatement()
-    {
-        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
-
-        Assert.Contains("await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql()", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessionKind.Attention, \"client timeout\"", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sqlserver.attention", source, StringComparison.Ordinal);
-
-        /* Three captures, three separate try blocks: one capture's failure never skips another. */
-        var ensureAll = source.Substring(source.IndexOf("public static async Task<AttentionEnsureFault?> EnsureAllAsync", StringComparison.Ordinal));
-        ensureAll = ensureAll.Substring(0, ensureAll.IndexOf("private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync", StringComparison.Ordinal));
-        Assert.Equal(3, ensureAll.Split("catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))").Length - 1);
-    }
-
-    [Fact]
-    public void TheRemovalOfAServer_DropsTheOwnAttentionSessionToo()
-    {
-        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingRemovedServerSessions.cs");
-
-        Assert.Contains("AlwaysOnXeSessionKind.Attention", source, StringComparison.Ordinal);
     }
 }

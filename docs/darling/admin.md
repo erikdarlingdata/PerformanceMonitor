@@ -227,7 +227,7 @@ Everything it can name provably came out of one of our own zips, because the man
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes. An upgrade that changes the attention Extended Events session also logs one Warning for each monitored server, `The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again`. It is expected and is not a failed check. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition.
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes. An upgrade that changes the attention Extended Events session also logs one Warning for each monitored server, `The attention XE session PerformanceMonitor_Darling_<id>_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again`. It is expected and is not a failed check. The service drops its own `PerformanceMonitor_Darling_<id>_Attention` session and creates it again with this version's definition.
 
 #### Rolling back to an older build
 
@@ -357,10 +357,10 @@ The project name is `performancemonitor-darling` in every release, so the new fo
    An upgrade that changes the attention Extended Events session logs one Warning for each monitored server, once, and it reads like a fault:
 
    ```text
-   [<server>] The attention XE session PerformanceMonitor_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again
+   [<server>] The attention XE session PerformanceMonitor_Darling_<id>_Attention has a definition other than this version's (events, actions or targets): dropping it and creating it again
    ```
 
-   It is expected, and nothing needs doing. The service drops its own `PerformanceMonitor_Attention` session and creates it again with this version's definition. It logs this once for each server after an upgrade that changes the session.
+   It is expected, and nothing needs doing. The service drops its own `PerformanceMonitor_Darling_<id>_Attention` session and creates it again with this version's definition. It never touches the shared `PerformanceMonitor_Attention` session that older builds made. It logs this once for each server after an upgrade that changes the session.
 
    If the line does not appear, read `docker compose logs darling` from the start for the reason. `docker compose ps` showing `darling` as `unhealthy` means that startup stopped for good (see the container health note in the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804)).
 
