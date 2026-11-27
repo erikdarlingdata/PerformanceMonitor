@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -100,6 +101,83 @@ public sealed class UpgradeRunPickupTests
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
+    }
+
+    /* #9821: the file upgrade-darling.sh --rollback writes, in the script's own layout. target_build is the build that is back and
+       rollback_folder is the folder that holds the build the rollback replaced. */
+    private static string RollbackRunJson(Guid id, string state, DateTime started) =>
+        "{\n  \"run_id\": \"" + id + "\",\n  \"state\": \"" + state + "\",\n  \"tool_version\": \"3.14.1\",\n  \"target_build\": \"3.14.0\",\n"
+        + "  \"started_utc\": \"" + started.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + "\",\n  \"ended_utc\": "
+        + (state == "in_progress" ? "null" : "\"" + started.AddSeconds(33).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + "\"")
+        + ",\n  \"exit_code\": " + (state == "in_progress" ? "null" : "0") + ",\n  \"stop_check\": \"clear\",\n"
+        + "  \"rollback_folder\": \"/opt/darling.failed\",\n  \"first_error\": null,\n  \"verified_utc\": null\n}\n";
+
+    /* #9821: a rollback's own run is a second row. The upgrade it undid is verified, the furthest state a row reaches, and the rule
+       that a row never steps back is per run id, so it neither drops the rollback's row nor moves the upgrade's row. The newest row
+       then names the build that is back and the folder of the build it replaced. */
+    [Fact]
+    public async Task ARollbacksOwnRun_IsASecondRowBesideTheVerifiedUpgrade_AndTheNewestRowNamesTheBuildThatIsBack()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9821-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var upgrade = Guid.NewGuid();
+            var rollback = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            File.WriteAllText(file, RunJson(upgrade, "verified", started: now.AddMinutes(-30)));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+
+            File.WriteAllText(file, RollbackRunJson(rollback, "in_progress", now.AddMinutes(-5)));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            Assert.Equal((2L, "in_progress"), await RowAsync(connection, rollback));
+
+            File.WriteAllText(file, RollbackRunJson(rollback, "succeeded", now.AddMinutes(-5)));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
+            Assert.Equal((2L, "succeeded"), await RowAsync(connection, rollback));
+            Assert.Equal((2L, "verified"), await RowAsync(connection, upgrade));
+
+            await using var newest = new NpgsqlCommand(
+                "SELECT run_id, target_build, rollback_folder, exit_code FROM collect.upgrade_runs ORDER BY started_at DESC LIMIT 1", connection);
+            await using var reader = await newest.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(rollback, reader.GetGuid(0));
+            Assert.Equal("3.14.0", reader.GetString(1));
+            Assert.Equal("/opt/darling.failed", reader.GetString(2));
+            Assert.Equal(0, reader.GetInt32(3));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /* #9821: the rollback's file parses as a run without a store, so a build that reads it never calls it malformed. */
+    [Fact]
+    public void ARollbacksFile_ParsesAsARunOfItsOwn()
+    {
+        var id = Guid.NewGuid();
+        var started = new DateTime(2026, 11, 27, 0, 33, 5, DateTimeKind.Utc);
+
+        Assert.True(UpgradeRunPickup.TryParse(RollbackRunJson(id, "succeeded", started), out var run, out var problem), problem);
+
+        Assert.Equal(id, run!.RunId);
+        Assert.Equal(UpgradeRuns.Succeeded, run.State);
+        Assert.Equal("3.14.0", run.TargetBuild);
+        Assert.Equal("/opt/darling.failed", run.RollbackFolder);
+        Assert.Equal(started.AddSeconds(33), run.EndedUtc);
+        Assert.Equal(0, run.ExitCode);
     }
 
     [Fact]
