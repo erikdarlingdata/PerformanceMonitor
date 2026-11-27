@@ -228,7 +228,7 @@ unit_replaced=0
 
 if [ "${rollback_only}" = 1 ]; then
     # A refusal before anything moved says that nothing was changed, why, which build stays, and how to change builds (#9851).
-    [ -f "${PREVIOUS_ROOT}/${SERVICE_DLL}" ] || die "Nothing was changed. The rollback copy ${PREVIOUS_ROOT} is missing or holds no build, so --rollback has nothing to go back to: an earlier --rollback uses the copy up. The build in ${INSTALL_ROOT} is $(build_version "${INSTALL_ROOT}"). To change builds, run a new upgrade with --source and --sha256."
+    [ -f "${PREVIOUS_ROOT}/${SERVICE_DLL}" ] || die "Nothing was changed. The rollback copy ${PREVIOUS_ROOT} is missing or holds no build, so --rollback has nothing to go back to. Only an upgrade makes that copy: a --rollback uses it up, removing it by hand deletes it, and an install that was never upgraded has none. The build in ${INSTALL_ROOT} is $(build_version "${INSTALL_ROOT}"). To change builds, run a new upgrade with --source and --sha256."
     others="$(processes_from "${INSTALL_ROOT}" "$(unit_pids)")"
     [ -z "${others}" ] || die "A process other than the service still runs from ${INSTALL_ROOT}. Nothing was changed. Let it finish or stop it, then run this script again:
 ${others}"
