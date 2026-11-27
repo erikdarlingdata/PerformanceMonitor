@@ -61,34 +61,81 @@ internal static class ExplainBuffers
     }
 
     /// <summary>The rows the scan nodes over <paramref name="relations"/> returned (actual rows times loops), summed over the plan in
-    /// <paramref name="explainJson"/>. A compressed chunk's decompress node carries the uncompressed chunk's name, its compressed child does
-    /// not, so a chunk is counted once. Rows, unlike pages, mean the same at every table size: a per-row index scan of an uncompressed chunk
-    /// counts a buffer access per row, and a compressed read counts a few.</summary>
-    public static long RowsRead(object? explainJson, ISet<string> relations)
+    /// <paramref name="explainJson"/>, taken at the printed value. A compressed chunk's decompress node carries the uncompressed chunk's
+    /// name, its compressed child does not, so a chunk is counted once. Rows, unlike pages, mean the same at every table size: a per-row
+    /// index scan of an uncompressed chunk counts a buffer access per row, and a compressed read counts a few.
+    /// <para>PostgreSQL 17 and earlier print <c>Actual Rows</c> as the per-loop average rounded to a whole number, so a node with several
+    /// loops can stand half a row a loop away from what it returned (#9809). This figure is exact only where every loop returns the same
+    /// whole number of rows, as a lookup that returns one row does. A bound check uses <see cref="RowsReadAtLeast"/> or
+    /// <see cref="RowsReadAtMost"/> instead.</para></summary>
+    public static long RowsRead(object? explainJson, ISet<string> relations) => RowsRead(explainJson, relations, Bound.Printed);
+
+    /// <summary>The fewest rows the plan can have read and still print what it printed: the figure for a "reads no more than N" check. The
+    /// printed value of a node is the per-loop average rounded to the digits it shows (whole rows on PostgreSQL 17 and earlier, hundredths
+    /// on 18), so the node's total sits within half a unit of the last digit, per loop, of the printed value times its loops. The
+    /// allowance applies only where it can matter, a node with more than one loop and a rounded value: a single loop prints its total, and
+    /// the hundredths of 18 stay inside one row for up to a hundred loops, so the bound is as tight there as an exact count (#9809).</summary>
+    public static long RowsReadAtLeast(object? explainJson, ISet<string> relations) => RowsRead(explainJson, relations, Bound.Least);
+
+    /// <summary>The most rows the plan can have read and still print what it printed: the figure for a "reads at least N" check. The same
+    /// allowance as <see cref="RowsReadAtLeast"/>, in the other direction (#9809).</summary>
+    public static long RowsReadAtMost(object? explainJson, ISet<string> relations) => RowsRead(explainJson, relations, Bound.Most);
+
+    private enum Bound
     {
-        using var document = JsonDocument.Parse(Convert.ToString(explainJson, CultureInfo.InvariantCulture)!);
-        return RowsRead(document.RootElement[0].GetProperty("Plan"), relations);
+        Printed,
+        Least,
+        Most,
     }
 
-    private static long RowsRead(JsonElement plan, ISet<string> relations)
+    private static long RowsRead(object? explainJson, ISet<string> relations, Bound bound)
+    {
+        using var document = JsonDocument.Parse(Convert.ToString(explainJson, CultureInfo.InvariantCulture)!);
+        return RowsRead(document.RootElement[0].GetProperty("Plan"), relations, bound);
+    }
+
+    private static long RowsRead(JsonElement plan, ISet<string> relations, Bound bound)
     {
         var rows = 0L;
         if (plan.TryGetProperty("Relation Name", out var name) && relations.Contains(name.GetString() ?? string.Empty)
             && plan.TryGetProperty("Actual Rows", out var actual))
         {
             var loops = plan.TryGetProperty("Actual Loops", out var l) ? l.GetInt64() : 1L;
-            rows += (long)Math.Round(actual.GetDouble() * loops);
+            rows += NodeRows(actual, loops, bound);
         }
 
         if (plan.TryGetProperty("Plans", out var children))
         {
             foreach (var child in children.EnumerateArray())
             {
-                rows += RowsRead(child, relations);
+                rows += RowsRead(child, relations, bound);
             }
         }
 
         return rows;
+    }
+
+    /// <summary>One node's rows. The rounding allowance is half of the last digit the number prints (read from the number's own text, so no
+    /// server version is needed), taken per loop.</summary>
+    private static long NodeRows(JsonElement actual, long loops, Bound bound)
+    {
+        var printed = actual.GetDecimal();
+        if (bound == Bound.Printed || loops <= 1)
+        {
+            return (long)Math.Round(printed * loops);
+        }
+
+        var raw = actual.GetRawText();
+        var point = raw.IndexOf('.', StringComparison.Ordinal);
+        var half = 0.5m;
+        for (var digits = point < 0 ? 0 : raw.Length - point - 1; digits > 0; digits--)
+        {
+            half /= 10m;
+        }
+
+        return bound == Bound.Least
+            ? (long)Math.Ceiling(Math.Max(0m, printed - half) * loops)
+            : (long)Math.Floor((printed + half) * loops);
     }
 
     private static long Blocks(JsonElement node, string name) => node.TryGetProperty(name, out var value) ? value.GetInt64() : 0;

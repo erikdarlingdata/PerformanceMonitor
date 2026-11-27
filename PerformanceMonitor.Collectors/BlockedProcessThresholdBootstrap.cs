@@ -109,9 +109,11 @@ public sealed class BlockedProcessThresholdBootstrap
     /// The one line logged when a server refuses the bootstrap: what failed, then the remedy for the platform. AWS RDS has no
     /// sp_configure for this setting, so its remedy is the instance's parameter group. Anywhere else the refusal is the login's
     /// missing ALTER SETTINGS permission. Azure SQL Database never reaches the bootstrap: its blocked-process session is
-    /// database-scoped and has no server threshold to set.
+    /// database-scoped and has no server threshold to set. <paramref name="serverMessages"/> are the messages of the errors the
+    /// server answered with, in the order it sent them: this project has no SqlClient, so each host reads them off its own
+    /// exception, as it reads the error numbers (#9818).
     /// </summary>
-    public static string RefusalMessage(CollectorTargetInfo target, string serverDetail)
+    public static string RefusalMessage(CollectorTargetInfo target, IEnumerable<string> serverMessages)
     {
         var remedy = target.IsAwsRds
             ? "AWS RDS does not allow sp_configure for this setting: set 'blocked process threshold (s)' to 5 in the DB parameter group of the instance."
@@ -120,8 +122,32 @@ public sealed class BlockedProcessThresholdBootstrap
         return "Could not set 'blocked process threshold (s)' to 5 seconds, so blocked process reports are not raised and the blocked-process XE session stays empty. "
             + remedy
             + " Blocking is still captured by the DMV blocking snapshot. This is logged once per server until the service restarts or the server's connection settings change."
-            + $" Detail: {serverDetail}";
+            + $" Detail: {RefusalDetail(serverMessages)}";
     }
+
+    /// <summary>
+    /// The server's answer to the batch as one line (#9818). A SqlException joins every error of the batch with a line break, and the
+    /// batch runs sp_configure and RECONFIGURE, which AWS RDS refuses twice (15247 and 5812, then both again), so the exception text
+    /// carries the same two messages twice across four lines. Each distinct message is named once, in the order the server sent it,
+    /// and a line break inside a message becomes a space, so the log carries the refusal on one line.
+    /// </summary>
+    private static string RefusalDetail(IEnumerable<string> serverMessages)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var detail = new List<string>();
+        foreach (var message in serverMessages)
+        {
+            var line = string.Join(' ', message.Split(LineBreaks, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            if (line.Length > 0 && seen.Add(line))
+            {
+                detail.Add(line);
+            }
+        }
+
+        return string.Join(' ', detail);
+    }
+
+    private static readonly char[] LineBreaks = ['\r', '\n'];
 
     /* A connection string can carry a password, so the settings are kept as a hash. */
     private static string KeyOf(string connectionSettings) =>

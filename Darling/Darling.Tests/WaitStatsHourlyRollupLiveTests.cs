@@ -89,8 +89,8 @@ public sealed class WaitStatsHourlyRollupLiveTests
             $"OR (collection_time >= '{Ts(hole)}' AND collection_time < '{Ts(hole.AddHours(1))}') OR (collection_time >= '{Ts(unreached)}' AND collection_time < '{Ts(end)}'))", ct);
         var rawRows = await RawWaitRowsAsync(connection, RawSql(start), start, end, waitChunks, ct);
         var hourlyRows = await RawWaitRowsAsync(connection, HourlySql(start), start, end, waitChunks, ct);
-        Assert.True(rawRows > allowed * 5, $"the raw statement reads the whole window ({rawRows} rows), far more than the edge, hole and unreached hours hold ({allowed})");
-        Assert.True(hourlyRows <= allowed, $"the hourly statement read {hourlyRows} raw wait_stats rows, more than the edge, hole and unreached hours hold ({allowed})");
+        Assert.True(rawRows.AtMost > allowed * 5, $"the raw statement reads the whole window ({rawRows.AtMost} rows at most), far more than the edge, hole and unreached hours hold ({allowed})");
+        Assert.True(hourlyRows.AtLeast <= allowed, $"the hourly statement read {hourlyRows.AtLeast} raw wait_stats rows at least, more than the edge, hole and unreached hours hold ({allowed})");
     }
 
     [Fact]
@@ -215,12 +215,12 @@ public sealed class WaitStatsHourlyRollupLiveTests
     }
 
     /// <summary>The raw <c>wait_stats</c> rows the statement's plan read (rows of the scans over the table's chunks).</summary>
-    private static async Task<long> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
+    private static async Task<(long AtLeast, long AtMost)> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
     {
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
         await ExecuteAsync(connection, $"PREPARE ws_rows_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         var plan = await ScalarAsync<object>(connection, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ws_rows_q({Args(start, end)})", ct);
-        return ExplainBuffers.RowsRead(plan, waitChunks);
+        return (ExplainBuffers.RowsReadAtLeast(plan, waitChunks), ExplainBuffers.RowsReadAtMost(plan, waitChunks));
     }
 
     private static async Task<NpgsqlConnection> BuildTimescaleStoreAsync(ScratchPostgres scratch, CancellationToken ct)
@@ -238,17 +238,21 @@ public sealed class WaitStatsHourlyRollupLiveTests
     }
 
     /// <summary>Four days of waits every 5 minutes for two servers and five wait types, two of them one wait type under two spellings (the
-    /// trailing space the Daily Summary merges), some zero deltas the rollups filter, from three days ago midnight to now.</summary>
+    /// trailing space the Daily Summary merges), some zero deltas the rollups filter, from three days ago midnight to
+    /// <see cref="LiveClock.Now"/>: the days the tests read are cut from the same clock, so yesterday holds every hour the tests name at any
+    /// pinned hour (#9809).</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await ExecuteAsync(connection, @"
+        await using var seed = new NpgsqlCommand(@"
 INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds)
 SELECT 882400000 + row_number() OVER (), t, s.server_id, 'wait-hourly-server', w.wait_type, 5,
        CASE WHEN (extract(epoch FROM t)::bigint / 60 + w.k) % 11 = 0 THEN 0 ELSE ((extract(epoch FROM t)::bigint / 60 * w.k * 37 + w.k * 101 + s.server_id) % 997) + 1 END,
        60
-FROM generate_series(date_trunc('day', now() AT TIME ZONE 'utc') - interval '3 days', now() AT TIME ZONE 'utc', interval '5 minutes') AS t
+FROM generate_series(date_trunc('day', $1::timestamp) - interval '3 days', $1::timestamp, interval '5 minutes') AS t
 CROSS JOIN (VALUES (8824), (8825)) AS s(server_id)
-CROSS JOIN (VALUES ('SOS_SCHEDULER_YIELD', 1), ('PAGEIOLATCH_SH ', 2), ('PAGEIOLATCH_SH', 3), ('CXCONSUMER', 4), ('WRITELOG', 5)) AS w(wait_type, k)", ct);
+CROSS JOIN (VALUES ('SOS_SCHEDULER_YIELD', 1), ('PAGEIOLATCH_SH ', 2), ('PAGEIOLATCH_SH', 3), ('CXCONSUMER', 4), ('WRITELOG', 5)) AS w(wait_type, k)", connection) { CommandTimeout = 300 };
+        seed.Parameters.AddWithValue(LiveClock.Now());
+        await seed.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

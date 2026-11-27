@@ -60,7 +60,7 @@ docker compose up -d
 
 `setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
 
-The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. The monitoring login must exist on each SQL Server before Darling can collect from it. With the stack up, `docker compose exec darling dotnet PerformanceMonitor.Darling.Service.dll --grant-script --host <host>` prints the T-SQL that creates it, and [Permissions](permissions.md#lite--darling-on-premises) has the grants. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
 
 The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off step before the new image starts; the steps, the rollback and a Kubernetes example are in [Container user](darling/security.md#container-user).
 

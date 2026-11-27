@@ -223,7 +223,7 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
 
             Assert.True(outside.Count >= 12, $"the store must hold many chunks that end before the window, it holds {outside.Count}");
             await using var explain = Command(connection, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + compiled.Sql, compiled);
-            var outsideRows = ExplainBuffers.RowsRead(await explain.ExecuteScalarAsync(ct), outside);
+            var outsideRows = ExplainBuffers.RowsReadAtLeast(await explain.ExecuteScalarAsync(ct), outside);
             Assert.True(outsideRows == 0, $"the panel read {outsideRows} rows from chunks that end before the window starts");
             bodySucceeded = true;
         }

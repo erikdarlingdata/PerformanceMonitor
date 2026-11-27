@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// rollup holds, plus the open day's last hours. The result must stay the raw statement's: EXCEPT both ways over a window whose
 /// yesterday is missing from the daily rollup and partly missing from the hourly one, on the legacy daily, on the stitched daily, on
 /// windows that start and end inside an hour (microseconds kept) and on a daily that holds nothing, and the hourly tier's statement is
-/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsRead"/>) stay at the hours no rollup holds. A hash whose only row in a
+/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsReadAtLeast"/>) stay at the hours no rollup holds. A hash whose only row in a
 /// held hour of an interval-honest hourly is a restart row (<c>sample_interval_seconds = 0</c>) is left out of the count, which is the queries
 /// with credited executions in the window (#8651), while the legacy hourly keeps it. The stitched daily's legacy-hourly branch, for hours before
 /// the boundary day, runs in a case of its own.
@@ -105,8 +105,8 @@ public sealed class DailySummaryClosedHoursLiveTests
         var rawRows = await RowsReadAsync(connection, DailySummarySql.RangeSql, start, end, rawChunks, ct);
         var routedRows = await RowsReadAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, NoCoverage, start), start, end, rawChunks, ct);
         Assert.True(allowed > 0 && allowed < yesterdayRows, $"the seed leaves hours no rollup holds ({allowed}) fewer than the rows of yesterday ({yesterdayRows})");
-        Assert.True(rawRows > yesterdayRows, $"the raw statement reads the window, {rawRows} rows");
-        Assert.True(routedRows <= allowed, $"the routed statement read {routedRows} raw query_stats rows, more than the {allowed} of the hours no rollup holds");
+        Assert.True(rawRows.AtMost > yesterdayRows, $"the raw statement reads the window, {rawRows.AtMost} rows at most");
+        Assert.True(routedRows.AtLeast <= allowed, $"the routed statement read {routedRows.AtLeast} raw query_stats rows at least, more than the {allowed} of the hours no rollup holds");
 
         /* Hourly tier: its relations read raw as their source, so nothing sits between them and raw and the closed-hours member is not in the text. */
         Assert.DoesNotContain("AS held", DailySummarySql.RangeSqlFor(RetentionTier.Hourly, NoCoverage, start), StringComparison.Ordinal);
@@ -129,7 +129,7 @@ public sealed class DailySummaryClosedHoursLiveTests
         await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, start, end, ct);
         await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, yesterday.AddHours(6).AddMinutes(30).AddTicks(10), yesterday.AddHours(12).AddMinutes(30).AddTicks(6543210), ct);
         var stitchedRows = await RowsReadAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, stitched, start), start, end, rawChunks, ct);
-        Assert.True(stitchedRows <= allowed, $"the stitched statement read {stitchedRows} raw query_stats rows, more than the {allowed} of the hours no rollup holds");
+        Assert.True(stitchedRows.AtLeast <= allowed, $"the stitched statement read {stitchedRows.AtLeast} raw query_stats rows at least, more than the {allowed} of the hours no rollup holds");
     }
 
     [Fact]
@@ -288,7 +288,7 @@ public sealed class DailySummaryClosedHoursLiveTests
             + $"AND NOT EXISTS (SELECT 1 FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} AS h WHERE h.server_id = {ServerId} AND h.bucket = date_trunc('hour', q.collection_time) AND h.bucket >= '{Ts(boundary)}')", ct);
         Assert.True(allowed > 0 && allowed * 10 < windowRows, $"the seed leaves {allowed} rows in hours no rollup holds, of {windowRows} from the legacy daily's ceiling");
         var routedRows = await RowsReadAsync(connection, sql, start, end, rawChunks, ct);
-        Assert.True(routedRows <= allowed, $"the stitched statement read {routedRows} raw query_stats rows, more than the {allowed} of the hours no rollup holds");
+        Assert.True(routedRows.AtLeast <= allowed, $"the stitched statement read {routedRows.AtLeast} raw query_stats rows at least, more than the {allowed} of the hours no rollup holds");
     }
 
     /// <summary>Opens <paramref name="connection"/>, migrates, enables TimescaleDB on a connection of the probe's own (#1922) and builds the rollups.</summary>
@@ -356,14 +356,15 @@ public sealed class DailySummaryClosedHoursLiveTests
         return rows;
     }
 
-    private static async Task<long> RowsReadAsync(
+    /// <summary>The raw rows the statement's plan reads, as the range the plan's printed rows allow (#9809): PostgreSQL 17 and earlier round each node's per-loop rows to a whole number.</summary>
+    private static async Task<(long AtLeast, long AtMost)> RowsReadAsync(
         NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> rawChunks, CancellationToken ct)
     {
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
         await ExecuteAsync(connection, $"PREPARE qs_rows_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         var plan = await ScalarAsync<object>(connection,
             $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE qs_rows_q({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", ct);
-        return ExplainBuffers.RowsRead(plan, rawChunks);
+        return (ExplainBuffers.RowsReadAtLeast(plan, rawChunks), ExplainBuffers.RowsReadAtMost(plan, rawChunks));
     }
 
     /// <summary>
