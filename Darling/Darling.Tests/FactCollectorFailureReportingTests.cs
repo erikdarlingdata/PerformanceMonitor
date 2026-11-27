@@ -61,11 +61,23 @@ public sealed class FactCollectorFailureReportingTests
         @"ReportCollectionFailure\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// The one other accepted report (#9879): a family the analysis time budget cuts is named in the reply's
+    /// <c>families_left_out</c> and adds no collection failure, so the family deadline's catch in
+    /// <c>PgFactCollector.RunFamiliesAsync</c> records the cut through <c>RecordBudgetCut</c>, the only writer of that
+    /// record. It is accepted for exactly one catch, which the census asserts, so an ordinary catch cannot meet the census
+    /// by calling it.
+    /// </summary>
+    private static readonly Regex s_budgetCut = new(
+        @"\bRecordBudgetCut\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     [Fact]
     public void EverySwallowingFactCollectorCatchReportsWhyItSwallowed()
     {
         var unreported = new List<string>();
         var reported = 0;
+        var budgetCuts = new List<string>();
 
         foreach (var file in FactCollectorSources())
         {
@@ -84,6 +96,10 @@ public sealed class FactCollectorFailureReportingTests
                 {
                     reported++;
                 }
+                else if (s_budgetCut.IsMatch(body))
+                {
+                    budgetCuts.Add($"{Path.GetFileName(file)}:{i + 1}");
+                }
                 else
                 {
                     unreported.Add($"{Path.GetFileName(file)}:{i + 1}");
@@ -94,8 +110,17 @@ public sealed class FactCollectorFailureReportingTests
         Assert.True(
             unreported.Count == 0,
             $"These fact-collector catches swallow a failure without reporting why, so a collector "
-            + $"that could not run is indistinguishable from one that found nothing (#2826):"
+            + $"that could not run is indistinguishable from one that found nothing (#2826). A catch reports it through "
+            + $"ReportCollectionFailure, or, for the family deadline's catch only, through RecordBudgetCut, the one other "
+            + $"accepted report (a budget cut is named in the reply's families_left_out and adds no collection failure, #9879):"
             + Environment.NewLine + string.Join(Environment.NewLine, unreported));
+
+        /* Exactly one: the family deadline's catch. A second catch that calls RecordBudgetCut to pass this census would be a
+           swallow with a report that is not one, and none is allowed to be added that way. */
+        Assert.True(
+            budgetCuts.Count == 1,
+            $"Expected exactly one fact-collector catch to report through RecordBudgetCut (the family deadline's catch, #9879); "
+            + $"found {budgetCuts.Count}:" + Environment.NewLine + string.Join(Environment.NewLine, budgetCuts));
 
         /* A floor, not an equality: the point is that nobody adds an unreporting catch, and a pin
            that also broke on every ADDED collector would be a tax on writing one. The floor still

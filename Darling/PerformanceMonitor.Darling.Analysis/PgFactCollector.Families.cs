@@ -195,7 +195,7 @@ public sealed partial class PgFactCollector
         {
             if (deadline.IsCancellationRequested)
             {
-                leftOut[index] = true;
+                RecordBudgetCut(index);
                 return;
             }
 
@@ -212,14 +212,20 @@ public sealed partial class PgFactCollector
                 /* The same shapes a family's own catch lets through once the token it reads is signalled, so nothing the
                    deadline caused reaches the pass as a failure. The filter opens as every other catch in this file family
                    does: an abandonment of the pass itself is never taken here, so it unwinds the pass whether or not the
-                   deadline has also fired. */
-                leftOut[index] = true;
+                   deadline has also fired. A budget cut is reported through the left-out record, not as a collection failure,
+                   so the catch records it by RecordBudgetCut and the reporting census (#2826) accepts that call as its report. */
+                RecordBudgetCut(index);
             }
             finally
             {
                 context.UseTokenForThisFlow(null);
             }
         }
+
+        /* #9879: the one writer of the left-out record. The reply's families_left_out is built from it, in family order, once
+           the families settle, so a family the deadline cut is named there and adds no fact and no failure. The only callers
+           are the two places the deadline decides a family is cut: one not yet started when it fires, and one it stops. */
+        void RecordBudgetCut(int index) => leftOut[index] = true;
     }
 
     /// <summary>
