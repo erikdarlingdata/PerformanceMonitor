@@ -425,10 +425,19 @@ With no more servers than `max_concurrent_sweeps` (4 by default), and no more th
 With the web dashboard and MCP off, the service opens no listening socket, so there is no port to probe. The proof that collection works is in the store. This counts the collector runs of the last 15 minutes for each server:
 
 ```bash
-sudo -u postgres psql -X -d darling -c "SELECT server_id, status, count(*) FROM collect.collection_log WHERE collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY server_id, status ORDER BY server_id, status"
+sudo -u postgres psql -X -d darling -c "SELECT s.name AS server, l.server_id, l.status, count(*) AS runs FROM collect.collection_log l LEFT JOIN config.config_monitored_servers s ON s.server_id = l.server_id WHERE l.collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY s.name, l.server_id, l.status ORDER BY s.name, l.status"
 ```
 
-**Proof:** `SUCCESS` rows for every server. For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
+**Proof:** `SUCCESS` rows for every server.
+
+The `server` column is the display name from the registry, so you can read the result by server. `server_id` is a signed number that the service derives from the host. `collect.collection_log.server_name` holds the host address, not the display name. Two other kinds of row are normal. They are not a fault.
+
+- A row with the status `ANALYZED` is the scheduled analysis pass. There is one for each server. It is not a collector run, so its status is `ANALYZED` and not `SUCCESS`. On a new store it says it ran on too little data.
+- A row with an empty `server` and a `server_id` of 0 is the fleet-wide work the service does for itself. The log records it under the name `(fleet)`. Its status is `SUCCESS`.
+
+Any other row with an empty `server` belongs to a server that is no longer registered.
+
+For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
 
 ### What a new install logs that is not a fault
 
