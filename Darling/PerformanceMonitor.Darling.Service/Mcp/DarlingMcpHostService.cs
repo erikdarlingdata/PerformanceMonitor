@@ -2456,6 +2456,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /// <summary>#9894: the probe of the MCP login could not run — fail-closed to loopback (LogCritical).</summary>
         LoginProbeFailed,
+
+        /// <summary>#9894: postgres.mcpConnectionString names a user but postgres.connectionString names none, so the names cannot prove the two
+        /// logins differ — fail-closed to loopback (LogCritical), before any probe.</summary>
+        OwnerUserUnknown,
     }
 
     /// <summary>The (mode, reason) pair returned by <see cref="ResolveMcpBind"/>.</summary>
@@ -2489,16 +2493,20 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// The effective MCP bind for a config's store (#9894): <see cref="ResolveMcpBind(McpConfig, bool, bool?, bool)"/> with the store's
     /// mode and, for a store the service does not manage, whether <c>postgres.mcpConnectionString</c> names a login other than the owner's
-    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>). Every caller that has the store's config calls this one, so the answer a
-    /// wizard, a report and the host start give for the same file cannot differ.
+    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>), and a login whose owner string names no user refused as
+    /// <see cref="McpBindReason.OwnerUserUnknown"/>. Every caller that has the store's config calls this one. The host start applies the same
+    /// name rules (<see cref="DarlingHostBinding.ResolveBindWithLoginProbeAsync"/>), so the answer it gives and the answer a wizard or a report
+    /// gives for the same file differ only by the probe: the host also refuses a login the probe finds privileged or cannot check, which this
+    /// overload never connects to learn.
     /// </summary>
     internal static McpBindDecision ResolveMcpBind(McpConfig mcp, PostgresConfig postgres, bool? inContainer = null)
     {
-        /* The host start does not use this overload: it resolves with the probe (DarlingHostBinding.ResolveBindWithLoginProbeAsync). */
         ArgumentNullException.ThrowIfNull(postgres);
-        return ResolveMcpBind(
-            mcp, postgres.Managed, inContainer,
-            dedicatedLogin: !postgres.Managed && DarlingStoreLogins.HasDedicatedLogin(DarlingStoreLogins.Surface.Mcp, postgres));
+        var names = postgres.Managed ? DarlingStoreLogins.LoginNameCheck.NotDedicated : DarlingStoreLogins.CheckLoginNames(DarlingStoreLogins.Surface.Mcp, postgres);
+        var decision = ToShared(ResolveMcpBind(
+            mcp, postgres.Managed, inContainer, dedicatedLogin: names == DarlingStoreLogins.LoginNameCheck.Dedicated));
+        var refined = DarlingHostBinding.RefuseUnknownOwner(decision, names);
+        return new McpBindDecision((McpBindMode)(int)refined.Mode, (McpBindReason)(int)refined.Reason);
     }
 
     /// <summary>
@@ -2595,7 +2603,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// PURE severity map for a <see cref="ResolveMcpBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="McpBindReason.ListenInvalid"/>/<see cref="McpBindReason.TokenMissing"/>/
-    /// <see cref="McpBindReason.AllowFromInvalid"/>/<see cref="McpBindReason.DedicatedLoginRequired"/>) are
+    /// <see cref="McpBindReason.AllowFromInvalid"/>/<see cref="McpBindReason.DedicatedLoginRequired"/>/<see cref="McpBindReason.OwnerUserUnknown"/>) are
     /// <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="McpBindReason.NetworkExposed"/>/<see cref="McpBindReason.LoopbackByDefault"/>)
     /// are silent (null). <see cref="LogBindReason"/> drives its emit level off this, so the level and the
     /// message can never diverge.
@@ -2648,6 +2656,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             case McpBindReason.DedicatedLoginRequired:
                 /* #9894 */
                 _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true));
+                break;
+
+            case McpBindReason.OwnerUserUnknown:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Mcp));
                 break;
 
             case McpBindReason.LoginPrivileged:

@@ -163,7 +163,9 @@ internal static class DiagnosticsBundle
     };
 
     /* A loopback-only install keeps its token in the network block too, so the block being present does not mean the
-       listener is reachable from the network. Exposed is the bind the host actually resolves: network and loopback. */
+       listener is reachable from the network. Exposed is the bind the host resolves from the file: network and loopback. On a store the
+       service does not manage (#9894) that is the name-level answer, which the host's start only narrows: it also refuses a login its
+       probe finds privileged or cannot check, so a bundle never calls a listener loopback that the host serves on the network. */
     private static bool McpNetworkExposed(DarlingConfig config)
         => config.Mcp is not null
             && DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres ?? new PostgresConfig()).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;

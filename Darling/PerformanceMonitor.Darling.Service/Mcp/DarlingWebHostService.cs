@@ -614,15 +614,18 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The effective web bind for a config's store (#9894): <see cref="ResolveWebBind(WebConfig, bool, bool?, bool)"/> with the store's
     /// mode and, for a store the service does not manage, whether <c>postgres.webConnectionString</c> names a login other than the owner's
-    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>). Every caller that has the store's config calls this one, so the answer a
-    /// wizard, a report and the host start give for the same file cannot differ.
+    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>), and a login whose owner string names no user refused as
+    /// <see cref="DarlingHostBinding.BindReason.OwnerUserUnknown"/>. Every caller that has the store's config calls this one. The host start
+    /// applies the same name rules (<see cref="DarlingHostBinding.ResolveBindWithLoginProbeAsync"/>), so the answer it gives and the answer a
+    /// wizard or a report gives for the same file differ only by the probe: the host also refuses a login the probe finds privileged or cannot
+    /// check, which this overload never connects to learn.
     /// </summary>
     internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, PostgresConfig postgres, bool? inContainer = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
-        return ResolveWebBind(
-            web, postgres.Managed, inContainer,
-            dedicatedLogin: !postgres.Managed && DarlingStoreLogins.HasDedicatedLogin(DarlingStoreLogins.Surface.Web, postgres));
+        var names = postgres.Managed ? DarlingStoreLogins.LoginNameCheck.NotDedicated : DarlingStoreLogins.CheckLoginNames(DarlingStoreLogins.Surface.Web, postgres);
+        return DarlingHostBinding.RefuseUnknownOwner(
+            ResolveWebBind(web, postgres.Managed, inContainer, dedicatedLogin: names == DarlingStoreLogins.LoginNameCheck.Dedicated), names);
     }
 
     /// <summary>
@@ -3642,6 +3645,11 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             case DarlingHostBinding.BindReason.DedicatedLoginRequired:
                 /* #9894 */
                 _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Web, refusing: true));
+                break;
+
+            case DarlingHostBinding.BindReason.OwnerUserUnknown:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Web));
                 break;
 
             case DarlingHostBinding.BindReason.LoginPrivileged:

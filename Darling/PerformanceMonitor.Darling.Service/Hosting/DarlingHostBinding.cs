@@ -88,6 +88,11 @@ internal static class DarlingHostBinding
         /// <summary>#9894: the probe of the surface's own login could not run (no connection, or its query failed) - fail-closed to loopback
         /// (Critical). Only <see cref="ApplyLoginProbe"/> sets it.</summary>
         LoginProbeFailed,
+
+        /// <summary>#9894: the surface's own connection string names a user, but postgres.connectionString (the owner's) names none, so the
+        /// names cannot prove the two logins differ - fail-closed to loopback (Critical), the same answer the name check gives everywhere. Set by
+        /// <see cref="RefuseUnknownOwner"/> in place of <see cref="DedicatedLoginRequired"/>, so the line can say what to fix.</summary>
+        OwnerUserUnknown,
     }
 
     /// <summary>The (mode, reason) pair returned by <see cref="ResolveBind"/>.</summary>
@@ -178,7 +183,7 @@ internal static class DarlingHostBinding
     /// PURE severity map for a <see cref="ResolveBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="BindReason.ListenInvalid"/>/<see cref="BindReason.TokenMissing"/>/
     /// <see cref="BindReason.AllowFromInvalid"/>/<see cref="BindReason.DedicatedLoginRequired"/>/<see cref="BindReason.LoginPrivileged"/>/
-    /// <see cref="BindReason.LoginProbeFailed"/>) are <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
+    /// <see cref="BindReason.LoginProbeFailed"/>/<see cref="BindReason.OwnerUserUnknown"/>) are <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
     /// are silent (null).
     /// </summary>
     internal static LogLevel? MapBindReasonSeverity(BindReason reason) => reason switch
@@ -189,35 +194,50 @@ internal static class DarlingHostBinding
         BindReason.DedicatedLoginRequired => LogLevel.Critical,
         BindReason.LoginPrivileged => LogLevel.Critical,
         BindReason.LoginProbeFailed => LogLevel.Critical,
+        BindReason.OwnerUserUnknown => LogLevel.Critical,
         _ => null,
     };
 
     /// <summary>
     /// PURE (#9894): the probe of a surface's own login applied to a bind that would expose it. A decision that is not an exposure is
-    /// returned as it is, and so is an exposure whose login the probe found unprivileged. A privileged login (a superuser, or a member of the
-    /// store owner role) or a probe that could not run turns the exposure into loopback-only with the reason that says which.
+    /// returned as it is, and so is an exposure whose login the probe found unprivileged. Only an explicit
+    /// <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/> passes: a privileged login (a superuser, or a member of the store owner
+    /// role), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Unprivileged by the enum's
+    /// order, so a result that was never filled in must still be told apart from a real answer by its verdict, never by default) turn the
+    /// exposure into loopback-only. A privileged login gets the reason that says so, every other refusal the probe-failed reason.
     /// </summary>
     internal static BindDecision ApplyLoginProbe(BindDecision bind, DarlingStoreLogins.LoginProbeResult probe)
     {
-        if (bind.Mode != BindMode.NetworkAndLoopback)
+        if (bind.Mode != BindMode.NetworkAndLoopback || probe.Verdict == DarlingStoreLogins.LoginProbeVerdict.Unprivileged)
         {
             return bind;
         }
 
-        return probe.Verdict switch
-        {
-            DarlingStoreLogins.LoginProbeVerdict.Privileged => new BindDecision(BindMode.LoopbackOnly, BindReason.LoginPrivileged),
-            DarlingStoreLogins.LoginProbeVerdict.Failed => new BindDecision(BindMode.LoopbackOnly, BindReason.LoginProbeFailed),
-            _ => bind,
-        };
+        return new BindDecision(
+            BindMode.LoopbackOnly,
+            probe.Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged ? BindReason.LoginPrivileged : BindReason.LoginProbeFailed);
     }
+
+    /// <summary>
+    /// PURE (#9894): the name check's answer for a login whose owner string names no user, applied to a decision. When the resolver refused
+    /// for want of a dedicated login (<see cref="BindReason.DedicatedLoginRequired"/>) and the cause is that postgres.connectionString names
+    /// no user (<see cref="DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown"/>), the reason becomes <see cref="BindReason.OwnerUserUnknown"/>,
+    /// still loopback-only, so the line can say to name the owner's user. Any other decision is returned as it is. The host start and every
+    /// caller of the <see cref="PostgresConfig"/> overloads apply it, so a refusal for this case is the same everywhere.
+    /// </summary>
+    internal static BindDecision RefuseUnknownOwner(BindDecision bind, DarlingStoreLogins.LoginNameCheck names) =>
+        bind.Reason == BindReason.DedicatedLoginRequired && names == DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown
+            ? new BindDecision(BindMode.LoopbackOnly, BindReason.OwnerUserUnknown)
+            : bind;
 
     /// <summary>
     /// #9894: the bind a host start takes for one surface, with the probe of its login. Outside a container on a store the service does not
     /// manage, a surface that would listen on the network connects once with its own login before the listener starts, and is exposed only if
     /// that login is neither a superuser nor a member of the store owner role. The names decide first: no login of its own is refused without a
-    /// connection (<see cref="BindReason.DedicatedLoginRequired"/>), and an owner string that names no user
-    /// (<see cref="DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown"/>) is left to the probe. A managed store and a container never probe
+    /// connection (<see cref="BindReason.DedicatedLoginRequired"/>), and so is an owner string that names no user
+    /// (<see cref="BindReason.OwnerUserUnknown"/>, through <see cref="RefuseUnknownOwner"/>), because the names then cannot prove the two
+    /// logins differ. The only difference left between this answer and the name-level answer of the <see cref="PostgresConfig"/> overloads is the
+    /// probe refusing a login whose names passed. A managed store and a container never probe
     /// (the managed roles are the service's own, and the compose port mapping is the boundary).
     /// <paramref name="resolve"/> is the surface's resolver with its login flag (<c>ResolveWebBind</c> / <c>ResolveMcpBind</c> mapped to the
     /// shared decision). <paramref name="probe"/> is the connection, injectable so the decision is testable without a store; its default is
@@ -237,7 +257,7 @@ internal static class DarlingHostBinding
         }
 
         var names = DarlingStoreLogins.CheckLoginNames(surface, postgres);
-        var candidate = resolve(names != DarlingStoreLogins.LoginNameCheck.NotDedicated);
+        var candidate = RefuseUnknownOwner(resolve(names == DarlingStoreLogins.LoginNameCheck.Dedicated), names);
         if (candidate.Mode != BindMode.NetworkAndLoopback)
         {
             return (candidate, null);

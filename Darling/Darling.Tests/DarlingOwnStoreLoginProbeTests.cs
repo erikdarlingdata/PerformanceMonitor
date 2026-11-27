@@ -8,7 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Buffers.Binary;
+using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Threading;
@@ -90,7 +94,7 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void AnOwnerStringWithNoUsername_IsNeverDedicatedOnNamesAlone(bool web)
+    public void AnOwnerStringWithNoUsername_IsRefusedByTheNamesAndByTheHostAlike(bool web)
     {
         var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var postgres = surface == DarlingStoreLogins.Surface.Web ? OwnStore(OwnerWithNoUser, webConnectionString: Dedicated) : OwnStore(OwnerWithNoUser, mcpConnectionString: Dedicated);
@@ -102,7 +106,15 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
             ? DarlingWebHostService.ResolveWebBind(Web(), postgres, inContainer: false)
             : ToShared(DarlingMcpHostService.ResolveMcpBind(Mcp(), postgres, inContainer: false));
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.DedicatedLoginRequired, decision.Reason);
+        Assert.Equal(DarlingHostBinding.BindReason.OwnerUserUnknown, decision.Reason);
+        Assert.Equal(LogLevel.Critical, DarlingHostBinding.MapBindReasonSeverity(decision.Reason));
+
+        /* The CLI and the reports answer the same: this surface is on loopback, so its firewall plan removes the rule and opens nothing. */
+        var config = new DarlingConfig { Postgres = postgres, Web = Web(), Mcp = Mcp() };
+        Assert.True(DarlingCliCommands.DedicatedLoginRefusesExposure(config, mcp: !web));
+        var plan = DarlingCliCommands.PlanFirewallRules(config).Single(p => p.Surface == (web ? "web dashboard" : "MCP"));
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, plan.Action);
+        Assert.False(string.IsNullOrEmpty(plan.Note));
     }
 
     /* ---- Item 4: the firewall plan follows the resolver's name-level answer ---- */
@@ -119,6 +131,9 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         Assert.True(DarlingCliCommands.DedicatedLoginRefusesExposure(Config(Own(null)), mcp));
         Assert.True(DarlingCliCommands.DedicatedLoginRefusesExposure(Config(Own(Owner)), mcp));
         Assert.False(DarlingCliCommands.DedicatedLoginRefusesExposure(Config(Own(Dedicated)), mcp));
+        /* An owner string that names no user is refused too: the host does not expose on it. */
+        Assert.True(DarlingCliCommands.DedicatedLoginRefusesExposure(
+            Config(mcp ? OwnStore(OwnerWithNoUser, mcpConnectionString: Dedicated) : OwnStore(OwnerWithNoUser, webConnectionString: Dedicated)), mcp));
         Assert.False(DarlingCliCommands.DedicatedLoginRefusesExposure(Config(new PostgresConfig { Managed = true, ConnectionString = Owner }), mcp));
 
         /* A listen that is not a network address is not an exposure to refuse. */
@@ -162,6 +177,19 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         LogLevel? expectedLevel = reason == DarlingHostBinding.BindReason.NetworkExposed ? null : LogLevel.Critical;
         Assert.Equal(expectedLevel, DarlingHostBinding.MapBindReasonSeverity(reason));
         Assert.Equal(expectedLevel, DarlingMcpHostService.MapBindReasonSeverity((DarlingMcpHostService.McpBindReason)(int)reason));
+    }
+
+    /// <summary>Only an explicit Unprivileged exposes. A result nobody filled in (<c>default</c>) and a verdict the probe does not name refuse.</summary>
+    [Fact]
+    public void OnlyAnExplicitUnprivilegedVerdict_Exposes()
+    {
+        var exposed = new DarlingHostBinding.BindDecision(DarlingHostBinding.BindMode.NetworkAndLoopback, DarlingHostBinding.BindReason.NetworkExposed);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, DarlingHostBinding.ApplyLoginProbe(exposed, default).Mode);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly,
+            DarlingHostBinding.ApplyLoginProbe(exposed, Probe((DarlingStoreLogins.LoginProbeVerdict)99)).Mode);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback,
+            DarlingHostBinding.ApplyLoginProbe(exposed, Probe(DarlingStoreLogins.LoginProbeVerdict.Unprivileged)).Mode);
     }
 
     public static IEnumerable<object[]> Surfaces() =>
@@ -208,12 +236,18 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         Assert.Equal(DarlingHostBinding.BindReason.LoginProbeFailed, failed.Bind.Reason);
         Assert.Equal("NpgsqlException", failed.Result?.ErrorClass);
 
-        /* An owner string with no Username: the names prove nothing, so the probe decides. */
-        var unknownOk = await RunAsync(Own(OwnerWithNoUser, Dedicated), inContainer: false, unprivileged);
-        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, unknownOk.Bind.Reason);
-        Assert.Equal(1, unknownOk.Calls);
-        var unknownPrivileged = await RunAsync(Own(OwnerWithNoUser, Dedicated), inContainer: false, Probe(DarlingStoreLogins.LoginProbeVerdict.Privileged));
-        Assert.Equal(DarlingHostBinding.BindReason.LoginPrivileged, unknownPrivileged.Bind.Reason);
+        /* An owner string with no Username: the names prove nothing, so the host refuses it, with no connection made, whatever a probe would say. */
+        var unknown = await RunAsync(Own(OwnerWithNoUser, Dedicated), inContainer: false, unprivileged);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, unknown.Bind.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.OwnerUserUnknown, unknown.Bind.Reason);
+        Assert.Equal(0, unknown.Calls);
+        /* ... and it is the answer the name-level overload gives, so a report and the host agree. */
+        Assert.Equal(unknown.Bind, surface == DarlingStoreLogins.Surface.Web
+            ? DarlingWebHostService.ResolveWebBind(Web(), Own(OwnerWithNoUser, Dedicated), inContainer: false)
+            : ToShared(DarlingMcpHostService.ResolveMcpBind(Mcp(), Own(OwnerWithNoUser, Dedicated), inContainer: false)));
+        /* In a container the compose port mapping is the boundary: the owner string's missing user changes nothing there. */
+        var unknownInContainer = await RunAsync(Own(OwnerWithNoUser, Dedicated), inContainer: true, unprivileged);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, unknownInContainer.Bind.Reason);
 
         /* No login of its own (unset, or the owner's user): refused on names, no connection made. */
         foreach (var postgres in new[] { Own(Owner, null), Own(Owner, Owner), Own(OwnerWithNoUser, null) })
@@ -344,6 +378,277 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         }
     }
 
+    /* ---- A started host binds what the decision says: no network listener when the probe or the names refuse ---- */
+
+    /// <summary>The first IPv4 address of this machine that is not loopback or link-local, or null: what a client on the network would dial.</summary>
+    private static IPAddress? LanAddress() =>
+        NetworkInterface.GetAllNetworkInterfaces()
+            .Where(nic => nic.OperationalStatus == OperationalStatus.Up && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+            .Select(unicast => unicast.Address)
+            .FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address)
+                && !address.GetAddressBytes().AsSpan().StartsWith(new byte[] { 169, 254 }));
+
+    private static async Task<bool> CanConnectAsync(IPAddress address, int port)
+    {
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try
+        {
+            await client.ConnectAsync(address, port, timeout.Token);
+            return true;
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Starts one host, asked to listen on every interface, on an own store outside a container, and reports what it logged and what it
+    /// bound: whether a client reaches it on the loopback address and on this machine's network address.</summary>
+    private static async Task<(CapturingTestLogger Log, bool LoopbackReachable, bool NetworkReachable)> StartHostAsync(bool web, PostgresConfig postgres)
+    {
+        var lan = LanAddress();
+        Assert.SkipWhen(lan is null, "This machine has no network address to dial, so a network listener cannot be told from a loopback one.");
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+        try
+        {
+            var port = ClosedPort();
+            var config = new DarlingConfig
+            {
+                Postgres = postgres,
+                Web = new WebConfig { Enabled = true, Network = new WebNetworkConfig { Listen = "0.0.0.0", AllowFrom = "10.0.0.0/8", Token = Token } },
+                Mcp = new McpConfig { Enabled = true, Network = new McpNetworkConfig { Listen = "0.0.0.0", AllowFrom = "10.0.0.0/8", Token = Token } },
+            };
+            var log = new CapturingTestLogger();
+            if (web)
+            {
+                var host = new DarlingWebHostService(
+                    new TypedLogger<DarlingWebHostService>(log), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+                try
+                {
+                    Assert.True(await TryStartAsync(host, config, port), log.Joined);
+                    return (log, await CanConnectAsync(IPAddress.Loopback, port), await CanConnectAsync(lan!, port));
+                }
+                finally
+                {
+                    await host.DisposeFailedStartAsync();
+                }
+            }
+
+            var mcpHost = new DarlingMcpHostService(new TypedLogger<DarlingMcpHostService>(log), new McpRuntimeState(), new MonitoredServerRegistryState());
+            try
+            {
+                Assert.True(await TryStartAsync(mcpHost, config, port), log.Joined);
+                return (log, await CanConnectAsync(IPAddress.Loopback, port), await CanConnectAsync(lan!, port));
+            }
+            finally
+            {
+                await mcpHost.DisposeFailedStartAsync();
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
+    }
+
+    private static PostgresConfig Unreachable(bool web, bool ownerNamesUser)
+    {
+        var closed = ClosedPort();
+        var dedicated = $"Host=127.0.0.1;Port={closed};Username=dashboard;Password=dash-pw;Database=darlingtest";
+        return new PostgresConfig
+        {
+            Managed = false,
+            ConnectionString = ownerNamesUser
+                ? $"Host=127.0.0.1;Port={closed};Username=darling;Password=x;Database=darlingtest"
+                : $"Host=127.0.0.1;Port={closed};Database=darlingtest",
+            WebConnectionString = web ? dedicated : null,
+            McpConnectionString = web ? null : dedicated,
+        };
+    }
+
+    /// <summary>The host start that a refused probe or an owner string with no user leaves with no network listener: the loopback address answers
+    /// and the machine's network address does not, and the Critical line is the one for that reason, on both hosts.</summary>
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task AHostThatRefusesItsSurfaceLogin_BindsNoNetworkListener(bool web, bool ownerNamesUser)
+    {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
+        var (log, loopback, network) = await StartHostAsync(web, Unreachable(web, ownerNamesUser));
+
+        Assert.True(loopback, "the loopback listener must be up");
+        Assert.False(network, "no network listener may be bound");
+        var refusal = ownerNamesUser ? "could not be checked first" : DarlingStoreLogins.OwnerUserUnknownText(surface);
+        Assert.Contains(log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal) && l.Contains(refusal, StringComparison.Ordinal));
+    }
+
+    /* ---- A probe that does not answer, and a stop that interrupts it ---- */
+
+    /// <summary>A listener that accepts and then goes quiet, standing in for a store that does not answer. With <c>answerStartup</c> it speaks just
+    /// enough of the PostgreSQL protocol to finish the connection (authentication OK, ready for query) and then never answers a command.</summary>
+    private sealed class QuietStore : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly bool _answerStartup;
+
+        public QuietStore(bool answerStartup)
+        {
+            _answerStartup = answerStartup;
+            _listener.Start();
+            _ = Task.Run(AcceptAsync);
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        private async Task AcceptAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    _ = Task.Run(() => ServeAsync(client));
+                }
+            }
+            catch (Exception)
+            {
+                /* stopped */
+            }
+        }
+
+        private static byte[] Message(char type, byte[] body)
+        {
+            var bytes = new byte[5 + body.Length];
+            bytes[0] = (byte)type;
+            BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(1, 4), 4 + body.Length);
+            body.CopyTo(bytes, 5);
+            return bytes;
+        }
+
+        private static byte[] ParameterStatus(string name, string value) =>
+            Message('S', System.Text.Encoding.ASCII.GetBytes(name + "\0" + value + "\0"));
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using var owned = client;
+            try
+            {
+                var stream = client.GetStream();
+                var buffer = new byte[8192];
+                var read = await stream.ReadAsync(buffer, _stop.Token);
+                if (_answerStartup && read >= 8 && BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(4, 4)) == 196608)
+                {
+                    var reply = new List<byte>();
+                    reply.AddRange(Message('R', new byte[4]));
+                    foreach (var (name, value) in new[] { ("server_version", "16.0"), ("client_encoding", "UTF8"), ("integer_datetimes", "on"),
+                        ("standard_conforming_strings", "on"), ("DateStyle", "ISO, MDY"), ("TimeZone", "UTC") })
+                    {
+                        reply.AddRange(ParameterStatus(name, value));
+                    }
+
+                    reply.AddRange(Message('K', new byte[] { 0, 0, 0, 1, 0, 0, 0, 1 }));
+                    reply.AddRange(Message('Z', new byte[] { (byte)'I' }));
+                    await stream.WriteAsync(reply.ToArray(), _stop.Token);
+                }
+
+                while (await stream.ReadAsync(buffer, _stop.Token) > 0)
+                {
+                    /* never answers */
+                }
+            }
+            catch (Exception)
+            {
+                /* the probe gave up, or the store stopped */
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            _stop.Dispose();
+        }
+    }
+
+    private static string QuietConnectionString(QuietStore store) =>
+        $"Host=127.0.0.1;Port={store.Port};Username=dashboard;Password=dash-pw;Database=darling;SSL Mode=Disable;"
+        + "Server Compatibility Mode=NoTypeLoading;Cancellation Timeout=100";
+
+    /// <summary>A store that never answers the connect, and one that connects and never answers the command, are each a failed probe within the
+    /// probe's own bound, never an exception.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AProbeThatTimesOut_IsAFailedProbe_AndNeverThrows(bool answerStartup)
+    {
+        using var store = new QuietStore(answerStartup);
+        var postgres = OwnStore(Owner, webConnectionString: QuietConnectionString(store));
+
+        var started = DateTime.UtcNow;
+        var result = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+            DarlingStoreLogins.Surface.Web, postgres, TestContext.Current.CancellationToken, timeoutSeconds: 1);
+
+        Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Failed, result.Verdict);
+        Assert.False(string.IsNullOrEmpty(result.ErrorClass));
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(8), "the probe must give up within its own bound");
+    }
+
+    /// <summary>The stop token cancelling the probe is the one cancellation that propagates: the service is stopping, so no verdict is made.</summary>
+    [Fact]
+    public async Task AStopDuringTheProbe_PropagatesTheCancellation_NotAVerdict()
+    {
+        using var store = new QuietStore(answerStartup: false);
+        var postgres = OwnStore(Owner, webConnectionString: QuietConnectionString(store));
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        stop.CancelAfter(TimeSpan.FromMilliseconds(300));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            DarlingStoreLogins.ProbeSurfaceLoginAsync(DarlingStoreLogins.Surface.Web, postgres, stop.Token));
+    }
+
+    /* ---- A container: two strings that name no user run as the same user ---- */
+
+    [Theory]
+    [MemberData(nameof(Surfaces))]
+    public void InAContainer_ASurfaceStringAndAnOwnerStringThatBothNameNoUser_RunAsTheOwner(bool web)
+    {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
+        const string noUser = "Host=pg.example;Database=darling";
+
+        void Report(string configured, string owner, CapturingTestLogger logger)
+        {
+            DarlingStoreLogins.ResetContainerExposureLogForTests();
+            DarlingStoreLogins.ReportContainerExposureOnOwnerLogin(
+                surface, new DarlingStoreLogins.StoreLogin(configured, DarlingStoreLogins.LoginSource.Configured, null), owner,
+                exposed: true, inContainer: true, logger);
+        }
+
+        var bothNoUser = new CapturingTestLogger();
+        Report(noUser, noUser, bothNoUser);
+        Assert.Equal(1, bothNoUser.CountAtLevel(LogLevel.Critical));
+        Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, noUser, verdict: null));
+
+        /* A string that names a user is not the owner's, and a string that names none beside an owner that does is not known to be. */
+        var named = new CapturingTestLogger();
+        Report(Dedicated, noUser, named);
+        Assert.Equal(0, named.CountAtLevel(LogLevel.Critical));
+        var unnamed = new CapturingTestLogger();
+        Report(noUser, Owner, unnamed);
+        Assert.Equal(0, unnamed.CountAtLevel(LogLevel.Critical));
+        Assert.Null(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, Owner, verdict: null));
+
+        /* The same user is still the owner. */
+        var same = new CapturingTestLogger();
+        Report(Owner, Owner, same);
+        Assert.Equal(1, same.CountAtLevel(LogLevel.Critical));
+    }
+
     /* ---- Item 2 against a real store ---- */
 
     /// <summary>The probe against a real server: a superuser and a member of the owner role are refused whatever their names, and a login that
@@ -419,6 +724,152 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {superName}; DROP ROLE IF EXISTS {memberName}; DROP ROLE IF EXISTS {webName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>The probe against a real server, for the logins the first live test does not reach: a login whose role is switched at connect (the
+    /// session login is a superuser while the connected role is not), a member of the role that owns a store table when another role owns the
+    /// schema, and a store with no config schema or none of its tables.</summary>
+    [Fact]
+    public async Task TheProbe_RefusesASwitchedSuperuserAndATableOwnerMember_AndFailsWithoutTheConfigTables()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var switchedName = "probe_switched_" + suffix;
+        var limitedName = "probe_limited_" + suffix;
+        var tableOwnerName = "probe_tblown_" + suffix;
+        var tableMemberName = "probe_tblmem_" + suffix;
+        var plainName = "probe_plain_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var empty = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {limitedName} NOLOGIN NOSUPERUSER; "
+                + $"CREATE ROLE {switchedName} LOGIN SUPERUSER PASSWORD '{password}'; ALTER ROLE {switchedName} SET role = {limitedName}; "
+                + $"CREATE ROLE {tableOwnerName} NOLOGIN; GRANT {tableOwnerName} TO CURRENT_USER; "
+                + $"CREATE ROLE {tableMemberName} LOGIN NOSUPERUSER PASSWORD '{password}'; GRANT {tableOwnerName} TO {tableMemberName}; "
+                + $"CREATE ROLE {plainName} LOGIN NOSUPERUSER PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            string As(NpgsqlConnectionStringBuilder from, string user) => new NpgsqlConnectionStringBuilder(from.ConnectionString)
+            {
+                Username = user,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+            var storeBuilder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString);
+
+            Task<DarlingStoreLogins.LoginProbeResult> ProbeAsync(string surfaceLogin) =>
+                DarlingStoreLogins.ProbeSurfaceLoginAsync(
+                    DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: surfaceLogin), ct);
+
+            /* A login that connects as a limited role but started as a superuser (it can SET ROLE back). */
+            var switched = await ProbeAsync(As(storeBuilder, switchedName));
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, switched.Verdict);
+
+            /* A login that is neither passes, so the refusals above are not a probe that refuses everything. */
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(As(storeBuilder, plainName))).Verdict);
+
+            /* A member of the role that owns a store table, while another role owns the config schema. */
+            await using (var move = owner.CreateCommand($"ALTER TABLE config.config_monitored_servers OWNER TO {tableOwnerName}"))
+            {
+                await move.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(As(storeBuilder, tableMemberName))).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(As(storeBuilder, plainName))).Verdict);
+
+            /* No config schema (a store the migrations never reached), and a config schema without the table: no row, so a failed probe. */
+            var noSchema = await ProbeAsync(As(new NpgsqlConnectionStringBuilder(empty.ConnectionString), plainName));
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Failed, noSchema.Verdict);
+            await using (var drop = owner.CreateCommand("DROP TABLE config.config_monitored_servers CASCADE"))
+            {
+                await drop.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Failed, (await ProbeAsync(As(storeBuilder, plainName))).Verdict);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand(
+                    $"DROP OWNED BY {tableOwnerName}; DROP ROLE IF EXISTS {switchedName}; DROP ROLE IF EXISTS {tableMemberName}; DROP ROLE IF EXISTS {plainName}; "
+                    + $"DROP ROLE IF EXISTS {tableOwnerName}; DROP ROLE IF EXISTS {limitedName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>A started host keeps no network listener for a superuser login, and binds one for a least-privilege login, on both hosts, against a
+    /// real store (the second half is the control: the check that finds no listener must be able to find one).</summary>
+    [Theory]
+    [MemberData(nameof(Surfaces))]
+    public async Task AHostStart_BindsNoNetworkListenerForASuperuserLogin_AndOneForALeastPrivilegeLogin(bool web)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var superName = "probe_hsuper_" + suffix;
+        var plainName = "probe_hplain_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {superName} LOGIN SUPERUSER PASSWORD '{password}'; CREATE ROLE {plainName} LOGIN NOSUPERUSER PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            PostgresConfig Store(string user)
+            {
+                var login = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = user, Password = password, Pooling = false }.ConnectionString;
+                return new PostgresConfig
+                {
+                    Managed = false,
+                    ConnectionString = scratch.ConnectionString,
+                    WebConnectionString = web ? login : null,
+                    McpConnectionString = web ? null : login,
+                };
+            }
+
+            var privileged = await StartHostAsync(web, Store(superName));
+            Assert.True(privileged.LoopbackReachable, "the loopback listener must be up");
+            Assert.False(privileged.NetworkReachable, "a superuser login must leave no network listener");
+            Assert.Contains(privileged.Log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal)
+                && l.Contains(DarlingStoreLogins.PrivilegedLoginText(surface), StringComparison.Ordinal));
+
+            var unprivileged = await StartHostAsync(web, Store(plainName));
+            Assert.True(unprivileged.NetworkReachable, "a least-privilege login is exposed, and this check must see the listener: " + unprivileged.Log.Joined);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {superName}; DROP ROLE IF EXISTS {plainName}", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }

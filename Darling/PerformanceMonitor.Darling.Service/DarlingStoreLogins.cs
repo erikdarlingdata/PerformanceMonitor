@@ -805,7 +805,8 @@ internal static class DarlingStoreLogins
         Dedicated,
 
         /// <summary>The dedicated string names a user, but the owner's string names none (peer or socket authentication, or a default user), so
-        /// the names cannot prove the two differ. Never "dedicated" on names alone: the host's probe of the login decides.</summary>
+        /// the names cannot prove the two differ. Never "dedicated" on names alone, so the host refuses it too (<see cref="DarlingHostBinding.BindReason.OwnerUserUnknown"/>),
+        /// before any probe: the fix is to name the owner's user in postgres.connectionString.</summary>
         OwnerUserUnknown,
     }
 
@@ -864,14 +865,17 @@ internal static class DarlingStoreLogins
     /// <summary>What the probe of a surface's login found (#9894).</summary>
     internal enum LoginProbeVerdict
     {
-        /// <summary>Neither a superuser nor a member of the role that owns the store's <c>config</c> schema: the login a network-facing surface may use.</summary>
+        /// <summary>The probe could not connect, or the query failed or found no row (no <c>config</c> schema, or none of its tables): exposure is
+        /// refused until a start can run it. First, so the zero value of a <see cref="LoginProbeResult"/> that was never filled in refuses too.</summary>
+        Failed,
+
+        /// <summary>Neither the connected login nor its session login is a superuser or a member of a role that owns the store's <c>config</c>
+        /// schema or the table the migrations create there: the login a network-facing surface may use.</summary>
         Unprivileged,
 
-        /// <summary>A superuser, or a member of the store owner role (under whatever name), so exposure is refused.</summary>
+        /// <summary>A superuser, or a member of the store owner role (under whatever name), by the connected login or by the session login that
+        /// could switch back to it, so exposure is refused.</summary>
         Privileged,
-
-        /// <summary>The probe could not connect, or the query failed or found no <c>config</c> schema: exposure is refused until a start can run it.</summary>
-        Failed,
     }
 
     /// <summary>The probe's answer. <see cref="ErrorClass"/> is set for <see cref="LoginProbeVerdict.Failed"/> only, and holds a type name and
@@ -879,13 +883,23 @@ internal static class DarlingStoreLogins
     internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null);
 
     /// <summary>The seconds the probe waits to connect, and for its one command. Short, so a start never waits on it for long.</summary>
-    private const int LoginProbeSeconds = 10;
+    internal const int LoginProbeSeconds = 10;
 
-    /// <summary>The query the probe runs, with the store's schema as <c>$1</c>: whether the connected login is a superuser, and whether it is a
-    /// member of the role that owns that schema (the migrations create the store's schemas as the owner login).</summary>
+    /// <summary>A table the migrations create in the <c>config</c> schema as the owner login (<c>config.config_monitored_servers</c>). The probe takes its
+    /// owner as an owner login too: the schemas are created <c>IF NOT EXISTS ... AUTHORIZATION CURRENT_USER</c>, so on a store whose schemas
+    /// another role created first the schema's owner is not the role the service runs as, but the tables are.</summary>
+    private const string LoginProbeOwnedTable = "config_monitored_servers";
+
+    /// <summary>The query the probe runs, with the store's schema as <c>$1</c> and a table it holds as <c>$2</c>. First column: whether the
+    /// connected login (<c>current_user</c>) or the login the session started as (<c>session_user</c>) is a superuser. A login whose role is switched
+    /// at connect (<c>ALTER ROLE ... SET role</c>, or <c>Options=-c role=...</c>) shows a limited <c>current_user</c> and can <c>SET ROLE</c> back to
+    /// what <c>session_user</c> is. Second column: whether either is a member of the role that owns the schema or of the one that owns the table.
+    /// No row (no such schema or table) is a failed probe.</summary>
     private const string LoginProbeSql =
-        "SELECT r.rolsuper, pg_has_role(current_user, n.nspowner, 'MEMBER') "
-        + "FROM pg_roles AS r CROSS JOIN pg_namespace AS n WHERE r.rolname = current_user AND n.nspname = $1";
+        "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
+        + "pg_has_role(current_user, n.nspowner, 'MEMBER') OR pg_has_role(session_user, n.nspowner, 'MEMBER') "
+        + "OR pg_has_role(current_user, c.relowner, 'MEMBER') OR pg_has_role(session_user, c.relowner, 'MEMBER') "
+        + "FROM pg_namespace AS n JOIN pg_class AS c ON c.relnamespace = n.oid WHERE n.nspname = $1 AND c.relname = $2";
 
     /// <summary>PURE: the probe's two answers as a verdict. Either one true is <see cref="LoginProbeVerdict.Privileged"/>.</summary>
     internal static LoginProbeResult ClassifyLoginProbe(bool isSuperuser, bool isOwnerMember) =>
@@ -906,10 +920,12 @@ internal static class DarlingStoreLogins
     /// <summary>
     /// #9894: connects once with a surface's own login (unpooled, bounded by <see cref="LoginProbeSeconds"/>) and asks the store whether it is a
     /// superuser or a member of the store owner role. The name check cannot see either, because a superuser or an owner-role member can carry
-    /// any name. Never throws for a connection or query failure: that is <see cref="LoginProbeVerdict.Failed"/> with its error class. A
-    /// cancellation while the service stops propagates.
+    /// any name. Never throws for a connection or query failure: that is <see cref="LoginProbeVerdict.Failed"/> with its error class, and so is
+    /// a timeout or a cancellation the stop token did not ask for. Only a cancellation while the service stops propagates.
+    /// <paramref name="timeoutSeconds"/> bounds the connect and the command (a test shortens it).
     /// </summary>
-    internal static async Task<LoginProbeResult> ProbeSurfaceLoginAsync(Surface surface, PostgresConfig postgres, CancellationToken cancellationToken)
+    internal static async Task<LoginProbeResult> ProbeSurfaceLoginAsync(
+        Surface surface, PostgresConfig postgres, CancellationToken cancellationToken, int timeoutSeconds = LoginProbeSeconds)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -920,19 +936,19 @@ internal static class DarlingStoreLogins
             var builder = new NpgsqlConnectionStringBuilder(DarlingSecretSource.Resolve(raw ?? "", setting))
             {
                 Pooling = false,
-                Timeout = LoginProbeSeconds,
-                CommandTimeout = LoginProbeSeconds,
+                Timeout = timeoutSeconds,
+                CommandTimeout = timeoutSeconds,
             };
             await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(LoginProbeSql, connection)
             {
-                Parameters = { new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema } },
+                Parameters = { new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema }, new NpgsqlParameter { Value = LoginProbeOwnedTable } },
             };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return new LoginProbeResult(LoginProbeVerdict.Failed, "the config schema was not found");
+                return new LoginProbeResult(LoginProbeVerdict.Failed, "the config schema or its tables were not found");
             }
 
             return ClassifyLoginProbe(reader.GetBoolean(0), reader.GetBoolean(1));
@@ -941,8 +957,9 @@ internal static class DarlingStoreLogins
         {
             throw;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            /* A cancellation that is not the stop token (the first catch took that one) is a failed probe too, so it never escapes the host start. */
             return new LoginProbeResult(LoginProbeVerdict.Failed, DescribeProbeFailure(ex));
         }
     }
@@ -973,13 +990,13 @@ internal static class DarlingStoreLogins
         logger.LogCritical("{Message}", DedicatedLoginRequiredText(surface, refusing: false));
     }
 
-    /// <summary>Whether a resolved login connects as the owner: the owner fallback itself, or a configured string whose user is the owner's.</summary>
+    /// <summary>Whether a resolved login connects as the owner: the owner fallback itself, or a configured string whose user is the owner's.
+    /// A configured string and an owner string that both name no user connect as the same default user, so that is the owner too.</summary>
     private static bool RunsAsOwner(StoreLogin login, string ownerConnectionString) =>
         login.Source == LoginSource.Owner
         || (login.Source == LoginSource.Configured
             && TryReadLoginUsers(login.ConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser)
-            && !string.IsNullOrEmpty(configuredUser)
-            && string.Equals(configuredUser, ownerUser, StringComparison.Ordinal));
+            && string.Equals(configuredUser ?? "", ownerUser ?? "", StringComparison.Ordinal));
 
     /// <summary>Lets a test see the container line, and each surface's login warning, again.</summary>
     internal static void ResetContainerExposureLogForTests()
@@ -1004,6 +1021,20 @@ internal static class DarlingStoreLogins
             + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
             + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
             + "and make sure that login is not the owner's.";
+    }
+
+    /// <summary>
+    /// #9894: the line for a surface whose own connection string names a user while postgres.connectionString names none, so the service
+    /// cannot tell the owner login from the surface's login by name. Outside a container the surface stays on loopback. Critical.
+    /// </summary>
+    internal static string OwnerUserUnknownText(Surface surface)
+    {
+        var (what, setting, role) = Describe(surface);
+        var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but postgres.connectionString names no user, "
+            + $"so the service cannot tell the owner login from the login in {setting}, and network exposure is refused and it binds loopback-only. "
+            + $"Name the store owner's user in postgres.connectionString (Username=...), and keep {setting} on the {role} role that "
+            + "provision-roles.sql creates (described in docs/darling/linux.md), then restart the service.";
     }
 
     /// <summary>
@@ -1052,16 +1083,17 @@ internal static class DarlingStoreLogins
             return null;
         }
 
-        if (string.IsNullOrEmpty(configuredUser))
+        /* Two strings that name no user connect as the same default user: that is the owner, not a login of the surface's own (#9894). */
+        if (string.IsNullOrEmpty(configuredUser) && !string.IsNullOrEmpty(ownerUser))
         {
             return null;
         }
 
         var (what, setting, role) = Describe(surface);
         what = whatOverride ?? what;
-        if (string.Equals(configuredUser, ownerUser, StringComparison.Ordinal))
+        if (string.Equals(configuredUser ?? "", ownerUser ?? "", StringComparison.Ordinal))
         {
-            return $"{setting} logs in as '{configuredUser}', the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "
+            return $"{setting} logs in as {(string.IsNullOrEmpty(configuredUser) ? "the default user" : $"'{configuredUser}'")}, the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "
                 + $"what the least-privilege {role} role holds it to: the secret-column carve, the narrow write grants and the "
                 + $"statement_timeout backstop. Point {setting} at the {role} role tools/provision-roles.sql creates.";
         }

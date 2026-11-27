@@ -3740,6 +3740,8 @@ public static partial class DarlingCliCommands
             $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingHostBinding.BindReason.DedicatedLoginRequired =>
             DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Web, refusing: true),
+        DarlingHostBinding.BindReason.OwnerUserUnknown =>
+            DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Web),
         _ => "the web bind resolver rejected these values.",
     };
 
@@ -3754,6 +3756,8 @@ public static partial class DarlingCliCommands
             $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingMcpHostService.McpBindReason.DedicatedLoginRequired =>
             DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true),
+        DarlingMcpHostService.McpBindReason.OwnerUserUnknown =>
+            DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Mcp),
         _ => "the MCP resolver rejected these values.",
     };
 
@@ -4677,13 +4681,24 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// #9894: whether the host keeps an endpoint on loopback only because the own store gives it no login of its own: the resolver's
-    /// <c>DedicatedLoginRequired</c>, which holds whenever the listen is a network address, whatever else is missing from the block.
-    /// The name-level rule, since the CLI does not connect to the store.
+    /// <c>DedicatedLoginRequired</c>, or <c>OwnerUserUnknown</c> (postgres.connectionString names no user, so the names cannot prove the two
+    /// logins differ). Either holds whenever the listen is a network address, whatever else is missing from the block. The name-level rule,
+    /// since the CLI does not connect to the store: the host refuses the same two, and also refuses a login its probe finds privileged.
     /// </summary>
     internal static bool DedicatedLoginRefusesExposure(DarlingConfig config, bool mcp) =>
-        mcp
-            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres).Reason == DarlingMcpHostService.McpBindReason.DedicatedLoginRequired
-            : DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres).Reason == DarlingHostBinding.BindReason.DedicatedLoginRequired;
+        (mcp
+            ? (DarlingHostBinding.BindReason)(int)DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres).Reason
+            : DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres).Reason)
+        is DarlingHostBinding.BindReason.DedicatedLoginRequired or DarlingHostBinding.BindReason.OwnerUserUnknown;
+
+    /// <summary>The line for the refusal <see cref="DedicatedLoginRefusesExposure(DarlingConfig, bool)"/> found: which of its two causes it is.</summary>
+    private static string DedicatedLoginRefusalText(DarlingConfig config, bool mcp)
+    {
+        var surface = mcp ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web;
+        return DarlingStoreLogins.CheckLoginNames(surface, config.Postgres) == DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown
+            ? DarlingStoreLogins.OwnerUserUnknownText(surface)
+            : DarlingStoreLogins.DedicatedLoginRequiredText(surface, refusing: true);
+    }
 
     private static bool DedicatedLoginRefusesExposure(EndpointKind endpoint, DarlingConfig config) =>
         DedicatedLoginRefusesExposure(config, endpoint == EndpointKind.Mcp);
@@ -4729,8 +4744,7 @@ public static partial class DarlingCliCommands
         {
             output.WriteLine(dedicatedLoginRefuses
                 ? "Firewall: the service keeps this endpoint on LOOPBACK ONLY, so no firewall change is needed. "
-                  + DarlingStoreLogins.DedicatedLoginRequiredText(
-                      endpoint == EndpointKind.Mcp ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web, refusing: true)
+                  + DedicatedLoginRefusalText(config, endpoint == EndpointKind.Mcp)
                 : enable
                     ? "Firewall: this endpoint has no LAN-exposure block, so it binds LOOPBACK ONLY — no firewall change is " +
                       "needed. To expose it on the LAN, run --configure-network (which writes the listen/allowFrom/token block)."
@@ -5051,6 +5065,8 @@ public static partial class DarlingCliCommands
             DarlingMcpHostService.McpBindReason.DedicatedLoginRequired =>
                 DarlingStoreLogins.DedicatedLoginRequiredText(
                     section == "mcp" ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web, refusing: true),
+            DarlingMcpHostService.McpBindReason.OwnerUserUnknown =>
+                DarlingStoreLogins.OwnerUserUnknownText(section == "mcp" ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web),
             _ => null,
         };
 

@@ -278,9 +278,9 @@ export function plainEmptyStrip(res, line) {
   return el("div", { class: "strip empty plain-empty" }, nodes);
 }
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
-    so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
-    admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
-    sentences come from DarlingWebStoreWrites and say the same. #6600: `adminWritesOff` (the session's admin_writes_off) is true on a managed
+    so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself also says the web's login
+    should be the web role provision-roles.sql creates, never an admin or owner login (#9894). `lists` finishes "so ..." and `toChange`
+    starts the sentence that names the Viewer. The service's own 403 sentences come from DarlingWebStoreWrites and say the same. #6600: `adminWritesOff` (the session's admin_writes_off) is true on a managed
     store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
 export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
@@ -290,7 +290,7 @@ export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
       /* #7402: with the switch on (or not known) nothing was turned off: the refusal is about the store login's privilege, so no switch is claimed. */
       : "This dashboard's store login has no write access, so " + lists + ". " + toChange + ", use the Viewer app.")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
-      ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
+      ", use the Viewer app. postgres.webConnectionString should name the web role provision-roles.sql creates, not an admin or owner login.";
 }
 
 /** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off; each tab's own
