@@ -1664,7 +1664,11 @@ public partial class DuckDbInitializer : IDisposable
 
         /* Open the database. Only a genuine storage-version mismatch triggers the
            destructive Parquet rebuild; transient lock contention is retried instead. */
+        Helpers.StartupTimeline.MarkPhase("store init before the first DuckDB open");
         DuckDBConnection connection = await OpenDatabaseAsync(archivePath);
+        /* #9853: the first open loads DuckDB's native library, so on a first start after Setup this phase is where a scan of that
+           DLL would show. A later InitializeAsync (a reset) finds no timeline and marks nothing. */
+        Helpers.StartupTimeline.MarkPhase("first DuckDB open (native library load)");
 
         using (connection)
         {

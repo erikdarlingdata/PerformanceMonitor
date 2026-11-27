@@ -613,6 +613,8 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        /* #9853: the timeline's first phase is process start to here. The line is written when the store is open (MainWindow). */
+        Helpers.StartupTimeline.Begin("process start to OnStartup");
         SetCurrentProcessExplicitAppUserModelID("DarlingData.PerformanceMonitor.Lite");
 
         _startupPlan = LiteStartupPlan.FromArgs(e.Args);
@@ -791,6 +793,7 @@ public partial class App : Application
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
+        Helpers.StartupTimeline.MarkPhase("single-instance check, settings and theme, logger initialize");
 
         /* #5565: the grids' column filters survive a restart, in a file beside settings.json. */
         ColumnFilterStore.Install(Path.Combine(ConfigDirectory, "column-filters.json"), message => AppLogger.Warn("ColumnFilterStore", message));
@@ -817,6 +820,7 @@ public partial class App : Application
            Connection and every collector connection are covered without per-site wiring. The handle
            itself is resolved lazily per prompt, so registering this early is safe. */
         Services.EntraInteractiveAuth.Register(ActiveWindowHandle);
+        Helpers.StartupTimeline.MarkPhase("Entra interactive register");
 
         /* Device code has a human step in the middle of the connection open: the driver calls back
            with a code and a URL and then polls for the token. With no callback installed the driver
@@ -825,12 +829,14 @@ public partial class App : Application
            above - SqlAuthenticationProvider installs against the METHOD, so this covers Test
            Connection and the Manage Servers connectivity check without per-site wiring. */
         Services.EntraDeviceCodeAuth.Register(ShowDeviceCodePrompt);
+        Helpers.StartupTimeline.MarkPhase("Entra device code register");
 
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         if (_startupPlan.ShowsMainWindow)
         {
             _mainWindow.Show();
+            Helpers.StartupTimeline.MarkPhase("main window Show");
         }
         else
         {
