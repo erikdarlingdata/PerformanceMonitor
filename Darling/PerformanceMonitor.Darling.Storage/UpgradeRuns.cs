@@ -142,11 +142,18 @@ END";
     public const string RetentionDeleteSql = @"
 DELETE FROM collect.upgrade_runs WHERE started_at < $1";
 
-    /// <summary>What the read says for a run the store still holds as <see cref="InProgress"/> once the service has started on the run's target build after the run began (#9902): the run's last write never landed, so the file never said how it ended.</summary>
+    /// <summary>What the read says for a run the store still holds as <see cref="InProgress"/> once the service has started on the run's target build after the run began and <see cref="MidUpgradeGrace"/> has passed (#9902): the run's last write never landed, so the file never said how it ended.</summary>
     public const string EndedWithoutResult = "ended_without_result";
 
     /// <summary>What the read says for a run the store still holds as <see cref="InProgress"/> once a newer run exists (#9902).</summary>
     public const string Superseded = "superseded";
+
+    /// <summary>
+    /// How long a run stored as <see cref="InProgress"/> keeps reading as in progress after the service starts on its target build (#9902). The upgrade restarts the service before the
+    /// script ends, so the script's last write is recorded by a store-side pass that follows the new build's start: three five-minute passes cover it. A run with a newer run needs no wait,
+    /// because the older script is no longer the one running.
+    /// </summary>
+    public static readonly TimeSpan MidUpgradeGrace = TimeSpan.FromMinutes(15);
 
     /// <summary>The most runs one read returns, newest first. A store keeps a run for <see cref="RetentionDays"/> days, so the cap is far above what a store holds.</summary>
     public const int MaxRunsRead = 1000;
@@ -156,15 +163,16 @@ DELETE FROM collect.upgrade_runs WHERE started_at < $1";
 
     /// <summary>
     /// The runs, newest first, each with the two facts the derived state needs (#9902), read over every start and every run the store holds and not over one page of starts.
-    /// Only a run the store holds as <c>in_progress</c> gets them, because no other state is derived. A build string is cut at its <c>+</c> (the commit suffix the Windows
-    /// script's file version can carry and <c>service_starts.product_version</c> never does) before the two are compared. $1 the most runs.
+    /// The first is when the service first started on the run's target build after the run began (null when it has not). Only a run the store holds as <c>in_progress</c> gets the
+    /// two, because no other state is derived. A build string is cut at its <c>+</c> (the commit suffix the Windows script's file version can carry and
+    /// <c>service_starts.product_version</c> never does) before the two are compared. $1 the most runs.
     /// </summary>
     public const string SelectReadSql = @"
 SELECT r.run_id, r.state, r.target_build, r.started_at, r.ended_at,
-       (r.state = 'in_progress' AND r.target_build IS NOT NULL
-        AND EXISTS (SELECT 1 FROM collect.service_starts AS s
-                    WHERE s.process_started_at >= r.started_at
-                    AND   lower(btrim(split_part(s.product_version, '+', 1))) = lower(btrim(split_part(r.target_build, '+', 1))))) AS started_on_target,
+       (SELECT min(s.process_started_at) FROM collect.service_starts AS s
+        WHERE r.state = 'in_progress' AND r.target_build IS NOT NULL
+        AND   s.process_started_at >= r.started_at
+        AND   lower(btrim(split_part(s.product_version, '+', 1))) = lower(btrim(split_part(r.target_build, '+', 1)))) AS first_start_on_target,
        (r.state = 'in_progress'
         AND EXISTS (SELECT 1 FROM collect.upgrade_runs AS n WHERE (n.started_at, n.run_id) > (r.started_at, r.run_id))) AS newer_run
 FROM collect.upgrade_runs AS r
@@ -172,13 +180,18 @@ ORDER BY r.started_at DESC, r.run_id
 LIMIT $1;";
 
     /// <summary>
-    /// The state a read reports for a run (#9902). The stored row keeps what the file said, so a run whose last write never landed (the script stopped, the host restarted
-    /// in the middle of the run) stays <see cref="InProgress"/> there. The read reports it as <see cref="EndedWithoutResult"/> once the service has started on the run's
-    /// target build after the run began, and as <see cref="Superseded"/> once a newer run exists. When both hold, <see cref="EndedWithoutResult"/> wins: it is the stronger
-    /// statement, because a start on the target build shows the run reached its build. A run with no later start on its build and no newer run is still in progress. Every
-    /// other stored state is reported as it is.
+    /// The state a read reports for a run (#9902), judged at <paramref name="nowUtc"/>. The stored row keeps what the file said, so a run whose last write never landed (the script stopped,
+    /// the host restarted in the middle of the run) stays <see cref="InProgress"/> there. With a newer run, the read reports it as <see cref="EndedWithoutResult"/> when the service started on
+    /// the run's target build after the run began (the stronger statement, because a start on the target build shows the run reached its build) and as <see cref="Superseded"/> otherwise,
+    /// with no wait, because a newer run means the older script is no longer the one running. With no newer run, the run keeps reading <see cref="InProgress"/> until the first start on its
+    /// target build is <see cref="MidUpgradeGrace"/> old, because the script's last write can still be on its way, and reads <see cref="EndedWithoutResult"/> from then on. A run with no start
+    /// on its target build and no newer run is still in progress. Every other stored state is reported as it is.
     /// </summary>
-    public static string DerivedState(string recordedState, bool startedOnTargetBuildAfterBegin, bool newerRunExists)
+    /// <param name="recordedState">The state the store holds.</param>
+    /// <param name="firstStartOnTargetUtc">When the service first started on the run's target build after the run began, or null when it has not.</param>
+    /// <param name="newerRunExists">Whether a run began after this one.</param>
+    /// <param name="nowUtc">The instant the read is judged at.</param>
+    public static string DerivedState(string recordedState, DateTime? firstStartOnTargetUtc, bool newerRunExists, DateTime nowUtc)
     {
         ArgumentNullException.ThrowIfNull(recordedState);
         if (!string.Equals(recordedState, InProgress, StringComparison.Ordinal))
@@ -186,7 +199,12 @@ LIMIT $1;";
             return recordedState;
         }
 
-        return startedOnTargetBuildAfterBegin ? EndedWithoutResult : newerRunExists ? Superseded : InProgress;
+        if (newerRunExists)
+        {
+            return firstStartOnTargetUtc is null ? Superseded : EndedWithoutResult;
+        }
+
+        return firstStartOnTargetUtc is { } start && nowUtc - start >= MidUpgradeGrace ? EndedWithoutResult : InProgress;
     }
 
     /// <summary>The build with any <c>+commit</c> suffix cut off and the ends trimmed, or null when nothing is left.</summary>
@@ -226,9 +244,9 @@ LIMIT $1;";
 
     /// <summary>
     /// The runs, newest first, with their derived state (#9902). A store without the table throws <see cref="PostgresException"/> with
-    /// <see cref="PostgresErrorCodes.UndefinedTable"/>, and so does one without <c>collect.service_starts</c>, so the caller can say why.
+    /// <see cref="PostgresErrorCodes.UndefinedTable"/>, and so does one without <c>collect.service_starts</c>, so the caller can say why. <paramref name="nowUtc"/> is the instant the derived state is judged at.
     /// </summary>
-    public static async Task<IReadOnlyList<UpgradeRunRead>> ReadAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken = default)
+    public static async Task<IReadOnlyList<UpgradeRunRead>> ReadAsync(NpgsqlDataSource dataSource, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
@@ -242,7 +260,7 @@ LIMIT $1;";
             var recorded = reader.GetString(1);
             runs.Add(new UpgradeRunRead(
                 reader.GetGuid(0),
-                DerivedState(recorded, reader.GetBoolean(5), reader.GetBoolean(6)),
+                DerivedState(recorded, reader.IsDBNull(5) ? null : DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc), reader.GetBoolean(6), nowUtc),
                 recorded,
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc),

@@ -20,17 +20,42 @@ public sealed class UpgradeRunDerivedStateTests
     private static UpgradeRunRead Run(double startedMinutes, string state = "in_progress") =>
         new(Guid.NewGuid(), state, state, "3.14.0", T.AddMinutes(startedMinutes), null);
 
+    /* The seconds are how old the run's first start on its target build is at T. A negative age is a start dated after the instant the read is judged at (clock skew between hosts). */
     [Theory]
-    [InlineData("in_progress", false, false, "in_progress")]
-    [InlineData("in_progress", true, false, "ended_without_result")]
-    [InlineData("in_progress", false, true, "superseded")]
-    [InlineData("in_progress", true, true, "ended_without_result")]
-    [InlineData("succeeded", true, true, "succeeded")]
-    [InlineData("failed", false, true, "failed")]
-    [InlineData("verified", true, false, "verified")]
-    public void OnlyAnInProgressRun_IsDerived_AndAStartOnItsBuildOutranksANewerRun(string stored, bool startedOnTarget, bool newerRun, string expected)
+    [InlineData("in_progress", null, false, "in_progress")]
+    [InlineData("in_progress", 0.0, false, "in_progress")]
+    [InlineData("in_progress", 60.0, false, "in_progress")]
+    [InlineData("in_progress", 899.0, false, "in_progress")]
+    [InlineData("in_progress", -120.0, false, "in_progress")]
+    [InlineData("in_progress", 900.0, false, "ended_without_result")]
+    [InlineData("in_progress", 901.0, false, "ended_without_result")]
+    [InlineData("in_progress", 86400.0, false, "ended_without_result")]
+    [InlineData("in_progress", null, true, "superseded")]
+    [InlineData("in_progress", 0.0, true, "ended_without_result")]
+    [InlineData("in_progress", 60.0, true, "ended_without_result")]
+    [InlineData("in_progress", 899.0, true, "ended_without_result")]
+    [InlineData("in_progress", 900.0, true, "ended_without_result")]
+    [InlineData("in_progress", 86400.0, true, "ended_without_result")]
+    [InlineData("succeeded", 86400.0, true, "succeeded")]
+    [InlineData("succeeded", 60.0, false, "succeeded")]
+    [InlineData("failed", null, true, "failed")]
+    [InlineData("verified", 60.0, false, "verified")]
+    [InlineData("verified", 86400.0, false, "verified")]
+    public void OnlyAnInProgressRun_IsDerived_WithAGraceForTheScriptsLastWrite_AndANewerRunNeedsNoWait(string stored, double? firstStartAgeSeconds, bool newerRun, string expected)
     {
-        Assert.Equal(expected, UpgradeRuns.DerivedState(stored, startedOnTarget, newerRun));
+        DateTime? firstStart = firstStartAgeSeconds is { } age ? T.AddSeconds(-age) : null;
+
+        Assert.Equal(expected, UpgradeRuns.DerivedState(stored, firstStart, newerRun, T));
+    }
+
+    [Fact]
+    public void TheGraceIsFifteenMinutes_JudgedAtTheInstantTheReadIsGiven()
+    {
+        var firstStart = T.AddMinutes(-3);
+
+        Assert.Equal(UpgradeRuns.InProgress, UpgradeRuns.DerivedState(UpgradeRuns.InProgress, firstStart, false, firstStart.AddMinutes(14).AddSeconds(59)));
+        Assert.Equal(UpgradeRuns.EndedWithoutResult, UpgradeRuns.DerivedState(UpgradeRuns.InProgress, firstStart, false, firstStart.AddMinutes(15)));
+        Assert.Equal(TimeSpan.FromMinutes(15), UpgradeRuns.MidUpgradeGrace);
     }
 
     [Theory]

@@ -206,6 +206,48 @@ public sealed class ServiceStartsUpgradeRunLiveTests
     }
 
     [Fact]
+    public async Task ARunWhoseFirstStartOnItsTargetBuildIsYoung_ReadsInProgress_UntilTheGraceHasPassed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            var run = Guid.NewGuid();
+            var firstStartMinutesAgo = 5.0;
+            var firstStart = Now.AddMinutes(-firstStartMinutesAgo);
+            await AddRunAsync(source, run, UpgradeRuns.InProgress, "3.14.0", 30.0 / 60, null, ct);
+            await ServiceStartHistory.UpsertStartAsync(source, Start("3.14.0", firstStartMinutesAgo / 60), ct);
+
+            /* The tool at the real clock: the start is five minutes old, inside the grace, so the script's last write may still be on its way. */
+            var named = (await StartsAsync(source, ct))[0].GetProperty("upgrade_run");
+            Assert.Equal(UpgradeRuns.InProgress, named.GetProperty("state").GetString());
+            Assert.Equal(UpgradeRuns.InProgress, named.GetProperty("recorded_state").GetString());
+            Assert.True(named.GetProperty("start_on_target_build").GetBoolean());
+
+            /* The same store judged at chosen instants: a minute short of the grace, then a minute past it. */
+            var inside = Assert.Single(await UpgradeRuns.ReadAsync(source, firstStart.AddMinutes(15).AddSeconds(-1), ct));
+            Assert.Equal(UpgradeRuns.InProgress, inside.State);
+            var past = Assert.Single(await UpgradeRuns.ReadAsync(source, firstStart.AddMinutes(15).AddSeconds(1), ct));
+            Assert.Equal(UpgradeRuns.EndedWithoutResult, past.State);
+            Assert.Equal(UpgradeRuns.InProgress, past.RecordedState);
+
+            /* The grace counts from the FIRST start on the build: a start on it 20 minutes ago is past the grace, and the restart five minutes ago does not extend it. */
+            await ServiceStartHistory.UpsertStartAsync(source, Start("3.14.0", 20.0 / 60), ct);
+            var older = (await StartsAsync(source, ct))[0].GetProperty("upgrade_run");
+            Assert.Equal(UpgradeRuns.EndedWithoutResult, older.GetProperty("state").GetString());
+            Assert.Equal(UpgradeRuns.InProgress, await StoredStateAsync(source, run, ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task ARunThatHasAResult_ReadsAsStored_WhateverComesAfterIt()
     {
         var ct = TestContext.Current.CancellationToken;
