@@ -55,11 +55,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (#9705).</b> A rebuild-all and a start with no cursor to adopt rebuild every listed server in one pass, and a table read
 /// front to back once per server is every block of it as many times as there are servers. So the servers that rebuild for
 /// any reason but age are split into groups (<see cref="QueryTagRebuildGroups"/>), each within
-/// <see cref="QueryTagMapStore.RebuildGroupRows"/> estimated rows of both tables, from the store's statistics, and a group
-/// is one read transaction: each table's pages once, for every server of the group, each row routed to its own server's
-/// merge, then each server's ordered read. A pass whose servers fit one group reads each table once, and a pass of G
-/// groups reads each G times. A server whose estimate is over the budget, and every server when a table has no
-/// statistics, is a group of one, which is one read of each table for that server. The clock is read before the group's
+/// <see cref="QueryTagMapStore.RebuildGroupRows"/> estimated rows of both tables, and a group is one read transaction:
+/// each table's pages once, for every server of the group, each row routed to its own server's merge, then each server's
+/// ordered read. A pass whose servers fit one group reads each table once, and a pass of G groups reads each G times. The
+/// estimate is the planner's: the rows a block of the table held at its last vacuum or analyze, times the blocks it has
+/// now, shared among the servers by the statistics of the server column. A server whose estimate is over the budget, and
+/// every server when a table gives no estimate or the estimates cannot be read, is a group of one, which is one read of
+/// each table for that server. The clock is read before the group's
 /// read and every server of the group gets the cursor built from it. After the read commits each server's map is written
 /// in its own transaction: a write that fails leaves that server's old map and cursor and the other servers of the group
 /// are still written, and a read that fails leaves every server of the group with its old map. The server the staggered

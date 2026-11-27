@@ -194,17 +194,21 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
     /// most one tagged key, and a tagged key holds 138.6 bytes (<see cref="QueryTagRebuildMerge"/>), so a group of 8 million
     /// rows holds at most 1,057 MiB. That is under what the rebuild of one server holds on a lab store whose one server tags
     /// 8.36 million keys from 16.2 million rows: 1,105 MiB of merge state in a process that peaks at 1.38 GiB resident. A
-    /// server over the budget is read alone, as is every server when a table has no statistics. The value is threaded into
-    /// the builder as a parameter (#3684).
+    /// server over the budget is read alone, as is every server when a table gives no estimate
+    /// (<see cref="QueryTagRebuildGroups.EstimateTableRows"/>). The value is threaded into the builder as a parameter (#3684).
     /// </summary>
     public const int RebuildGroupRows = 8_000_000;
 
     /// <summary>
-    /// What the store's statistics say of the <c>server_id</c> column of one table (#9705): the table's row estimate, and the
-    /// column's distinct count, most common values and their shares when the table has been analyzed. $1 the table's name.
+    /// What the store says of one table and its <c>server_id</c> column (#9705): the rows and the heap blocks counted at the
+    /// last vacuum or analyze, the heap blocks the table has now, and the column's distinct count, most common values and
+    /// their shares when the table has been analyzed. The blocks it has now are read in the same statement as the count, so
+    /// the rows a block held can be scaled to the table as it is (<see cref="QueryTagRebuildGroups.EstimateTableRows"/>).
+    /// $1 the table's name.
     /// </summary>
     internal const string RebuildRowStatisticsSql = """
-SELECT c.reltuples::float8, s.n_distinct::float8, s.most_common_vals::text::integer[], s.most_common_freqs::float8[]
+SELECT c.reltuples::float8, c.relpages::float8, (pg_relation_size(c.oid) / current_setting('block_size')::int)::float8,
+    s.n_distinct::float8, s.most_common_vals::text::integer[], s.most_common_freqs::float8[]
 FROM pg_class AS c
 LEFT JOIN pg_namespace AS n ON n.oid = c.relnamespace
 LEFT JOIN pg_stats AS s ON s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = 'server_id' AND NOT s.inherited
@@ -497,9 +501,11 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
             statistics.Add(await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
                 ? new QueryTagRebuildGroups.ServerStatistics(
                     reader.GetDouble(0),
-                    reader.IsDBNull(1) ? null : reader.GetDouble(1),
-                    reader.IsDBNull(2) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(2),
-                    reader.IsDBNull(3) ? Array.Empty<double>() : reader.GetFieldValue<double[]>(3))
+                    reader.GetDouble(1),
+                    reader.GetDouble(2),
+                    reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                    reader.IsDBNull(4) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(4),
+                    reader.IsDBNull(5) ? Array.Empty<double>() : reader.GetFieldValue<double[]>(5))
                 : null);
         }
 

@@ -809,4 +809,48 @@ ORDER BY u.tier, u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.ap
             Assert.Empty(duringNoMove);
         });
     }
+
+    [Fact]
+    public async Task ASightingThePurgeMovesBetweenARebuildsSlimReadAndItsSightingsRead_IsReadExactlyOnce()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-SightingsDays);
+            await SightAtAsync(env, "0xMOVED", cutoff.AddHours(-100));
+            await SightAtAsync(env, "0xKEPT", DateTime.UtcNow);
+
+            var slimRead = new List<string>();
+            var sightingsRead = new List<string>();
+            await using (var read = await QueryTagMapStore.BeginRebuildReadAsync(env.Store, env.Ct))
+            {
+                await foreach (var (_, row) in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, new[] { Server }, QueryTagMapStore.RebuildSlimSightings, 1, env.Ct))
+                {
+                    slimRead.Add(row.Key);
+                }
+
+                /* The purge's move of the expired sighting, on a second connection, committed between the two reads. */
+                await using (var purge = await env.Source.OpenConnectionAsync(env.Ct))
+                {
+                    var (moved, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(purge, cutoff, null, env.Ct);
+                    Assert.Equal(1, moved);
+                }
+
+                await foreach (var (_, row) in QueryTagMapStore.ReadRebuildRowsAsync(env.Store, new[] { Server }, QueryTagMapStore.RebuildSightings, 1, env.Ct))
+                {
+                    sightingsRead.Add(row.Key);
+                }
+
+                await read.CommitAsync(env.Ct);
+            }
+
+            /* The moved row is in the two reads once, where the read's snapshot has it, and the row that stayed is there once. */
+            Assert.Single(slimRead.Concat(sightingsRead), key => key == "0xMOVED");
+            Assert.Empty(slimRead);
+            Assert.Equal(new[] { "0xKEPT", "0xMOVED" }, sightingsRead.OrderBy(key => key, StringComparer.Ordinal));
+
+            /* The move was committed: a read after the transaction finds the row in the slim table and not among the sightings. */
+            Assert.Equal("0xMOVED", await SlimKeysAsync(env));
+            Assert.Equal("0xKEPT", await SightedKeysAsync(env));
+        });
+    }
 }
