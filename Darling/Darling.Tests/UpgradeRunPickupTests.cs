@@ -377,6 +377,179 @@ public sealed class UpgradeRunPickupTests
         }
     }
 
+    /* #9852: the row as the store holds it: updated_at and the row version (xmin) say whether a pass wrote it. */
+    private static async Task<(DateTime UpdatedAt, string Version, string? FirstError, int? ExitCode)> StoredAsync(NpgsqlConnection connection, Guid id)
+    {
+        await using var command = new NpgsqlCommand("SELECT updated_at, xmin::text, first_error, exit_code FROM collect.upgrade_runs WHERE run_id = $1", connection);
+        command.Parameters.AddWithValue(id);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+        return (reader.GetDateTime(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt32(3));
+    }
+
+    /// <summary>
+    /// #9852: a file that equals the stored row writes nothing, so <c>updated_at</c> and the row version stay as the last change left them,
+    /// and the pickup handles the file as it handles a current one: a run still going or not yet verified keeps its file, a failed or
+    /// verified run's file is removed. The file is the same text on both passes (the pass that finds it unwritten is the one a file that
+    /// could not be removed gets on every 5-minute pass).
+    /// </summary>
+    [Theory]
+    [InlineData("in_progress", UpgradeRunPickupOutcome.Recorded, true)]
+    [InlineData("succeeded", UpgradeRunPickupOutcome.Recorded, true)]
+    [InlineData("failed", UpgradeRunPickupOutcome.RecordedAndRemoved, false)]
+    [InlineData("verified", UpgradeRunPickupOutcome.RecordedAndRemoved, false)]
+    public async Task TheSameFilePickedUpTwice_WritesNothingTheSecondTime_AndIsHandledAsACurrentFile(
+        string state, UpgradeRunPickupOutcome outcome, bool fileStays)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9852-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var id = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+            var text = RunJson(id, state, state == "failed" ? "the copy failed twice" : null);
+
+            File.WriteAllText(file, text);
+            Assert.Equal(outcome, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            var first = await StoredAsync(connection, id);
+            Assert.Equal(fileStays, File.Exists(file));
+
+            File.WriteAllText(file, text);
+            var second = await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct);
+            Assert.Equal(outcome, second.Outcome);
+            Assert.Equal(id, second.RunId);
+            Assert.Equal(state, second.State);
+            Assert.Equal(fileStays, File.Exists(file));
+            var stored = await StoredAsync(connection, id);
+            Assert.Equal(first.UpdatedAt, stored.UpdatedAt);
+            Assert.Equal(first.Version, stored.Version);
+            Assert.Equal((1L, state), await RowAsync(connection, id));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9852: a file that differs from the stored row in any column still updates it, in the same state or a later one, and
+    /// <c>updated_at</c> becomes the time of that pass. An unchanged pass after the change writes nothing again.
+    /// </summary>
+    [Fact]
+    public async Task AChangedFile_UpdatesTheRow_AndTheNextUnchangedPassLeavesThatUpdateAlone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9852-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var id = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            File.WriteAllText(file, RunJson(id, "in_progress"));
+            await pickup.PickUpAsync(connection, folder, now, ct);
+            var started = await StoredAsync(connection, id);
+
+            /* A state that moves forward is an update. */
+            var succeeded = RunJson(id, "succeeded");
+            File.WriteAllText(file, succeeded);
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
+            var moved = await StoredAsync(connection, id);
+            Assert.NotEqual(started.UpdatedAt, moved.UpdatedAt);
+            Assert.NotEqual(started.Version, moved.Version);
+            Assert.Equal((1L, "succeeded"), await RowAsync(connection, id));
+
+            /* The same file again writes nothing. */
+            File.WriteAllText(file, succeeded);
+            await pickup.PickUpAsync(connection, folder, now.AddMinutes(10), ct);
+            var again = await StoredAsync(connection, id);
+            Assert.Equal(moved.UpdatedAt, again.UpdatedAt);
+            Assert.Equal(moved.Version, again.Version);
+
+            /* The same state with another value in one column is an update too: the file moved to failed, with its error and exit code, and then only its error changes. */
+            var failedText = RunJson(id, "failed", "the health check failed");
+            File.WriteAllText(file, failedText);
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(15), ct)).Outcome);
+            var failed = await StoredAsync(connection, id);
+            Assert.NotEqual(again.UpdatedAt, failed.UpdatedAt);
+            Assert.Equal("the health check failed", failed.FirstError);
+            Assert.Equal(1, failed.ExitCode);
+
+            File.WriteAllText(file, failedText.Replace("the health check failed", "the health check failed twice", StringComparison.Ordinal));
+            await pickup.PickUpAsync(connection, folder, now.AddMinutes(20), ct);
+            var reworded = await StoredAsync(connection, id);
+            Assert.NotEqual(failed.UpdatedAt, reworded.UpdatedAt);
+            Assert.Equal("the health check failed twice", reworded.FirstError);
+            Assert.Equal((1L, "failed"), await RowAsync(connection, id));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9852: a file behind the stored row is still stale and is removed, and it writes nothing. A run that is still going keeps its file
+    /// when it equals the row, and loses it when the row is already further along: the pickup keeps the two apart.
+    /// </summary>
+    [Fact]
+    public async Task AFileBehindTheStoredRow_IsStillStale_WritesNothing_AndIsRemovedWhereAnEqualFileStays()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9852-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var id = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            File.WriteAllText(file, RunJson(id, "succeeded"));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            var stored = await StoredAsync(connection, id);
+
+            /* The run's first file, put back: behind the row, so stale and removed. */
+            File.WriteAllText(file, RunJson(id, "in_progress"));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
+            Assert.False(File.Exists(file), "a file behind the stored row is stale and goes");
+            var after = await StoredAsync(connection, id);
+            Assert.Equal(stored.UpdatedAt, after.UpdatedAt);
+            Assert.Equal(stored.Version, after.Version);
+            Assert.Equal((1L, "succeeded"), await RowAsync(connection, id));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
     /* #9841: a succeeded run's file stays until it is verified, failed or a week old, so a pass records the same run in the same state
        every five minutes. The "recorded in the store" line is said once for that run and state. */
     [Theory]
