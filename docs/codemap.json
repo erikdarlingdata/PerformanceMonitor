@@ -475,6 +475,15 @@
       ]
     },
     {
+      "file": ".github/workflows/darling-linux-tests.yml",
+      "name": "Darling Linux tests",
+      "triggers": [
+        "pull_request",
+        "workflow_call",
+        "workflow_dispatch"
+      ]
+    },
+    {
       "file": ".github/workflows/darling-msi.yml",
       "name": "Darling MSI",
       "triggers": [
@@ -574,8 +583,13 @@
       ]
     }
   ],
-  "generated_from": "9abed9cb1",
+  "generated_from": "ae7176e58",
   "mcp_tools": [
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "add_alert_source",
+      "product": "Darling"
+    },
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
       "name": "add_servers",
@@ -712,6 +726,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "create_web_access_group",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowWriteTools.cs",
       "name": "declare_change_window",
       "product": "Darling"
@@ -754,6 +773,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs",
       "name": "delete_server_tag",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "delete_web_access_group",
       "product": "Darling"
     },
     {
@@ -1262,6 +1286,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "get_personal_tokens",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgAutovacuumTools.cs",
       "name": "get_pg_autovacuum_health",
       "product": "Darling"
@@ -1757,8 +1786,18 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "get_web_access_groups",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs",
       "name": "kill_session",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "list_alert_sources",
       "product": "Darling"
     },
     {
@@ -1807,8 +1846,18 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "mint_personal_token",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs",
       "name": "mute_analysis_finding",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs",
+      "name": "new_password_key",
       "product": "Darling"
     },
     {
@@ -1852,6 +1901,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "remove_alert_source",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
       "name": "remove_server",
       "product": "Darling"
@@ -1867,6 +1921,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs",
+      "name": "reset_password_key",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs",
       "name": "restore_alert_history",
       "product": "Darling"
@@ -1874,6 +1933,21 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs",
       "name": "resume_collection",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs",
+      "name": "revoke_personal_token",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs",
+      "name": "rotate_alert_source",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "rotate_web_access_group_token",
       "product": "Darling"
     },
     {
@@ -1894,6 +1968,16 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDailyHealthReportTools.cs",
       "name": "send_daily_health_report_now",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.TestNotification.cs",
+      "name": "send_test_notification",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "set_advanced_web_access",
       "product": "Darling"
     },
     {
@@ -2077,6 +2161,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs",
+      "name": "update_web_access_group",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
       "name": "validate_custom_alert_rule",
       "product": "Darling"
@@ -2095,6 +2184,11 @@
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs",
       "name": "write_investigation_note",
       "product": "Darling"
+    },
+    {
+      "file": "Lite/Mcp/McpServerRegistryTools.cs",
+      "name": "add_servers",
+      "product": "Lite"
     },
     {
       "file": "Lite/Mcp/McpPlanTools.cs",
@@ -2142,6 +2236,16 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "create_mute_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.RouteAdmin.cs",
+      "name": "create_notification_route",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpQueryTagTools.cs",
       "name": "create_query_tag",
       "product": "Lite"
@@ -2149,6 +2253,11 @@
     {
       "file": "Lite/Mcp/McpQueryTagTools.cs",
       "name": "create_query_tag_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "delete_mute_rule",
       "product": "Lite"
     },
     {
@@ -2657,8 +2766,18 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpServerRegistryTools.cs",
+      "name": "remove_server",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpCollectorScheduleTools.cs",
       "name": "reset_collector_schedules",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "set_mute_rule_enabled",
       "product": "Lite"
     },
     {
@@ -2692,6 +2811,21 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpAlertSettingsWriteTools.cs",
+      "name": "update_alert_settings",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.MuteRules.cs",
+      "name": "update_mute_rule",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpAlertTools.RouteAdmin.cs",
+      "name": "update_notification_route",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpQueryTagTools.cs",
       "name": "update_query_tag",
       "product": "Lite"
@@ -2703,9 +2837,9 @@
     }
   ],
   "migrations": {
-    "count": 317,
+    "count": 318,
     "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
-    "newest_version": 318
+    "newest_version": 319
   },
   "overview": [
     "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
@@ -2728,6 +2862,7 @@
       "name": "Darling.Tests",
       "path": "Darling/Darling.Tests/Darling.Tests.csproj",
       "target_frameworks": [
+        "net10.0",
         "net10.0-windows"
       ]
     },
@@ -2931,7 +3066,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3635
+      "test_classes": 3675
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
@@ -2941,12 +3076,12 @@
     {
       "name": "PerformanceMonitor.Exporter.Tests",
       "project": "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
-      "test_classes": 74
+      "test_classes": 75
     },
     {
       "name": "Lite.Tests",
       "project": "Lite.Tests/Lite.Tests.csproj",
-      "test_classes": 1224
+      "test_classes": 1248
     }
   ]
 }

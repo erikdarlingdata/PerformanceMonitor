@@ -10,7 +10,7 @@
 # fails CI. It is the durable half of the proof; `roundtrip` is the whole-document half and
 # needs the pre-split revision to compare against.
 
-3.14.0   318  4da40b10b609f7cfe6e0fc4a39873cf806f1e0e8618c7ec8f4c652ccba9f1d2d
+3.14.0   318  715be354312c89ff2cd0d81412fb019107aaf510a232b5512eb4c39eaa1340be
 3.13.0   726  b29232a3fe1f38a9d24192bc275fd471418b7f5519950be3cf37d6d332a336c1
 3.12.0   188  5990b2d01ed6de1e7f9247a0aeb225ef96fdd35aed4ac6f12fc4bca47a4e0b3b
 3.11.0   316  401ebf89639bdb101f0b0a440bbb0c7600e8ee68fb2c17d2454850cf3ffa8e44
