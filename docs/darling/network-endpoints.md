@@ -327,7 +327,7 @@ The routes are matched the way ASP.NET Core routing matches every route: case-in
 
 No server name, no database name, no step name, no failure detail, no attempt count, no version, no metric and no store content. There is no JSON, no cookie, no `Server` header, and no header beyond the few Kestrel always adds (such as `Date`).
 
-The listener is tight because it has no token and, in a container, listens on every interface: HTTP/1 only (a kubelet probe is an HTTP/1.1 GET), no `Server` header, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body. When the port binds an address that is not loopback, the service logs one Warning that names why: `health.listen` when it is set, or `DOTNET_RUNNING_IN_CONTAINER` when `listen` is empty and the container default applied.
+The listener is tight because it has no token and, in a container, listens on every interface: HTTP/1 only (a kubelet probe is an HTTP/1.1 GET), no `Server` header, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body. When the port binds an address that is not loopback, the service logs one Warning that names why: `health.listen` when it is set, or `DOTNET_RUNNING_IN_CONTAINER` when `listen` is empty and the container default applied. On Docker Compose with `listen` empty, that Warning logs at every start and is expected: the release's compose file publishes no health port, so only the stack's own containers reach it, and a `ports:` entry that you add decides who else can.
 
 ### Why it has no token and no `allowFrom`
 
