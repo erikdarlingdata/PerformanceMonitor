@@ -56,6 +56,9 @@ public sealed class DarlingMcpCollectorReadinessTools
     /// <summary>The characters the failure read fetches, so the cut lands in code at a word boundary and never inside a word in SQL (#9880).</summary>
     internal const int ErrorReadChars = 4000;
 
+    /// <summary>The newest runs of a waiting pair the failure read looks through for its newest failure (#9880).</summary>
+    internal const int FailureLookbackRuns = 20;
+
     /// <summary>Example servers a precondition group names. The count says how many the group covers.</summary>
     internal const int ExampleServers = 5;
 
@@ -71,14 +74,14 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
-        + "A collector held by a setup step on the monitored server (a named skip: an extension not created or not preloaded, a grant refused, an Extended Events session not running) is not waiting on the service: precondition_count counts those, precondition_held lists one group per collector and status with the number of servers it holds and a few example servers, and waiting_count does not include them, so it reaches zero on a finished install. "
+        + "A collector held by a setup step on the monitored server (a named skip: an extension not created or not preloaded, a grant refused, an Extended Events session not running) is not waiting on the service: precondition_count counts those, precondition_held lists one group per collector and status with the number of servers it holds and a few example servers, and waiting_count does not include them, so it reaches zero on a finished install. The newest failure is looked for among each waiting pair's newest 20 runs since the start: a pair whose newest 20 runs hold no failure stays waiting and its row has no last_error. "
         + "A group carries the newest server's text in last_error (text_server names that server) and distinct_texts, how many different texts the group's servers wrote: a remedy such as CREATE EXTENSION names the database its server connects to, so when distinct_texts is above 1 get_collection_log (server_name, collector_name) carries each server's own text. "
         + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total. The reply is also held to the 32,768-byte response budget: budget_truncated = true says waiting rows were left off the end, and budget_note names the offset that reads on; precondition_held_truncated = true says precondition_held groups were left off its end and budget_note says how many; over_budget = true says the per-server summaries alone are over it and server_name reads one server. "
         + "A waiting row's last_error is cut at a word boundary when it is long, and last_error_cut says so: get_collection_log (server_name, collector_name) carries the whole text.")]
     public static Task<string> GetCollectorReadiness(
         NpgsqlDataSource postgres,
         [Description("Optional server name or display name. Omit for every enabled server.")] string? server_name = null,
-        [Description("Waiting rows to skip before the page, in the answer's order (a page start). Default 0; budget_note names the offset that reads on when budget_truncated is true.")] int offset = 0,
+        [Description("Waiting rows to skip before the page, in the answer's order (a page start). 0 or more, default 0; budget_note names the offset that reads on when budget_truncated is true.")] int offset = 0,
         CancellationToken cancellationToken = default) =>
         GetCollectorReadiness(postgres, server_name, AlertReadFailureCounter.Shared.CountingSince, DateTime.UtcNow, cancellationToken, offset);
 
@@ -87,6 +90,11 @@ public sealed class DarlingMcpCollectorReadinessTools
         NpgsqlDataSource postgres, string? server_name, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken, int offset = 0,
         int budgetBytes = McpResponseBudget.DefaultBytes)
     {
+        if (offset < 0)
+        {
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0 or more.");
+        }
+
         int? onlyServerId = null;
         if (!string.IsNullOrWhiteSpace(server_name))
         {
@@ -246,24 +254,34 @@ CROSS JOIN LATERAL (
 ) d";
 
     /// <summary>
-    /// The newest failed run of each waiting pair since the start (#9880): its status, time and text, by one keyed descending probe per pair on
-    /// <c>idx_collection_log_watermark</c> that stops at the first failure, so the cost follows the number of waiting pairs and not how many rows each
-    /// has logged. The status is what tells a collector held by a setup step on the monitored server from one that has not had its first cycle:
-    /// <see cref="CollectorRuntimePrecondition.IsNamedSkip"/>, the classification the service already has. The text is read to
-    /// <see cref="ErrorReadChars"/> so the cut that follows lands on a word boundary in code, never inside a word in SQL. A pair with no failure has no row.
+    /// The newest failed run of each waiting pair among its newest <see cref="FailureLookbackRuns"/> runs since the start (#9880): its status, time
+    /// and text. Each pair reads at most that many rows by one keyed descending probe on <c>idx_collection_log_watermark</c>
+    /// (server_id, collector_name, collection_time DESC), which carries no status, so a filter on the status inside the probe would walk back over every
+    /// SKIPPED or YIELDED run of a pair until it found a failure. The inner probe takes the newest runs whatever their status and the outer filter
+    /// keeps the newest failure among them, so the cost follows the number of waiting pairs times <see cref="FailureLookbackRuns"/> and not how many rows
+    /// a pair has logged. The status is what tells a collector held by a setup step on the monitored server from one that has not had its first cycle:
+    /// <see cref="CollectorRuntimePrecondition.IsNamedSkip"/>, the classification the service already has. A collector held by a setup step writes its named
+    /// skip on every attempt, so its newest runs carry it. A pair whose newest runs hold no failure has no row: it stays waiting, is not counted as held and
+    /// its row carries no <c>last_error</c> (its <c>errors_since_start</c> still counts the earlier failures, and <c>get_collection_log</c> carries them). The text
+    /// is read to <see cref="ErrorReadChars"/> so the cut that follows lands on a word boundary in code, never inside a word in SQL.
     /// </summary>
     internal static readonly string FailureSql = $@"
 SELECT p.server_id, p.collector_name, f.status, f.collection_time, left(f.error_message, {ErrorReadChars})
 FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
 CROSS JOIN LATERAL (
-    SELECT x.status, x.collection_time, x.error_message
-    FROM collection_log x
-    WHERE x.server_id = p.server_id
-    AND   x.collector_name = p.collector_name
-    AND   x.collection_time >= $3
-    AND   x.collection_time <= $4
-    AND   x.status IN ({CollectorFleetLiveness.FailureStatusSqlList})
-    ORDER BY x.collection_time DESC
+    SELECT r.status, r.collection_time, r.error_message
+    FROM (
+        SELECT x.status, x.collection_time, x.error_message
+        FROM collection_log x
+        WHERE x.server_id = p.server_id
+        AND   x.collector_name = p.collector_name
+        AND   x.collection_time >= $3
+        AND   x.collection_time <= $4
+        ORDER BY x.collection_time DESC
+        LIMIT {FailureLookbackRuns}
+    ) r
+    WHERE r.status IN ({CollectorFleetLiveness.FailureStatusSqlList})
+    ORDER BY r.collection_time DESC
     LIMIT 1
 ) f";
 
@@ -339,6 +357,9 @@ CROSS JOIN LATERAL (
         return rows;
     }
 
+    /// <summary>The separators dropped from the end of a cut text along with whitespace.</summary>
+    private const string TrailingSeparators = ",;:-(";
+
     /// <summary>
     /// <paramref name="text"/> cut to at most <paramref name="max"/> characters at a word boundary (#9880): the last whitespace at or before the
     /// limit, dropping the trailing punctuation that separated the words, so a remedy never ends "listed in sha". A text with no whitespace in
@@ -366,7 +387,14 @@ CROSS JOIN LATERAL (
             }
         }
 
-        var kept = text[..end].TrimEnd().TrimEnd(',', ';', ':', '-', '(');
+        /* Whitespace and the separators trim together, so "run x - " ends "run x" and never "run x ". */
+        var keptLength = end;
+        while (keptLength > 0 && (char.IsWhiteSpace(text[keptLength - 1]) || TrailingSeparators.Contains(text[keptLength - 1])))
+        {
+            keptLength--;
+        }
+
+        var kept = text[..keptLength];
         return (kept.Length == 0 ? text[..McpHelpers.TextElementCutLength(text, max)] : kept, true);
     }
 
@@ -606,7 +634,7 @@ CROSS JOIN LATERAL (
                 + (reached ? $"First full cycle at {Stamp(lastFirstGood!.Value)}." : "First full cycle: not yet.");
         }
 
-        var start = Math.Clamp(offset, 0, ordered.Count);
+        var start = Math.Min(offset, ordered.Count);
         var page = ordered.Skip(start).Take(MaxWaitingRows).ToList();
         var detail = await readDetail(singleServer ? pairs : page.Select(w => w.Pair).ToList());
         Detail? DetailOf(string collector, int serverId) => detail.TryGetValue((serverId, collector), out var d) ? d : null;

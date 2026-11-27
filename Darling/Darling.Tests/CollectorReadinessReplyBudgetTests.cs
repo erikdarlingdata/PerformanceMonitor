@@ -407,6 +407,30 @@ public sealed class CollectorReadinessReplyBudgetTests
         Assert.Equal(3, root.GetProperty("waiting").GetArrayLength());
     }
 
+    [Fact]
+    public async Task ANegativeOffset_IsRefused_BeforeAnyStoreRead()
+    {
+        /* No data source: a read that began would fail on it and answer an error, not a refusal. */
+        var reply = await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(null!, null, Start, Now, TestContext.Current.CancellationToken, offset: -1);
+
+        using var doc = JsonDocument.Parse(reply);
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("offset", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains("Must be 0 or more", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("run x - then y", 8, "run x")]
+    [InlineData("run x, - then y", 9, "run x")]
+    [InlineData("run x; then y", 7, "run x")]
+    public void ACutThatEndsOnASeparator_DropsTheSeparatorAndTheSpaceBeforeIt(string text, int max, string expected)
+    {
+        var (kept, cut) = DarlingMcpCollectorReadinessTools.CutAtWord(text, max);
+
+        Assert.True(cut);
+        Assert.Equal(expected, kept);
+    }
+
     private static string Stamp(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o");
 
     private static int CountOccurrences(string text, string needle)

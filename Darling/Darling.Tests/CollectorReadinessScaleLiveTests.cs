@@ -164,6 +164,63 @@ GROUP BY server_id, collector_name";
     }
 
     [Fact]
+    public async Task TheFailureProbe_LooksThroughOnlyTheNewestRunsOfAPair_NotEveryRowSinceTheStart()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness failure probe test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = LiveClock.Now();
+            var start = now.AddHours(-3);
+            var serverId = SeedServerBase + 700;
+            await RegisterServerAsync(connection, serverId, "probe-a", ct);
+            var lookback = DarlingMcpCollectorReadinessTools.FailureLookbackRuns;
+
+            /* beyond: a failure, then more skipped runs than the probe looks through. */
+            await InsertRunAsync(connection, serverId, "probe-a", "beyond", start.AddMinutes(1), "EXTENSION_MISSING", "run CREATE EXTENSION x", ct);
+            for (var i = 0; i < lookback + 20; i++)
+            {
+                await InsertRunAsync(connection, serverId, "probe-a", "beyond", start.AddMinutes(2 + i), "SKIPPED", null, ct);
+            }
+
+            /* edge: the failure is the oldest of exactly the newest runs the probe reads. */
+            await InsertRunAsync(connection, serverId, "probe-a", "edge", start.AddMinutes(1), "EXTENSION_MISSING", "run CREATE EXTENSION x", ct);
+            for (var i = 0; i < lookback - 1; i++)
+            {
+                await InsertRunAsync(connection, serverId, "probe-a", "edge", start.AddMinutes(2 + i), "YIELDED", null, ct);
+            }
+
+            /* newest: two failures among skipped runs. The newer one is the answer, whatever its status. */
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(1), "EXTENSION_MISSING", "old step", ct);
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(5), "ERROR", "newer failure", ct);
+            await InsertRunAsync(connection, serverId, "probe-a", "newest", start.AddMinutes(9), "SKIPPED", null, ct);
+
+            var pairs = new[] { "beyond", "edge", "newest", "never" }
+                .Select(c => new DarlingMcpCollectorReadinessTools.Pair(serverId, c, 5, false)).ToList();
+            var failures = await DarlingMcpCollectorReadinessTools.ReadFailuresAsync(postgres, pairs, start, now, ct);
+
+            Assert.False(failures.ContainsKey((serverId, "beyond")), "a failure older than the newest runs the probe reads is not read");
+            Assert.Equal("EXTENSION_MISSING", failures[(serverId, "edge")].Status);
+            Assert.Equal("ERROR", failures[(serverId, "newest")].Status);
+            Assert.Equal("newer failure", failures[(serverId, "newest")].Text);
+            Assert.False(failures.ContainsKey((serverId, "never")));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task WaitingList_IsCutAt200Rows_OldestWaitFirst_WithTheTotalCounted()
     {
         var baseConnectionString = ConnectionString;
@@ -382,6 +439,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertRunAsync(
+        NpgsqlConnection connection, int serverId, string serverName, string collector, DateTime at, string status, string? text, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message)
+VALUES ($1,$2,$3,$4,$5,$6,10,0,$7)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(at, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(collector);
+        command.Parameters.AddWithValue(status);
+        command.Parameters.AddWithValue((object?)text ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 
