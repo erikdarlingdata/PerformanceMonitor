@@ -149,10 +149,7 @@ public static class QueryStatsHostHourly
         ("plan_generation_num", "bigint", Max("plan_generation_num")),
         ("worker_time_per_second", "double precision", "MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0)"),
         ("digests", "bytea[]", $"array_agg(DISTINCT query_text_digest) FILTER (WHERE {Honest} AND query_text_digest IS NOT NULL)"),
-        ("latest_text_key", "bytea",
-            @"MAX(timestamp_send(collection_time) || int8send(collection_id)
-        || CASE WHEN query_text IS NOT NULL THEN '\x00'::bytea || convert_to(query_text, 'UTF8') ELSE '\x01'::bytea || query_text_digest END)
-        FILTER (WHERE query_text IS NOT NULL OR query_text_digest IS NOT NULL)"),
+        ("latest_text_key", "bytea", ByteaMaxSql.LatestTextKey("")),
     ];
 
     private static string Lines(IEnumerable<string> parts) => string.Join(",\n    ", parts);

@@ -45,6 +45,64 @@ public sealed class DarlingConfigTests
         return config;
     }
 
+    /* #9688: the sample install-darling.sh copies to /etc/darling/darling.json. Parse reads a file: secret when it loads
+       the config, so the test points each file: reference at a file it makes, as an operator fills the real ones. The
+       sample then loads with its comments, is the bring-your-own store shape Linux needs, hands the store connection
+       string through from its file, and validates as shipped. */
+    [Fact]
+    public void LinuxSampleConfig_ParsesAndValidatesOnceItsSecretFilesExist()
+    {
+        var samplePath = Path.Combine(AppContext.BaseDirectory, "darling.linux.sample.json");
+        var root = System.Text.Json.Nodes.JsonNode.Parse(
+            File.ReadAllText(samplePath),
+            documentOptions: new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip });
+        var folder = Directory.CreateTempSubdirectory("darling-linux-sample-").FullName;
+        try
+        {
+            const string secret = "Host=127.0.0.1;Port=5432;Username=darling;Password=x;Database=darling";
+            PointFileReferencesAt(root, folder, secret);
+
+            var config = DarlingConfig.Parse(root!.ToJsonString());
+
+            Assert.False(config.Postgres.Managed);
+            Assert.Equal(secret, config.Postgres.ConnectionString);
+            var server = Assert.Single(config.Servers);
+            Assert.True(server.UsesSqlAuth);
+            Assert.Empty(config.Validate());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    private static void PointFileReferencesAt(System.Text.Json.Nodes.JsonNode? node, string folder, string contents)
+    {
+        if (node is System.Text.Json.Nodes.JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                PointFileReferencesAt(item, folder, contents);
+            }
+        }
+        else if (node is System.Text.Json.Nodes.JsonObject obj)
+        {
+            foreach (var name in obj.Select(property => property.Key).ToList())
+            {
+                if (obj[name] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var text) && text.StartsWith("file:", StringComparison.Ordinal))
+                {
+                    var path = Path.Combine(folder, Guid.NewGuid().ToString("N"));
+                    File.WriteAllText(path, contents);
+                    obj[name] = "file:" + path;
+                }
+                else
+                {
+                    PointFileReferencesAt(obj[name], folder, contents);
+                }
+            }
+        }
+    }
+
     [Fact]
     public void SampleConfig_ParsesWithComments()
     {

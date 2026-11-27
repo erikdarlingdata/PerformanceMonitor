@@ -6107,6 +6107,10 @@ internal interface IUnixDirectoryModes
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
 
+    /// <summary>The account name for <see cref="EffectiveUserId"/> as the process sees it (#9793), or null when there is none
+    /// to give (no passwd entry for that id, a stand-in that does not model it).</summary>
+    string? EffectiveUserName => null;
+
     /// <summary>Whether this process can list <paramref name="directory"/> (#8141). When it cannot, a file in it reads as
     /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
     /// model it.</summary>
@@ -6134,6 +6138,8 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public string? EffectiveUserName => string.IsNullOrWhiteSpace(Environment.UserName) ? null : Environment.UserName;
 
     public bool CanList(string directory)
     {

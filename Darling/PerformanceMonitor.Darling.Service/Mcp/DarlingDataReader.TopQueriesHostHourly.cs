@@ -205,7 +205,7 @@ internal static partial class DarlingDataReader
                     MAX(u.plan_generation_num) AS plan_generation_num,
                     MAX(u.peak_cpu_ms_per_second) AS worker_time_per_second,
                     {(byHostObject ? "COUNT(DISTINCT u.query_hash) FILTER (WHERE u.raw_rows > 0) AS distinct_query_hashes," : "")}
-                    MAX(u.latest_text_key) AS latest_text_key,
+                    {ByteaMaxSql.Of("u.latest_text_key")} AS latest_text_key,
                     MAX(u.rank_metric) AS rank_metric,
                     MAX(u.rank_cpu) AS rank_cpu
                 FROM wide_units AS u

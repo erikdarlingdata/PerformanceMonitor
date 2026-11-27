@@ -615,7 +615,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
     /// <summary>
     /// #9223: whether <see cref="PgTableTuning.QueryStoreServerHashIndexName"/> exists on <c>collect.query_store_stats</c> and is valid. The service builds it at a
-    /// start (one build per start, so a store that is missing several large indexes gets it a start or two later), and an interrupted build can leave an invalid
+    /// start (the large indexes share one build time budget per start, so a store whose builds use it up gets this one at a later start), and an interrupted build can leave an invalid
     /// one; until it is valid the tail keeps its one-filter shape, which is correct and only slower. One catalog row, read per call, so a build that finishes
     /// while the service runs is used by the next call.
     /// </summary>

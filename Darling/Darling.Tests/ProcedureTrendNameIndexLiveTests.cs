@@ -574,11 +574,12 @@ ORDER BY server_id, collection_time, database_name", connection))
             Assert.Same(DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql, await DarlingTrendReader.OneProcedureRawSqlAsync(sawTheIndex, ct));
             Assert.Equal(withIndex, RawTrendOf(await ToolAsync(sawTheIndex)));
 
-            /* A start with rows in the table. The restart-row index is missing too and is earlier in the list, so this start builds
-               that one and names this one as waiting, and the data source that was told no is told no again. */
+            /* A start with rows in the table, on a clock where one build takes the whole build time a start shares out. The restart-row
+               index is missing too and is earlier in the list, so this start builds that one and names this one as waiting, and the
+               data source that was told no is told no again. */
             await ExecAsync(connection, "DROP INDEX collect." + PgTableTuning.ProcedureStatsRestartRowIndexName, ct);
             var firstStart = new CapturingTestLogger();
-            await PgTableTuning.ApplyAsync(connection, firstStart, ct);
+            await PgTableTuning.ApplyAsync(connection, firstStart, hourly: false, new TuningStartPasses.BuildClock(secondsPerBuild: 300), 300, ct);
             Assert.Single(firstStart.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal)
                 && l.Contains(ProcedureStatsNameIndex.IndexName, StringComparison.Ordinal)
                 && l.Contains("built at the next start", StringComparison.Ordinal));

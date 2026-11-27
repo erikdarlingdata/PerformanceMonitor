@@ -111,6 +111,14 @@
          the MSI payload, the Linux tarball and the container image), not only where the Windows scripts do, because a
          bring-your-own store runs on any of them. The messages name it "in the install folder". -->
     <None Include="..\tools\provision-roles.sql" Link="provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9688: the systemd unit, the install and upgrade scripts with the file they share, and the Linux config sample. They ship
+         in the linux-x64 tarball only, the one publish that names a Linux RID. The container image publishes with no RID and
+         runs under no systemd, and the Windows zip has the PowerShell scripts. -->
+    <None Include="..\tools\darling.service" Link="darling.service" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\install-darling.sh" Link="install-darling.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\upgrade-darling.sh" Link="upgrade-darling.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\darling-script-lib.sh" Link="darling-script-lib.sh" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
+    <None Include="..\tools\darling.linux.sample.json" Link="darling.linux.sample.json" CopyToOutputDirectory="PreserveNewest" Condition="$(RuntimeIdentifier.StartsWith('linux'))" />
   </ItemGroup>
 
   <ItemGroup>

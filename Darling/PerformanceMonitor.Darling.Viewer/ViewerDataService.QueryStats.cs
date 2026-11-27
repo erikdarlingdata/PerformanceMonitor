@@ -365,10 +365,9 @@ public sealed partial class ViewerDataService
                    when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
                    the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view
                    gives a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays
-                   partial and parallel; an ordered array aggregate here lost both and ran slower than the second scan. */
-                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
-                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
-                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
+                   partial and parallel; an ordered array aggregate here lost both and ran slower than the second scan. ByteaMaxSql
+                   writes the MAX in the form PostgreSQL 16 and 17 run too, which have no max(bytea) (#9802). */
+                {ByteaMaxSql.LatestTextKey("q.")} AS latest_text_key,
                 host_object_name
             FROM
             (

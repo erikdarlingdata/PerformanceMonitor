@@ -59,6 +59,9 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
     /// <summary>The user id the stand-in reports the service as running under (#5366).</summary>
     public uint EffectiveUserId { get; set; } = 1000;
 
+    /// <summary>The account name the stand-in reports for <see cref="EffectiveUserId"/> (#9793); null when the process has none.</summary>
+    public string? EffectiveUserName { get; set; }
+
     /// <summary>Reports <paramref name="path"/> as owned by <paramref name="userId"/> with <paramref name="links"/> names
     /// (#5366). A path never reported has no owner to check, as on a platform whose stat layout is not known.</summary>
     public void ReportOwner(string path, uint userId, ulong links = 1) => _owners[Key(path)] = new UnixFileOwner(userId, links);

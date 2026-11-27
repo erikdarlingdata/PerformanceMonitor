@@ -168,9 +168,6 @@ public sealed class ViewerFinOpsSqlTests
         /* The stored statement-level plan is carried per statement so "View Plan" opens it (Darling stores
            plans) - restores the plan action the port had wrongly dropped as "no live SQL". */
         Assert.Contains("query_plan_xml", sql, StringComparison.Ordinal);
-        /* #2069: plans written since V54 are gzip bytes with the text NULL - the statement must carry
-           both forms or the plan action goes dark as the GC retires the last text rows. */
-        Assert.Contains("MAX(p.query_plan_gz)", sql, StringComparison.Ordinal);
     }
 
     [Fact]

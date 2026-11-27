@@ -1137,6 +1137,15 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
+          # #9688: the systemd unit, the Linux config sample, and the install and upgrade scripts with their execute bit ship in
+          # the tarball's root. Same check as nightly.yml's linux job.
+          long_listing="$(tar -tvzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          for shipped in darling.service darling.linux.sample.json darling-script-lib.sh; do
+            grep -E " \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} (#9688)."; exit 1; }
+          done
+          for shipped in install-darling.sh upgrade-darling.sh; do
+            grep -E "^-rwxr-xr-x .* \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} with its execute bit (#9688)."; exit 1; }
+          done
           # #6123: the Compose files are their own release asset, because no other download holds Darling/compose/.
           # #9333: .github/scripts/pack-compose.sh packs it, and nightly.yml calls the same script.
           bash .github/scripts/pack-compose.sh "${version}" releases

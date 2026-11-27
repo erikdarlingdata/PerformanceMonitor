@@ -1727,6 +1727,15 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
+          # #9688: the systemd unit, the Linux config sample, and the install and upgrade scripts with their execute bit ship in
+          # the tarball's root. Same check as build.yml's release job.
+          long_listing="$(tar -tvzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          for shipped in darling.service darling.linux.sample.json darling-script-lib.sh; do
+            grep -E " \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} (#9688)."; exit 1; }
+          done
+          for shipped in install-darling.sh upgrade-darling.sh; do
+            grep -E "^-rwxr-xr-x .* \./${shipped}\$" <<<"${long_listing}" >/dev/null || { echo "::error::The Linux tarball does not hold ${shipped} with its execute bit (#9688)."; exit 1; }
+          done
           # #9333: the Compose files ride the nightly too, pinned to this nightly's own :<version> image tag (pushed
           # beside :nightly), so the archive the release checklist tests exists before the release is cut. The same
           # script build.yml's release job runs.
