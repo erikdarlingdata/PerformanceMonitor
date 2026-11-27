@@ -160,7 +160,7 @@ public sealed class StoreVerbPlatformRefusalTests
     public void TheHelp_OnLinux_NamesTheLinuxCommandOnEveryLine_AndListsTheVerbsTheWindowsHelpDoes()
     {
         var linuxEntry = OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling");
-        var windowsEntry = OperatorVerbForm.EntryPoint(isWindows: true, "C:\Darling");
+        var windowsEntry = OperatorVerbForm.EntryPoint(isWindows: true, "C:\\Darling");
         var linux = DarlingCliCommands.UsageText(linuxEntry);
         var windows = DarlingCliCommands.UsageText(windowsEntry);
 
