@@ -321,7 +321,8 @@ public sealed partial class DarlingWorker : BackgroundService
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
         Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null,
+        bool StartPassDoesHourlyWork = true);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -531,7 +532,8 @@ public sealed partial class DarlingWorker : BackgroundService
            large one takes the rest next hour. Stage TimescaleAfterRepairLaunch only so a store without TimescaleDB skips it. */
         new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => Task.FromResult(0),
-            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct),
+            StartPassDoesHourlyWork: false),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -560,19 +562,12 @@ public sealed partial class DarlingWorker : BackgroundService
     private HashSet<string>? _convergedAtStartup;
 
     /// <summary>
-    /// True when the hourly pass would run the very work the start pass already did (#9858): the step has no hourly delegate of its
-    /// own, or its hourly delegate is the start one. A step with a different hourly delegate does work the start pass did not
-    /// (the start pass of "rollup chunk visibility" is a no-op and its hourly delegate is the whole step, the hourly compression and
-    /// tuning passes are the conservative variants that run beside live collection), so skipping it would hold that work back
-    /// an hour after every start, and forever on a service restarted more often than hourly.
-    /// </summary>
-    private static bool HourlyWorkIsStartWork(StoreObjectConvergenceStep step) =>
-        step.HourlyEnsureAsync is null || ReferenceEquals(step.HourlyEnsureAsync, step.EnsureAsync);
-
-    /// <summary>
     /// The steps one hourly pass runs (#3913's TimescaleDB filter, and #9858's skip of what this start's own pass already ran).
-    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start. Only a step whose hourly work is its start
-    /// work is skipped (<see cref="HourlyWorkIsStartWork"/>), so the first pass still runs every step with an hourly delegate of its own.
+    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start. A step that completed at start is skipped
+    /// when <see cref="StoreObjectConvergenceStep.StartPassDoesHourlyWork"/> is true, whatever its hourly delegate is: an hourly delegate that is a
+    /// conservative variant of the start work (fewer statements beside live collection, as the tuning and compression steps have) is a strict
+    /// subset of the pass the start just ran in full, and running it again repeats the work and its log lines (#9858). A step whose start pass does
+    /// not do its hourly work ("rollup chunk visibility", a no-op at start) runs on the first hourly pass.
     /// </summary>
     internal static List<StoreObjectConvergenceStep> SelectHourlyConvergenceSteps(
         IEnumerable<StoreObjectConvergenceStep> steps, bool timescaleAvailable, ISet<string>? ranAtStartup, out int skippedAsRanAtStartup)
@@ -587,7 +582,7 @@ public sealed partial class DarlingWorker : BackgroundService
                 continue;
             }
 
-            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name) && HourlyWorkIsStartWork(step))
+            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name) && step.StartPassDoesHourlyWork)
             {
                 skippedAsRanAtStartup++;
                 continue;
