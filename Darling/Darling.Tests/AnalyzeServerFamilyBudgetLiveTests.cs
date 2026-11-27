@@ -139,7 +139,7 @@ public sealed class AnalyzeServerFamilyBudgetLiveTests
             if (withHeldFamily)
                 families.Add(CollectSlowThingFactsAsync);
 
-            context.CollectionFamilyCount = families.Length;
+            context.CollectionFamilyCount = families.Count;
             context.Coverage = WindowCoverage.Unobserved(FourHoursMs);
             var collected = new List<Fact>();
             await PgFactCollector.RunFamiliesAsync(context, collected, families, family => ReferenceEquals(family.Target, this));
