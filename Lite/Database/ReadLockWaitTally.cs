@@ -78,9 +78,10 @@ internal sealed class ReadLockWaitTally : IDisposable
     internal long ArchiveFiles => Interlocked.Read(ref _archiveFiles);
 
     /// <summary>
-    /// Says the read keeps a phase split (#9423): a tool that times its own phases, as get_query_store_top does, calls this so the
-    /// slow-call row stores the hot against archive figures. A read that never calls it stores NULL for them, since "no split
-    /// kept" and "no archive time" are different answers. The flag passes to the outer tally when this one ends.
+    /// Says the read keeps a hot against archive split (#9423): a tool whose every read goes through the archive span timer, as
+    /// get_query_store_top does, calls this so the slow-call row stores the hot and archive figures. A read that never calls it stores
+    /// NULL for them, since "no split kept" and "no archive time" are different answers. A tool that times phases without that
+    /// timer, as get_object_usage does (#9885), does not call it. The flag passes to the outer tally when this one ends.
     /// </summary>
     internal void MarkSplitKept() => Interlocked.Exchange(ref _hasSplit, 1);
 

@@ -75,15 +75,18 @@ public sealed class McpObjectUsageTools
             return McpHelpers.Refusal("offset", "offset must be zero or more.");
         }
 
-        /* #9885: the call's phases and which path read the tables, for the slow-call row and the Information line the finally block writes. */
+        /* #9885: the call's phases and which path read the tables, for the slow-call row and the Information line the finally block writes.
+           The call never marks a hot and archive split kept: no read of it times an archive span, so the row leaves hot_ms, archive_ms and
+           archive_files NULL, which says "not measured" where a zero would claim an archive read that took no time (#3682). */
         using var lockWaits = ReadLockWaitTally.Begin();
         var phases = new ReadPhaseSplit();
-        lockWaits.MarkSplitKept();
         string? answeredFrom = null;
+        var fromCache = false;
         try
         {
             var database = database_name.Trim();
             var cacheKey = ObjectUsageEvidenceCache.Key([resolved.ServerId], database, days_back);
+            var lookupStarted = Stopwatch.GetTimestamp();
             if (cache is null || !cache.TryGet(cacheKey, out var evidence))
             {
                 var windowStart = nowUtc.AddDays(-days_back);
@@ -116,6 +119,14 @@ public sealed class McpObjectUsageTools
                     [new ObjectUsageSide(resolved.DisplayName, tables, serverClock.ToUtc, executions, Inventory: null, References: references, AnsweredFrom: answeredFrom)]);
                 cache?.Set(cacheKey, evidence);
             }
+            else
+            {
+                /* The evidence a page of this walk reads came from one path, and the reply names it (coverage.tables.answered_from), so the row and the
+                   line name the same path. The evidence cache phase says the call read nothing itself. */
+                phases.Add("evidence cache", Stopwatch.GetTimestamp() - lookupStarted);
+                answeredFrom = evidence.Sides.Count > 0 ? evidence.Sides[0].AnsweredFrom : null;
+                fromCache = true;
+            }
 
             return ObjectUsageReport.Build(
                 database,
@@ -134,16 +145,18 @@ public sealed class McpObjectUsageTools
         }
         finally
         {
-            ReportSlowRead(resolved.DisplayName, resolved.ServerId, days_back, answeredFrom, phases, lockWaits);
+            ReportSlowRead(resolved.DisplayName, resolved.ServerId, days_back, answeredFrom, fromCache, phases, lockWaits);
         }
     }
 
     /// <summary>
     /// #9885: hands the call's path and phases to the slow-call row, and writes one Information line when the call took over
     /// <see cref="ReadLockWaitTally.SlowReadThreshold"/>, the way <c>get_query_store_top</c> does. "other" is what no phase accounts for. A call
-    /// answered from the evidence cache read nothing, so it names no path.
+    /// answered from the evidence cache names the path that read the evidence, the one its reply names, and the line and the row's phases say
+    /// the evidence came from the cache.
     /// </summary>
-    private static void ReportSlowRead(string serverName, int serverId, int daysBack, string? answeredFrom, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
+    private static void ReportSlowRead(
+        string serverName, int serverId, int daysBack, string? answeredFrom, bool fromCache, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
     {
         var total = phases.Total;
         var split = phases.Describe(total);
@@ -151,7 +164,7 @@ public sealed class McpObjectUsageTools
         if (total <= ReadLockWaitTally.SlowReadThreshold) return;
 
         AppLogger.Info("McpObjectUsageTools",
-            $"get_object_usage took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}, {daysBack} days): answered from {answeredFrom ?? "cache"}, "
-            + $"{lockWaits.DescribeLockWait()}, {split}");
+            $"get_object_usage took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}, {daysBack} days): "
+            + $"answered from {answeredFrom ?? "no path"}{(fromCache ? " (evidence cache)" : "")}, {lockWaits.DescribeLockWait()}, {split}");
     }
 }

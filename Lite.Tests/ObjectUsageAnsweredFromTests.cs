@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -25,9 +26,15 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #9885: Lite's <c>get_object_usage</c> says which read answered the table window (the persisted chain or the full fold, with the fold's
-/// reason), in the reply's coverage and in the slow-call row, and the row carries the call's phases. The statement parse is kept per text
-/// between calls, so a second first call for another window parses nothing and answers the same as a call that parsed everything.
+/// reason), in the reply's coverage and in the slow-call row, and the row carries the call's phases. The row leaves the hot and archive split
+/// NULL, since no read of the call times an archive span. A call answered from the evidence cache names, in the reply, the row and the log line,
+/// the path that read the evidence. The statement parse is kept per text between calls, so a second first call for another window parses
+/// nothing and answers the same as a call that parsed everything.
+///
+/// <para>Collection <c>app-logger-statics</c>: the cache tests set the slow-read threshold, one static for the whole process, and drain the
+/// process-wide log buffer.</para>
 /// </summary>
+[Collection("app-logger-statics")]
 public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "ObjectUsageAnsweredSrv";
@@ -56,6 +63,7 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
 
     public void Dispose()
     {
+        ReadLockWaitTally.SlowReadThreshold = TimeSpan.FromSeconds(2);
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
@@ -92,13 +100,13 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
     }
 
     /// <summary>One call inside the call timing scope the host's filter opens, with every call counted slow, so its row is written.</summary>
-    private async Task<(JsonElement Reply, McpSlowCall Row)> CallWithRowAsync(int daysBack)
+    private async Task<(JsonElement Reply, McpSlowCall Row)> CallWithRowAsync(int daysBack, ObjectUsageEvidenceCache? cache = null)
     {
         var recorder = new McpCallTimingRecorder(_dataService) { SlowThreshold = TimeSpan.Zero };
         string text;
         using (var call = recorder.Begin("get_object_usage", null))
         {
-            text = await McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, Database, daysBack, 500, 0, Now);
+            text = await McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, Database, daysBack, 500, 0, Now, cache);
             call.Finish(McpCallTimingRecorder.OutcomeOk, new CallToolResult { Content = [new TextContentBlock { Text = text }] });
         }
 
@@ -110,10 +118,18 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
     private static string? AnsweredFrom(JsonElement reply) =>
         reply.GetProperty("coverage")[0].GetProperty("tables").GetProperty("answered_from").GetString();
 
+    /// <summary>The Information lines the slow reads of <c>get_object_usage</c> wrote since the last drain.</summary>
+    private static List<string> SlowReadLines() =>
+        AppLogger.DrainBufferedLines()
+            .Where(l => l.Contains("get_object_usage took", StringComparison.Ordinal) && l.Contains(ServerName, StringComparison.Ordinal))
+            .ToList();
+
+    /// <summary>No read of the call times an archive span, so the row's hot and archive split is not measured: NULL, never a zero that says an archive read took no time (#3682). The phases themselves are filled.</summary>
     private static void AssertPhasesAreKept(McpSlowCall row)
     {
-        Assert.NotNull(row.HotMs);
-        Assert.NotNull(row.ArchiveMs);
+        Assert.Null(row.HotMs);
+        Assert.Null(row.ArchiveMs);
+        Assert.Null(row.ArchiveFiles);
         var phases = Assert.IsType<string>(row.PhaseSplit).Split(", ");
         Assert.True(phases.Length >= 4, $"phase_split was '{row.PhaseSplit}'");
         Assert.All(phases, p => Assert.EndsWith(" ms", p, StringComparison.Ordinal));
@@ -151,6 +167,57 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
         Assert.Equal(answered, row.AnsweredFrom);
         AssertPhasesAreKept(row);
         Assert.Equal(chainReply.GetProperty("objects").GetRawText(), foldReply.GetProperty("objects").GetRawText());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACallAnsweredFromTheEvidenceCache_NamesTheSamePathInTheReply_TheRowAndTheLogLine(bool withChain)
+    {
+        if (withChain)
+        {
+            await SeedChainAsync();
+        }
+        else
+        {
+            await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, ObjectUsageChainHistory.Generate());
+        }
+
+        ReadLockWaitTally.SlowReadThreshold = TimeSpan.Zero;
+        var cache = new ObjectUsageEvidenceCache();
+
+        AppLogger.DrainBufferedLines();
+        var (readReply, readRow) = await CallWithRowAsync(90, cache);
+        var readLine = Assert.Single(SlowReadLines());
+        var (cachedReply, cachedRow) = await CallWithRowAsync(90, cache);
+        var cachedLine = Assert.Single(SlowReadLines());
+
+        var path = AnsweredFrom(readReply);
+        Assert.NotNull(path);
+        if (withChain)
+        {
+            Assert.Equal("chain", path);
+        }
+        else
+        {
+            Assert.StartsWith("fold: ", path, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(path, AnsweredFrom(cachedReply));
+        Assert.Equal(path, readRow.AnsweredFrom);
+        Assert.Equal(path, cachedRow.AnsweredFrom);
+        Assert.Contains($"answered from {path}", readLine, StringComparison.Ordinal);
+        Assert.Contains($"answered from {path}", cachedLine, StringComparison.Ordinal);
+
+        /* Only the cached call says the evidence came from the cache: the read call read it. */
+        Assert.DoesNotContain("evidence cache", readLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("evidence cache", readRow.PhaseSplit, StringComparison.Ordinal);
+        Assert.Contains("evidence cache", cachedLine, StringComparison.Ordinal);
+        Assert.Contains("evidence cache", cachedRow.PhaseSplit, StringComparison.Ordinal);
+        Assert.Null(cachedRow.HotMs);
+        Assert.Null(cachedRow.ArchiveMs);
+        Assert.Null(cachedRow.ArchiveFiles);
+        Assert.Equal(readReply.GetProperty("objects").GetRawText(), cachedReply.GetProperty("objects").GetRawText());
     }
 
     [Fact]
