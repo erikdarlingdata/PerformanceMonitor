@@ -1258,7 +1258,7 @@ END;", connection);
                 other.ServerName,
                 other.DatabaseName,
                 other.IsEnabled,
-                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, collectorName)?.Enabled ?? false,
+                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false,
                 other.ExcludedDatabases.ToList(),
                 DatabaseScope: null))
             .ToList();
