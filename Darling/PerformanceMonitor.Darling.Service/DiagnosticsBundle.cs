@@ -166,11 +166,11 @@ internal static class DiagnosticsBundle
        listener is reachable from the network. Exposed is the bind the host actually resolves: network and loopback. */
     private static bool McpNetworkExposed(DarlingConfig config)
         => config.Mcp is not null
-            && DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres?.Managed ?? false).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
+            && DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres ?? new PostgresConfig()).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
 
     private static bool WebNetworkExposed(DarlingConfig config)
         => config.Web is not null
-            && DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres?.Managed ?? false).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+            && DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres ?? new PostgresConfig()).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
 
     internal static JsonObject BuildConfigShape(DarlingConfig config)
     {

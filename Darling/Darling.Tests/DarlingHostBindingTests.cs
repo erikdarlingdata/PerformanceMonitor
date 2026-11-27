@@ -35,7 +35,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("2001:db8::5", "2001:db8::/32")]      // a specific IPv6
     public void ResolveBind_Exposed_Managed_TokenAndAllowFrom_IsNetworkAndLoopback(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
@@ -44,7 +44,7 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void ResolveBind_Exposed_Managed_NoToken_IsLoopbackOnly_TokenMissing()
     {
-        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", "192.168.1.0/24", tokenPresent: false, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", "192.168.1.0/24", tokenPresent: false, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.TokenMissing, decision.Reason);
@@ -58,7 +58,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("192.168.1.0")]     // an address with no prefix
     public void ResolveBind_Exposed_Managed_Token_BadAllowFrom_IsLoopbackOnly_AllowFromInvalid(string? allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -70,7 +70,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("*")]          // the postgres listen wildcard, not a Kestrel-bindable IP
     public void ResolveBind_Exposed_Managed_NonIpListen_IsLoopbackOnly_ListenInvalid(string listen)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, "192.168.1.0/24", tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, "192.168.1.0/24", tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.ListenInvalid, decision.Reason);
@@ -81,7 +81,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("2001:db8::5", "192.168.1.0/24")]   // IPv6 listen, IPv4 CIDR
     public void ResolveBind_Exposed_Managed_AllowFromFamilyMismatch_IsLoopbackOnly_AllowFromInvalid(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -99,7 +99,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("2001:db8::5", "2001:db8::/32,fd00::/8")]               // a specific IPv6
     public void ResolveBind_List_EveryEntryMatchesTheListenFamily_IsNetworkAndLoopback(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
@@ -112,7 +112,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("0.0.0.0", "192.168.1.0/24,2001:db8::/32")]
     public void ResolveBind_List_OneWrongFamilyEntry_IsAllowFromInvalid(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -127,7 +127,7 @@ public sealed class DarlingHostBindingTests
         /* F6: Kestrel binds "::" dual-stack, so IPv4 clients DO arrive there (as IPv4-mapped IPv6 addresses,
            which IsRemoteAddressAllowed unwraps) - and the family rule stays strict anyway: "::" takes IPv6
            entries only. */
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -145,7 +145,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("192.168.1.205", "192.168.1.0/24;10.8.0.0/16")]
     public void ResolveBind_List_BadEntry_IsAllowFromInvalid(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -162,7 +162,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("192.168.1.205", "010.0.0.0/8,192.168.1.0/24")]
     public void ResolveBind_List_NonCanonicalIPv4_IsAllowFromInvalid(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -174,7 +174,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("::", "fe80::1%x';calc;'/64")]
     public void ResolveBind_List_IPv6ZoneIndex_IsAllowFromInvalid(string listen, string allowFrom)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
@@ -211,23 +211,71 @@ public sealed class DarlingHostBindingTests
         Assert.DoesNotContain("JSON array", line, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void ResolveBind_Exposed_Byo_IsLoopbackOnly_ManagedModeRequired()
-    {
-        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", "192.168.1.0/24", tokenPresent: true, networkConfigured: true, managed: false);
+    /* ── #9894: an own store (postgres.managed = false) outside a container exposes a surface only when the surface
+       has a login of its own, other than the owner's. Every other precondition applies identically. ── */
 
-        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
+    [Fact]
+    public void ResolveBind_Exposed_Byo_WithDedicatedLogin_IsNetworkExposed()
+    {
+        var decision = DarlingHostBinding.ResolveBind(
+            "192.168.1.205", "192.168.1.0/24", tokenPresent: true, managed: false, inContainer: false, dedicatedLogin: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
     }
 
     [Fact]
-    public void ResolveBind_Byo_ConfiguredButNotExposed_IsManagedModeRequired()
+    public void ResolveBind_Exposed_Byo_WithoutDedicatedLogin_IsLoopbackOnly_DedicatedLoginRequired()
     {
-        /* A loopback/partial network block in BYO is ignored -> the warning fires even when not exposed. */
-        var decision = DarlingHostBinding.ResolveBind(listen: null, allowFrom: "192.168.1.0/24", tokenPresent: false, networkConfigured: true, managed: false);
+        var decision = DarlingHostBinding.ResolveBind("192.168.1.205", "192.168.1.0/24", tokenPresent: true, managed: false);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
+        Assert.Equal(DarlingHostBinding.BindReason.DedicatedLoginRequired, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveBind_Exposed_Byo_WithDedicatedLogin_StillFailsClosed_WithoutTokenOrCidrOrListen()
+    {
+        var noToken = DarlingHostBinding.ResolveBind(
+            "192.168.1.205", "192.168.1.0/24", tokenPresent: false, managed: false, dedicatedLogin: true);
+        Assert.Equal(DarlingHostBinding.BindReason.TokenMissing, noToken.Reason);
+
+        var badCidr = DarlingHostBinding.ResolveBind(
+            "192.168.1.205", "not-a-cidr", tokenPresent: true, managed: false, dedicatedLogin: true);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, badCidr.Reason);
+
+        var badListen = DarlingHostBinding.ResolveBind(
+            "my-host", "192.168.1.0/24", tokenPresent: true, managed: false, dedicatedLogin: true);
+        Assert.Equal(DarlingHostBinding.BindReason.ListenInvalid, badListen.Reason);
+
+        Assert.All(new[] { noToken, badCidr, badListen }, d => Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, d.Mode));
+    }
+
+    [Fact]
+    public void ResolveBind_Byo_NotExposed_IsLoopbackByDefault_WithOrWithoutDedicatedLogin()
+    {
+        /* A block that is not exposed is just the default: an own store has nothing to ignore any more. */
+        foreach (var dedicated in new[] { false, true })
+        {
+            var decision = DarlingHostBinding.ResolveBind(
+                listen: null, allowFrom: "192.168.1.0/24", tokenPresent: false, managed: false, dedicatedLogin: dedicated);
+
+            Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+            Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
+        }
+    }
+
+    [Fact]
+    public void ResolveBind_Managed_AndContainer_DoNotNeedADedicatedLogin()
+    {
+        var managed = DarlingHostBinding.ResolveBind(
+            "192.168.1.205", "192.168.1.0/24", tokenPresent: true, managed: true, inContainer: false, dedicatedLogin: false);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, managed.Reason);
+
+        var container = DarlingHostBinding.ResolveBind(
+            "0.0.0.0", "10.0.0.0/8", tokenPresent: true, managed: false, inContainer: true, dedicatedLogin: false);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, container.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, container.Reason);
     }
 
     /* ── the #1804 container gate: a containerized BYO deployment (compose) is exposure-capable — the
@@ -238,7 +286,7 @@ public sealed class DarlingHostBindingTests
     public void ResolveBind_Exposed_ByoInContainer_IsNetworkExposed()
     {
         var decision = DarlingHostBinding.ResolveBind(
-            "0.0.0.0", "10.0.0.0/8", tokenPresent: true, networkConfigured: true, managed: false, inContainer: true);
+            "0.0.0.0", "10.0.0.0/8", tokenPresent: true, managed: false, inContainer: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
@@ -249,37 +297,25 @@ public sealed class DarlingHostBindingTests
     {
         /* The container gate relaxes ONLY the managed requirement — never the token or the CIDR. */
         var noToken = DarlingHostBinding.ResolveBind(
-            "0.0.0.0", "10.0.0.0/8", tokenPresent: false, networkConfigured: true, managed: false, inContainer: true);
+            "0.0.0.0", "10.0.0.0/8", tokenPresent: false, managed: false, inContainer: true);
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, noToken.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.TokenMissing, noToken.Reason);
 
         var badCidr = DarlingHostBinding.ResolveBind(
-            "0.0.0.0", "not-a-cidr", tokenPresent: true, networkConfigured: true, managed: false, inContainer: true);
+            "0.0.0.0", "not-a-cidr", tokenPresent: true, managed: false, inContainer: true);
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, badCidr.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, badCidr.Reason);
     }
 
     [Fact]
-    public void ResolveBind_ByoInContainer_NotExposed_NoManagedModeNotice()
+    public void ResolveBind_ByoInContainer_NotExposed_IsLoopbackByDefault()
     {
-        /* In a container the network block is HONORED, so a not-exposed block is just the default —
-           the "network.* is ignored" notice would be a lie there. */
+        /* In a container the network block is HONORED, so a not-exposed block is just the default. */
         var decision = DarlingHostBinding.ResolveBind(
-            listen: null, allowFrom: "10.0.0.0/8", tokenPresent: false, networkConfigured: true, managed: false, inContainer: true);
+            listen: null, allowFrom: "10.0.0.0/8", tokenPresent: false, managed: false, inContainer: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
-    }
-
-    [Fact]
-    public void ResolveBind_Exposed_ByoOutsideContainer_StaysManagedModeRequired()
-    {
-        /* The uncontained BYO rule is byte-for-byte unchanged — inContainer defaults to false. */
-        var decision = DarlingHostBinding.ResolveBind(
-            "192.168.1.205", "192.168.1.0/24", tokenPresent: true, networkConfigured: true, managed: false, inContainer: false);
-
-        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
     }
 
     [Theory]
@@ -287,7 +323,7 @@ public sealed class DarlingHostBindingTests
     [InlineData("127.0.0.5")]  // anywhere in 127.0.0.0/8
     public void ResolveBind_LoopbackListen_IsLoopbackByDefault(string listen)
     {
-        var decision = DarlingHostBinding.ResolveBind(listen, "192.168.1.0/24", tokenPresent: true, networkConfigured: true, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen, "192.168.1.0/24", tokenPresent: true, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
@@ -296,7 +332,7 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void ResolveBind_NoNetworkBlock_IsLoopbackByDefault()
     {
-        var decision = DarlingHostBinding.ResolveBind(listen: null, allowFrom: null, tokenPresent: false, networkConfigured: false, managed: true);
+        var decision = DarlingHostBinding.ResolveBind(listen: null, allowFrom: null, tokenPresent: false, managed: true);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
@@ -400,15 +436,15 @@ public sealed class DarlingHostBindingTests
     public void FixedTimeTokenEquals_MatchesOnlyExact(string? presented, string? expected, bool result)
         => Assert.Equal(result, DarlingHostBinding.FixedTimeTokenEquals(presented, expected));
 
-    /* ---- MapBindReasonSeverity: degrades are Critical, BYO is Warning, non-degrade is silent ---- */
+    /* ---- MapBindReasonSeverity: degrades (the missing dedicated login among them) are Critical, non-degrade is silent ---- */
 
     [Fact]
-    public void MapBindReasonSeverity_DegradesAreCritical_ByoIsWarning_NonDegradeIsSilent()
+    public void MapBindReasonSeverity_DegradesAreCritical_NonDegradeIsSilent()
     {
         Assert.Equal(LogLevel.Critical, DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.ListenInvalid));
         Assert.Equal(LogLevel.Critical, DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.TokenMissing));
         Assert.Equal(LogLevel.Critical, DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.AllowFromInvalid));
-        Assert.Equal(LogLevel.Warning, DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.ManagedModeRequired));
+        Assert.Equal(LogLevel.Critical, DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.DedicatedLoginRequired));
         Assert.Null(DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.NetworkExposed));
         Assert.Null(DarlingHostBinding.MapBindReasonSeverity(DarlingHostBinding.BindReason.LoopbackByDefault));
     }
@@ -424,7 +460,7 @@ public sealed class DarlingHostBindingTests
 
         Assert.Equal((int)DarlingHostBinding.BindReason.LoopbackByDefault, (int)DarlingMcpHostService.McpBindReason.LoopbackByDefault);
         Assert.Equal((int)DarlingHostBinding.BindReason.NetworkExposed, (int)DarlingMcpHostService.McpBindReason.NetworkExposed);
-        Assert.Equal((int)DarlingHostBinding.BindReason.ManagedModeRequired, (int)DarlingMcpHostService.McpBindReason.ManagedModeRequired);
+        Assert.Equal((int)DarlingHostBinding.BindReason.DedicatedLoginRequired, (int)DarlingMcpHostService.McpBindReason.DedicatedLoginRequired);
         Assert.Equal((int)DarlingHostBinding.BindReason.ListenInvalid, (int)DarlingMcpHostService.McpBindReason.ListenInvalid);
         Assert.Equal((int)DarlingHostBinding.BindReason.TokenMissing, (int)DarlingMcpHostService.McpBindReason.TokenMissing);
         Assert.Equal((int)DarlingHostBinding.BindReason.AllowFromInvalid, (int)DarlingMcpHostService.McpBindReason.AllowFromInvalid);

@@ -2089,8 +2089,7 @@ public sealed class McpNetworkConfig
     public string? HostName { get; set; }
 
     /// <summary>
-    /// True when any field is set, the token included. NOT the same as "exposed", and NOT the BYO "network.* is
-    /// ignored" test: a token is honored in bring-your-own mode, so that warning uses <see cref="ByoIgnoredFields"/>.
+    /// True when any field is set, the token included. NOT the same as "exposed".
     /// </summary>
     [JsonIgnore]
     public bool IsConfigured =>
@@ -2100,25 +2099,6 @@ public sealed class McpNetworkConfig
         || !string.IsNullOrWhiteSpace(Token)
         || !string.IsNullOrWhiteSpace(HostName)
         || (Tls?.IsConfigured ?? false);
-
-    /// <summary>
-    /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores,
-    /// for the start-up warning. The token and encrypted token are NOT here: the MCP server on loopback uses
-    /// them, and the write tools need them. Names are the JSON keys, in a fixed order.
-    /// </summary>
-    [JsonIgnore]
-    public IReadOnlyList<string> ByoIgnoredFields
-    {
-        get
-        {
-            var fields = new List<string>();
-            if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
-            if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
-            if (!string.IsNullOrWhiteSpace(HostName)) { fields.Add("hostName"); }
-            if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
-            return fields;
-        }
-    }
 
     /// <summary>
     /// The bare DNS name a raw <see cref="HostName"/> stands for, or null when there is none to use (#5288). PURE:
@@ -2672,8 +2652,7 @@ public sealed class WebNetworkConfig
     public List<WebTokenEntry>? Tokens { get; set; }
 
     /// <summary>
-    /// True when any field is set, the tokens included. NOT the same as "exposed", and NOT the BYO "network.* is
-    /// ignored" test: the tokens are honored in bring-your-own mode, so that warning uses <see cref="ByoIgnoredFields"/>.
+    /// True when any field is set, the tokens included. NOT the same as "exposed".
     /// </summary>
     [JsonIgnore]
     public bool IsConfigured =>
@@ -2685,28 +2664,6 @@ public sealed class WebNetworkConfig
         || (Oidc?.IsConfigured ?? false)
         || (TrustedProxies?.Length ?? 0) > 0
         || HasNamedTokens;
-
-    /// <summary>
-    /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores, for
-    /// the start-up warning. The bind ladder never exposes the dashboard there, so the host reads <c>tls</c>, <c>oidc</c>
-    /// and <c>trustedProxies</c> only on an exposed start. The <c>oidc</c> entry is worded "oidc (the sign-in provider)" because
-    /// <c>oidc.tokenSignIn</c> is still read in this mode and <c>off</c> stops the loopback dashboard. The shared token, <c>encryptedToken</c> and <c>tokens</c> are
-    /// NOT here: they gate the loopback dashboard. Names are the JSON keys, in a fixed order.
-    /// </summary>
-    [JsonIgnore]
-    public IReadOnlyList<string> ByoIgnoredFields
-    {
-        get
-        {
-            var fields = new List<string>();
-            if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
-            if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
-            if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
-            if (Oidc?.IsConfigured ?? false) { fields.Add("oidc (the sign-in provider)"); }
-            if ((TrustedProxies?.Length ?? 0) > 0) { fields.Add("trustedProxies"); }
-            return fields;
-        }
-    }
 
     /// <summary>True when <see cref="Tokens"/> has an entry, served or not.</summary>
     [JsonIgnore]

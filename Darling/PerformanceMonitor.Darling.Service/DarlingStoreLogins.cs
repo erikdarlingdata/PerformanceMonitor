@@ -770,6 +770,109 @@ internal static class DarlingStoreLogins
     }
 
     /// <summary>
+    /// The user names a configured connection string and the owner's connection string log in as, read the one way every
+    /// comparison of the two reads them (Npgsql's own parse). False when either string is malformed: that fails at the
+    /// first connect with Npgsql's message, which names the problem better than a guess here could.
+    /// </summary>
+    private static bool TryReadLoginUsers(
+        string configuredConnectionString, string ownerConnectionString, out string? configuredUser, out string? ownerUser)
+    {
+        try
+        {
+            configuredUser = new NpgsqlConnectionStringBuilder(configuredConnectionString).Username;
+            ownerUser = new NpgsqlConnectionStringBuilder(ownerConnectionString).Username;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            configuredUser = null;
+            ownerUser = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #9894: whether a surface of a store the service does not manage has its own login to connect with: its dedicated connection
+    /// string (<c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>) is set, resolves, and names a user other than
+    /// the owner's (<c>postgres.connectionString</c>). The bind decision outside a container exposes the surface only then. The user
+    /// names are compared the way <see cref="ConfiguredLoginWarning"/> compares them (ordinal), and a reference that cannot resolve or a
+    /// malformed string counts as no dedicated login: the host start logs the resolve failure itself, and the surface stays on loopback.
+    /// </summary>
+    internal static bool HasDedicatedLogin(Surface surface, PostgresConfig postgres)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var (_, setting, _) = Describe(surface);
+        var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        string configured;
+        try
+        {
+            configured = DarlingSecretSource.Resolve(raw, setting);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace(configured)
+            && TryReadLoginUsers(configured, postgres.ConnectionString, out var configuredUser, out var ownerUser)
+            && !string.IsNullOrEmpty(configuredUser)
+            && !string.Equals(configuredUser, ownerUser, StringComparison.Ordinal);
+    }
+
+    /* #9894: the surfaces whose container line has been logged, so a supervisor retry does not repeat it. */
+    private static readonly ConcurrentDictionary<Surface, bool> s_containerExposureLogged = new();
+
+    /// <summary>
+    /// #9894: in a container with a store the service does not manage, a surface that is exposed to the network keeps its exposure
+    /// (the compose port mapping is the boundary), and when its dedicated connection string is unset or names the owner's login it
+    /// says so once at Critical, with the text the refusal outside a container uses minus the refusal. Does nothing for the
+    /// bundled store, outside a container, for a surface that is not exposed, or for one that has its own login.
+    /// <paramref name="inContainer"/> is the ambient container marker unless a test passes one.
+    /// </summary>
+    internal static void ReportContainerExposureWithoutDedicatedLogin(
+        Surface surface, PostgresConfig postgres, bool exposed, ILogger logger, bool? inContainer = null)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        if (!exposed || postgres.Managed || !(inContainer ?? DarlingHostBinding.IsRunningInContainer)
+            || HasDedicatedLogin(surface, postgres)
+            || !s_containerExposureLogged.TryAdd(surface, true))
+        {
+            return;
+        }
+
+        logger.LogCritical("{Message}", DedicatedLoginRequiredText(surface, refusing: false));
+    }
+
+    /// <summary>Lets a test see the container line again.</summary>
+    internal static void ResetContainerExposureLogForTests() => s_containerExposureLogged.Clear();
+
+    /// <summary>
+    /// #9894: the line for a surface that is asked to listen on the network on a store the service does not manage, without a login of its
+    /// own. Outside a container the surface stays on loopback (<paramref name="refusing"/>); in a container the exposure is honored and
+    /// the line says the same without the refusal. Critical either way. Surface-specific: names the setting to set, the role the roles
+    /// script creates for it, and where the script is described.
+    /// </summary>
+    internal static string DedicatedLoginRequiredText(Surface surface, bool refusing)
+    {
+        var (what, setting, role) = Describe(surface);
+        var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but {setting} is not set to a login "
+            + "other than the store owner: it is unset, or it logs in as the user postgres.connectionString uses"
+            + (refusing ? ", so network exposure is refused and it binds loopback-only. " : ". ")
+            + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
+            + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
+            + "and make sure that login is not the owner's.";
+    }
+
+    /// <summary>
     /// What a configured login needs said about it (#3914), or null: that it is the owner after all, which gives up
     /// the same three things as leaving it unset; or that it names a role the service provisions on this compose
     /// store and re-keys from its own credential file every start, so a password set by hand stops working.
@@ -778,14 +881,7 @@ internal static class DarlingStoreLogins
         Surface surface, string configuredConnectionString, string ownerConnectionString, ComposeStoreVerdict? verdict,
         string? whatOverride = null)
     {
-        string? configuredUser;
-        string? ownerUser;
-        try
-        {
-            configuredUser = new NpgsqlConnectionStringBuilder(configuredConnectionString).Username;
-            ownerUser = new NpgsqlConnectionStringBuilder(ownerConnectionString).Username;
-        }
-        catch (ArgumentException)
+        if (!TryReadLoginUsers(configuredConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser))
         {
             /* A malformed string fails at the first connect with Npgsql's own message, which names the problem
                better than a guess here could. */

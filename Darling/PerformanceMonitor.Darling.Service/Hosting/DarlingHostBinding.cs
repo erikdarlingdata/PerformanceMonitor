@@ -66,11 +66,11 @@ internal static class DarlingHostBinding
         /// <summary>All preconditions met: non-loopback listen + managed + token present + valid allowFrom CIDR.</summary>
         NetworkExposed,
 
-        /// <summary>network.* is set but postgres.managed = false and the process is not containerized —
-        /// network exposure is managed-mode-or-container only (a warning). In a container (#1804) the
-        /// compose port mapping is the boundary the BYO reverse-proxy rule was standing in for, and a
-        /// loopback bind would be unreachable through it, so exposure is honored there.</summary>
-        ManagedModeRequired,
+        /// <summary>#9894: a non-loopback listen with postgres.managed = false outside a container, and no login of the surface's own:
+        /// postgres.webConnectionString / postgres.mcpConnectionString is unset, or names the store owner's login. Network exposure
+        /// there needs the dedicated login, so the surface stays on loopback (Critical). In a container (#1804) the compose port
+        /// mapping is the boundary and exposure is honored, with the same line logged.</summary>
+        DedicatedLoginRequired,
 
         /// <summary>Exposed + managed but the listen value is not a parseable IP — fail-closed to loopback.</summary>
         ListenInvalid,
@@ -102,43 +102,34 @@ internal static class DarlingHostBinding
     /// PURE resolution of an effective host bind from the surface-agnostic inputs. Returns
     /// <see cref="BindMode.NetworkAndLoopback"/> ONLY when <paramref name="listen"/> is a genuine network
     /// (non-loopback) address (via <see cref="DarlingNetwork.IsExposedListenAddress"/> — so <c>127.0.0.1</c>
-    /// stays loopback, never a network bind/collision) that ALSO parses as an IP, AND <paramref name="managed"/>
-    /// is true, AND a bearer token is present (<paramref name="tokenPresent"/> — presence only; the host
+    /// stays loopback, never a network bind/collision) that ALSO parses as an IP, AND the store allows it
+    /// (<paramref name="managed"/> is true, or the process is in a container, or <paramref name="dedicatedLogin"/> is true: #9894, an own
+    /// store outside a container, whose surface has a connection string of its own naming a login other than the owner's), AND a bearer token is present (<paramref name="tokenPresent"/> — presence only; the host
     /// decrypts later), AND <paramref name="allowFrom"/> is a valid CIDR list (#5288: one CIDR, or CIDRs separated
     /// by commas — see <see cref="CidrAllowList"/>) whose EVERY entry is of the SAME address family as the
     /// listen. Otherwise loopback-only with the specific reason. Never throws; never consults a logger.
-    /// <paramref name="networkConfigured"/> is "the surface's network block has any field set" — used only for
-    /// the BYO "network.* is ignored" notice (the network path never runs in BYO).
     /// </summary>
     internal static BindDecision ResolveBind(
-        string? listen, string? allowFrom, bool tokenPresent, bool networkConfigured, bool managed,
-        bool inContainer = false)
+        string? listen, string? allowFrom, bool tokenPresent, bool managed,
+        bool inContainer = false, bool dedicatedLogin = false)
     {
         var exposed = DarlingNetwork.IsExposedListenAddress(listen);
 
-        /* #1804: a containerized BYO deployment (compose) is exposure-capable — the port mapping is the
-           boundary the BYO reverse-proxy rule was standing in for, and a loopback bind would be dead
-           through it. The token/CIDR preconditions below apply identically either way. */
-        var exposureCapable = managed || inContainer;
-
+        /* Not exposed = the secure default. */
         if (!exposed)
         {
-            /* Not exposed = the secure default. The one exception worth a word: a BYO store with a network
-               block set at all (even a loopback/partial one) is ignored -> the managed-mode notice. */
-            if (!exposureCapable && networkConfigured)
-            {
-                return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
-            }
-
             return new BindDecision(BindMode.LoopbackOnly, BindReason.LoopbackByDefault);
         }
 
-        /* Exposed. Managed-or-container only: uncontained BYO never binds the network path, and this
-           dominates a missing/invalid listen/token/allowFrom so the operator sees the actionable
-           "managed only" notice first. */
-        if (!exposureCapable)
+        /* Exposed. The bundled store and a container (#1804: the compose port mapping is the boundary, and a loopback bind
+           would be dead through it) expose under the token and CIDR preconditions below. A store the service does not
+           manage, outside a container (#9894), exposes the same way only when the surface has a login of its own, one
+           other than the owner's: the owner login holds more than a network-facing surface should hold. Without it the
+           surface stays on loopback, and this dominates a missing/invalid listen/token/allowFrom so the operator sees
+           the actionable "set the dedicated login" line first. */
+        if (!managed && !inContainer && !dedicatedLogin)
         {
-            return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
+            return new BindDecision(BindMode.LoopbackOnly, BindReason.DedicatedLoginRequired);
         }
 
         /* The listen must be a parseable IP. IsExposedListenAddress treats a non-IP value (localhost, a
@@ -178,9 +169,8 @@ internal static class DarlingHostBinding
     /// <summary>
     /// PURE severity map for a <see cref="ResolveBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="BindReason.ListenInvalid"/>/<see cref="BindReason.TokenMissing"/>/
-    /// <see cref="BindReason.AllowFromInvalid"/>) are <see cref="LogLevel.Critical"/>, the BYO "ignored"
-    /// notice (<see cref="BindReason.ManagedModeRequired"/>) is <see cref="LogLevel.Warning"/>, and the
-    /// non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
+    /// <see cref="BindReason.AllowFromInvalid"/>/<see cref="BindReason.DedicatedLoginRequired"/>) are
+    /// <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
     /// are silent (null).
     /// </summary>
     internal static LogLevel? MapBindReasonSeverity(BindReason reason) => reason switch
@@ -188,7 +178,7 @@ internal static class DarlingHostBinding
         BindReason.ListenInvalid => LogLevel.Critical,
         BindReason.TokenMissing => LogLevel.Critical,
         BindReason.AllowFromInvalid => LogLevel.Critical,
-        BindReason.ManagedModeRequired => LogLevel.Warning,
+        BindReason.DedicatedLoginRequired => LogLevel.Critical,
         _ => null,
     };
 

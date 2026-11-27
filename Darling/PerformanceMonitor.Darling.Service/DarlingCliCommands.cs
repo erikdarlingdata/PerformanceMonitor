@@ -1016,7 +1016,7 @@ public static partial class DarlingCliCommands
             return findings;
         }
 
-        var exposed = DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres.Managed, inContainer).Mode
+        var exposed = DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres, inContainer).Mode
             == DarlingHostBinding.BindMode.NetworkAndLoopback;
         if (DarlingWebHostService.TokenSignInStartProblem(oidc.TokenSignIn, oidc.IsConfigured, exposed, oidcClientPresent: oidc.IsConfigured) is { } problem)
         {
@@ -3053,13 +3053,13 @@ public static partial class DarlingCliCommands
            service's own truth (including any fail-closed degrade), not the wizard's guess. */
         var (storeCertPath, storeKeyPath) = ResolveStoreCertPaths(postgres);
         var storeNow = DarlingManagedPostgres.ResolveNetworkExposure(postgres.Network, storeCertPath, storeKeyPath);
-        var mcpNow = DarlingMcpHostService.ResolveMcpBind(config.Mcp, postgres.Managed);
+        var mcpNow = DarlingMcpHostService.ResolveMcpBind(config.Mcp, postgres);
         var mcpNowExposed = mcpNow.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
         var mcpNowDegrade =
             mcpNow.Reason is DarlingMcpHostService.McpBindReason.NetworkExposed or DarlingMcpHostService.McpBindReason.LoopbackByDefault
                 ? null
                 : McpDegradeText(mcpNow.Reason, config.Mcp);
-        var webNow = DarlingWebHostService.ResolveWebBind(config.Web, postgres.Managed);
+        var webNow = DarlingWebHostService.ResolveWebBind(config.Web, postgres);
         var webNowExposed = webNow.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var webNowDegrade =
             webNow.Reason is DarlingHostBinding.BindReason.NetworkExposed or DarlingHostBinding.BindReason.LoopbackByDefault
@@ -3099,18 +3099,21 @@ public static partial class DarlingCliCommands
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
         output.WriteLine();
 
-        /* BYO guard — exposure is managed-mode only (same refusal shape as PrintViewerConnectionAsync). */
+        /* BYO guard — the wizard writes the bundled store's exposure (same refusal shape as PrintViewerConnectionAsync). */
         if (!postgres.Managed)
         {
-            output.WriteLine("Network exposure is MANAGED-MODE ONLY.");
-            output.WriteLine("This darling.json uses bring-your-own PostgreSQL (postgres.connectionString), so your own");
-            output.WriteLine("PostgreSQL / reverse proxy governs network exposure — the wizard cannot open the endpoints here.");
+            output.WriteLine("The wizard configures network exposure for the bundled store only.");
+            output.WriteLine("This darling.json uses bring-your-own PostgreSQL (postgres.connectionString). Your own PostgreSQL governs the");
+            output.WriteLine("store's exposure, and the wizard cannot open the MCP or web endpoints here. To expose one by hand, set its");
+            output.WriteLine("network block (listen, allowFrom and a token) in darling.json, and set postgres.mcpConnectionString or");
+            output.WriteLine("postgres.webConnectionString to a login other than the owner's: the mcp or web role that");
+            output.WriteLine("provision-roles.sql creates. Without that login the endpoint stays on loopback.");
 
-            /* #9571: a token alone is honored here, so only the fields this mode ignores make a block worth offering to remove. */
+            /* The store's own postgres.network block is ignored here, and the mcp and web exposure keys are the ones this verb removes. */
             var hasBlocks = (postgres.Network?.IsConfigured ?? false)
-                || (config.Mcp.Network?.ByoIgnoredFields.Count > 0)
-                || (config.Web.Network?.ByoIgnoredFields.Count > 0);
-            if (hasBlocks && AskYesNo(input, output, "A network block is present but IGNORED in this mode. Remove it from darling.json?", defaultYes: false))
+                || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Listen) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.AllowFrom)
+                || !string.IsNullOrWhiteSpace(config.Web.Network?.Listen) || !string.IsNullOrWhiteSpace(config.Web.Network?.AllowFrom);
+            if (hasBlocks && AskYesNo(input, output, "Network exposure is set in darling.json (the postgres.network block is ignored in this mode). Remove it, so the MCP and web endpoints go back to loopback?", defaultYes: false))
             {
                 return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);
             }
@@ -3268,7 +3271,7 @@ public static partial class DarlingCliCommands
 
         if (mcp is not null)
         {
-            var check = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres.Managed);
+            var check = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres);
             if (check.Mode != DarlingMcpHostService.McpBindMode.NetworkAndLoopback)
             {
                 error.WriteLine($"Internal error: the MCP block would fail-close ({McpDegradeText(check.Reason, reparsed.Mcp)}). No changes were written.");
@@ -3278,7 +3281,7 @@ public static partial class DarlingCliCommands
 
         if (web is not null)
         {
-            var check = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed);
+            var check = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres);
             if (check.Mode != DarlingHostBinding.BindMode.NetworkAndLoopback)
             {
                 error.WriteLine($"Internal error: the web block would fail-close ({WebDegradeText(check.Reason, reparsed.Web)}). No changes were written.");
@@ -3726,8 +3729,8 @@ public static partial class DarlingCliCommands
             "no access token is set (the wizard should have supplied one — this is unexpected).",
         DarlingHostBinding.BindReason.AllowFromInvalid =>
             $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
-        DarlingHostBinding.BindReason.ManagedModeRequired =>
-            "network exposure is managed-mode only.",
+        DarlingHostBinding.BindReason.DedicatedLoginRequired =>
+            DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Web, refusing: true),
         _ => "the web bind resolver rejected these values.",
     };
 
@@ -3740,8 +3743,8 @@ public static partial class DarlingCliCommands
             "no bearer token is set (the wizard should have supplied one — this is unexpected).",
         DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
             $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
-        DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
-            "network exposure is managed-mode only.",
+        DarlingMcpHostService.McpBindReason.DedicatedLoginRequired =>
+            DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true),
         _ => "the MCP resolver rejected these values.",
     };
 
@@ -3784,9 +3787,9 @@ public static partial class DarlingCliCommands
 
         var (certPath, keyPath) = ResolveStoreCertPaths(reparsed.Postgres);
         var storeStillExposed = DarlingManagedPostgres.ResolveNetworkExposure(reparsed.Postgres.Network, certPath, keyPath).Exposed;
-        var mcpStillExposed = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres.Managed).Mode
+        var mcpStillExposed = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres).Mode
             == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
-        var webStillExposed = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed).Mode
+        var webStillExposed = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres).Mode
             == DarlingHostBinding.BindMode.NetworkAndLoopback;
         if (storeStillExposed || mcpStillExposed || webStillExposed)
         {
@@ -4305,10 +4308,9 @@ public static partial class DarlingCliCommands
     /// </summary>
     private static string LoopbackScheme(bool mcp, DarlingConfig config)
     {
-        var managed = config.Postgres.Managed;
         var exposed = mcp
-            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback
-            : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback
+            : DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
         var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
         /* A block Describe refuses (a store name that is a path, say) is not served: the listener stays on loopback http. */
@@ -4890,6 +4892,7 @@ public static partial class DarlingCliCommands
     {
         var plans = new List<FirewallRulePlan>();
         var managed = config.Postgres?.Managed ?? false;
+        var postgresConfig = config.Postgres ?? new PostgresConfig();
 
         if (managed && config.Postgres is not null)
         {
@@ -4912,7 +4915,7 @@ public static partial class DarlingCliCommands
            port the endpoint serves. A null store answer resolves to the file value with Origin = File, which the
            describer turns into the loud fallback disclosure rather than a silent guess. */
         var mcpToggle = DarlingHostBinding.ResolveEndpointToggle(mcpStore, config.Mcp.Enabled, config.Mcp.Port);
-        var mcpBind = DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed);
+        var mcpBind = DarlingMcpHostService.ResolveMcpBind(config.Mcp, postgresConfig);
         var mcpExposed = mcpBind.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
         var mcpOpen = mcpExposed && mcpToggle.Enabled;
         plans.Add(new FirewallRulePlan(
@@ -4936,7 +4939,7 @@ public static partial class DarlingCliCommands
             SweepOtherPorts: !mcpExposed || mcpToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
 
         var webToggle = DarlingHostBinding.ResolveEndpointToggle(webStore, config.Web.Enabled, config.Web.Port);
-        var webBind = DarlingWebHostService.ResolveWebBind(config.Web, managed);
+        var webBind = DarlingWebHostService.ResolveWebBind(config.Web, postgresConfig);
         var webExposed = webBind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var webOpen = webExposed && webToggle.Enabled;
         plans.Add(new FirewallRulePlan(
@@ -5015,8 +5018,9 @@ public static partial class DarlingCliCommands
                 $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
                 $"{section}.network.allowFrom is missing, is not a valid CIDR list (every entry in CIDR form, with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index), or has an entry whose address family does not match listen, so the service fail-closes this endpoint to loopback",
-            DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
-                $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
+            DarlingMcpHostService.McpBindReason.DedicatedLoginRequired =>
+                DarlingStoreLogins.DedicatedLoginRequiredText(
+                    section == "mcp" ? DarlingStoreLogins.Surface.Mcp : DarlingStoreLogins.Surface.Web, refusing: true),
             _ => null,
         };
 

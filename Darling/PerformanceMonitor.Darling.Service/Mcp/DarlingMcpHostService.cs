@@ -563,8 +563,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* Decide the effective bind PURELY, then map the reason -> severity here (Round-4 #7: the caller,
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
-        var bind = ResolveMcpBind(config.Mcp, config.Postgres.Managed);
+        var bind = ResolveMcpBind(config.Mcp, config.Postgres);
         LogBindReason(config.Mcp, bind.Reason);
+        DarlingStoreLogins.ReportContainerExposureWithoutDedicatedLogin(
+            DarlingStoreLogins.Surface.Mcp, config.Postgres, bind.Mode == McpBindMode.NetworkAndLoopback, _logger);
 
         try
         {
@@ -2424,7 +2426,8 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>WHY the bind resolved as it did — the caller maps this to a severity (Round-4 #7):
     /// <see cref="LoopbackByDefault"/>/<see cref="NetworkExposed"/> are non-degrade (no critical log),
     /// <see cref="TokenMissing"/>/<see cref="AllowFromInvalid"/> are fail-closed degrades (LogCritical),
-    /// and <see cref="ManagedModeRequired"/> is the BYO "ignored" notice (LogWarning, D-BYO).</summary>
+    /// and <see cref="DedicatedLoginRequired"/> is an own store (outside a container) asked to listen on the network without a login of its
+    /// own (LogCritical, #9894).</summary>
     internal enum McpBindReason
     {
         /// <summary>No network block, or a loopback/absent listen — the byte-for-byte-today loopback server.</summary>
@@ -2433,8 +2436,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         /// <summary>All preconditions met: non-loopback listen + managed + token present + valid allowFrom CIDR.</summary>
         NetworkExposed,
 
-        /// <summary>network.* is set but postgres.managed = false — network exposure is managed-mode only (D-BYO warning).</summary>
-        ManagedModeRequired,
+        /// <summary>#9894: a non-loopback listen with postgres.managed = false outside a container and no postgres.mcpConnectionString that
+        /// names a login other than the owner's — fail-closed to loopback (LogCritical).</summary>
+        DedicatedLoginRequired,
 
         /// <summary>Exposed + managed but the listen value is not a parseable IP (localhost/hostname/"*") — fail-closed to loopback (LogCritical).</summary>
         ListenInvalid,
@@ -2456,7 +2460,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// LADDER itself (exposed classifier, managed gate, listen/token/allowFrom validation, family match) now
     /// lives ONCE in <see cref="DarlingHostBinding"/>; this method's contract is byte-for-byte what it was.
     /// </summary>
-    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed, bool? inContainer = null)
+    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed, bool? inContainer = null, bool dedicatedLogin = false)
     {
         var network = mcp.Network;
         var decision = DarlingHostBinding.ResolveBind(
@@ -2464,15 +2468,28 @@ public sealed class DarlingMcpHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: mcp.HasNamedTokens || (network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token))),
-            /* #9571: a token alone is honored in bring-your-own mode, so only the fields that mode ignores count here. */
-            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
-            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
+            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin: dedicatedLogin);
 
         /* The nested McpBind* enums mirror DarlingHostBinding's BindMode/BindReason 1:1 (same member order,
            pinned equal by DarlingHostBindingTests), so a numeric cast maps them without a per-value switch. */
         return new McpBindDecision((McpBindMode)(int)decision.Mode, (McpBindReason)(int)decision.Reason);
+    }
+
+    /// <summary>
+    /// The effective MCP bind for a config's store (#9894): <see cref="ResolveMcpBind(McpConfig, bool, bool?, bool)"/> with the store's
+    /// mode and, for a store the service does not manage, whether <c>postgres.mcpConnectionString</c> names a login other than the owner's
+    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>). Every caller that has the store's config calls this one, so the answer a
+    /// wizard, a report and the host start give for the same file cannot differ.
+    /// </summary>
+    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, PostgresConfig postgres, bool? inContainer = null)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        return ResolveMcpBind(
+            mcp, postgres.Managed, inContainer,
+            dedicatedLogin: !postgres.Managed && DarlingStoreLogins.HasDedicatedLogin(DarlingStoreLogins.Surface.Mcp, postgres));
     }
 
     /// <summary>
@@ -2569,9 +2586,8 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// PURE severity map for a <see cref="ResolveMcpBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="McpBindReason.ListenInvalid"/>/<see cref="McpBindReason.TokenMissing"/>/
-    /// <see cref="McpBindReason.AllowFromInvalid"/>) are <see cref="LogLevel.Critical"/>, the BYO "ignored"
-    /// notice (<see cref="McpBindReason.ManagedModeRequired"/>) is <see cref="LogLevel.Warning"/>, and the
-    /// non-degrade reasons (<see cref="McpBindReason.NetworkExposed"/>/<see cref="McpBindReason.LoopbackByDefault"/>)
+    /// <see cref="McpBindReason.AllowFromInvalid"/>/<see cref="McpBindReason.DedicatedLoginRequired"/>) are
+    /// <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="McpBindReason.NetworkExposed"/>/<see cref="McpBindReason.LoopbackByDefault"/>)
     /// are silent (null). <see cref="LogBindReason"/> drives its emit level off this, so the level and the
     /// message can never diverge.
     /// </summary>
@@ -2616,14 +2632,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                     mcp.Network?.AllowFrom);
                 break;
 
-            case McpBindReason.ManagedModeRequired:
-                /* #9571: name the fields that are ignored. A token alone never lands here. */
-                var ignored = mcp.Network?.ByoIgnoredFields ?? [];
-                _logger.Log(level.Value,
-                    "{Fields} set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.",
-                    string.Join(", ", ignored.Select(f => "mcp.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
+            case McpBindReason.DedicatedLoginRequired:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true));
                 break;
 
             default:
