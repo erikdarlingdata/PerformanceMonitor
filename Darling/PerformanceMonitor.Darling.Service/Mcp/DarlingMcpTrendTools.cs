@@ -928,7 +928,7 @@ public sealed class DarlingMcpTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
-                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs PerformanceMonitor.Darling.Service.exe --backfill-rollups.",
+                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs " + OperatorVerbForm.CommandHere("--backfill-rollups") + ".",
                         disclosure, databases), cancellationToken, startUtc);
                 }
 
