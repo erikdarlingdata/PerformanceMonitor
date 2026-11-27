@@ -479,21 +479,28 @@ WHERE id = $1";
     /// <summary>Retention for <c>query_tag_sightings</c>: removes rows not seen since <paramref name="retentionDays"/> ago
     /// (by <c>last_seen</c>) and returns how many. Only this table is aged; tags, assignments and rules are configuration.
     /// A background sweep, so it is not refused while a restore is pending (it touches no preserved table).</summary>
-    public async Task<int> PurgeOldQueryTagSightingsAsync(int retentionDays = QueryTagSightingRetentionDays, DateTime? utcNow = null)
+    public async Task<int> PurgeOldQueryTagSightingsAsync(int? retentionDays = null, DateTime? utcNow = null)
     {
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM query_tag_sightings WHERE last_seen < $1";
-        command.Parameters.Add(new DuckDBParameter { Value = (utcNow ?? DateTime.UtcNow).AddDays(-retentionDays) });
+        command.Parameters.Add(new DuckDBParameter { Value = (utcNow ?? DateTime.UtcNow).AddDays(-(retentionDays ?? QueryTagSightingRetentionDays)) });
         return await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>
-    /// How long a sighting is kept after it was last seen. Lite keeps collected rows hot for
-    /// <see cref="ArchiveService.HotDataDays"/> days and the archive for <see cref="RetentionService.ArchiveRetentionMonths"/>
-    /// months, so a sighting outlives the data that produced it by no more than that archive window.
+    /// How long a sighting is kept after it was last seen (#9862). It must outlive the oldest archived row it tags, or the last
+    /// days of an archive file read with no tag. That row is collected, stays hot for <see cref="ArchiveService.HotDataDays"/>,
+    /// and is then written by the next hourly archive run (<see cref="CollectionBackgroundService.ArchiveInterval"/>) into a
+    /// file named for that day. <see cref="RetentionService.CleanupOldArchives"/> deletes the file once its name's date is
+    /// <see cref="RetentionService.ArchiveRetentionMonths"/> calendar months back (at most 31 days each), at its next daily run
+    /// (<see cref="CollectionBackgroundService.RetentionInterval"/>). So the window is the archive's months, plus the hot days,
+    /// plus the two run intervals rounded up to whole days.
     /// </summary>
-    internal const int QueryTagSightingRetentionDays = RetentionService.ArchiveRetentionMonths * 31;
+    internal static readonly int QueryTagSightingRetentionDays =
+        RetentionService.ArchiveRetentionMonths * 31
+        + ArchiveService.HotDataDays
+        + (int)Math.Ceiling((CollectionBackgroundService.ArchiveInterval + CollectionBackgroundService.RetentionInterval).TotalDays);
 
     // ---- helpers --------------------------------------------------------------------------------
 
