@@ -250,7 +250,15 @@ Restart-Service 'PerformanceMonitor Darling'
 
 ### How the sign-in works in a browser
 
-Open `http://192.168.1.205:5153/` and paste the token into the login form. The form POSTs the token to `/auth/login`. The host validates the token in constant time. It then sets a cookie named `darling_web_session` that is HMAC-signed, HttpOnly and SameSite=Strict, with a 12-hour lifetime. It redirects (302) to the page that you were opening.
+Open `http://192.168.1.205:5153/` and paste the token into the login form. The form POSTs the token to `/auth/login`, in a form field named `token`. The host validates the token in constant time. It then sets a cookie named `darling_web_session` that is HMAC-signed, HttpOnly and SameSite=Strict, with a 12-hour lifetime. It redirects (302) to the page that you were opening.
+
+A script can sign in the same way and keep the cookie. A good sign-in answers 302 and sets `darling_web_session`:
+
+```bash
+curl -c cookies.txt --data-urlencode "token=$WEB_TOKEN" http://127.0.0.1:5153/auth/login
+```
+
+Then send `-b cookies.txt` with each request. Over HTTPS, use the `https` address.
 
 A token in the URL (`?token=`) is not accepted, so the token never lands in history or a `Referer`. Every later request carries the cookie. The signing key is per process, so a service restart logs everyone out. Present the token again. The host throttles repeated misses from one address (429 with `Retry-After`). A token shorter than 16 characters keeps the dashboard loopback-only at start.
 
