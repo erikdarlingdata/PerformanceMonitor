@@ -1570,6 +1570,8 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SecondBoundCutKeys =
     [
+        ("precondition_held_truncated", ["DarlingMcpCollectorReadinessTools.cs"],
+            "#9880: get_collector_readiness's precondition_held groups (one per collector and status) are kept whole and cut from the end of their order only when the per-server summaries and the groups are over the response budget with a single waiting row, observed off the serialized answer, beside the waiting rows' own truncated and budget_truncated — two bounds in one payload, the second spelled <bound>_truncated; budget_note says how many groups were left off"),
         ("indexes_truncated", ["DarlingMcpStoreTableHealthTools.cs"],
             "#8787: get_store_table_health's indexes section is capped at top, beside the tables section's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("partition_index_coverage_truncated", ["DarlingMcpStoreTableHealthTools.cs"],

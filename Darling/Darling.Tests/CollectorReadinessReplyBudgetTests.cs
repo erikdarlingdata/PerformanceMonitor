@@ -35,9 +35,11 @@ public sealed class CollectorReadinessReplyBudgetTests
         + "and needs a reboot; self-managed PostgreSQL needs the line in postgresql.conf and a restart. Once it is loaded the collector reads the plans on the next cycle "
         + "and the capture readiness read, get_pg_plan_capture_readiness, names which database and which setting still lack it.";
 
-    private const string BufferCacheText =
-        "the pg_buffercache extension is not installed: run CREATE EXTENSION pg_buffercache in database 'postgres', which is the one this collector connects to, "
+    private static string BufferCacheTextIn(string database) =>
+        $"the pg_buffercache extension is not installed: run CREATE EXTENSION pg_buffercache in database '{database}', which is the one this collector connects to, "
         + "as a role that may create extensions. The first cycle after that returns the buffer pool rows with no restart.";
+
+    private static readonly string BufferCacheText = BufferCacheTextIn("postgres");
 
     private static List<CollectorFleetLiveness.ServerFacts> Servers(int count) =>
         Enumerable.Range(1, count)
@@ -54,7 +56,7 @@ public sealed class CollectorReadinessReplyBudgetTests
     /// Every server holds both collectors behind a named skip and has one ordinary collector done. The first <paramref name="stillWaiting"/> servers
     /// also have a collector that never ran, with an ordinary error.
     /// </summary>
-    private static Fleet BuildFleet(int serverCount, int stillWaiting)
+    private static Fleet BuildFleet(int serverCount, int stillWaiting, Func<int, string>? bufferTextOf = null)
     {
         var servers = Servers(serverCount);
         var pairs = new List<DarlingMcpCollectorReadinessTools.Pair>();
@@ -69,7 +71,7 @@ public sealed class CollectorReadinessReplyBudgetTests
             failures[(server.ServerId, "pg_plan_capture")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-3), AutoExplainText);
 
             pairs.Add(new(server.ServerId, "pg_buffer_usage", 5, false));
-            failures[(server.ServerId, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-4), BufferCacheText);
+            failures[(server.ServerId, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-4), bufferTextOf?.Invoke(server.ServerId) ?? BufferCacheText);
 
             if (server.ServerId <= stillWaiting)
             {
@@ -212,6 +214,7 @@ public sealed class CollectorReadinessReplyBudgetTests
             Assert.Equal(DarlingMcpCollectorReadinessTools.ExampleServers, group.GetProperty("example_servers").GetArrayLength());
             Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, group.GetProperty("status").GetString());
             Assert.False(group.GetProperty("last_error_cut").GetBoolean());
+            Assert.Equal(1, group.GetProperty("distinct_texts").GetInt32());
         }
 
         /* The whole remedy of the auto_explain step is in the reply, once. */
@@ -260,6 +263,11 @@ public sealed class CollectorReadinessReplyBudgetTests
         Assert.Contains("OVER BUDGET", root.GetProperty("budget_note").GetString());
         Assert.Contains("server_name", root.GetProperty("budget_note").GetString());
         Assert.Equal(400, root.GetProperty("waiting_count").GetInt32());
+
+        /* The summaries alone are over the budget, so no precondition group fits either, and the counts still say how many collectors are held. */
+        Assert.True(root.GetProperty("precondition_held_truncated").GetBoolean());
+        Assert.Equal(0, root.GetProperty("precondition_held").GetArrayLength());
+        Assert.Equal(800, root.GetProperty("precondition_count").GetInt32());
     }
 
     [Fact]
@@ -274,6 +282,132 @@ public sealed class CollectorReadinessReplyBudgetTests
         Assert.Equal(2, root.GetProperty("waiting_count").GetInt32());
         Assert.Equal(4, root.GetProperty("precondition_count").GetInt32());
     }
+
+    [Fact]
+    public async Task ServersConnectedToDifferentDatabases_StillCollapseToOneGroupPerCollectorAndStatus_InsideTheBudget()
+    {
+        /* The buffer cache step names the connected database, so no two servers write the same text. */
+        var fleet = BuildFleet(serverCount: 120, stillWaiting: 0, bufferTextOf: id => BufferCacheTextIn($"tenant_db_{id:000}"));
+        var reply = await Compose(fleet);
+
+        using var doc = JsonDocument.Parse(reply);
+        var root = doc.RootElement;
+        var groups = root.GetProperty("precondition_held").EnumerateArray().ToList();
+        Assert.Equal(2, groups.Count);
+
+        var buffer = groups.Single(g => g.GetProperty("collector").GetString() == "pg_buffer_usage");
+        Assert.Equal(120, buffer.GetProperty("servers").GetInt32());
+        Assert.Equal(120, buffer.GetProperty("distinct_texts").GetInt32());
+        Assert.Contains("CREATE EXTENSION pg_buffercache", buffer.GetProperty("last_error").GetString());
+        var textServer = buffer.GetProperty("text_server").GetString()!;
+        var databaseOfTextServer = $"tenant_db_{int.Parse(textServer[^3..], System.Globalization.CultureInfo.InvariantCulture):000}";
+        Assert.Contains($"in database '{databaseOfTextServer}'", buffer.GetProperty("last_error").GetString());
+
+        var autoExplain = groups.Single(g => g.GetProperty("collector").GetString() == "pg_plan_capture");
+        Assert.Equal(1, autoExplain.GetProperty("distinct_texts").GetInt32());
+
+        Assert.False(root.GetProperty("precondition_held_truncated").GetBoolean());
+        Assert.False(root.GetProperty("budget_truncated").GetBoolean());
+        Assert.False(root.GetProperty("over_budget").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
+        Assert.Equal(240, root.GetProperty("precondition_count").GetInt32());
+        Assert.True(Encoding.UTF8.GetByteCount(reply) <= McpResponseBudget.DefaultBytes, $"the reply is {Encoding.UTF8.GetByteCount(reply)} bytes");
+    }
+
+    [Fact]
+    public async Task TheGroupCarriesTheNewestServersText_AndTheServerItCameFrom()
+    {
+        var fleet = BuildFleet(serverCount: 4, stillWaiting: 0);
+        fleet.Failures[(1, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-10), BufferCacheTextIn("older_db"));
+        fleet.Failures[(2, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-1), BufferCacheTextIn("newest_db"));
+        fleet.Failures[(3, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-5), BufferCacheTextIn("older_db"));
+        fleet.Failures[(4, "pg_buffer_usage")] = new(CollectorRuntimePrecondition.ExtensionMissingStatus, Now.AddMinutes(-7), BufferCacheTextIn("other_db"));
+
+        using var doc = JsonDocument.Parse(await Compose(fleet));
+        var buffer = doc.RootElement.GetProperty("precondition_held").EnumerateArray().Single(g => g.GetProperty("collector").GetString() == "pg_buffer_usage");
+        Assert.Equal("pg-target-002", buffer.GetProperty("text_server").GetString());
+        Assert.Contains("in database 'newest_db'", buffer.GetProperty("last_error").GetString());
+        Assert.Equal(3, buffer.GetProperty("distinct_texts").GetInt32());
+        Assert.Equal(4, buffer.GetProperty("servers").GetInt32());
+        Assert.Equal(Stamp(Now.AddMinutes(-1)), buffer.GetProperty("last_error_at").GetString());
+        Assert.Equal(Stamp(Start), buffer.GetProperty("waiting_since").GetString());
+    }
+
+    /// <summary>
+    /// Every one of <paramref name="collectors"/> collectors is held by a named skip on every server, with a status that alternates by server, so a
+    /// collector has two groups. The text is long enough that a group carries the full group cut.
+    /// </summary>
+    private static Fleet BuildManyGroups(int serverCount, int collectors, int stillWaiting)
+    {
+        var servers = Servers(serverCount);
+        var pairs = new List<DarlingMcpCollectorReadinessTools.Pair>();
+        var failures = new Dictionary<(int, string), DarlingMcpCollectorReadinessTools.Failure>();
+        var remedy = string.Concat(Enumerable.Repeat("then restart the cluster and run the grant again ", 40));
+        foreach (var server in servers)
+        {
+            for (var c = 1; c <= collectors; c++)
+            {
+                var collector = $"pg_collector_{c:000}";
+                pairs.Add(new(server.ServerId, collector, 5, false));
+                var status = server.ServerId % 2 == 1 ? CollectorRuntimePrecondition.ExtensionMissingStatus : "PERMISSIONS";
+                failures[(server.ServerId, collector)] = new(status, Now.AddMinutes(-3), $"{collector} on {server.ServerName}: {remedy}");
+            }
+
+            if (server.ServerId <= stillWaiting)
+            {
+                pairs.Add(new(server.ServerId, "wait_stats", 5, false));
+                failures[(server.ServerId, "wait_stats")] = new("ERROR", Now.AddMinutes(-2), "connection was refused by the server");
+            }
+        }
+
+        return new Fleet(servers, pairs, new Dictionary<(int, string), DateTime>(), failures);
+    }
+
+    [Fact]
+    public async Task MoreGroupsThanFit_AreCutFromTheEnd_AndTheNoteSaysHowManyWereLeftOut()
+    {
+        var fleet = BuildManyGroups(serverCount: 4, collectors: 30, stillWaiting: 3);
+        var reply = await Compose(fleet);
+
+        using var doc = JsonDocument.Parse(reply);
+        var root = doc.RootElement;
+        var kept = root.GetProperty("precondition_held").EnumerateArray()
+            .Select(g => (Collector: g.GetProperty("collector").GetString()!, Status: g.GetProperty("status").GetString()!))
+            .ToList();
+        var all = Enumerable.Range(1, 30)
+            .SelectMany(c => new[] { CollectorRuntimePrecondition.ExtensionMissingStatus, "PERMISSIONS" }.Select(st => ($"pg_collector_{c:000}", st)))
+            .OrderBy(g => g.Item1, StringComparer.Ordinal)
+            .ThenBy(g => g.st, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(60, all.Count);
+        Assert.InRange(kept.Count, 1, 59);
+        Assert.Equal(all.Take(kept.Count), kept);
+        Assert.True(root.GetProperty("precondition_held_truncated").GetBoolean());
+        Assert.False(root.GetProperty("over_budget").GetBoolean());
+        Assert.Contains($"{60 - kept.Count} of 60 precondition_held group(s)", root.GetProperty("budget_note").GetString());
+        Assert.True(Encoding.UTF8.GetByteCount(reply) <= McpResponseBudget.DefaultBytes, $"the reply is {Encoding.UTF8.GetByteCount(reply)} bytes");
+
+        /* The counts cover every held collector, and a waiting row still fits. */
+        Assert.Equal(120, root.GetProperty("precondition_count").GetInt32());
+        Assert.Equal(3, root.GetProperty("waiting_count").GetInt32());
+        Assert.True(root.GetProperty("waiting").GetArrayLength() >= 1);
+    }
+
+    [Fact]
+    public async Task GroupsThatFit_AreAllKept_AndNothingSaysTheyWereCut()
+    {
+        var fleet = BuildManyGroups(serverCount: 4, collectors: 30, stillWaiting: 3);
+        using var doc = JsonDocument.Parse(await Compose(fleet, budgetBytes: 4 * 1024 * 1024));
+        var root = doc.RootElement;
+        Assert.Equal(60, root.GetProperty("precondition_held").GetArrayLength());
+        Assert.False(root.GetProperty("precondition_held_truncated").GetBoolean());
+        Assert.False(root.GetProperty("budget_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
+        Assert.Equal(3, root.GetProperty("waiting").GetArrayLength());
+    }
+
+    private static string Stamp(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o");
 
     private static int CountOccurrences(string text, string needle)
     {

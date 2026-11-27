@@ -71,8 +71,9 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
-        + "A collector held by a setup step on the monitored server (a named skip: an extension not created or not preloaded, a grant refused, an Extended Events session not running) is not waiting on the service: precondition_count counts those, precondition_held lists each step once with the number of servers it holds and a few example servers (the full text of the step is kept whole there), and waiting_count does not include them, so it reaches zero on a finished install. "
-        + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total. The reply is also held to the 32,768-byte response budget: budget_truncated = true says waiting rows were left off the end, and budget_note names the offset that reads on; over_budget = true says the per-server summaries alone are over it and server_name reads one server. "
+        + "A collector held by a setup step on the monitored server (a named skip: an extension not created or not preloaded, a grant refused, an Extended Events session not running) is not waiting on the service: precondition_count counts those, precondition_held lists one group per collector and status with the number of servers it holds and a few example servers, and waiting_count does not include them, so it reaches zero on a finished install. "
+        + "A group carries the newest server's text in last_error (text_server names that server) and distinct_texts, how many different texts the group's servers wrote: a remedy such as CREATE EXTENSION names the database its server connects to, so when distinct_texts is above 1 get_collection_log (server_name, collector_name) carries each server's own text. "
+        + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total. The reply is also held to the 32,768-byte response budget: budget_truncated = true says waiting rows were left off the end, and budget_note names the offset that reads on; precondition_held_truncated = true says precondition_held groups were left off its end and budget_note says how many; over_budget = true says the per-server summaries alone are over it and server_name reads one server. "
         + "A waiting row's last_error is cut at a word boundary when it is long, and last_error_cut says so: get_collection_log (server_name, collector_name) carries the whole text.")]
     public static Task<string> GetCollectorReadiness(
         NpgsqlDataSource postgres,
@@ -628,12 +629,16 @@ CROSS JOIN LATERAL (
             };
         }).ToList();
 
-        /* Each distinct step once: the text is the same on every server that lacks the step, so the group carries it with the count and a few example servers. */
+        /* One group per collector and status, never per text (#9880): a named skip's text carries the connected database ("run CREATE EXTENSION x in database 'name'"), and other texts may carry a server or an object name, so on a fleet whose servers connect to different databases a group per text is a group per server. The group carries the newest text with the server it came from, and distinct_texts says how many different texts the group's servers wrote. */
         var heldGroups = heldRows
-            .GroupBy(h => (h.Pair.Collector, h.Failure.Status, Text: h.Failure.Text ?? ""))
+            .GroupBy(h => (h.Pair.Collector, h.Failure.Status))
             .Select(g =>
             {
-                var (text, cut) = CutAtWord(string.IsNullOrEmpty(g.Key.Text) ? null : g.Key.Text, GroupErrorChars);
+                var newest = g
+                    .OrderByDescending(h => h.Failure.At)
+                    .ThenBy(h => Name(h.Server), StringComparer.OrdinalIgnoreCase)
+                    .First();
+                var (text, cut) = CutAtWord(string.IsNullOrEmpty(newest.Failure.Text) ? null : newest.Failure.Text, GroupErrorChars);
                 var names = g.Select(h => Name(h.Server)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
                 return new
                 {
@@ -644,12 +649,13 @@ CROSS JOIN LATERAL (
                     waiting_since = Stamp(g.Min(h => h.DueAt)),
                     last_error = text,
                     last_error_cut = cut,
-                    last_error_at = Stamp(g.Max(h => h.Failure.At)),
+                    last_error_at = Stamp(newest.Failure.At),
+                    text_server = Name(newest.Server),
+                    distinct_texts = g.Select(h => h.Failure.Text ?? "").Distinct(StringComparer.Ordinal).Count(),
                 };
             })
             .OrderBy(g => g.collector, StringComparer.Ordinal)
             .ThenBy(g => g.status, StringComparer.Ordinal)
-            .ThenBy(g => g.last_error, StringComparer.Ordinal)
             .ToList();
 
         object done = singleServer
@@ -680,11 +686,31 @@ CROSS JOIN LATERAL (
                     };
                 }).ToList();
 
-        string Reply(int n, bool overBudget = false)
+        /* n waiting rows and g precondition groups. The budget note names each cut it made: the waiting rows with the offset that reads on, and the groups left off the end. */
+        string Reply(int n, int g, bool overBudget = false)
         {
             var shown = waitingRows.Take(n).ToList();
             var rowsAfter = start + n < ordered.Count;
             var budgetCut = n < waitingRows.Count;
+            var groupsLeftOut = heldGroups.Count - g;
+            var notes = new List<string>();
+            if (overBudget)
+            {
+                notes.Add($"OVER BUDGET: {(g > 0 ? "the per-server summary and the precondition groups alone are" : "the per-server summary alone is")} over the {budgetBytes:#,0}-byte response budget at {n:#,0} waiting row(s), so no row can be left off to fit it. Ask one server at a time (server_name) for its collectors."
+                    + (budgetCut ? $" {waitingRows.Count - n:#,0} waiting row(s) were left off: call again with offset = {start + n} for the next rows." : ""));
+            }
+            else if (budgetCut)
+            {
+                notes.Add(McpResponseBudget.PageCutNote(
+                    ordered.Count - start, n, "oldest wait first", "waiting rows",
+                    $"Call again with offset = {start + n} for the next rows. waiting_count counts every waiting pair, listed or not."));
+            }
+
+            if (groupsLeftOut > 0)
+            {
+                notes.Add($"{groupsLeftOut:#,0} of {heldGroups.Count:#,0} precondition_held group(s) were left off its end (collector, then status order) to fit the response budget. precondition_count counts every held collector, and one server at a time (server_name) lists the steps that server holds.");
+            }
+
             return JsonSerializer.Serialize(new
             {
                 status = "ok",
@@ -708,29 +734,48 @@ CROSS JOIN LATERAL (
                 disabled_count = disabled,
                 truncated = rowsAfter,
                 budget_truncated = budgetCut,
+                precondition_held_truncated = groupsLeftOut > 0,
                 over_budget = overBudget,
-                budget_note = overBudget
-                    ? $"OVER BUDGET: the per-server summary and the precondition groups alone are over the {budgetBytes:#,0}-byte response budget at {n:#,0} waiting row(s), so no row can be left off to fit it. Ask one server at a time (server_name) for its collectors."
-                    + (budgetCut ? $" {waitingRows.Count - n:#,0} waiting row(s) were left off: call again with offset = {start + n} for the next rows." : "")
-                    : budgetCut
-                    ? McpResponseBudget.PageCutNote(
-                        ordered.Count - start, n, "oldest wait first", "waiting rows",
-                        $"Call again with offset = {start + n} for the next rows. waiting_count counts every waiting pair, listed or not.")
-                    : null,
+                budget_note = notes.Count == 0 ? null : string.Join(" ", notes),
                 waiting = shown,
-                precondition_held = heldGroups,
+                precondition_held = heldGroups.Take(g).ToList(),
                 done,
                 note = "A collector counts as waiting only when it is enabled, collected on the server's engine, not on a fixed run time, and due: it never ran, was overdue at the start, or has reached the end of the interval it was waiting out, and no setup step on the monitored server is holding it. "
                     + "not_yet_due_count and fixed_time_count are collectors that are not waiting. "
                     + "precondition_count is the collectors whose newest failure since the start is a named skip (EXTENSION_MISSING, PERMISSIONS or SESSION_MISSING): a setup step on the monitored server, listed in precondition_held with the servers it holds, and not counted in waiting_count or in first_full_cycle. "
+                    + "precondition_held has one group per collector and status. Its last_error is the newest server's text, text_server names that server, and distinct_texts counts the different texts the group's servers wrote: a remedy such as CREATE EXTENSION names the database its server connects to, so when distinct_texts is above 1 get_collection_log (server_name, collector_name) carries each server's own text. "
                     + "A last_error with last_error_cut = true was cut at a word boundary: get_collection_log (server_name, collector_name) carries the whole text.",
             }, McpHelpers.JsonOptions);
         }
 
-        /* The waiting rows are what the budget cuts, oldest wait first, so the next page starts where this one ends. The reply is never below one row: when the summaries alone are over the budget the reply says so (over_budget) and names the per-server read. */
-        var fit = McpResponseBudget.RowsThatFit(waitingRows.Count, n => System.Text.Encoding.UTF8.GetByteCount(Reply(n)), budgetBytes);
-        var fitted = Reply(fit);
-        return System.Text.Encoding.UTF8.GetByteCount(fitted) > budgetBytes ? Reply(fit, overBudget: true) : fitted;
+        int Bytes(int n, int g) => System.Text.Encoding.UTF8.GetByteCount(Reply(n, g));
+
+        /* The waiting rows are what the budget cuts first, oldest wait first, so the next page starts where this one ends. The precondition groups are the backstop: they are not paged, so they are cut only when the per-server summaries and the groups are over the budget with a single waiting row, from the end of their order. The reply is never below one row: when the summaries alone are over the budget the reply says so (over_budget) and names the per-server read. */
+        var oneRow = Math.Min(1, waitingRows.Count);
+        var groupFit = heldGroups.Count;
+        if (Bytes(oneRow, groupFit) > budgetBytes)
+        {
+            var low = 0;
+            var high = heldGroups.Count - 1;
+            while (low < high)
+            {
+                var mid = (low + high + 1) / 2;
+                if (Bytes(oneRow, mid) <= budgetBytes)
+                {
+                    low = mid;
+                }
+                else
+                {
+                    high = mid - 1;
+                }
+            }
+
+            groupFit = low;
+        }
+
+        var fit = McpResponseBudget.RowsThatFit(waitingRows.Count, n => Bytes(n, groupFit), budgetBytes);
+        var fitted = Reply(fit, groupFit);
+        return System.Text.Encoding.UTF8.GetByteCount(fitted) > budgetBytes ? Reply(fit, groupFit, overBudget: true) : fitted;
     }
 
     private sealed class ServerTally
