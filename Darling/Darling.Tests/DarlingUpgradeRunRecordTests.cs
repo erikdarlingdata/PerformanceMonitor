@@ -30,7 +30,7 @@ public sealed class DarlingUpgradeRunRecordTests
     private static readonly string[] FunctionNames =
     {
         "Get-DarlingBuildVersion", "New-DarlingUpgradeRun", "Complete-DarlingUpgradeRun", "Write-DarlingUpgradeRunFile",
-        "Read-DarlingUpgradeRunFile", "Set-DarlingUpgradeRunVerified", "Close-DarlingUpgradeRun",
+        "Read-DarlingUpgradeRunFile", "Set-DarlingUpgradeRunVerified", "Close-DarlingUpgradeRun", "Get-DarlingUpgradeRunWriteWarning",
     };
 
     private static string? PwshPath
@@ -217,6 +217,89 @@ public sealed class DarlingUpgradeRunRecordTests
 
             Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
             if (OperatingSystem.IsWindows()) { Assert.Equal(before, File.ReadAllText(Path.Combine(folder, "upgrade-run.json"))); }
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>
+    /// #9850: the in_progress record is written while the service runs, over the file a previous run left. A holder that lets writers in but
+    /// not deleters (no FileShare.Delete) makes File.Replace throw, and the record must still land, in place. The old code failed this case
+    /// with a sharing violation and left the previous run's record in the file.
+    /// </summary>
+    [Fact]
+    public void TheInProgressWrite_Lands_WhenTheOldFileIsHeldWithoutDeleteSharing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); $run['state'] = 'succeeded'; Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                var output = Run(folder, "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok + ' reason=[' + $w.Reason + ']'");
+                Assert.Contains("ok=True", output, StringComparison.Ordinal);
+            }
+
+            var file = ReadFile(folder);
+            Assert.Equal("in_progress", file.GetProperty("state").GetString());
+            Assert.Equal("new-target", file.GetProperty("target_build").GetString());
+            Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>#9850: the service's own pickup opens the file with ReadWrite and Delete sharing. The in_progress write must land with that handle open.</summary>
+    [Fact]
+    public void TheInProgressWrite_Lands_WhenTheOldFileIsHeldTheWayTheServiceHoldsIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); $run['state'] = 'succeeded'; Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var output = Run(folder, "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok");
+                Assert.Contains("ok=True", output, StringComparison.Ordinal);
+            }
+
+            var file = ReadFile(folder);
+            Assert.Equal("in_progress", file.GetProperty("state").GetString());
+            Assert.Equal("new-target", file.GetProperty("target_build").GetString());
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>
+    /// #9850: a write that fails with nothing able to get past the holder (a reader that lets in no writer and no deleter) leaves the old file whole, and
+    /// the warning for the in_progress record names that record and does not tell the operator the store will not show the run. The final record's
+    /// warning does say so.
+    /// </summary>
+    [Fact]
+    public void AFailedWrite_NamesTheRecordThatIsMissing_AndOnlyTheFinalOneSaysTheStoreWillNotShowTheRun()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            Run(folder, "$run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run | Out-Null");
+            string output;
+            using (new FileStream(Path.Combine(folder, "upgrade-run.json"), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                output = Run(folder,
+                    "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok; "
+                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'");
+            }
+
+            Assert.Contains("ok=False", output, StringComparison.Ordinal);
+            var lines = output.Split('\n').Select(l => l.Trim()).ToArray();
+            var start = lines.Single(l => l.StartsWith("start=[", StringComparison.Ordinal));
+            var end = lines.Single(l => l.StartsWith("end=[", StringComparison.Ordinal));
+            Assert.Contains("in_progress", start, StringComparison.Ordinal);
+            Assert.DoesNotContain("will not show", start, StringComparison.Ordinal);
+            Assert.Contains("final", end, StringComparison.Ordinal);
+            Assert.Contains("will not show", end, StringComparison.Ordinal);
+            Assert.Equal("old-target", ReadFile(folder).GetProperty("target_build").GetString());
         }
         finally { Cleanup(folder); }
     }
