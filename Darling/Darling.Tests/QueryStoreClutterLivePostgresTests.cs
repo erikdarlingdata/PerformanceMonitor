@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -769,6 +770,115 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.True(McpHelpers.IsErrorEnvelope(failed), failed);
             QueryStoreClutterFleetReference.ComputationSeam.Value = null;
             Assert.NotEqual("null", (await FleetOfAsync(postgres, asOf)).Median);
+        }
+        finally
+        {
+            ClearFleetSeams();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+        }
+    }
+
+    /// <summary>
+    /// #9882: one fleet computation runs at a time per store. The computation seam holds the 24-hour computation in flight. A call for
+    /// another <c>hours_back</c> has its whole budget left and answers while the computation is still held, with the per-server rows, a
+    /// null median and the busy note, and starts nothing. The same holds once the clock hour has turned under the held computation.
+    /// After the release that call computes its own reference.
+    /// </summary>
+    [Fact]
+    public async Task WhileOneFleetReferenceIsComputed_ACallForAnotherWindow_AnswersAtOnce_AndStartsNothing()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connectionString, asOf) = await PlantedStoreAsync(ct);
+        await using var dropScratch = scratch;
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+
+        var clock = new ManualClock(new DateTime(2026, 3, 10, 14, 10, 0, DateTimeKind.Utc));
+        var computations = 0;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        QueryStoreClutterFleetReference.Clock.Value = clock;
+        QueryStoreClutterFleetReference.ComputationSeam.Value = async cap =>
+        {
+            Interlocked.Increment(ref computations);
+            entered.TrySetResult();
+            await release.Task.WaitAsync(cap.Token);
+        };
+        try
+        {
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = fleetBudget =>
+            {
+                fleetBudget.Cancel();
+                return Task.CompletedTask;
+            };
+            var held = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
+            Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, held.Note);
+            await entered.Task.WaitAsync(HeldCallGivesUp, ct);
+
+            /* no seam fires this call's budget: it answers because it starts nothing, not because it waited a budget out */
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = null;
+            var other = await FleetOfAsync(postgres, asOf, hoursBack: 23).WaitAsync(HeldCallGivesUp, ct);
+            Assert.False(release.Task.IsCompleted);
+            Assert.Equal("null", other.Median);
+            Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetBusyNote, other.Note);
+
+            /* 15:00 has passed under the held computation: it still is the store's one */
+            clock.Advance(TimeSpan.FromHours(1));
+            var nextHour = await FleetOfAsync(postgres, asOf, hoursBack: 23).WaitAsync(HeldCallGivesUp, ct);
+            Assert.False(release.Task.IsCompleted);
+            Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetBusyNote, nextHour.Note);
+            Assert.Equal(1, Volatile.Read(ref computations));
+
+            release.SetResult();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+            QueryStoreClutterFleetReference.ComputationSeam.Value = _ =>
+            {
+                Interlocked.Increment(ref computations);
+                return Task.CompletedTask;
+            };
+            Assert.NotEqual("null", (await FleetOfAsync(postgres, asOf, hoursBack: 23)).Median);
+            Assert.Equal(2, Volatile.Read(ref computations));
+        }
+        finally
+        {
+            release.TrySetResult();
+            ClearFleetSeams();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+        }
+    }
+
+    /// <summary>
+    /// #9882: the computation runs outside the read scope of the call that starts it, because it can outlive that call and the
+    /// call's record is written when the call answers. The call runs inside a scope, the computation seam notes the scope the
+    /// computation runs in, and that is none. The call's own flow keeps its scope.
+    /// </summary>
+    [Fact]
+    public async Task TheFleetComputation_RunsOutsideTheStartingCallsReadScope()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connectionString, asOf) = await PlantedStoreAsync(ct);
+        await using var dropScratch = scratch;
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+
+        using var opened = ReadScope.Open(null);
+        /* starts as the call's scope, so a seam that never ran cannot pass for "none" */
+        ReadScope? computationScope = opened.Scope;
+        var computations = 0;
+        QueryStoreClutterFleetReference.ComputationSeam.Value = _ =>
+        {
+            Volatile.Write(ref computationScope, ReadScope.Current);
+            Interlocked.Increment(ref computations);
+            return Task.CompletedTask;
+        };
+        try
+        {
+            Assert.NotEqual("null", (await FleetOfAsync(postgres, asOf)).Median);
+            Assert.Equal(1, Volatile.Read(ref computations));
+            Assert.Null(Volatile.Read(ref computationScope));
+            Assert.Same(opened.Scope, ReadScope.Current);
         }
         finally
         {

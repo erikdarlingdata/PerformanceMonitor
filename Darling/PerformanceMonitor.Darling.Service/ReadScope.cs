@@ -369,6 +369,12 @@ internal sealed class ReadScope
     /// <summary>The scope the calling async flow runs inside, or null outside any recorder.</summary>
     internal static ReadScope? Current => s_current.Value;
 
+    /// <summary>Takes the calling async flow out of every scope (#9882). For work started with <c>Task.Run</c> that goes on after
+    /// the read that started it has answered: called first inside the started task, it keeps that work's statements, connection
+    /// waits and notes out of a scope whose record may already be written. The assignment stays in the started task's flow and
+    /// never reaches the caller.</summary>
+    internal static void Detach() => s_current.Value = null;
+
     /* #6390 S2c: the composed-panel run lives in Storage and cannot name this class; it notes through ComposeReadNotes, which is
        pointed at this scope here, before any service type is used. */
     [System.Runtime.CompilerServices.ModuleInitializer]
