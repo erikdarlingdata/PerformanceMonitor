@@ -91,21 +91,42 @@ public static class QueryTagResolver
         IReadOnlyList<QueryTagSighting> sightings,
         IReadOnlyList<QueryTagHandAssignment> assignments,
         IReadOnlyList<QueryTagRule> rules,
-        IReadOnlyDictionary<string, long> tagIdsByName)
+        IReadOnlyDictionary<string, long> tagIdsByName) =>
+        Resolve(serverId, sightings, assignments, rules, tagIdsByName, out _);
+
+    /// <summary>
+    /// <see cref="Resolve(int, IReadOnlyList{QueryTagSighting}, IReadOnlyList{QueryTagHandAssignment}, IReadOnlyList{QueryTagRule}, IReadOnlyDictionary{string, long})"/>,
+    /// and which step of the walk hit (#9705). <paramref name="rank"/> counts the steps the walk visits: every hand
+    /// assignment of the hash pass, then every hand assignment of the object pass, then every rule the rule pass tries,
+    /// each counted whether or not it can match. So a step's number depends only on the server, the assignments and the
+    /// rules, never on the sightings, and two calls with the same three can compare their ranks: the lower one is the
+    /// step that wins when their sightings are resolved together. <see cref="int.MaxValue"/> when nothing hit.
+    /// </summary>
+    public static QueryTagResolution Resolve(
+        int serverId,
+        IReadOnlyList<QueryTagSighting> sightings,
+        IReadOnlyList<QueryTagHandAssignment> assignments,
+        IReadOnlyList<QueryTagRule> rules,
+        IReadOnlyDictionary<string, long> tagIdsByName,
+        out int rank)
     {
         ArgumentNullException.ThrowIfNull(sightings);
         ArgumentNullException.ThrowIfNull(assignments);
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentNullException.ThrowIfNull(tagIdsByName);
 
+        rank = int.MaxValue;
         if (sightings.Count == 0)
         {
             return QueryTagResolution.None;
         }
 
+        int step = 0;
+
         // 1 and 2: a hand hash assignment, this server's before the every-server one.
         foreach (QueryTagHandAssignment a in ScopedFirst(assignments, serverId))
         {
+            step++;
             if (a.KeyKind != QueryTagKeyKind.Hash || string.IsNullOrEmpty(a.Key))
             {
                 continue;
@@ -115,6 +136,7 @@ public static class QueryTagResolver
             {
                 if (s.KeyKind == QueryTagKeyKind.Hash && string.Equals(s.Key, a.Key, StringComparison.OrdinalIgnoreCase))
                 {
+                    rank = step;
                     return new QueryTagResolution(a.TagId, QueryTagSource.HandHash, MatchedValue: a.Key);
                 }
             }
@@ -123,6 +145,7 @@ public static class QueryTagResolver
         // 3: a hand object assignment whose object appears on any sighting of the key.
         foreach (QueryTagHandAssignment a in ScopedFirst(assignments, serverId))
         {
+            step++;
             if (a.KeyKind != QueryTagKeyKind.Object || a.ObjectRef is null)
             {
                 continue;
@@ -132,6 +155,7 @@ public static class QueryTagResolver
             {
                 if (a.ObjectRef.SameObjectAs(s.ObjectRef))
                 {
+                    rank = step;
                     return new QueryTagResolution(a.TagId, QueryTagSource.HandObject, MatchedValue: a.ObjectRef.Qualified);
                 }
             }
@@ -165,11 +189,13 @@ public static class QueryTagResolver
                      .OrderBy(r => r.Priority)
                      .ThenBy(r => r.Id))
         {
+            step++;
             foreach (QueryTagSighting s in sightings)
             {
                 QueryTagResolution? hit = TryRule(rule, s, names, ambiguous);
                 if (hit is not null)
                 {
+                    rank = step;
                     return hit;
                 }
             }
