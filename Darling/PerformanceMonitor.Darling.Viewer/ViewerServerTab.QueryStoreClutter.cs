@@ -38,8 +38,10 @@ public partial class ViewerServerTab
     /// Loads the clutter grid, the per-server overhead block and the server-level note over the toolbar's
     /// window. The shell's <c>LoadInnerTabAsync</c> owns the try/catch that surfaces failures.
     /// </summary>
-    private async Task LoadQueryStoreClutterAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryStoreClutterAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
+        /* #9887: the slow-load line names this sub-tab and its reads (see LoadQueryStoreRegressionsAsync). */
+        timer?.Surface = "Queries > Query Store Clutter";
         /* #4966: the probe starts beside the read, and both take the window the caller worked out once. The panel draws from two ranged
            sources, the plan churn from query_store_stats and the read cost from the collection log, so the coverage rule applies to each
            and the note names the later of the two starts; the config and memory-clerk sections show the newest snapshot only, and the
@@ -48,9 +50,9 @@ public partial class ViewerServerTab
            The shell's LoadInnerTabAsync declares no width, so this load does, before either starts. */
         using var readFanOut = ViewerReadFanOut.Of(2);
 
-        var dataStartTask = _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var readTask = _dataService.GetQueryStoreClutterAsync(
-            _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataStartTask = Timed(timer, "data start", QueriesReadsOverride?.ClutterDataStart?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var readTask = Timed(timer, "grid read", QueriesReadsOverride?.Clutter?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryStoreClutterAsync(
+            _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter), result => result.Databases.Count);
 
         /* A read that throws skips the banner step below, so the probe would go unawaited: the helper watches it then, and a probe that
            fails later is a warning and not an unobserved-exception Error. */

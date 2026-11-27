@@ -174,7 +174,7 @@ FROM generate_series(1, $3) AS n;";
             await SeedAsync(connection, other, "PENDING", 40000, olderAt, null, null, null, ct);
         }
 
-        await ExecAsync(connection, "VACUUM (ANALYZE) collect.oversized_plan_backlog;", ct);
+        await VacuumUntilAllVisibleAsync(connection, ct);
 
         /* A cycle of five re-sightings of rows the server holds, and the cap far above its rows, so the gate's first test is under it. */
         var sightings = Sightings("PENDING", 5).ToList();
@@ -478,6 +478,40 @@ AND   c.relname = $1;";
         seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = (object?)expiredAt ?? DBNull.Value });
         seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = (object?)lastAttemptAt ?? DBNull.Value });
         Assert.Equal(rows, await seed.ExecuteNonQueryAsync(ct));
+    }
+
+    /// <summary>
+    /// Vacuums the backlog table until its pages are all-visible (#9897). A vacuum marks a page all-visible only for rows older than its horizon, and a backend
+    /// the test does not own (for example a TimescaleDB launcher scan of <c>pg_database</c>, or an autovacuum worker, while other tests create scratch databases)
+    /// can hold that horizon for a moment, so a single vacuum can leave every page unmarked and the index-only scan then fetches every heap row. The vacuum
+    /// is repeated, by count and not by clock, until at most one page (the last, which a vacuum may leave) is not all-visible.
+    /// </summary>
+    private static async Task VacuumUntilAllVisibleAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        const int attempts = 40;
+        long pages = 0;
+        long allVisible = 0;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            await ExecAsync(connection, "VACUUM (ANALYZE) collect.oversized_plan_backlog;", ct);
+            await using var read = new NpgsqlCommand(
+                "SELECT relpages::bigint, relallvisible::bigint FROM pg_class WHERE oid = 'collect.oversized_plan_backlog'::regclass", connection);
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                Assert.True(await reader.ReadAsync(ct));
+                pages = reader.GetInt64(0);
+                allVisible = reader.GetInt64(1);
+            }
+
+            if (pages > 0 && pages - allVisible <= 1)
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+        }
+
+        Assert.Fail($"{attempts} vacuums left {pages - allVisible} of {pages} pages not all-visible, so the horizon stayed held and the test cannot measure an index-only scan");
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
