@@ -122,9 +122,11 @@ public partial class ViewerServerTab
     }
 
     /// <summary>Loads the Query Heatmap sub-tab for the combo's current metric over the window.</summary>
-    private async Task LoadQueryHeatmapAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryHeatmapAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        await ReadAndDrawQueryHeatmapAsync((HeatmapMetric)HeatmapMetricCombo.SelectedIndex, startUtc, endUtc);
+        /* #9887: the slow-load line names this sub-tab and its reads (see LoadQueryStoreRegressionsAsync). */
+        timer?.Surface = "Queries > Query Heatmap";
+        await ReadAndDrawQueryHeatmapAsync((HeatmapMetric)HeatmapMetricCombo.SelectedIndex, startUtc, endUtc, timer);
     }
 
     /// <summary>
@@ -135,8 +137,8 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task ReadAndDrawQueryHeatmapAsync(HeatmapMetric metric, DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        var dataStartTask = _dataService.GetQueryHeatmapDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = Timed(timer, "heatmap read", _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var dataStartTask = Timed(timer, "data start", QueriesReadsOverride?.HeatmapDataStart?.Invoke(startUtc, endUtc) ?? _dataService.GetQueryHeatmapDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed(timer, "heatmap read", QueriesReadsOverride?.Heatmap?.Invoke(metric, startUtc, endUtc) ?? _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Query Heatmap");
         var result = dataReadTask.Result;
         UpdateQueryHeatmapChart(result);
