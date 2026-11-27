@@ -104,6 +104,56 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
     }
 
     [Fact]
+    public async Task ALedgerHourTheRollupDoesNotHold_GivesNoVerdict_NotesLedgerMismatch_LogsNothing_AndAMatchingHourPasses()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await CreateScratchAsync(ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PrepareStoreAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #9883: the ledger covers the window and counts rows in one hour that the rollup does not hold, the shape of an hour whose
+               rollup has not caught up. The guard counts one differing pair, so the read stays on raw, and the note says why. */
+            await QueryStatsLedgerSeed.SetCountedSinceAsync(connection, QueryStatsLedgerSeed.Low, ct);
+            await ExecuteAsync(connection, $"INSERT INTO {QueryStatsHourLedger.LedgerTable} (server_id, server_name, bucket, n) VALUES (1, 'lab', '{H1.AddHours(1):yyyy-MM-dd HH:mm:ss}', 7)", ct);
+            await using (var mismatched = await BeginSnapshotAsync(connection, ct))
+            {
+                var logger = new CapturingTestLogger();
+                using var scope = ReadScope.Open(logger);
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+
+                Assert.Null(verdict);
+                Assert.Equal(ReadFallback.LedgerMismatch, scope.Fallback);
+                Assert.Equal(ReadOutcome.FallbackRaw, ReadScope.Resolve(ReadOutcome.Ok, scope.Fallback));
+                Assert.True(logger.Lines.Count == 0, "a count mismatch is an expected state and logs nothing: " + logger.Joined);
+                Assert.Equal(1L, await ScalarAsync(connection, "SELECT 1", ct));
+                await mismatched.RollbackAsync(ct);
+            }
+
+            /* With the differing ledger row gone both sides hold nothing and agree: the verdict is given and nothing is noted. */
+            await ExecuteAsync(connection, $"DELETE FROM {QueryStatsHourLedger.LedgerTable}", ct);
+            await using (var matched = await BeginSnapshotAsync(connection, ct))
+            {
+                using var scope = ReadScope.Open(new CapturingTestLogger());
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+
+                Assert.NotNull(verdict);
+                Assert.Null(scope.Fallback);
+                await matched.RollbackAsync(ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task AStoreBeforeTheLedger_ReadsItsVersion_NeverRunsTheGuard_NotesGateFailed_WithNoLogLine_AndLeavesTheTransactionUsable()
     {
         var ct = TestContext.Current.CancellationToken;

@@ -366,7 +366,9 @@ public sealed class DarlingMcpCustomViewTools
         "Runs a single composed (v2) panel and returns the DATA it produces, {sql, rows, annotations, notice?} " +
         "(notice is a partial-window caveat: the tier's retention could not cover the window, or the panel's own " +
         "data starts after the window does, or the row cap truncated the result; absent means the window was " +
-        "served whole), " +
+        "served whole. notice also says when a fleet time series on 'auto' was given hour buckets (no server " +
+        "scope, a window of 12 hours or more, source query_stats or procedure_stats), and that timeBucket " +
+        "'minute' gives minute detail), " +
         "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +
         "web composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and " +
         "executed against the collected store under a statement_timeout. The spec is a JSON object " +

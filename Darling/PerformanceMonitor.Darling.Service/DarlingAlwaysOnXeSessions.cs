@@ -49,8 +49,7 @@ internal static class DarlingAlwaysOnXeSessions
         {
             var current = runner.AlwaysOnChoices.Get(ServerKey(server), databaseName, kind);
             var ownName = runner.AlwaysOnOwnSessionName(kind);
-            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken, ringBufferMaxEvents: runner.RingBufferMaxEvents,
-                claimSharedAttentionReplace: () => runner.AlwaysOnChoices.TryClaimAttentionReplace(ServerKey(server), databaseName));
+            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken, ringBufferMaxEvents: runner.RingBufferMaxEvents);
             runner.AlwaysOnChoices.Set(ServerKey(server), databaseName, kind, result.Choice);
             runner.AlwaysOnChoices.ClearReadOnlyRefusal(ServerKey(server), databaseName, kind);
 
@@ -114,7 +113,7 @@ internal static class DarlingAlwaysOnXeSessions
                carry every failure, classified the same way. #7639: the client-timeout session's other failures are carried too (as
                not a permission), so the caller can name the databases that refused it in the run note, as Lite does; the caller's
                PERMISSIONS rule still looks at IsPermission alone. */
-            return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault
+            return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex, runner.AlwaysOnOwnSessionName(kind)) is { } attentionFault
                 ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) { ServerText = ex.Message }
                 : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }

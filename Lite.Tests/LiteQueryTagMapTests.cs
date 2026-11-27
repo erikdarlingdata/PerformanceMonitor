@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Darling.Tests;
@@ -25,18 +26,31 @@ namespace Lite.Tests;
 /// <summary>
 /// Behaviour pins for the Lite query-tag sightings write and tag map (#5990) against a real DuckDB.
 /// </summary>
-public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
+public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string HashA = "0x00000000000000AA";
     private const string HashB = "0x00000000000000BB";
     private readonly LocalDataService _service;
     private readonly SharedDuckDbFixture _fixture;
 
+    /* #9906: the folder the server and schedule managers keep servers.json and collection_schedule.json in. Each test gets its own, deleted with the
+       test, because a fixed name under the shared temp folder is one a run under another account can leave unwritable. */
+    private readonly string _configFolder = Path.Combine(Path.GetTempPath(), $"lite-querytagmap-{Guid.NewGuid():N}");
+
     public LiteQueryTagMapTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _fixture = fixture;
         _service = new LocalDataService(fixture.DuckDb);
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_configFolder, recursive: true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Temp cleanup is best effort. */
+        }
     }
 
     private static QuerySnapshotsCollector.Row Snapshot(string? hash, string text = "SELECT 1", string app = "Reports", string db = "Sales") => new()
@@ -732,8 +746,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
 
     private RemoteCollectorService ServiceWithOneBufferedSighting()
     {
-        var servers = new ServerManager(System.IO.Path.GetTempPath());
-        var service = new RemoteCollectorService(_fixture.DuckDb, servers, new ScheduleManager(System.IO.Path.GetTempPath()));
+        Directory.CreateDirectory(_configFolder);
+        var servers = new ServerManager(_configFolder);
+        var service = new RemoteCollectorService(_fixture.DuckDb, servers, new ScheduleManager(_configFolder));
         service.QueryTagSightingBufferForTests = new QueryTagSightingBuffer();
         service.QueryTagSightingBufferForTests.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
         return service;

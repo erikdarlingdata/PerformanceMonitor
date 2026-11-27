@@ -618,7 +618,7 @@ More than 40 collectors run on independent, configurable schedules (the long-run
 | spinlock_stats | 1 min | `sys.dm_os_spinlock_stats` (deltas) |
 | cpu_scheduler_stats | 1 min | `sys.dm_os_schedulers` runnable/blocked/queued task counts (not Azure SQL DB) |
 | long_query_completions | 1 min (opt-in, ships off) | dedicated completion-trace XE (`rpc_completed`/`sql_batch_completed` over a duration threshold, plus `attention`) |
-| attention | 1 min | dedicated `PerformanceMonitor_Attention` XE session (`attention`: queries a client cancelled or timed out, with the client application, host, database and statement; feeds the Client Timeouts alert) |
+| attention | 1 min | dedicated `PerformanceMonitor_Lite_<id>_Attention` XE session, one for each Lite install (`attention`: queries a client cancelled or timed out, with the client application, host, database and statement; feeds the Client Timeouts alert) |
 | query_stats | 1 min | `sys.dm_exec_query_stats` (deltas) |
 | procedure_stats | 1 min | `sys.dm_exec_procedure_stats` (deltas) |
 | cpu_utilization | 1 min | `sys.dm_os_ring_buffers` scheduler monitor |

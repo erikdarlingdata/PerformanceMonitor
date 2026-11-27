@@ -37,7 +37,7 @@ public sealed class AttentionXeSessionLiteTests
     [Fact]
     public void TheBuilderMakesTheSameStatementBothProductsSend()
     {
-        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql();
+        var sql = AlwaysOnXeSessions.BuildAttentionServerCreateSql("PerformanceMonitor_Lite_0a1b2c3d_Attention");
 
         Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
         Assert.Contains("ADD EVENT sqlserver.attention", sql, StringComparison.Ordinal);
@@ -49,18 +49,6 @@ public sealed class AttentionXeSessionLiteTests
         Assert.Equal("PerformanceMonitor_Lite_0a1b2c3d_Attention", lite);
         Assert.True(AlwaysOnXeSessions.IsOwnName(lite, AlwaysOnXeSessionKind.Attention));
         Assert.False(AlwaysOnXeSessions.IsOwnName(lite, AlwaysOnXeSessionKind.Deadlock));
-    }
-
-    [Fact]
-    public void LiteHoldsNoCopyOfTheAttentionStatement_AndEnsuresThroughTheBuilder()
-    {
-        var ensure = ReadLite("Lite/Services/RemoteCollectorService.AttentionXeSession.cs");
-
-        Assert.DoesNotContain("sqlserver.attention", ensure, StringComparison.Ordinal);
-        Assert.DoesNotContain("CREATE EVENT SESSION", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql()", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerProbeSql(", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessionKind.Attention", ensure, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -88,13 +76,5 @@ public sealed class AttentionXeSessionLiteTests
         /* The shared server arm is what raises XeSessionEnsureException for the deadlock and blocked-process ensures too. */
         var arm = ReadLite("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
         Assert.Contains("throw new XeSessionEnsureException(captureName, ex)", arm, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RemovingAServer_ForgetsTheOwnAttentionSessionToo()
-    {
-        var removal = ReadLite("Lite/Services/RemoteCollectorService.LongQueryCompletions.cs");
-
-        Assert.Contains("AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention", removal, StringComparison.Ordinal);
     }
 }

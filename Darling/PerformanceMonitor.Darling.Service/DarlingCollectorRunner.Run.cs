@@ -634,6 +634,8 @@ public sealed partial class DarlingCollectorRunner
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
+            /* #9895: the client-timeout read names this install's own session on every engine; the Azure per-database loop sets it again, to the same name. */
+            AlwaysOnSessionName = definition is AttentionCollector ? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention) : null,
             /* #9529: only query_snapshots reads it. Only this path holds plans: FetchRowsAsync, the on-demand live
                read, passes none, so it reuses nothing and fetches under the cap. */
             SnapshotPlanCache = _snapshotPlanCache,
