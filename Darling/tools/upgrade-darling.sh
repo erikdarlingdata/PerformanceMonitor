@@ -366,7 +366,9 @@ if start_and_check "${health_seconds}"; then
     fi
     write_upgrade_run "${INSTALL_ROOT}" succeeded 0
     note "Darling ${STAGED_VERSION} is in ${INSTALL_ROOT}, and ${UNIT_NAME} is active."
-    note "To go back: run this script with --rollback. Remove ${PREVIOUS_ROOT} when you no longer need it."
+    # The scripts refuse to run from ${INSTALL_ROOT}, so the copy that rolls back is the one in the folder the tarball was
+    # extracted into (#9851). Once that folder is gone, the tarball has to be extracted again before --rollback can run.
+    note "To go back: sudo ${SCRIPT_DIR}/$(basename -- "${BASH_SOURCE[0]}") --rollback. Only a copy in a folder the tarball was extracted into can run it, not the one in ${INSTALL_ROOT}, so if you remove ${SCRIPT_DIR} first, extract the tarball into a new folder and run its copy. Remove ${PREVIOUS_ROOT} when you no longer need it."
     [ ! -e "${FAILED_ROOT}" ] || note "${FAILED_ROOT} holds a build that an earlier upgrade or rollback set aside. Nothing uses it: remove it when you have looked at it."
     print_next_checks
     exit 0
