@@ -162,10 +162,11 @@ public sealed class DarlingOwnStoreExposureTests : IDisposable
     }
 
     [Theory]
-    [InlineData(DarlingStoreLogins.Surface.Web)]
-    [InlineData(DarlingStoreLogins.Surface.Mcp)]
-    public void Container_OwnStore_ExposedWithoutADedicatedLogin_LogsCriticalOncePerStart(DarlingStoreLogins.Surface surface)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Container_OwnStore_ExposedWithoutADedicatedLogin_LogsCriticalOncePerStart(bool web)
     {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
         var logger = new CapturingTestLogger();
 
         DarlingStoreLogins.ReportContainerExposureWithoutDedicatedLogin(surface, OwnStore(), exposed: true, logger, inContainer: true);
