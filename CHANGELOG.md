@@ -348,6 +348,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **A Linux `--rollback` is recorded as its own row in the upgrade history, and its closing message says the rollback copy is used up** ([#9832])
 - **Darling logs each large index the start builds, and a timed-out bounded Query Store index build is now recorded** ([#9833])
 - **`install-darling.sh` and `upgrade-darling.sh` no longer refuse for a process in a container that runs from the container's own `/opt/darling`** ([#9836])
+- **On Linux the Darling service no longer watches the whole file system, so a first start under systemd says it is ready at once** ([#9839])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8622,3 +8623,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9832]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9832
 [#9833]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9833
 [#9836]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9836
+[#9839]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9839
