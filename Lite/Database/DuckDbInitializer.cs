@@ -678,7 +678,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 87;
+    internal const int CurrentSchemaVersion = 88;
 
     /* #9425: what this instance's start did to the schema, for the build history row. The version stamp the file carried before
        the first open (0 for a fresh file), the stamp after the last one, and the milliseconds the migration steps took. A start
@@ -3610,6 +3610,15 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("Migration to v87 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
+
+        if (fromVersion < 88)
+        {
+            /* v88 (#9885): mcp_slow_calls.answered_from and phase_split, so a slow get_object_usage row says whether the chain or the full fold
+               read the tables and where its time went. VARCHAR, nullable, the LAST columns (the shared added-columns list). NULL on a row stored
+               before v88 and on a tool that records neither. An older build refuses a file stamped v88 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v88: adding mcp_slow_calls.answered_from and phase_split");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(88));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3698,6 +3707,9 @@ public partial class DuckDbInitializer : IDisposable
         (81, "memory_pressure_events", "memory_node_id", "INTEGER"),
         /* #8784: the @@SERVERNAME of the instance that answered the index and object stats collection (Darling's V268 column). NULL on a row stored before v82. */
         (82, "index_object_stats", "answering_server_name", "VARCHAR"),
+        /* #9885: which path answered a get_object_usage call and the call's phases in words, on the slow-call row. NULL on a row stored before v88 and on a tool that records neither. */
+        (88, "mcp_slow_calls", "answered_from", "VARCHAR"),
+        (88, "mcp_slow_calls", "phase_split", "VARCHAR"),
         /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
         (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
         /* #8881: the tempdb log's space and what holds it (Darling's V269 columns), in the collector's payload order. NULL on a row stored before v83. */

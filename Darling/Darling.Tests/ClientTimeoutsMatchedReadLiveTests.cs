@@ -263,6 +263,7 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
         {
             var t0 = DateTime.UtcNow.Date.AddDays(-2).AddHours(12);
             await PlantAsync(connection, t0, ct);
+            await AnalyzePlantedTablesAsync(connection, ct);
             await body(connection, t0, ct);
             bodySucceeded = true;
         }
@@ -326,9 +327,22 @@ FROM generate_series(2, 144, 2) AS h, generate_series(0, 9, 3) AS k
 """, ct, id, t0);
     }
 
+    private static readonly string[] PlantedTables = ["attention_events", "collection_log"];
+
+    /* A freshly planted table has no statistics until autovacuum reaches it, and every read here (the product's and the reference's) plans on row counts. Without them each node is
+       estimated at one row and the planner nests a scan of the whole planted week inside every sample (#9881). The statistics are taken right after planting, before any read. */
+    private static async Task AnalyzePlantedTablesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        foreach (var table in PlantedTables)
+        {
+            using var command = new NpgsqlCommand($"ANALYZE {table}", connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var table in new[] { "attention_events", "collection_log" })
+        foreach (var table in PlantedTables)
         {
             using var command = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", connection);
             command.Parameters.AddWithValue(NpgsqlDbType.Integer, ServerId);

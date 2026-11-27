@@ -27,11 +27,14 @@ namespace PerformanceMonitorLite.Database;
 /// </summary>
 internal sealed class ReadLockWaitTally : IDisposable
 {
+    /// <summary>The slow-read threshold a host that sets none keeps, so a test that changes it restores this and writes no second copy of the figure.</summary>
+    internal static readonly TimeSpan DefaultSlowReadThreshold = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// A read that takes longer than this logs its timing line. Two seconds, the threshold the collector pass line uses. The
     /// setter is a test seam, so a test can make any read slow or fast without depending on the clock.
     /// </summary>
-    internal static TimeSpan SlowReadThreshold { get; set; } = TimeSpan.FromSeconds(2);
+    internal static TimeSpan SlowReadThreshold { get; set; } = DefaultSlowReadThreshold;
 
     private static readonly AsyncLocal<ReadLockWaitTally?> s_current = new();
 
@@ -43,6 +46,8 @@ internal sealed class ReadLockWaitTally : IDisposable
     private long _archiveSpanTicks;
     private long _archiveFiles;
     private int _hasSplit;
+    private string? _answeredFrom;
+    private string? _phaseSplit;
     private int _connections;
     private bool _disposed;
 
@@ -76,13 +81,31 @@ internal sealed class ReadLockWaitTally : IDisposable
     internal long ArchiveFiles => Interlocked.Read(ref _archiveFiles);
 
     /// <summary>
-    /// Says the read keeps a phase split (#9423): a tool that times its own phases, as get_query_store_top does, calls this so the
-    /// slow-call row stores the hot against archive figures. A read that never calls it stores NULL for them, since "no split
-    /// kept" and "no archive time" are different answers. The flag passes to the outer tally when this one ends.
+    /// Says the read keeps a hot against archive split (#9423): a tool whose every read goes through the archive span timer, as
+    /// get_query_store_top does, calls this so the slow-call row stores the hot and archive figures. A read that never calls it stores
+    /// NULL for them, since "no split kept" and "no archive time" are different answers. A tool that times phases without that
+    /// timer, as get_object_usage does (#9885), does not call it. The flag passes to the outer tally when this one ends.
     /// </summary>
     internal void MarkSplitKept() => Interlocked.Exchange(ref _hasSplit, 1);
 
     internal bool SplitKept => Volatile.Read(ref _hasSplit) == 1;
+
+    /// <summary>
+    /// Records which path answered the call and the call's own phase text (#9885), for the slow-call row. <c>get_object_usage</c> calls it
+    /// once it knows whether the chain or the full fold read the tables. Both values pass to the outer tally when this one ends, the way
+    /// <see cref="MarkSplitKept"/> does, so the row of the call that wraps the tool carries them.
+    /// </summary>
+    internal void NoteAnswer(string? answeredFrom, string? phaseSplit)
+    {
+        if (answeredFrom is not null) Volatile.Write(ref _answeredFrom, answeredFrom);
+        if (phaseSplit is not null) Volatile.Write(ref _phaseSplit, phaseSplit);
+    }
+
+    /// <summary>The path that answered the call, as <see cref="NoteAnswer"/> recorded it. Null when the tool records none.</summary>
+    internal string? AnsweredFrom => Volatile.Read(ref _answeredFrom);
+
+    /// <summary>The call's phases as <see cref="ReadPhaseSplit.Describe"/> wrote them. Null when the tool records none.</summary>
+    internal string? PhaseSplit => Volatile.Read(ref _phaseSplit);
 
     internal TimeSpan LockWait => Elapsed(Interlocked.Read(ref _waitTicks));
     internal TimeSpan ArchiveSpan => Elapsed(Interlocked.Read(ref _archiveSpanTicks));
@@ -102,6 +125,7 @@ internal sealed class ReadLockWaitTally : IDisposable
             Interlocked.Add(ref _outer._archiveSpanTicks, Interlocked.Read(ref _archiveSpanTicks));
             Interlocked.Add(ref _outer._archiveFiles, Interlocked.Read(ref _archiveFiles));
             if (SplitKept) _outer.MarkSplitKept();
+            _outer.NoteAnswer(AnsweredFrom, PhaseSplit);
             Interlocked.Add(ref _outer._connections, Volatile.Read(ref _connections));
         }
     }
@@ -134,7 +158,8 @@ internal sealed class ReadPhaseSplit
         }
     }
 
-    private void Add(string phase, long ticks)
+    /// <summary>Adds <paramref name="ticks"/> of stopwatch time to <paramref name="phase"/> for a phase a read measures inside its own loop (#9885).</summary>
+    internal void Add(string phase, long ticks)
     {
         var i = _phases.FindIndex(p => p.Name == phase);
         if (i < 0) _phases.Add((phase, ticks));

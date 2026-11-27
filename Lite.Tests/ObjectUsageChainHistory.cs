@@ -30,6 +30,13 @@ internal static class ObjectUsageChainHistory
     internal const string Node1 = "NODE1";
     internal const string Node2 = "NODE2";
 
+    /// <summary>
+    /// The tool's reply with the path that read the tables left out (#9885). The reply names the chain or the fold in <c>coverage.tables.answered_from</c>,
+    /// and the tests that hold both reads to one answer compare everything but that.
+    /// </summary>
+    internal static async Task<string> UnpathedAsync(Task<string> reply) =>
+        System.Text.RegularExpressions.Regex.Replace(await reply, "\"answered_from\":\"[^\"]*\"", "\"answered_from\":\"\"");
+
     internal static DateTime Day(int daysAgo) => DateTime.SpecifyKind(Now.AddDays(-daysAgo), DateTimeKind.Unspecified);
 
     /// <summary>The days the history has a snapshot on, oldest first: 100 days ago to today, without the gap (60 to 49 days ago).</summary>
