@@ -109,8 +109,10 @@ public sealed class UpgradeRunPickupTests
         "{\n  \"run_id\": \"" + id + "\",\n  \"state\": \"" + state + "\",\n  \"tool_version\": \"3.14.1\",\n  \"target_build\": \"3.14.0\",\n"
         + "  \"started_utc\": \"" + started.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + "\",\n  \"ended_utc\": "
         + (state == "in_progress" ? "null" : "\"" + started.AddSeconds(33).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + "\"")
-        + ",\n  \"exit_code\": " + (state == "in_progress" ? "null" : "0") + ",\n  \"stop_check\": \"clear\",\n"
-        + "  \"rollback_folder\": \"/opt/darling.failed\",\n  \"first_error\": null,\n  \"verified_utc\": null\n}\n";
+        + ",\n  \"exit_code\": " + (state == "in_progress" ? "null" : state == "failed" ? "1" : "0") + ",\n  \"stop_check\": \"clear\",\n"
+        + "  \"rollback_folder\": \"/opt/darling.failed\",\n  \"first_error\": " + (state == "failed" ? "\"" + FailedRollbackError + "\"" : "null") + ",\n  \"verified_utc\": null\n}\n";
+
+    private const string FailedRollbackError = "The build from /opt/darling.previous is back in /opt/darling, and its health check failed: the unit is not active.";
 
     /* #9821: a rollback's own run is a second row. The upgrade it undid is verified, the furthest state a row reaches, and the rule
        that a row never steps back is per run id, so it neither drops the rollback's row nor moves the upgrade's row. The newest row
@@ -178,6 +180,56 @@ public sealed class UpgradeRunPickupTests
         Assert.Equal("/opt/darling.failed", run.RollbackFolder);
         Assert.Equal(started.AddSeconds(33), run.EndedUtc);
         Assert.Equal(0, run.ExitCode);
+    }
+
+    /* #9821: a rollback whose restored build fails its health check writes failed, exit code 1 and the first error. The file parses
+       as a failed run, so no reader takes it for a run that is still going. */
+    [Fact]
+    public void AFailedRollbacksFile_ParsesAsAFailedRun()
+    {
+        var id = Guid.NewGuid();
+        var started = new DateTime(2026, 11, 27, 0, 33, 5, DateTimeKind.Utc);
+
+        Assert.True(UpgradeRunPickup.TryParse(RollbackRunJson(id, "failed", started), out var run, out var problem), problem);
+
+        Assert.Equal(UpgradeRuns.Failed, run!.State);
+        Assert.Equal(1, run.ExitCode);
+        Assert.Equal(FailedRollbackError, run.FirstError);
+        Assert.Equal(started.AddSeconds(33), run.EndedUtc);
+        Assert.Equal("3.14.0", run.TargetBuild);
+    }
+
+    /* #9821: the service stores a failed rollback as a failed row, also when its first read is the finished file and it never
+       saw the run as in_progress. */
+    [Fact]
+    public async Task AFailedRollbacksFile_IsStoredAsAFailedRow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9821-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var rollback = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            File.WriteAllText(Path.Combine(folder, UpgradeRunPickup.FileName), RollbackRunJson(rollback, "failed", now.AddMinutes(-5)));
+            var result = await pickup.PickUpAsync(connection, folder, now, ct);
+
+            Assert.Equal(UpgradeRuns.Failed, result.State);
+            Assert.Equal((1L, "failed"), await RowAsync(connection, rollback));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
     }
 
     [Fact]
