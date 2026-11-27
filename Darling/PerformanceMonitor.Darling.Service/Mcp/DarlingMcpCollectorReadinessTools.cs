@@ -590,7 +590,7 @@ CROSS JOIN LATERAL (
         string verdict;
         if (ordered.Count == 0)
         {
-            verdict = $"Every due collector that a setup step is not holding has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
+            verdict = $"Every due collector {(held > 0 ? "that a setup step is not holding " : "")}has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
                 + (notYetDue > 0 ? $", {notYetDue} not due yet" : "")
                 + (fixedTime > 0 ? $", {fixedTime} run at a set time and have no good cycle since the start" : "")
                 + (held > 0 ? $", {heldClause}" : "")

@@ -230,7 +230,7 @@ public sealed class CollectorReadinessReplyBudgetTests
             Assert.Equal(60, root.GetProperty("precondition_count").GetInt32());
             Assert.Equal(30, root.GetProperty("done_count").GetInt32());
             Assert.Equal("reached", root.GetProperty("first_full_cycle").GetProperty("status").GetString());
-            Assert.StartsWith("Every due collector", root.GetProperty("verdict").GetString());
+            Assert.StartsWith("Every due collector that a setup step is not holding has a good cycle", root.GetProperty("verdict").GetString());
             Assert.All(root.GetProperty("done").EnumerateArray(), s =>
             {
                 Assert.Equal(0, s.GetProperty("collectors_waiting").GetInt32());
