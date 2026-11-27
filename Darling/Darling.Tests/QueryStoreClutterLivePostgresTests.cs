@@ -895,7 +895,9 @@ public sealed class QueryStoreClutterLivePostgresTests
     /// slow-read log, as the MCP filter's does. The computation seam moves the clock, so "as long as the threshold" is set, never
     /// waited for. A cheap computation writes no row. One that took as long as the threshold writes one row under the computation's
     /// own route, as the starting call's caller, with the window it read and the statements it ran. The starting call's scope holds
-    /// the same number of statements with the fleet arm as without it, so none of the fleet statements are in the call's row.
+    /// the same statements with the fleet arm as without it, so none of the fleet statements are in the call's row. A scope also
+    /// holds an entry with no text for each physical connection its call opens, and whether a call opens one depends on where the
+    /// pool stands, so the comparison is of the statements that have text.
     /// </summary>
     [Fact]
     public async Task AFleetComputationOverTheSlowReadBar_WritesOneRowUnderItsOwnRoute_AndACheapOneWritesNone()
@@ -919,8 +921,9 @@ public sealed class QueryStoreClutterLivePostgresTests
             return Task.CompletedTask;
         };
 
-        /* One call in a recorder's scope: the statements the call's own scope saw. */
-        async Task<int> CallAsync(bool fleet)
+        /* One call in a recorder's scope: the statements with text that the call's own scope saw, as hash and label in a fixed order.
+           The scope's other entries have no text: Npgsql's activity for a physical connection the call opened. */
+        async Task<string[]> CallAsync(bool fleet)
         {
             using var opened = ReadScope.Open(null);
             opened.Scope.CaptureStatements = true;
@@ -930,16 +933,20 @@ public sealed class QueryStoreClutterLivePostgresTests
             using var doc = JsonDocument.Parse(json);
             Assert.Equal(fleet, doc.RootElement.GetProperty("fleet_median").ValueKind == JsonValueKind.Object);
             await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
-            return opened.Scope.StatementTotal;
+            var seen = opened.Scope.Snapshot();
+            /* the scope keeps every entry it counted, so the list below hides none of them */
+            Assert.Equal(opened.Scope.StatementTotal, seen.Count);
+            var noText = StatementLabel.Hash(string.Empty);
+            return seen.Where(t => t.Hash != noText).Select(t => $"{t.Hash} {t.Label}").Order(StringComparer.Ordinal).ToArray();
         }
 
         try
         {
-            /* the first call of each kind pays for whatever a data source reads once, so neither is the one compared */
+            /* the first call of each kind opens the pool's connections and fills what a data source reads once, so neither is the one compared */
             await CallAsync(fleet: true);
             await CallAsync(fleet: false);
             var withoutFleet = await CallAsync(fleet: false);
-            Assert.True(withoutFleet > 0, "the call's scope saw no statement");
+            Assert.NotEmpty(withoutFleet);
 
             /* cheap: the clock did not move, so the computation is under the threshold and writes nothing */
             Assert.Equal(withoutFleet, await CallAsync(fleet: true));
