@@ -26,6 +26,11 @@ The tarball has `install-darling.sh`, `upgrade-darling.sh`, `darling.service` an
 
 ```bash
 echo "<hash>  PerformanceMonitorDarling-linux-x64-<version>.tar.gz" | sha256sum -c -
+```
+
+Go on only if it prints `PerformanceMonitorDarling-linux-x64-<version>.tar.gz: OK`.
+
+```bash
 sudo mkdir /opt/darling-new
 sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling-new --no-same-owner --no-same-permissions
 sudo /opt/darling-new/install-darling.sh --source PerformanceMonitorDarling-linux-x64-<version>.tar.gz --sha256 <hash>
@@ -36,7 +41,7 @@ sudo /opt/darling-new/install-darling.sh --source PerformanceMonitorDarling-linu
 - A config that is already in `/etc/darling` is kept, and so is a unit that is already installed. `--replace-unit` installs the tarball's unit over yours and keeps yours as `darling.service.previous`.
 - `--check` runs the checks and changes nothing. `--source <tarball>` installs the build from the tarball, not from the folder the script runs from. The script copies the tarball first and checks the copy that it installs, against `--sha256`, or without it against the `SHA256SUMS-linux.txt` beside the tarball. Run the script again with the same arguments.
 - A `SHA256SUMS-linux.txt` beside the tarball shows that the tarball is whole. It does not show where the tarball came from, because whoever can replace the tarball can replace the file beside it. `--sha256 <hash>`, with a hash that you took from the release page yourself, is the check that does. Both arguments are for a tarball: with a folder as the source the scripts refuse `--sha256` and `--skip-hash-check`. Without `--source` the source is the folder the script runs from, so that form has no hash check at all, and the blocks on this page pass `--source`.
-- The script that runs is the one that you extracted, and it checks the hash only after it starts. So the first line of each block checks the tarball, with the same hash, before you extract it. It prints `<tarball>: OK`, and on a mismatch it prints `FAILED` and exits non-zero: stop there.
+- The script that runs is the one that you extracted, and it checks the hash only after it starts. So the first block of each pair checks the tarball, with the same hash, before you extract it. It is a block of its own so that a pasted block never runs past a failed check: on a mismatch it prints `FAILED`, and you stop there.
 - The scripts run as root, so they refuse to run from a folder that root does not own or that its group or other users can write. The same goes for every folder above it up to `/`, for the script, for `darling-script-lib.sh` and for the `darling.service` and `darling.linux.sample.json` beside it. `/opt` and `/etc/systemd/system`, where the scripts put the build and the unit, must pass the same check with every folder above them. They refuse a `--source` folder like that too, and one that holds a file or a folder like that. The commands above make a folder that passes: `/opt` is root's on a stock host, and a folder in your home directory is not. `--no-same-permissions` lets root's umask set the modes, so a tarball that was built with group-writable files still extracts closed to group writes.
 - The commands the scripts run as the `darling` user, such as the build's `--version` and `--test-connection`, get `PATH` and the `Environment=` lines of the installed unit and its drop-ins, and nothing from root's shell. A variable the build needs to start, such as `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` on a host without ICU, belongs in the unit or in a drop-in. Before a first install there is no unit, so on such a host write the unit by hand first ([step 8](#step-8-write-the-unit-and-start-the-service)): the install keeps a unit that is already there. The lines of an `EnvironmentFile=` are not read.
 - The service user gets only the folders it writes. `/usr/share/PerformanceMonitorDarling` stays root's, and the script takes it back when an older install gave it to `darling`. It refuses, and changes no owner, when `logs` or `darling-keys` is a symbolic link.
@@ -45,6 +50,11 @@ sudo /opt/darling-new/install-darling.sh --source PerformanceMonitorDarling-linu
 
 ```bash
 echo "<hash>  PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz" | sha256sum -c -
+```
+
+Go on only if it prints `PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz: OK`.
+
+```bash
 sudo rm -rf /opt/darling-new && sudo mkdir /opt/darling-new
 sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling-new --no-same-owner --no-same-permissions
 sudo /opt/darling-new/upgrade-darling.sh --check --source PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz --sha256 <hash>
