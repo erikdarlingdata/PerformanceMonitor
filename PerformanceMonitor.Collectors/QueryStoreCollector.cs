@@ -231,9 +231,9 @@ BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
            actually caches and Query Store records for each database. The marker in the cursor SELECT above
            only reaches the outer batch, so without it this probe topped Top Queries by Duration and Query
            Store by Duration, one row per database. */
+        /* #9813: the N before the quoted name keeps a name with a character outside the database code page intact.
+           A non-Unicode literal returns it with a question mark and the driver then targets a database that does not exist. */
         SET @sql = N'
-            /* #9813: the N prefix keeps a name with a character outside the database's code page intact. Without it
-               the literal is non-Unicode, comes back as '?' and the driver then runs against a database that does not exist. */
             SELECT /* PerformanceMonitorLite */ N' + QUOTENAME(@db, '''') + N'
             WHERE EXISTS
             (
