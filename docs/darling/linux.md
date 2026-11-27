@@ -425,10 +425,14 @@ With no more servers than `max_concurrent_sweeps` (4 by default), and no more th
 With the web dashboard and MCP off, the service opens no listening socket, so there is no port to probe. The proof that collection works is in the store. This counts the collector runs of the last 15 minutes for each server:
 
 ```bash
-sudo -u postgres psql -X -d darling -c "SELECT server_id, status, count(*) FROM collect.collection_log WHERE collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY server_id, status ORDER BY server_id, status"
+sudo -u postgres psql -X -d darling -c "SELECT s.name AS server, l.server_id, l.status, count(*) AS runs FROM collect.collection_log l LEFT JOIN config.config_monitored_servers s ON s.server_id = l.server_id WHERE l.collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY s.name, l.server_id, l.status ORDER BY s.name, l.status"
 ```
 
-**Proof:** `SUCCESS` rows for every server. For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
+**Proof:** `SUCCESS` rows for every server.
+
+The `server` column is the display name from the registry, so you can read the result by server. `server_id` is a signed number that the service derives from the host. `collect.collection_log.server_name` holds the host address, not the display name. A row with an empty `server` belongs to a server that is no longer registered.
+
+For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
 
 ### What a new install logs that is not a fault
 
@@ -518,6 +522,14 @@ Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only,
 - **After the first start**, the store holds the switch, in `config.config_service.web_enabled` and `mcp_enabled`, and the file's value is ignored. Change it there as the store owner, for example `UPDATE config.config_service SET web_enabled = true WHERE id = 1`. No restart is needed. The service reads the switch on each collection sweep, and it starts or stops the surface when the value changes. On the Docker Compose shape, run the statement through psql in the store container, as the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804) shows for MCP.
 
 The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
+
+**With your own PostgreSQL outside a container, the web dashboard and MCP listen on loopback only, whatever the `network` block says.** The service logs a warning that names the `network` settings it ignores, and it binds `127.0.0.1` and `::1` only. [#9894](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9894) tracks changing that. From another machine, use an SSH tunnel. The web dashboard listens on port `5153` and MCP on port `5152` unless you set another `port`:
+
+```bash
+ssh -L 8080:127.0.0.1:5153 <user>@<host>
+```
+
+Then open `http://127.0.0.1:8080/` on your own machine. For MCP, forward `-L 8081:127.0.0.1:5152` the same way. For access that several people share, put a reverse proxy on the Linux host in front of the loopback port, and read the notes on a proxy on the same host in [Web dashboard configuration](configuration-web.md) and the reverse proxy notes in [Opt-in Network Endpoints](network-endpoints.md).
 
 ## Upgrade by hand
 
