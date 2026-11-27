@@ -582,6 +582,46 @@ public sealed class QueryTagRebuildMergeTests
         }
     }
 
+    [Fact]
+    public void TwoSlimRowsOfAKeyThatTwoNeighbouringOrderFieldsPutInOppositeOrders_GiveTheRowTheEarlierFieldPutsFirst_ForEachPairOfFields_InBothArrivalOrders()
+    {
+        /* One rule per field, each matching only values that start with x, so each key below is tagged by the rule on the
+           later field of its pair, and its two rows give that rule different matched values. */
+        var world = new World(
+            new List<QueryTagRule>
+            {
+                new(1, QueryTagRuleField.Application, "x*", 1, true, 1),
+                new(2, QueryTagRuleField.Login, "x*", 2, true, 2),
+                new(3, QueryTagRuleField.Host, "x*", 3, true, 3),
+                new(4, QueryTagRuleField.Object, "*.dbo.x*", 4, true, 4),
+            },
+            new List<QueryTagHandAssignment>(),
+            new List<List<QueryTagSighting>>());
+        static QueryTagSighting Row(string key, string database, string application, string login, string host, string objectName) =>
+            new(QueryTagKeyKind.Hash, key, database, new QueryTagObject("D", "dbo", objectName), application, login, host);
+
+        /* Each key's first row comes first by the earlier field of its pair (a before b) and second by the later one (xz after
+           xy). The same few values stand in different fields of different keys. */
+        var first = new[]
+        {
+            Row("0xDATABASE", "a", "xz", "m", "m", "m"), Row("0xAPPLICATION", "m", "a", "xz", "m", "m"),
+            Row("0xLOGIN", "m", "m", "a", "xz", "m"), Row("0xHOST", "m", "m", "m", "a", "xz"),
+        };
+        var second = new[]
+        {
+            Row("0xDATABASE", "b", "xy", "m", "m", "m"), Row("0xAPPLICATION", "m", "b", "xy", "m", "m"),
+            Row("0xLOGIN", "m", "m", "b", "xy", "m"), Row("0xHOST", "m", "m", "m", "b", "xy"),
+        };
+        string[] expected = { "0xAPPLICATION|2|rule|2|xz", "0xDATABASE|1|rule|1|xz", "0xHOST|4|rule|4|D.dbo.xz", "0xLOGIN|3|rule|3|xz" };
+
+        foreach (var arrival in new[] { first.Concat(second).ToList(), second.Concat(first).ToList() })
+        {
+            var merged = Merge(world, arrival, Array.Empty<QueryTagSighting>());
+            Assert.Empty(merged.KeysNeedingOrder);
+            Assert.Equal(expected, merged.Rows.Select(RowText).OrderBy(r => r, StringComparer.Ordinal));
+        }
+    }
+
     private static List<string> RowTexts(IEnumerable<QueryTagMapRow> rows) =>
         rows.Select(r => r.ToString()).OrderBy(r => r, StringComparer.Ordinal).ToList();
 

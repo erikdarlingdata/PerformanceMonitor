@@ -756,4 +756,56 @@ ORDER BY u.tier, u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.ap
             Assert.Equal("0xOLD1,0xOLD2", await SlimKeysAsync(env));
         });
     }
+
+    /* What the store tells the test's connection while the action runs, one line a notice. */
+    private static async Task<List<string>> NoticesDuringAsync(Env env, Func<Task> action)
+    {
+        var heard = new List<string>();
+        void Hear(object sender, NpgsqlNoticeEventArgs e) => heard.Add($"{e.Notice.Severity} {e.Notice.SqlState}: {e.Notice.MessageText}");
+        env.Store.Notice += Hear;
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            env.Store.Notice -= Hear;
+        }
+
+        return heard;
+    }
+
+    [Fact]
+    public async Task AMoveSlice_GetsNoWarningFromTheStore_WhereItsPlanSettingSentOutsideATransactionGetsOne_AndSetsNothing()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-SightingsDays);
+
+            /* Sent with no transaction around it, the move's plan setting changes nothing and the store says so in a warning
+               this connection hears. A move that sent its setting that way would run on the plan it means to avoid. */
+            var alone = await NoticesDuringAsync(env, () => ExecAsync(env, QueryTagSlimSightings.MovePlanSettingSql));
+            Assert.Single(alone);
+            Assert.Equal("on", await IndexScansAsync(env));
+
+            await SightAtAsync(env, "0xOLD1", cutoff.AddHours(-100));
+            var moved = 0;
+            var duringTheMove = await NoticesDuringAsync(env, async () =>
+            {
+                (moved, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct);
+            });
+            Assert.Equal(1, moved);
+            Assert.Empty(duringTheMove);
+            Assert.Equal("0xOLD1", await SlimKeysAsync(env));
+
+            /* A slice that finds nothing expired sends no setting at all. */
+            var movedNothing = -1;
+            var duringNoMove = await NoticesDuringAsync(env, async () =>
+            {
+                (movedNothing, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct);
+            });
+            Assert.Equal(0, movedNothing);
+            Assert.Empty(duringNoMove);
+        });
+    }
 }
