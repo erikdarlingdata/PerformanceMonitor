@@ -33,6 +33,12 @@ namespace Darling.Tests;
 /// end plus a row a second outside each end, a counters-went-down row (a 0 interval beside all-zero deltas), rows with
 /// 0 executions and non-zero CPU (#8403) in the rollup's hours and in the last day, two sql_handles in one hour, one
 /// hash in two databases, NULL reads, and three queries that rank below the five.</para>
+///
+/// <para>Every payload column of <c>collect.query_stats</c> is nullable, and the rollup groups by three of them
+/// (database, hash, sql_handle). The NULL-group test adds a group with no database name and a group with no query
+/// hash, each with rows in all three arms, a NULL sql_handle, a NULL interval and rows whose CPU delta is NULL beside
+/// real executions (#4394), next to groups below the five that differ from them only in the database or the hash and
+/// carry far more spills and a far higher DOP.</para>
 /// </summary>
 public sealed class BadActorHourlySplitLiveTests
 {
@@ -46,6 +52,7 @@ public sealed class BadActorHourlySplitLiveTests
     private const string PartHour = "0x9879PARTHOUR";
     private const string LastDay = "0x9879LASTDAY";
     private const string Rollup = "0x9879ROLLUP";
+    private const string NoDb = "0x9879NODB";
 
     private static readonly DateTime Start = At(2, 6, 20, 0);
     private static readonly DateTime End = At(9, 6, 20, 0);
@@ -95,6 +102,27 @@ public sealed class BadActorHourlySplitLiveTests
             Assert.True(read.UsesRollup, "the rollup reaches the first hour line, so the split serves");
             Assert.Equal(FirstHour, read.FirstHour);
             Assert.True(read.Cut > FirstHour && read.Cut <= At(7, 12, 0, 0), $"the cut follows the ceiling, got {read.Cut:o}");
+
+            Assert.Equal(raw, await ReadSplitAsync(scratch, read, ct));
+            Assert.Equal(ByHash(raw), await CollectorRowsAsync(source));
+        });
+
+    [Fact]
+    public Task GroupsWithNoDatabaseNameOrNoQueryHash_AndRowsWithNoCpuDelta_AreTheRawReadsRows() =>
+        WithStoreAsync(async (scratch, connection, ct) =>
+        {
+            await PlantWeekAsync(connection, ct);
+            await PlantNullGroupsAsync(connection, ct);
+            var raw = await ReadRawAsync(scratch, ct);
+            AssertTheFixtureRanksTheTwoNullGroups(raw);
+
+            await RefreshAsync(connection, Start.AddHours(-1), End.AddHours(1), ct);
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var read = await ChooseAsync(source, ct);
+            Assert.True(read.UsesRollup, "the rollup reaches the first hour line, so the split serves");
+            Assert.Equal(FirstHour, read.FirstHour);
+            Assert.Equal(EndMidnight, read.Cut);
 
             Assert.Equal(raw, await ReadSplitAsync(scratch, read, ct));
             Assert.Equal(ByHash(raw), await CollectorRowsAsync(source));
@@ -200,9 +228,57 @@ public sealed class BadActorHourlySplitLiveTests
         await PlantAsync(c, ct, At(2, 6, 40, 0), Db, "0x9879FILLER3", 400, 14_000_000, 10);
     }
 
+    /// <summary>
+    /// The two NULL groups rank second and third, with their own rows' figures: the spills and DOP of the groups that
+    /// share only their hash or only their database are not theirs. A NULL name reads as the empty string.
+    /// </summary>
+    private static void AssertTheFixtureRanksTheTwoNullGroups(List<Row> raw)
+    {
+        Assert.Equal(new[] { Barely, NoDb, "", Edges, PartHour }, raw.Select(r => r.Hash).ToArray());
+
+        var noDatabase = raw.Single(r => r.Hash == NoDb);
+        Assert.Equal("", noDatabase.Db);
+        Assert.Equal(350L, noDatabase.Executions);
+        Assert.Equal(90_000_000L, noDatabase.TotalCpuUs);
+        Assert.Equal(6_500L, noDatabase.TotalReads);
+        Assert.Equal(6L, noDatabase.Spills);
+        Assert.Equal(6, noDatabase.MaxDop);
+
+        var noHash = raw.Single(r => r.Hash.Length == 0);
+        Assert.Equal(Db, noHash.Db);
+        Assert.Equal(350L, noHash.Executions);
+        Assert.Equal(75_000_000L, noHash.TotalCpuUs);
+        Assert.Equal(4_650L, noHash.TotalReads);
+        Assert.Equal(4L, noHash.Spills);
+        Assert.Equal(5, noHash.MaxDop);
+    }
+
+    private static async Task PlantNullGroupsAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        /* No database name: a row in each arm, a NULL sql_handle in the rollup's hours, and a row alone in its hour
+           whose CPU delta is NULL beside real executions (#4394), so that hour's CPU sum is NULL. */
+        await PlantAsync(c, ct, At(2, 6, 35, 0), null, NoDb, 100, 30_000_000, 1_000, spills: 2, maxDop: 2);
+        await PlantAsync(c, ct, At(5, 9, 5, 0), null, NoDb, 100, 40_000_000, 2_000, maxDop: 6, handle: null);
+        await PlantAsync(c, ct, At(5, 16, 5, 0), null, NoDb, 50, null, 500, elapsedUs: 7_000_000);
+        await PlantAsync(c, ct, At(9, 2, 5, 0), null, NoDb, 100, 20_000_000, 3_000, spills: 4, maxDop: 3);
+        /* The same hash with a database name is its own group, below the five. */
+        await PlantAsync(c, ct, At(5, 9, 6, 0), Db, NoDb, 150, 1_500_000, 10, spills: 40, maxDop: 16);
+
+        /* No query hash: a row in each arm, a NULL interval (the rollup keeps it: only a 0 interval is left out), and a
+           NULL CPU delta beside a known one in the same hour, and in the last day. */
+        await PlantAsync(c, ct, At(2, 6, 36, 0), Db, null, 100, 25_000_000, 1_500, spills: 1, maxDop: 2);
+        await PlantAsync(c, ct, At(6, 3, 10, 0), Db, null, 100, 35_000_000, 2_500, interval: null, maxDop: 5);
+        await PlantAsync(c, ct, At(6, 3, 40, 0), Db, null, 20, null, 100, elapsedUs: 3_000_000);
+        await PlantAsync(c, ct, At(9, 3, 30, 0), Db, null, 100, 15_000_000, 500, spills: 3, maxDop: 4);
+        await PlantAsync(c, ct, At(9, 3, 45, 0), Db, null, 30, null, 50, elapsedUs: 1_000_000);
+        /* No hash in another database, and no hash with no database: each its own group, below the five. */
+        await PlantAsync(c, ct, At(6, 3, 11, 0), OtherDb, null, 150, 1_200_000, 10, spills: 50, maxDop: 32);
+        await PlantAsync(c, ct, At(6, 3, 12, 0), null, null, 150, 900_000, 10, spills: 60, maxDop: 64);
+    }
+
     private static async Task PlantAsync(
-        NpgsqlConnection connection, CancellationToken ct, DateTime at, string db, string hash, long executions, long cpuUs,
-        long? reads, int interval = 60, long spills = 0, int maxDop = 1, string handle = "0x9879H0")
+        NpgsqlConnection connection, CancellationToken ct, DateTime at, string? db, string? hash, long executions, long? cpuUs,
+        long? reads, int? interval = 60, long spills = 0, int maxDop = 1, string? handle = "0x9879H0", long? elapsedUs = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
@@ -214,16 +290,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
-        command.Parameters.AddWithValue(db);
-        command.Parameters.AddWithValue(hash);
-        command.Parameters.AddWithValue(handle);
+        command.Parameters.AddWithValue((object?)db ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)hash ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)handle ?? DBNull.Value);
         command.Parameters.AddWithValue(executions);
-        command.Parameters.AddWithValue(cpuUs);
-        command.Parameters.AddWithValue(cpuUs * 2);
+        command.Parameters.AddWithValue((object?)cpuUs ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)(elapsedUs ?? cpuUs * 2) ?? DBNull.Value);
         command.Parameters.AddWithValue((object?)reads ?? DBNull.Value);
         command.Parameters.AddWithValue(spills);
         command.Parameters.AddWithValue(maxDop);
-        command.Parameters.AddWithValue(interval);
+        command.Parameters.AddWithValue((object?)interval ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 
