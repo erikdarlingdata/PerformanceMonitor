@@ -438,6 +438,48 @@ public sealed class DarlingServiceConnectionTestTests
         Assert.Equal(expected, port);
     }
 
+    /* #9893: the flags form reaches the same trust_server_certificate the JSON form sets. The entry goes through the add core's own parse,
+       so the setting asserted is the one a registered server would carry. */
+    [Theory]
+    [InlineData(true, "--trust-server-certificate")]
+    [InlineData(true, "--trust-server-certificate=true")]
+    [InlineData(true, "--trust-server-certificate", "true")]
+    [InlineData(false, "--trust-server-certificate=false")]
+    [InlineData(false, "--trust-server-certificate", "false")]
+    [InlineData(false)]
+    public void TheTrustFlag_RegistersTheServerWithTheTrustSettingTheFlagGave(bool expected, params string[] trustArgs)
+    {
+        var args = new[] { "--host", "sql01", "--auth", "windows" }.Concat(trustArgs).ToArray();
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags, _ => "pw");
+        Assert.Null(problem);
+        var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(json!);
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        Assert.Equal(expected, Assert.Single(entries).ProbeConfig.TrustServerCertificate);
+    }
+
+    [Fact]
+    public void TheTrustFlag_DoesNotSwallowTheNextFlag_AndAloneCountsAsFlags()
+    {
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(
+            new[] { "--trust-server-certificate", "--host", "sql01", "--auth", "sql", "--username", "u" }, out _, out var flags, out var error));
+        Assert.Null(error);
+        Assert.Equal(new DarlingCliCommands.AddServerFlags("sql01", null, "sql", "u", TrustServerCertificate: true), flags);
+
+        Assert.True(new DarlingCliCommands.AddServerFlags(TrustServerCertificate: false).Any);
+    }
+
+    [Fact]
+    public void TheTrustFlagWithAValueThatIsNotTrueOrFalse_IsRefusedWithAPlainMessage()
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "sql01", "--trust-server-certificate=yes" }, out _, out _, out var error));
+        Assert.Contains("--trust-server-certificate takes true or false", error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void NoPort_LeavesThePortOutOfTheEntry_AndAPortAloneCountsAsFlags()
     {

@@ -7341,11 +7341,11 @@ public static partial class DarlingCliCommands
     /// </summary>
     public sealed record AddServerFlags(
         string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
-        string? Engine = null, string? Database = null, int? Port = null)
+        string? Engine = null, string? Database = null, int? Port = null, bool? TrustServerCertificate = null)
     {
         /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
         public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
-            || Engine is not null || Database is not null || Port is not null;
+            || Engine is not null || Database is not null || Port is not null || TrustServerCertificate is not null;
     }
 
     /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
@@ -7357,7 +7357,8 @@ public static partial class DarlingCliCommands
     /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
     /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
     /// <c>--engine</c>, <c>--database</c> and <c>--port</c> (a whole number from 1 to 65535, #9750), each as <c>--flag value</c> or
-    /// <c>--flag=value</c>. A password flag is refused with the reason.
+    /// <c>--flag=value</c>, and the switch <c>--trust-server-certificate</c> (#9893), alone for true or with true or false as Lite's add reads it.
+    /// A password flag is refused with the reason.
     /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
     /// </summary>
     public static bool TryParseAddServerArgs(string[] rest, out string? configPath, out AddServerFlags flags, out string? errorMessage)
@@ -7366,6 +7367,7 @@ public static partial class DarlingCliCommands
         errorMessage = null;
         string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
         int? port = null;
+        bool? trustCertificate = null;
 
         for (var i = 0; i < rest.Length; i++)
         {
@@ -7396,6 +7398,26 @@ public static partial class DarlingCliCommands
                 errorMessage = "There is no password flag: an argument shows in the process list and in shell history. "
                     + "Leave it out and you are asked for the password with nothing echoed, or pipe a JSON array on stdin.";
                 break;
+            }
+
+            if (name.Equals("--trust-server-certificate", StringComparison.OrdinalIgnoreCase))
+            {
+                /* #9893: a switch alone means true, as Lite's add reads it. The next argument is its value only when it is true or false,
+                   so "--trust-server-certificate --auth sql" and "--trust-server-certificate sql01" are never swallowed. */
+                if (value is null && i + 1 < rest.Length && TrueOrFalseWord(rest[i + 1]) is not null)
+                {
+                    value = rest[++i];
+                }
+
+                var switchValue = value is null ? true : TrueOrFalseWord(value);
+                if (switchValue is null)
+                {
+                    errorMessage = "--trust-server-certificate takes true or false, or no value for true.";
+                    break;
+                }
+
+                trustCertificate = switchValue;
+                continue;
             }
 
             if (name.Equals("--config", StringComparison.OrdinalIgnoreCase) || name.Equals("--host", StringComparison.OrdinalIgnoreCase)
@@ -7449,13 +7471,18 @@ public static partial class DarlingCliCommands
                 continue;
             }
 
-            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port and --config.";
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port, --trust-server-certificate and --config.";
             break;
         }
 
-        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port);
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port, trustCertificate);
         return errorMessage is null;
     }
+
+    private static bool? TrueOrFalseWord(string? text) =>
+        string.Equals(text?.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? true
+        : string.Equals(text?.Trim(), "false", StringComparison.OrdinalIgnoreCase) ? false
+        : null;
 
     /// <summary>
     /// Builds the one-entry JSON array the add core reads from the flags (#6476), asking <paramref name="readPassword"/> for the password
@@ -7485,6 +7512,13 @@ public static partial class DarlingCliCommands
         if (flags.Port is { } port)
         {
             entry["port"] = port;
+        }
+
+        /* #9893: the JSON form's trust_server_certificate, so the add core reads it exactly as it does there. Left out when the flag was not
+           given, which is the entry's own fail-closed default (false). */
+        if (flags.TrustServerCertificate is { } trustCertificate)
+        {
+            entry["trust_server_certificate"] = trustCertificate;
         }
 
         var auth = flags.Auth?.Trim();
@@ -7587,8 +7621,9 @@ public static partial class DarlingCliCommands
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
         "  " + entryPoint + " --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
-        "  " + entryPoint + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>]" + Environment.NewLine +
+        "  " + entryPoint + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>] [--trust-server-certificate]" + Environment.NewLine +
         "--port is for a PostgreSQL server on a port other than 5432. A SQL Server target takes its port in the host as host,port." + Environment.NewLine +
+        "--trust-server-certificate accepts any certificate the SQL Server presents (a self-signed one included). The connection is still encrypted." + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
@@ -7744,7 +7779,7 @@ public static partial class DarlingCliCommands
 
         if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
         {
-            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>]");
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>] [--trust-server-certificate]");
             return 1;
         }
 
