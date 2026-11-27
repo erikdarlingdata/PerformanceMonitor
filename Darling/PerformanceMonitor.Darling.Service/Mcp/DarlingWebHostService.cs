@@ -848,8 +848,6 @@ public sealed class DarlingWebHostService : BackgroundService
         /* Decide the effective bind PURELY (shared ladder), then map the reason -> severity here. */
         var bind = ResolveWebBind(web, config.Postgres);
         LogBindReason(web, bind.Reason);
-        DarlingStoreLogins.ReportContainerExposureWithoutDedicatedLogin(
-            DarlingStoreLogins.Surface.Web, config.Postgres, bind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback, _logger);
 
         try
         {
@@ -1204,7 +1202,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
+                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken, exposed: networkMode);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();

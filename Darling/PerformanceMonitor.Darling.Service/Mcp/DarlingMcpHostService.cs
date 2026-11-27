@@ -565,8 +565,6 @@ public sealed class DarlingMcpHostService : BackgroundService
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
         var bind = ResolveMcpBind(config.Mcp, config.Postgres);
         LogBindReason(config.Mcp, bind.Reason);
-        DarlingStoreLogins.ReportContainerExposureWithoutDedicatedLogin(
-            DarlingStoreLogins.Surface.Mcp, config.Postgres, bind.Mode == McpBindMode.NetworkAndLoopback, _logger);
 
         try
         {
@@ -864,7 +862,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
+                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken, exposed: networkMode);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();

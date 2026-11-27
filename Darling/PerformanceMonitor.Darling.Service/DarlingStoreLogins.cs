@@ -480,9 +480,12 @@ internal static class DarlingStoreLogins
     /// silent substitute); a container host still waiting for the worker's compose-store verdict; or a role's
     /// credential from an earlier start that the store refuses (the role was dropped or re-keyed by hand), which
     /// keeps the surface down with the store's error rather than let it become the owner.
+    /// <paramref name="exposed"/> (#9894): the host's bind result for the surface, true when it listens on the network. A container
+    /// surface that is exposed and then resolves to the owner login logs the Critical line
+    /// (<see cref="ReportContainerExposureOnOwnerLogin"/>).
     /// </summary>
     internal static async Task<string?> ResolveUnmanagedAsync(
-        Surface surface, PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken)
+        Surface surface, PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken, bool exposed = false)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(logger);
@@ -565,6 +568,7 @@ internal static class DarlingStoreLogins
         }
 
         LogLoginWarnings(surface, login, verdict, logger);
+        ReportContainerExposureOnOwnerLogin(surface, login, postgres.ConnectionString, exposed, inContainer, logger);
 
         if (login.Source is LoginSource.ComposeStoreRoleFromEarlierStart or LoginSource.ComposeStoreViewerFromEarlierStart
             && !await AcceptsLoginAsync(
@@ -830,19 +834,19 @@ internal static class DarlingStoreLogins
 
     /// <summary>
     /// #9894: in a container with a store the service does not manage, a surface that is exposed to the network keeps its exposure
-    /// (the compose port mapping is the boundary), and when its dedicated connection string is unset or names the owner's login it
-    /// says so once at Critical, with the text the refusal outside a container uses minus the refusal. Does nothing for the
-    /// bundled store, outside a container, for a surface that is not exposed, or for one that has its own login.
-    /// <paramref name="inContainer"/> is the ambient container marker unless a test passes one.
+    /// (the compose port mapping is the boundary). Where the surface then runs as the owner login, whether the login resolution fell
+    /// back to it or the configured login names the owner's user, it says so once at Critical, with the text the refusal outside a
+    /// container uses minus the refusal. A login that is not the owner's (the role the compose store provisioned, one an earlier start
+    /// left, or a configured one) logs nothing, so the line is made where the login is chosen, not where the surface binds.
+    /// Does nothing outside a container or for a surface that is not exposed (its login's own warning is all it logs).
     /// </summary>
-    internal static void ReportContainerExposureWithoutDedicatedLogin(
-        Surface surface, PostgresConfig postgres, bool exposed, ILogger logger, bool? inContainer = null)
+    internal static void ReportContainerExposureOnOwnerLogin(
+        Surface surface, StoreLogin login, string ownerConnectionString, bool exposed, bool inContainer, ILogger logger)
     {
-        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(login);
         ArgumentNullException.ThrowIfNull(logger);
 
-        if (!exposed || postgres.Managed || !(inContainer ?? DarlingHostBinding.IsRunningInContainer)
-            || HasDedicatedLogin(surface, postgres)
+        if (!exposed || !inContainer || !RunsAsOwner(login, ownerConnectionString)
             || !s_containerExposureLogged.TryAdd(surface, true))
         {
             return;
@@ -851,8 +855,20 @@ internal static class DarlingStoreLogins
         logger.LogCritical("{Message}", DedicatedLoginRequiredText(surface, refusing: false));
     }
 
-    /// <summary>Lets a test see the container line again.</summary>
-    internal static void ResetContainerExposureLogForTests() => s_containerExposureLogged.Clear();
+    /// <summary>Whether a resolved login connects as the owner: the owner fallback itself, or a configured string whose user is the owner's.</summary>
+    private static bool RunsAsOwner(StoreLogin login, string ownerConnectionString) =>
+        login.Source == LoginSource.Owner
+        || (login.Source == LoginSource.Configured
+            && TryReadLoginUsers(login.ConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser)
+            && !string.IsNullOrEmpty(configuredUser)
+            && string.Equals(configuredUser, ownerUser, StringComparison.Ordinal));
+
+    /// <summary>Lets a test see the container line, and each surface's login warning, again.</summary>
+    internal static void ResetContainerExposureLogForTests()
+    {
+        s_containerExposureLogged.Clear();
+        s_lastWarning.Clear();
+    }
 
     /// <summary>
     /// #9894: the line for a surface that is asked to listen on the network on a store the service does not manage, without a login of its

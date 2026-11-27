@@ -1336,7 +1336,7 @@ public sealed class DarlingStoreLoginsTests
         Assert.StartsWith("else", afterManaged, StringComparison.Ordinal);
         var elseBlock = CSharpSourceWalker.BraceBalanced(afterManaged, afterManaged.IndexOf('{'));
         Assert.Matches(
-            $@"storeConnectionString = await DarlingStoreLogins\.ResolveUnmanagedAsync\(\s*DarlingStoreLogins\.Surface\.{surface}, config\.Postgres, _logger, stoppingToken\);",
+            $@"storeConnectionString = await DarlingStoreLogins\.ResolveUnmanagedAsync\(\s*DarlingStoreLogins\.Surface\.{surface}, config\.Postgres, _logger, stoppingToken, exposed: networkMode\);",
             elseBlock);
 
         /* The managed half is unchanged: its wait still derives the role login from the DPAPI credential. */
