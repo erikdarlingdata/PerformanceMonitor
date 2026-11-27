@@ -16,5 +16,5 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StorageVersion
 {
-    public const int SchemaVersion = SlowReadConnectionOpens.Version;
+    public const int SchemaVersion = HostHourlyHashIndexDrop.Version;
 }

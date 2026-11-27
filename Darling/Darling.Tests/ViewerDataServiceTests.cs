@@ -750,11 +750,19 @@ public sealed class ViewerSchemaVersionGateTests
            that one and V290's is a V288 store and maps to 288, not 289. Each sentinel below shifts one place from the end. */
         /* #9223: the V292 sentinel (the covering hash index on the corrected daily Query Store rollup) is the one before the last, so a store that has every
            sentinel but that one and V293's, V294's and V295's is a V291 store and maps to 291, not 292. Each sentinel below shifts one place from the end. */
-        /* #9923: the V321 sentinel (the connection open columns on the slow read record) is the last parameter, so a store that has every sentinel but that one is a V320 store
+        /* #9863: the V322 sentinel (the hourly host rollup's hash index is gone) is the last parameter, so a store that has every sentinel but that one is a V321 store
+           and maps to 321, not 322. Each sentinel below shifts one place from the end. */
+        var allButV322 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV322[^1] = false;
+        Assert.Equal("hasHostHourlyHashIndexDropped", map.GetParameters()[^1].Name);
+        Assert.Equal(321, (int)map.Invoke(null, allButV322)!);
+
+        /* #9923: the V321 sentinel (the connection open columns on the slow read record) is the one before the last, so a store that has every sentinel but that one and V322's is a V320 store
            and maps to 320, not 321. Each sentinel below shifts one place from the end. */
         var allButV321 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV321[^1] = false;
-        Assert.Equal("hasSlowReadConnectionOpens", map.GetParameters()[^1].Name);
+        allButV321[^2] = false;
+        Assert.Equal("hasSlowReadConnectionOpens", map.GetParameters()[^2].Name);
         Assert.Equal(320, (int)map.Invoke(null, allButV321)!);
 
         /* #9705: the V320 sentinel (the slim query-tag sightings table) is the last parameter, so a store that has every sentinel but that one is a V319 store
@@ -762,6 +770,7 @@ public sealed class ViewerSchemaVersionGateTests
         var allButV320 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV320[^1] = false;
         allButV320[^2] = false;
+        allButV320[^3] = false;
         Assert.Equal(319, (int)map.Invoke(null, allButV320)!);
 
         /* #9662: the V319 sentinel (the three argument advanced web access setter) is the last parameter, so a store that has every sentinel but that one is a V318 store
@@ -770,7 +779,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV319[^1] = false;
         allButV319[^2] = false;
         allButV319[^3] = false;
-        Assert.Equal("hasWebAccessAdvancedActor", map.GetParameters()[^3].Name);
+        allButV319[^4] = false;
+        Assert.Equal("hasWebAccessAdvancedActor", map.GetParameters()[^4].Name);
         Assert.Equal(318, (int)map.Invoke(null, allButV319)!);
 
         /* #9485: the V318 sentinel (the planned change windows table) is the last parameter, so a store that has every sentinel but that one is a V317 store
@@ -779,8 +789,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV318[^1] = false;
         allButV318[^2] = false;
         allButV318[^3] = false;
-        Assert.Equal("hasInvestigationChangeWindows", map.GetParameters()[^4].Name);
+        Assert.Equal("hasInvestigationChangeWindows", map.GetParameters()[^5].Name);
         allButV318[^4] = false;
+        allButV318[^5] = false;
         Assert.Equal(317, (int)map.Invoke(null, allButV318)!);
 
         /* #9433: the V317 sentinel (the reply size columns) is the last parameter, so a store that has every sentinel but that one is a V316 store
@@ -790,8 +801,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV317[^2] = false;
         allButV317[^3] = false;
         allButV317[^4] = false;
-        Assert.Equal("hasReadReplyBytes", map.GetParameters()[^5].Name);
+        Assert.Equal("hasReadReplyBytes", map.GetParameters()[^6].Name);
         allButV317[^5] = false;
+        allButV317[^6] = false;
         Assert.Equal(316, (int)map.Invoke(null, allButV317)!);
 
         /* #9439: the V316 sentinel (the lock waits table) is the last parameter, so a store that has every sentinel but that one is a V315 store
@@ -802,8 +814,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV316[^3] = false;
         allButV316[^4] = false;
         allButV316[^5] = false;
-        Assert.Equal("hasStoreLockWaits", map.GetParameters()[^6].Name);
+        Assert.Equal("hasStoreLockWaits", map.GetParameters()[^7].Name);
         allButV316[^6] = false;
+        allButV316[^7] = false;
         Assert.Equal(315, (int)map.Invoke(null, allButV316)!);
 
         /* #9434: the V315 sentinel (the read_latency unique key index) is the last parameter, so a store that has every sentinel but that one is a V314 store
@@ -815,8 +828,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV315[^4] = false;
         allButV315[^5] = false;
         allButV315[^6] = false;
-        Assert.Equal("hasReadLatencyProcessStart", map.GetParameters()[^7].Name);
+        Assert.Equal("hasReadLatencyProcessStart", map.GetParameters()[^8].Name);
         allButV315[^7] = false;
+        allButV315[^8] = false;
         Assert.Equal(314, (int)map.Invoke(null, allButV315)!);
 
         /* #9437: the V314 sentinel (the two store connection tables) is the last parameter, so a store that has every sentinel but that one is a V313 store
@@ -829,8 +843,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV314[^5] = false;
         allButV314[^6] = false;
         allButV314[^7] = false;
-        Assert.Equal("hasStoreConnectionSamples", map.GetParameters()[^8].Name);
+        Assert.Equal("hasStoreConnectionSamples", map.GetParameters()[^9].Name);
         allButV314[^8] = false;
+        allButV314[^9] = false;
         Assert.Equal(313, (int)map.Invoke(null, allButV314)!);
 
         /* #9427: the V313 sentinel (the store setting state and changes tables) is the last parameter, so a store that has every sentinel but that one is a V312 store
@@ -844,8 +859,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV313[^6] = false;
         allButV313[^7] = false;
         allButV313[^8] = false;
-        Assert.Equal("hasStoreSettingChanges", map.GetParameters()[^9].Name);
+        Assert.Equal("hasStoreSettingChanges", map.GetParameters()[^10].Name);
         allButV313[^9] = false;
+        allButV313[^10] = false;
         Assert.Equal(312, (int)map.Invoke(null, allButV313)!);
 
         /* #9432: the V312 sentinel (the upgrade run table) is the last parameter, so a store that has every sentinel but that one is a V311 store
@@ -860,8 +876,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV312[^7] = false;
         allButV312[^8] = false;
         allButV312[^9] = false;
-        Assert.Equal("hasUpgradeRuns", map.GetParameters()[^10].Name);
+        Assert.Equal("hasUpgradeRuns", map.GetParameters()[^11].Name);
         allButV312[^10] = false;
+        allButV312[^11] = false;
         Assert.Equal(311, (int)map.Invoke(null, allButV312)!);
 
         /* #9438: the V311 sentinel (the migration rung object table) is the last parameter, so a store that has every sentinel but that one is a V310 store
@@ -877,8 +894,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV311[^8] = false;
         allButV311[^9] = false;
         allButV311[^10] = false;
-        Assert.Equal("hasServiceStartRungObjects", map.GetParameters()[^11].Name);
+        Assert.Equal("hasServiceStartRungObjects", map.GetParameters()[^12].Name);
         allButV311[^11] = false;
+        allButV311[^12] = false;
         Assert.Equal(310, (int)map.Invoke(null, allButV311)!);
 
         /* #9452: the V310 sentinel (the partial index of the oversized-plan backlog's pending rows) is the last parameter, so a store that has every sentinel but that
@@ -895,8 +913,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV310[^9] = false;
         allButV310[^10] = false;
         allButV310[^11] = false;
-        Assert.Equal("hasOversizedPlanBacklogPendingIndex", map.GetParameters()[^12].Name);
+        Assert.Equal("hasOversizedPlanBacklogPendingIndex", map.GetParameters()[^13].Name);
         allButV310[^12] = false;
+        allButV310[^13] = false;
         Assert.Equal(309, (int)map.Invoke(null, allButV310)!);
 
         /* #9414: the V309 sentinel (the store checkpoint rows' table) is the one before the last, so a store that has every sentinel but that one and V310's is a V308 store
@@ -914,8 +933,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV309[^10] = false;
         allButV309[^11] = false;
         allButV309[^12] = false;
-        Assert.Equal("hasStoreCheckpoints", map.GetParameters()[^13].Name);
+        Assert.Equal("hasStoreCheckpoints", map.GetParameters()[^14].Name);
         allButV309[^13] = false;
+        allButV309[^14] = false;
         Assert.Equal(308, (int)map.Invoke(null, allButV309)!);
 
         /* #9413: the V308 sentinel (the per-table activity tables) is the last parameter, so a store that has every sentinel but that one is a V307 store
@@ -934,8 +954,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV308[^11] = false;
         allButV308[^12] = false;
         allButV308[^13] = false;
-        Assert.Equal("hasStoreTableActivity", map.GetParameters()[^14].Name);
+        Assert.Equal("hasStoreTableActivity", map.GetParameters()[^15].Name);
         allButV308[^14] = false;
+        allButV308[^15] = false;
         Assert.Equal(307, (int)map.Invoke(null, allButV308)!);
 
         /* #9415: the V307 sentinel (the service start history's tables) is the last parameter, so a store that has every sentinel but that one is a V306 store
@@ -955,8 +976,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV307[^12] = false;
         allButV307[^13] = false;
         allButV307[^14] = false;
-        Assert.Equal("hasServiceStartHistory", map.GetParameters()[^15].Name);
+        Assert.Equal("hasServiceStartHistory", map.GetParameters()[^16].Name);
         allButV307[^15] = false;
+        allButV307[^16] = false;
         Assert.Equal(306, (int)map.Invoke(null, allButV307)!);
 
         /* #9411: the V306 sentinel (the background pass step history table) is the last parameter, so a store that has every sentinel but that one is a V305 store
@@ -977,8 +999,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV306[^13] = false;
         allButV306[^14] = false;
         allButV306[^15] = false;
-        Assert.Equal("hasStorePassSteps", map.GetParameters()[^16].Name);
+        Assert.Equal("hasStorePassSteps", map.GetParameters()[^17].Name);
         allButV306[^16] = false;
+        allButV306[^17] = false;
         Assert.Equal(305, (int)map.Invoke(null, allButV306)!);
 
         /* #9419: the V305 sentinel (the WAL columns on the store metrics table) is the last parameter, so a store that has every sentinel but that one is a V304
@@ -1000,8 +1023,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV305[^14] = false;
         allButV305[^15] = false;
         allButV305[^16] = false;
-        Assert.Equal("hasStoreWalFigures", map.GetParameters()[^17].Name);
+        Assert.Equal("hasStoreWalFigures", map.GetParameters()[^18].Name);
         allButV305[^17] = false;
+        allButV305[^18] = false;
         Assert.Equal(304, (int)map.Invoke(null, allButV305)!);
 
         /* #9410: the V304 sentinel (the statement history's write counters) is the last parameter, so a store that has every sentinel but that one is a V303 store
@@ -1024,8 +1048,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV304[^15] = false;
         allButV304[^16] = false;
         allButV304[^17] = false;
-        Assert.Equal("hasStatementHistoryWriteCounters", map.GetParameters()[^18].Name);
+        Assert.Equal("hasStatementHistoryWriteCounters", map.GetParameters()[^19].Name);
         allButV304[^18] = false;
+        allButV304[^19] = false;
         Assert.Equal(303, (int)map.Invoke(null, allButV304)!);
 
         /* #9384: the V303 sentinel (the clutter-day stamp table) is the last parameter, so a store that has every sentinel but that one is a V302 store
@@ -1049,8 +1074,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV303[^16] = false;
         allButV303[^17] = false;
         allButV303[^18] = false;
-        Assert.Equal("hasClutterDayBuilt", map.GetParameters()[^19].Name);
+        Assert.Equal("hasClutterDayBuilt", map.GetParameters()[^20].Name);
         allButV303[^19] = false;
+        allButV303[^20] = false;
         Assert.Equal(302, (int)map.Invoke(null, allButV303)!);
 
         /* #8570: the V302 sentinel (the partial index of failed Agent job outcomes on job_history) is the last parameter, so a store that has every sentinel
@@ -1075,8 +1101,9 @@ public sealed class ViewerSchemaVersionGateTests
         allButV302[^17] = false;
         allButV302[^18] = false;
         allButV302[^19] = false;
-        Assert.Equal("hasJobHistoryFailedIndex", map.GetParameters()[^20].Name);
+        Assert.Equal("hasJobHistoryFailedIndex", map.GetParameters()[^21].Name);
         allButV302[^20] = false;
+        allButV302[^21] = false;
         Assert.Equal(301, (int)map.Invoke(null, allButV302)!);
 
         /* #9374: the V301 sentinel (the last measured relation sizes and their measured time) is the last parameter, so a store that has every sentinel but
@@ -1103,6 +1130,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV301[^19] = false;
         allButV301[^20] = false;
         allButV301[^21] = false;
+        allButV301[^22] = false;
         Assert.Equal(300, (int)map.Invoke(null, allButV301)!);
 
         /* #9357: the V300 sentinel (the procedure_stats hour ledger's tables) is the one before the last, so a store that has every sentinel but that one
@@ -1130,6 +1158,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV300[^20] = false;
         allButV300[^21] = false;
         allButV300[^22] = false;
+        allButV300[^23] = false;
         Assert.Equal(299, (int)map.Invoke(null, allButV300)!);
 
         /* #9349: the V299 sentinel (the object usage chain's tables) is the last parameter, so a store that has every sentinel but that one
@@ -1158,6 +1187,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV299[^21] = false;
         allButV299[^22] = false;
         allButV299[^23] = false;
+        allButV299[^24] = false;
         Assert.Equal(298, (int)map.Invoke(null, allButV299)!);
 
         /* #9304: the V298 sentinel (the payload dimension tables' stamp tables) is the last parameter, so a store that has every sentinel but that one
@@ -1187,6 +1217,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV298[^22] = false;
         allButV298[^23] = false;
         allButV298[^24] = false;
+        allButV298[^25] = false;
         Assert.Equal(297, (int)map.Invoke(null, allButV298)!);
 
         /* #8784 part 2: the V297 sentinel (the dependency list and the per-day referenced-names summary) is the last parameter, so a store that has
@@ -1217,6 +1248,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV297[^23] = false;
         allButV297[^24] = false;
         allButV297[^25] = false;
+        allButV297[^26] = false;
         Assert.Equal(296, (int)map.Invoke(null, allButV297)!);
 
         /* #9280: the V296 sentinel (the hourly Query Store summary's index) is the one before the last, so a store that has every sentinel but that
@@ -1248,6 +1280,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV296[^24] = false;
         allButV296[^25] = false;
         allButV296[^26] = false;
+        allButV296[^27] = false;
         Assert.Equal(295, (int)map.Invoke(null, allButV296)!);
 
         /* #9225: the V295 sentinel (the plan regression block tables) is the one before the last, so a store that has every sentinel but that one and V296's
@@ -1280,6 +1313,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV295[^25] = false;
         allButV295[^26] = false;
         allButV295[^27] = false;
+        allButV295[^28] = false;
         Assert.Equal(294, (int)map.Invoke(null, allButV295)!);
 
         /* #9284: the V294 sentinel (the view-and-time index on the aggregate compression order history) is the one before V295's, so a store that has every
@@ -1313,6 +1347,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV294[^26] = false;
         allButV294[^27] = false;
         allButV294[^28] = false;
+        allButV294[^29] = false;
         Assert.Equal(293, (int)map.Invoke(null, allButV294)!);
 
         /* #9277: the V293 sentinel (the partial counter-row index on attention_events) is the one before the last, so a store that has every
@@ -1347,6 +1382,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV293[^27] = false;
         allButV293[^28] = false;
         allButV293[^29] = false;
+        allButV293[^30] = false;
         Assert.Equal(292, (int)map.Invoke(null, allButV293)!);
 
         var allButV292 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1380,6 +1416,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV292[^28] = false;
         allButV292[^29] = false;
         allButV292[^30] = false;
+        allButV292[^31] = false;
         Assert.Equal(291, (int)map.Invoke(null, allButV292)!);
 
         /* #9215: the V291 sentinel (the covering server index on the corrected hourly Query Store rollup) is the one before the last, so a store that has every
@@ -1416,6 +1453,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV291[^29] = false;
         allButV291[^30] = false;
         allButV291[^31] = false;
+        allButV291[^32] = false;
         Assert.Equal(290, (int)map.Invoke(null, allButV291)!);
 
         /* #9193: the V290 sentinel (the query_stats summary floor table) is the third from the end, so a store that has every sentinel but that one
@@ -1453,6 +1491,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV290[^30] = false;
         allButV290[^31] = false;
         allButV290[^32] = false;
+        allButV290[^33] = false;
         Assert.Equal(289, (int)map.Invoke(null, allButV290)!);
 
         var allButV289 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1489,6 +1528,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV289[^31] = false;
         allButV289[^32] = false;
         allButV289[^33] = false;
+        allButV289[^34] = false;
         Assert.Equal(288, (int)map.Invoke(null, allButV289)!);
 
         var allButV288 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1526,6 +1566,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV288[^32] = false;
         allButV288[^33] = false;
         allButV288[^34] = false;
+        allButV288[^35] = false;
         Assert.Equal(287, (int)map.Invoke(null, allButV288)!);
 
         var allButV287 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1564,6 +1605,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV287[^33] = false;
         allButV287[^34] = false;
         allButV287[^35] = false;
+        allButV287[^36] = false;
         Assert.Equal(286, (int)map.Invoke(null, allButV287)!);
 
         var allButV286 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1603,6 +1645,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV286[^34] = false;
         allButV286[^35] = false;
         allButV286[^36] = false;
+        allButV286[^37] = false;
         Assert.Equal(285, (int)map.Invoke(null, allButV286)!);
 
         var allButV285 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1643,6 +1686,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV285[^35] = false;
         allButV285[^36] = false;
         allButV285[^37] = false;
+        allButV285[^38] = false;
         Assert.Equal(284, (int)map.Invoke(null, allButV285)!);
 
         var allButV284 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1684,6 +1728,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV284[^36] = false;
         allButV284[^37] = false;
         allButV284[^38] = false;
+        allButV284[^39] = false;
         Assert.Equal(283, (int)map.Invoke(null, allButV284)!);
 
         var allButV283 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1726,6 +1771,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV283[^37] = false;
         allButV283[^38] = false;
         allButV283[^39] = false;
+        allButV283[^40] = false;
         Assert.Equal(282, (int)map.Invoke(null, allButV283)!);
 
         var allButV282 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1769,6 +1815,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV282[^38] = false;
         allButV282[^39] = false;
         allButV282[^40] = false;
+        allButV282[^41] = false;
         Assert.Equal(281, (int)map.Invoke(null, allButV282)!);
 
         var allButV281 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1813,6 +1860,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV281[^39] = false;
         allButV281[^40] = false;
         allButV281[^41] = false;
+        allButV281[^42] = false;
         Assert.Equal(280, (int)map.Invoke(null, allButV281)!);
 
         var allButV280 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1858,6 +1906,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV280[^40] = false;
         allButV280[^41] = false;
         allButV280[^42] = false;
+        allButV280[^43] = false;
         Assert.Equal(279, (int)map.Invoke(null, allButV280)!);
 
         var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1904,6 +1953,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV279[^41] = false;
         allButV279[^42] = false;
         allButV279[^43] = false;
+        allButV279[^44] = false;
         Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
 
         var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1951,6 +2001,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV278[^42] = false;
         allButV278[^43] = false;
         allButV278[^44] = false;
+        allButV278[^45] = false;
         Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
 
         var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -1999,6 +2050,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV277[^43] = false;
         allButV277[^44] = false;
         allButV277[^45] = false;
+        allButV277[^46] = false;
         Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
 
         var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -2048,6 +2100,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV276[^44] = false;
         allButV276[^45] = false;
         allButV276[^46] = false;
+        allButV276[^47] = false;
         Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
 
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -2098,6 +2151,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV275[^45] = false;
         allButV275[^46] = false;
         allButV275[^47] = false;
+        allButV275[^48] = false;
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -2149,6 +2203,7 @@ public sealed class ViewerSchemaVersionGateTests
         allButV274[^46] = false;
         allButV274[^47] = false;
         allButV274[^48] = false;
+        allButV274[^49] = false;
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes
