@@ -982,7 +982,8 @@ public static class DarlingRetention
             /* #9705: the statement that deletes a slice of sightings also appends their slim rows (QueryTagSlimSightings.MoveSliceSql), one
                INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's pacing and time budget and no
                sighting is deleted without its slim row. A probe finds each slice and the move takes its bounds as parameters
-               (ExecuteSightingsMoveSliceAsync). */
+               (ExecuteSightingsMoveSliceAsync), and the DELETE inside the move runs under #9796's scan setting so it plans as a bitmap heap
+               scan. */
             var sightingsRetentionDays = QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor);
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
@@ -2316,6 +2317,74 @@ AND   d.collection_time < g.state_time";
     }
 
     /// <summary>
+    /// #9796: the bounds of the slice <see cref="TimeSlicedDeleteSql"/> deletes, read as a statement of its own: the oldest
+    /// expired <paramref name="timeColumn"/> and that time plus one slice width. Both are NULL when no expired row is left,
+    /// which ends the drain. <c>$1</c> is the cutoff. Table and column come from catalog constants (never user input), so
+    /// interpolation is safe.
+    /// </summary>
+    internal static string SliceBoundsProbeSql(string table, string timeColumn)
+        => $"SELECT s.slice_start, s.slice_start + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'"
+         + $" FROM (SELECT min({timeColumn}) AS slice_start FROM {table} WHERE {timeColumn} < $1) AS s";
+
+    /// <summary>
+    /// #9796: the DELETE of the one slice whose bounds <see cref="SliceBoundsProbeSql"/> read, the same rows
+    /// <see cref="TimeSlicedDeleteSql"/> deletes for that slice. <c>$1</c> is the cutoff, <c>$2</c> the slice start
+    /// (inclusive) and <c>$3</c> the slice end (exclusive). The bounds are parameters, so the planner sees their values
+    /// and sizes the slice from the column's statistics.
+    /// </summary>
+    internal static string BoundedSliceDeleteSql(string table, string timeColumn)
+        => $"DELETE FROM {table} WHERE {timeColumn} < $1 AND {timeColumn} >= $2 AND {timeColumn} < $3";
+
+    /* #9796: the slice DELETE of a table whose expired rows are scattered through the heap runs with the plain index
+       scan off. SET LOCAL lasts to the end of the transaction, and that transaction holds the one DELETE, so the
+       bounds probe and every other statement of the purge keep their plans. With the setting on, the planner costs an
+       Index Scan cheapest for the slice and reads the heap in index order, one random page for each row. With it off
+       the DELETE is a Bitmap Heap Scan, which reads the same pages in heap order with read-ahead. On a lab copy of
+       collect.query_tag_sightings (13.5M rows, one day is 450k rows on 416k heap pages, cold cache) the DELETE of one
+       day takes about 50 s as a Bitmap Heap Scan against about 300 s as an Index Scan. The planner picks the Index Scan
+       even with the slice's real bounds as parameters, because last_seen follows heap position closely over the whole table
+       (a correlation of 0.98 on a lab store) while the rows of one expired day lie all over the heap, so it prices one
+       random read a row as if the rows were neighbours. The sightings move (#9705, ExecuteSightingsMoveSliceAsync) runs its
+       DELETE under this same setting through WithSliceDeleteScanSettingAsync, so the two never carry a setting of their own. */
+    internal const string SliceDeleteScanSettingSql = "SET LOCAL enable_indexscan = off";
+
+    /// <summary>
+    /// #9796: runs <see cref="SliceBoundsProbeSql"/> (already bound to its cutoff) and returns the slice's bounds, or null when
+    /// no expired row is left.
+    /// </summary>
+    internal static async Task<(DateTime Start, DateTime End)?> ReadSliceBoundsAsync(NpgsqlCommand probe, CancellationToken cancellationToken)
+    {
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(0, cancellationToken))
+        {
+            return null;
+        }
+
+        return (reader.GetDateTime(0), reader.GetDateTime(1));
+    }
+
+    /// <summary>
+    /// #9796: runs <paramref name="body"/> in a transaction of its own on <paramref name="connection"/> under
+    /// <see cref="SliceDeleteScanSettingSql"/>, commits, and returns what the body returned. A throw out of the body rolls
+    /// the transaction back, which also ends the setting.
+    /// </summary>
+    internal static async Task<T> WithSliceDeleteScanSettingAsync<T>(
+        NpgsqlConnection connection,
+        Func<NpgsqlTransaction, CancellationToken, Task<T>> body,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        using (var setting = new NpgsqlCommand(SliceDeleteScanSettingSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds })
+        {
+            await setting.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var result = await body(transaction, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return result;
+    }
+
+    /// <summary>
     /// #7643: every schema version of a (history key, database) that no capture-state row points at with a <c>last_seen_in_scope_at</c>
     /// at or after <c>$1</c>, and none of whose versions closed at or after <c>$1</c>: a history moved to another key (the pass closed its
     /// current versions at the move) ages out over the window through the closed-version purge. The key is written as
@@ -2748,11 +2817,17 @@ WHERE NOT EXISTS
     /// One slice of the sightings purge (#9705): the probe finds the oldest expired <c>last_seen</c> and the slice's end, and
     /// <see cref="QueryTagSlimSightings.MoveSliceSql"/> deletes the expired sightings of that range and appends their slim rows.
     /// Returns the rows moved and the slice's end, which the drain passes back as <paramref name="lowerBound"/> of its next slice.
-    /// A probe that finds no expired row moves nothing, and the drain ends. The move runs in a transaction of its own, after
-    /// <see cref="QueryTagSlimSightings.MovePlanSettingSql"/>: the setting is local to that transaction, so it ends with the
-    /// commit or with the rollback of a failed move and reaches neither the probe nor any other statement of the purge. The
-    /// setting's comment has the lab medians: a day that lies all over the heap moves 9.6 times faster with it, a day in heap
-    /// order 1.29 times slower. A row written below the bound later is left for the next drain, whose first probe has no bound.
+    /// A probe that finds no expired row moves nothing, and the drain ends. The move runs through
+    /// <see cref="WithSliceDeleteScanSettingAsync"/> (#9796), the same transaction and scan setting the plain time-sliced
+    /// DELETE of a table with scattered expired rows runs under: the DELETE inside the move plans as a Bitmap Heap Scan,
+    /// and the setting ends with the commit or with the rollback of a failed move, so it reaches neither the probe nor any
+    /// other statement of the purge. The setting's comment has the lab medians: a day that lies all over the heap moves 9.6
+    /// times faster with it, a day in heap order 1.29 times slower. The probe is not <see cref="SliceBoundsProbeSql"/>: it
+    /// starts from the end of the slice before (<paramref name="lowerBound"/>), because nothing vacuums the table between two
+    /// slices and a probe from the bottom of the index would visit the dead entry of every row the slices before deleted. The
+    /// probe and the move read two snapshots, so a slice whose every row the sighting writer moves past the cutoff between
+    /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A row written below the bound later
+    /// is left for the next drain, whose first probe has no bound.
     /// </summary>
     /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
     internal static async Task<(int Rows, object? SliceEnd)> ExecuteSightingsMoveSliceAsync(
@@ -2761,8 +2836,7 @@ WHERE NOT EXISTS
         object? lowerBound,
         CancellationToken cancellationToken)
     {
-        object sliceStart;
-        object sliceEnd;
+        (DateTime Start, DateTime End) slice;
         using (var probe = new NpgsqlCommand(
             lowerBound is null ? QueryTagSlimSightings.FirstSliceProbeSql : QueryTagSlimSightings.NextSliceProbeSql,
             connection) { CommandTimeout = DeleteTimeoutSeconds })
@@ -2773,34 +2847,26 @@ WHERE NOT EXISTS
                 probe.Parameters.AddWithValue(lowerBound);
             }
 
-            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(0, cancellationToken))
+            if (await ReadSliceBoundsAsync(probe, cancellationToken) is not { } found)
             {
                 return (0, null);
             }
 
-            sliceStart = reader.GetValue(0);
-            sliceEnd = reader.GetValue(1);
+            slice = found;
         }
 
-        /* Disposing the transaction rolls a failed move back, which also ends the plan setting. */
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        using (var setting = new NpgsqlCommand(QueryTagSlimSightings.MovePlanSettingSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds })
-        {
-            await setting.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        int rows;
-        using (var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds })
-        {
-            move.Parameters.AddWithValue(cutoff);
-            move.Parameters.AddWithValue(sliceStart);
-            move.Parameters.AddWithValue(sliceEnd);
-            rows = await move.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await transaction.CommitAsync(cancellationToken);
-        return (rows, sliceEnd);
+        var rows = await WithSliceDeleteScanSettingAsync(
+            connection,
+            async (transaction, token) =>
+            {
+                using var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds };
+                move.Parameters.AddWithValue(cutoff);
+                move.Parameters.AddWithValue(slice.Start);
+                move.Parameters.AddWithValue(slice.End);
+                return await move.ExecuteNonQueryAsync(token);
+            },
+            cancellationToken);
+        return (rows, slice.End);
     }
 
     /// <summary>
@@ -3524,6 +3590,20 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// <para><paramref name="secondParameterFactory"/> (the unsliced shape only) builds the statement's <c>$2</c> from the purge's own
     /// connection once the #5592 budget gate has passed, so a measurement the second parameter needs (the procedure totals' raw
     /// floor) is never taken for a table the pass will not start. A throw out of it fails the table like any other fault.</para>
+    ///
+    /// <para><paramref name="sliceStatement"/> (#9705, collect.query_tag_sightings only) ignores <paramref name="deleteSql"/> and
+    /// runs each slice as the caller's probe and statement (<see cref="ExecuteSightingsMoveSliceAsync"/>), handing each slice's
+    /// end to the next as its lower bound. The statement's DELETE already runs under <see cref="WithSliceDeleteScanSettingAsync"/>.
+    /// It wins when <paramref name="bitmapSliceTimeColumn"/> is also set.</para>
+    ///
+    /// <para><paramref name="bitmapSliceTimeColumn"/> (#9796) ignores <paramref name="deleteSql"/> and
+    /// runs each slice as two statements: <see cref="SliceBoundsProbeSql"/> reads the slice's bounds, then
+    /// <see cref="BoundedSliceDeleteSql"/> deletes it inside <see cref="WithSliceDeleteScanSettingAsync"/>. On a store with no write
+    /// between the two, the slices, their order and the rows they delete are those of <see cref="TimeSlicedDeleteSql"/>, and a probe
+    /// that finds no expired row ends the drain. The probe and the DELETE read two snapshots, so a slice whose every row a writer
+    /// moves past the cutoff between them deletes 0 rows and ends the drain early, and the next sweep goes on from there. No call
+    /// site passes it since the sightings purge moved to <paramref name="sliceStatement"/>. The parameter stays for the plain
+    /// time-sliced DELETE of a table whose expired rows are scattered through the heap, and the move shares its probe reader and scan setting.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -3537,7 +3617,8 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         RetentionWalPacer? pacer = null,
         Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
         Func<int, bool, string>? cursoredSql = null,
-        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null)
+        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null,
+        string? bitmapSliceTimeColumn = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -3604,6 +3685,39 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
                         var (rows, sliceEnd) = await sliceStatement(connection, cutoff, lowerBound, ct);
                         deleted += rows;
                         lowerBound = sliceEnd ?? lowerBound;
+                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
+                    },
+                    pacer,
+                    cancellationToken);
+            }
+            else if (bitmapSliceTimeColumn is not null)
+            {
+                using var probe = new NpgsqlCommand(SliceBoundsProbeSql(tableName, bitmapSliceTimeColumn), connection) { CommandTimeout = DeleteTimeoutSeconds };
+                probe.Parameters.AddWithValue(cutoff);
+                var sliceDeleteSql = BoundedSliceDeleteSql(tableName, bitmapSliceTimeColumn);
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        batches++;
+                        var walBefore = await ReadWalAsync(ct);
+                        var rows = 0;
+                        if (await ReadSliceBoundsAsync(probe, ct) is { } slice)
+                        {
+                            rows = await WithSliceDeleteScanSettingAsync(
+                                connection,
+                                async (transaction, token) =>
+                                {
+                                    using var delete = new NpgsqlCommand(sliceDeleteSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds };
+                                    delete.Parameters.AddWithValue(cutoff);
+                                    delete.Parameters.AddWithValue(slice.Start);
+                                    delete.Parameters.AddWithValue(slice.End);
+                                    return await delete.ExecuteNonQueryAsync(token);
+                                },
+                                ct);
+                        }
+
+                        deleted += rows;
                         return (rows, batchSize, await WalSinceAsync(walBefore, ct));
                     },
                     pacer,

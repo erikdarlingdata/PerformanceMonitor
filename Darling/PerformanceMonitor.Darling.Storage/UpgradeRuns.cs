@@ -90,27 +90,53 @@ CREATE INDEX IF NOT EXISTS idx_upgrade_runs_started
     /// <summary>One row per run id: a second pickup of the same run updates the row, it never adds one. <c>recorded_at</c> keeps the
     /// first time the service saw the run. A row never steps back: the update runs only when the file's state is at least as far along
     /// as the stored one (in_progress, then succeeded or failed, then verified), so an older copy of the run's file, put back from a
-    /// rollback backup, cannot move a failed or verified row to in_progress. When the update is skipped the statement returns no row,
-    /// and the pickup treats the file as stale.</summary>
+    /// rollback backup, cannot move a failed or verified row to in_progress. A file that matches the stored row in every column the update
+    /// sets writes nothing, so <c>updated_at</c> is the time the row last changed and a finished run's file that waits for its removal does
+    /// not rewrite the row on each pass (#9852). The statement returns one word that keeps the three apart: <see cref="Written"/> for an
+    /// insert or an update, <see cref="Unchanged"/> for a file that is current and equal to the row, <see cref="Stale"/> for a file behind
+    /// the row. The skipped update returns no row of its own, so the word comes from reading the stored state as the statement began.</summary>
     public const string UpsertSql = @"
-INSERT INTO collect.upgrade_runs AS r
-    (run_id, state, tool_version, target_build, started_at, ended_at, exit_code, stop_check, rollback_folder, first_error, verified_at, recorded_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
-ON CONFLICT (run_id) DO UPDATE SET
-    state = EXCLUDED.state,
-    tool_version = EXCLUDED.tool_version,
-    target_build = EXCLUDED.target_build,
-    started_at = EXCLUDED.started_at,
-    ended_at = EXCLUDED.ended_at,
-    exit_code = EXCLUDED.exit_code,
-    stop_check = EXCLUDED.stop_check,
-    rollback_folder = EXCLUDED.rollback_folder,
-    first_error = EXCLUDED.first_error,
-    verified_at = EXCLUDED.verified_at,
-    updated_at = EXCLUDED.updated_at
-WHERE (CASE EXCLUDED.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
-    >= (CASE r.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
-RETURNING r.state";
+WITH written AS
+(
+    INSERT INTO collect.upgrade_runs AS r
+        (run_id, state, tool_version, target_build, started_at, ended_at, exit_code, stop_check, rollback_folder, first_error, verified_at, recorded_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+    ON CONFLICT (run_id) DO UPDATE SET
+        state = EXCLUDED.state,
+        tool_version = EXCLUDED.tool_version,
+        target_build = EXCLUDED.target_build,
+        started_at = EXCLUDED.started_at,
+        ended_at = EXCLUDED.ended_at,
+        exit_code = EXCLUDED.exit_code,
+        stop_check = EXCLUDED.stop_check,
+        rollback_folder = EXCLUDED.rollback_folder,
+        first_error = EXCLUDED.first_error,
+        verified_at = EXCLUDED.verified_at,
+        updated_at = EXCLUDED.updated_at
+    WHERE (CASE EXCLUDED.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
+        >= (CASE r.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
+      AND (r.state, r.tool_version, r.target_build, r.started_at, r.ended_at, r.exit_code, r.stop_check, r.rollback_folder, r.first_error, r.verified_at)
+        IS DISTINCT FROM
+          (EXCLUDED.state, EXCLUDED.tool_version, EXCLUDED.target_build, EXCLUDED.started_at, EXCLUDED.ended_at, EXCLUDED.exit_code, EXCLUDED.stop_check,
+           EXCLUDED.rollback_folder, EXCLUDED.first_error, EXCLUDED.verified_at)
+    RETURNING r.run_id
+)
+SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM written) THEN 'written'
+    WHEN (CASE $2 WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
+        >= (SELECT CASE s.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END FROM collect.upgrade_runs s WHERE s.run_id = $1)
+        THEN 'unchanged'
+    ELSE 'stale'
+END";
+
+    /// <summary>The statement's word for an insert or an update of the row.</summary>
+    public const string Written = "written";
+
+    /// <summary>The statement's word for a file that is current and equal to the stored row: nothing was written (#9852).</summary>
+    public const string Unchanged = "unchanged";
+
+    /// <summary>The statement's word for a file behind the stored row: nothing was written, and the file is stale.</summary>
+    public const string Stale = "stale";
 
     /// <summary>The bounded retention delete, run after each record.</summary>
     public const string RetentionDeleteSql = @"
@@ -140,7 +166,7 @@ public enum UpgradeRunPickupOutcome
     /// <summary>The file was recorded and left in place: the run is not finished or not yet verified.</summary>
     Recorded,
 
-    /// <summary>The file was recorded and then removed: the run is verified, failed or older than a week, or the stored row is already further along than the file.</summary>
+    /// <summary>The file was recorded and then removed: the run is verified, failed or older than a week, or the stored row is already further along than the file. A file that equals the stored row is recorded and handled by its state and age, as one that was written is (#9852).</summary>
     RecordedAndRemoved,
 
     /// <summary>The file was recorded but could not be removed. The next pass records it again and the row stays one row.</summary>
@@ -230,8 +256,9 @@ public sealed class UpgradeRunPickup
 
         var recorded = await RecordAsync(connection, run!, nowUtc, cancellationToken);
 
-        /* A file behind the stored row (an older copy put back from a rollback backup) changed nothing and is stale: it is removed. */
-        var finished = !recorded || run!.State is UpgradeRuns.Verified or UpgradeRuns.Failed;
+        /* A file behind the stored row (an older copy put back from a rollback backup) changed nothing and is stale: it is removed. A file
+           equal to the stored row (#9852) is current and writes nothing: it is kept or removed by its state and age like one that was written. */
+        var finished = recorded == UpgradeRuns.Stale || run!.State is UpgradeRuns.Verified or UpgradeRuns.Failed;
         var stale = nowUtc - run!.StartedUtc > MaxFileAge;
         if (!finished && !stale)
         {
@@ -354,13 +381,14 @@ public sealed class UpgradeRunPickup
         }
     }
 
-    /// <summary>False when the stored row is further along than the file, so nothing was written.</summary>
-    private static async Task<bool> RecordAsync(NpgsqlConnection connection, UpgradeRunFile run, DateTime nowUtc, CancellationToken cancellationToken)
+    /// <summary><see cref="UpgradeRuns.Written"/> when the row was inserted or updated, <see cref="UpgradeRuns.Unchanged"/> when the file equals the
+    /// stored row, <see cref="UpgradeRuns.Stale"/> when the stored row is further along than the file. The last two write nothing (#9852).</summary>
+    private static async Task<string> RecordAsync(NpgsqlConnection connection, UpgradeRunFile run, DateTime nowUtc, CancellationToken cancellationToken)
     {
         /* The columns are timestamp without time zone, and Npgsql refuses a Kind=Utc value for one. The file's times are already Unspecified,
            so the caller's UtcNow gets the same Kind here. Without this the first pickup throws and the file never reaches the store (#9432). */
         var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
-        bool written;
+        string recorded;
         await using (var upsert = new NpgsqlCommand(UpgradeRuns.UpsertSql, connection) { CommandTimeout = 30 })
         {
             upsert.Parameters.Add(new NpgsqlParameter { Value = run.RunId, NpgsqlDbType = NpgsqlDbType.Uuid });
@@ -375,13 +403,13 @@ public sealed class UpgradeRunPickup
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.FirstError ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.VerifiedUtc ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
             upsert.Parameters.Add(new NpgsqlParameter { Value = now, NpgsqlDbType = NpgsqlDbType.Timestamp });
-            written = await upsert.ExecuteScalarAsync(cancellationToken) is not null;
+            recorded = (string?)await upsert.ExecuteScalarAsync(cancellationToken) ?? UpgradeRuns.Stale;
         }
 
         await using var retention = new NpgsqlCommand(UpgradeRuns.RetentionDeleteSql, connection) { CommandTimeout = 30 };
         retention.Parameters.Add(new NpgsqlParameter { Value = now.AddDays(-UpgradeRuns.RetentionDays), NpgsqlDbType = NpgsqlDbType.Timestamp });
         await retention.ExecuteNonQueryAsync(cancellationToken);
-        return written;
+        return recorded;
     }
 
     private void WarnOnce(string key, string message, params object?[] args)

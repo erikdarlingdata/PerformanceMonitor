@@ -63,7 +63,7 @@ COMMENT ON TABLE collect.query_tag_sightings_slim IS 'A query-tag sighting past 
     /// <summary>
     /// The hours of <c>last_seen</c> one slice of the move covers (#9705): a day, the slice every other time-sliced purge takes.
     /// Measured on a lab store, one cold run a length, on a day of 402,668 expired rows that lie all over the heap: a 24 hour
-    /// slice moves in 5.8 s through the bitmap read <see cref="MovePlanSettingSql"/> gives (12 hours 5.3 s, 6 hours 4.3 s)
+    /// slice moves in 5.8 s through the bitmap read the scan setting of <see cref="MoveSliceSql"/> gives (12 hours 5.3 s, 6 hours 4.3 s)
     /// and in 54.6 s through the index scan the planner picks without it (12 hours 51.5 s, 6 hours 43.8 s). So a shorter
     /// slice saves under 30 percent of a slice's time, doubles or quadruples the probes and the pacing waits of a drain, and
     /// a day is under the purge's 100 s target on either plan.
@@ -87,31 +87,19 @@ COMMENT ON TABLE collect.query_tag_sightings_slim IS 'A query-tag sighting past 
         $"SELECT s.slice_start, s.slice_start + INTERVAL '{MoveSliceHours} hours' FROM (SELECT min(last_seen) AS slice_start FROM collect.query_tag_sightings WHERE last_seen < $1{lowerBound}) AS s";
 
     /// <summary>
-    /// The plan setting of the move (#9705), run as its own command inside the transaction that holds only it and
-    /// <see cref="MoveSliceSql"/>: <c>SET LOCAL</c> ends with that transaction, committed or rolled back, so no probe and no
-    /// other statement of the purge is planned under it. With index scans off the delete finds its slice through a bitmap of
-    /// the <c>last_seen</c> index and reads the heap in block order with read-ahead. Left alone, the planner picks the index
-    /// scan even with the slice's real bounds as parameters, because <c>last_seen</c> follows heap position closely over the
-    /// whole table (a correlation of 0.98 on a lab store) while the rows of one expired day lie all over the heap, so it
-    /// prices one random read a row as if the rows were neighbours. It prices the bitmap plan 3.7 times its own pick on
-    /// either kind of day, so the setting forces the bitmap and no cost is left to choose it. Measured on that store, the
-    /// median of three cold runs of a day's slice: a day of 402,668 rows that lie all over the heap moves in 5.74 s by the
-    /// bitmap against 55.11 s by the index scan, 9.6 times faster. A day of 402,467 rows that lie in heap order moves in
-    /// 4.91 s by the bitmap against 3.81 s by the index scan, 1.29 times slower. The setting is on for every slice: it gains
-    /// 49.4 s on a day of the first kind and loses 1.10 s on a day of the second, and 27 of that store's 28 days are of the
-    /// first kind.
-    /// </summary>
-    public const string MovePlanSettingSql = "SET LOCAL enable_indexscan = off";
-
-    /// <summary>
     /// Deletes one slice of expired sightings and appends their slim rows in the same statement: a sighting is never gone
     /// without its slim row, and a failed statement leaves both tables as they were. <c>$1</c> is the cutoff, <c>$2</c> and
     /// <c>$3</c> the slice's start and end as a probe returned them, as plain parameters. The range alone does not choose the
-    /// plan (#9705): the planner takes the index scan for it, so the statement runs after <see cref="MovePlanSettingSql"/>
-    /// in a transaction of its own and reads the slice through a bitmap. Lab medians of three cold runs: a day of 402,668
+    /// plan (#9705): the planner takes the index scan for it, so the purge runs the statement in a transaction of its own
+    /// after <c>SET LOCAL enable_indexscan = off</c> (the scan setting of #9796, DarlingRetention.WithSliceDeleteScanSettingAsync),
+    /// which ends with that transaction, committed or rolled back, so no probe and no other statement of the purge is planned
+    /// under it. With index scans off the DELETE finds its slice through a bitmap of the <c>last_seen</c> index and reads the
+    /// heap in block order with read-ahead. The planner prices that bitmap plan 3.7 times its own pick on either kind of day,
+    /// so the setting forces the bitmap and no cost is left to choose it. Lab medians of three cold runs: a day of 402,668
     /// rows that lie all over the heap moves in 5.74 s against 55.11 s by the index scan (9.6 times faster), and a day of
-    /// 402,467 rows in heap order in 4.91 s against 3.81 s (1.29 times slower). The statement's row count is the rows
-    /// deleted, which is the rows inserted.
+    /// 402,467 rows in heap order in 4.91 s against 3.81 s (1.29 times slower). The setting is on for every slice: it gains
+    /// 49.4 s on a day of the first kind and loses 1.10 s on a day of the second, and 27 of that store's 28 days are of the
+    /// first kind. The statement's row count is the rows deleted, which is the rows inserted.
     /// </summary>
     public const string MoveSliceSql = """
 WITH moved AS (

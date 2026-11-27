@@ -227,7 +227,8 @@ id -u "${SERVICE_USER}" >/dev/null 2>&1 || die "The '${SERVICE_USER}' user does 
 unit_replaced=0
 
 if [ "${rollback_only}" = 1 ]; then
-    [ -f "${PREVIOUS_ROOT}/${SERVICE_DLL}" ] || die "${PREVIOUS_ROOT} holds no build to go back to."
+    # A refusal before anything moved says that nothing was changed, why, which build stays, and how to change builds (#9851).
+    [ -f "${PREVIOUS_ROOT}/${SERVICE_DLL}" ] || die "Nothing was changed. The rollback copy ${PREVIOUS_ROOT} is missing or holds no build, so --rollback has nothing to go back to. Only an upgrade makes that copy: a --rollback uses it up, removing it by hand deletes it, and an install that was never upgraded has none. The build in ${INSTALL_ROOT} is $(build_version "${INSTALL_ROOT}"). To change builds, run a new upgrade with --source and --sha256."
     others="$(processes_from "${INSTALL_ROOT}" "$(unit_pids)")"
     [ -z "${others}" ] || die "A process other than the service still runs from ${INSTALL_ROOT}. Nothing was changed. Let it finish or stop it, then run this script again:
 ${others}"
@@ -365,7 +366,9 @@ if start_and_check "${health_seconds}"; then
     fi
     write_upgrade_run "${INSTALL_ROOT}" succeeded 0
     note "Darling ${STAGED_VERSION} is in ${INSTALL_ROOT}, and ${UNIT_NAME} is active."
-    note "To go back: run this script with --rollback. Remove ${PREVIOUS_ROOT} when you no longer need it."
+    # The scripts refuse to run from ${INSTALL_ROOT}, so the copy that rolls back is the one in the folder the tarball was
+    # extracted into (#9851). Once that folder is gone, the tarball has to be extracted again before --rollback can run.
+    note "To go back: sudo ${SCRIPT_DIR}/$(basename -- "${BASH_SOURCE[0]}") --rollback. Only a copy in a folder the tarball was extracted into can run it, not the one in ${INSTALL_ROOT}, so if you remove ${SCRIPT_DIR} first, extract the tarball into a new folder and run its copy. Remove ${PREVIOUS_ROOT} when you no longer need it."
     [ ! -e "${FAILED_ROOT}" ] || note "${FAILED_ROOT} holds a build that an earlier upgrade or rollback set aside. Nothing uses it: remove it when you have looked at it."
     print_next_checks
     exit 0

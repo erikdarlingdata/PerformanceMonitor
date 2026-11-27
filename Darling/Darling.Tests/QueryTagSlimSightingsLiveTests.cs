@@ -785,7 +785,7 @@ ORDER BY u.tier, u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.ap
 
             /* Sent with no transaction around it, the move's plan setting changes nothing and the store says so in a warning
                this connection hears. A move that sent its setting that way would run on the plan it means to avoid. */
-            var alone = await NoticesDuringAsync(env, () => ExecAsync(env, QueryTagSlimSightings.MovePlanSettingSql));
+            var alone = await NoticesDuringAsync(env, () => ExecAsync(env, DarlingRetention.SliceDeleteScanSettingSql));
             Assert.Single(alone);
             Assert.Equal("on", await IndexScansAsync(env));
 
