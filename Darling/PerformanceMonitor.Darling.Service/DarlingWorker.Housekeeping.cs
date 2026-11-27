@@ -1234,9 +1234,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             else
             {
-                _logger.LogDebug(
-                    "Store object convergence: the first hourly pass ran no step, the {Skipped} it would run all ran in this start's own pass (#9858)",
-                    skippedAsRanAtStartup);
+                /* The line stays at Information (#3817): it is the proof the hourly path is wired on this store, in the log window an
+                   operator reads after a restart. The start's own pass ran the steps, so this one says it ran none and why (#9858). */
+                _logger.LogInformation(
+                    "Store object convergence: 0 steps, all {Skipped} ran in this start's own pass (#9858), {ElapsedMs} ms",
+                    skippedAsRanAtStartup, passClock.ElapsedMilliseconds);
             }
 
             await PassSteps.RecordAsync(
