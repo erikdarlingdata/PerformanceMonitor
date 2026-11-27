@@ -21,13 +21,17 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ConnectionOpenIsNotAStatementTests
 {
-    private static readonly ActivitySource s_source = new("Darling.Tests.ConnectionOpen9923");
+    private const string SourceName = "Darling.Tests.ConnectionOpen9923";
+
+    /* The listener below names the source by this constant, never by s_source: a listener added before the field is built is called by the
+       ActivitySource constructor, and a lambda that read the still-null field would throw inside the type initializer. */
+    private static readonly ActivitySource s_source = new(SourceName);
 
     private static Activity Stopped(string displayName, string? text, TimeSpan duration)
     {
         using var listener = new ActivityListener
         {
-            ShouldListenTo = source => source.Name == s_source.Name,
+            ShouldListenTo = source => source.Name == SourceName,
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
         };
         ActivitySource.AddActivityListener(listener);
