@@ -409,6 +409,12 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
         public TimeSpan Statement;
         public TimeSpan Held;
         public int Rows;
+
+        /// <summary>#9888: the rows the statement returned beyond the cost cap, which the read did not price further.</summary>
+        public int LeftOut;
+
+        /// <summary>#9888: true when the rows came from the kept result of an earlier read, so no statement ran.</summary>
+        public bool FromKeep;
     }
 
     /// <summary>
@@ -444,9 +450,15 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             string.Create(CultureInfo.InvariantCulture,
                 $"Plan regression read took {Ms(total)} ms for {context.ServerName} (server {context.ServerId}): archive read plan {Ms(archivePlan)} ms, " +
                 $"failures read {Ms(failures.Statement)} ms for {failures.Rows} rows (read lock wait {Ms(failures.Wait)} ms), " +
-                $"cost read {Ms(cost.Statement)} ms for {cost.Rows} candidates (read lock wait {Ms(cost.Wait)} ms), " +
+                $"cost read {Ms(cost.Statement)} ms for {cost.Rows} candidates{DescribeCostRead(cost)} (read lock wait {Ms(cost.Wait)} ms), " +
                 $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches{profiles.Describe()}"));
     }
+
+    /// <summary>#9888: what the cost read did beyond its time: the rows left out by the cap, an answer from the kept result, or a read that found nothing.</summary>
+    private static string DescribeCostRead(PlanRegressionStatementTime cost) =>
+        (cost.FromKeep ? " answered from an earlier read" : "")
+        + (cost.LeftOut > 0 ? $", {cost.LeftOut} left out past the cap of {PlanRegressionCostCap}" : "")
+        + (cost.Rows == 0 && !cost.FromKeep ? " (found no candidate, so this is the floor of the statement's scan)" : "");
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -590,6 +602,9 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                        changed between the compiles, 0 not checked. The advice reads it so it claims no cause the
                        data does not show. */
                     ["worst_input_basis"] = offenderCount > 0 ? kept[0].InputBasis : 0,
+                    /* #9888: the cost read's candidates this fact priced, and the rows it left out past the cap. */
+                    ["cost_candidates_priced"] = costRead.Rows,
+                    ["cost_candidates_left_out"] = costRead.LeftOut,
                 }
             };
 
