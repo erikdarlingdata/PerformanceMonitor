@@ -462,7 +462,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `.\PerformanceMonitor.Darling.Service.exe --check-settings` | `darling-verb --check-settings` |
 | `.\PerformanceMonitor.Darling.Service.exe --add-server` | `darling-verb --add-server`, with the arguments in [Add-server](cli.md#--add-server) |
 | `.\PerformanceMonitor.Darling.Service.exe --edit-server` | `darling-verb --edit-server`, with the arguments in [Edit-server](cli.md#--edit-server) |
-| `.\PerformanceMonitor.Darling.Service.exe --grant-script` | `darling-verb --grant-script` |
+| `.\PerformanceMonitor.Darling.Service.exe --grant-script` | `darling-verb --grant-script`. With `--host` and no `--auth` it prints the SQL login script, so add `--username <login>` to name the login |
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
 | `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |

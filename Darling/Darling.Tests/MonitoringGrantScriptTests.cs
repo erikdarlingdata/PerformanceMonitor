@@ -677,13 +677,51 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Fact]
+    public async Task Verb_ForAHostWithNoAuth_OffWindows_PrintsTheSqlLoginScript()
+    {
+        async Task<(int Code, string Out, string Err)> Run(bool isWindows, params string[] args)
+        {
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var code = await DarlingCliCommands.GrantScriptAsync(
+                args, output, error, TestContext.Current.CancellationToken,
+                readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: isWindows);
+            return (code, output.ToString(), error.ToString());
+        }
+
+        // #9844: a Linux or Compose service connects with a SQL login, so the host form without --auth prints the SQL login script.
+        var named = await Run(false, "--host", "sql01", "--username", "DarlingMonitor");
+        Assert.Equal(0, named.Code);
+        Assert.Equal("", named.Err);
+        Assert.Contains("CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'<strong password>'", named.Out);
+        Assert.DoesNotContain("FROM WINDOWS", named.Out);
+        Assert.DoesNotContain("NT SERVICE", named.Out);
+
+        // No --username: the placeholder login and its note.
+        var placeholder = await Run(false, "--host", "sql01");
+        Assert.Equal(0, placeholder.Code);
+        Assert.Contains($"CREATE LOGIN [{MonitoringGrantScript.PlaceholderLogin}] WITH PASSWORD = N'<strong password>'", placeholder.Out);
+        Assert.Contains("The server entry names no SQL login", placeholder.Out);
+        Assert.DoesNotContain("FROM WINDOWS", placeholder.Out);
+
+        // The same line on Windows prints the Windows account script, and an explicit --auth wins on either platform.
+        var windows = await Run(true, "--host", "sql01");
+        Assert.Equal(0, windows.Code);
+        Assert.Contains("FROM WINDOWS", windows.Out);
+        Assert.DoesNotContain("WITH PASSWORD", windows.Out);
+        Assert.Equal(windows.Out, (await Run(true, "--host", "sql01", "--auth", "integrated")).Out);
+        Assert.Equal(windows.Out, (await Run(false, "--host", "sql01", "--auth", "integrated")).Out);
+        Assert.Equal(named.Out, (await Run(true, "--host", "sql01", "--auth", "sql", "--username", "DarlingMonitor")).Out);
+    }
+
+    [Fact]
     public async Task Verb_ReadsTheServiceAccountFromTheCaller_ForWindowsAuth()
     {
         var output = new StringWriter();
 
         var code = await DarlingCliCommands.GrantScriptAsync(
             new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
-            readServiceAccount: () => @"CORP\gmsa-darling$", machineName: "DARLING01", domainName: "CORP");
+            readServiceAccount: () => @"CORP\gmsa-darling$", machineName: "DARLING01", domainName: "CORP", isWindows: true);
 
         Assert.Equal(0, code);
         Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
@@ -696,7 +734,7 @@ public sealed class MonitoringGrantScriptTests
 
         var code = await DarlingCliCommands.GrantScriptAsync(
             new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
-            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: true);
 
         Assert.Equal(0, code);
         Assert.Contains("PLACEHOLDER", output.ToString());

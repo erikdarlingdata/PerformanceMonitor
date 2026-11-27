@@ -36,7 +36,7 @@ public static partial class DarlingCliCommands
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
         "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--service-account <account>]" + Environment.NewLine +
-        "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
+        "      The same for a host not yet added. Connects to no monitored server. Without --auth the default is integrated on Windows and sql on Linux and in a container." + Environment.NewLine +
         "  --column-stats-databases adds database-level SELECT, only in the databases you list, for the optional column_stats collector (column selectivity)." + Environment.NewLine +
         "      One database per option, repeated for each: the value is taken whole, so a name with a comma or a space works (quote it)." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
@@ -178,10 +178,11 @@ public static partial class DarlingCliCommands
     /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to no monitored SQL Server (the <c>server-name</c> form reads the store registry)
     /// and prints no password. The server list is the store's registry, with darling.json's own list when the store cannot be
     /// reached, as <c>--validate-config</c> resolves it. Exit 0 with the script on stdout; 1 for an argument, configuration or name problem.
+    /// <paramref name="isWindows"/> is the platform that picks the <c>--host</c> form's default <c>--auth</c> (#9844): null reads the running OS.
     /// </summary>
     public static async Task<int> GrantScriptAsync(
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken,
-        Func<string?>? readServiceAccount = null, string? machineName = null, string? domainName = null)
+        Func<string?>? readServiceAccount = null, string? machineName = null, string? domainName = null, bool? isWindows = null)
     {
         if (!TryParseGrantScriptArgs(rest, out var args, out var argError))
         {
@@ -237,7 +238,10 @@ public static partial class DarlingCliCommands
         {
             host = args.Host!;
             label = host;
-            auth = args.Auth ?? "integrated";
+            /* #9844: with no --auth, a host not yet added gets the form its platform can use. A Windows service connects with Windows
+               authentication. A Linux or Compose service has no Windows account to connect as, so its entry is a SQL login, and the script
+               names the --username login, or the placeholder login and its note when none is given. */
+            auth = args.Auth ?? ((isWindows ?? OperatingSystem.IsWindows()) ? "integrated" : "sql");
             username = args.Username;
         }
 
