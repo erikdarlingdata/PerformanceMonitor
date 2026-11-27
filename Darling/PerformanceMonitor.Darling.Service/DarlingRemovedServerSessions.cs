@@ -29,7 +29,8 @@ internal sealed record RemovedLongQueryServer(MonitoredServer Config, ServerRunt
 
 /// <summary>
 /// Removing a server drops this install's Extended Events sessions on it, and nothing else (#4961): the long-query trace's
-/// session, then the deadlock and blocked-process sessions this install chose for itself in the server's databases. The same
+/// session, then the deadlock and blocked-process sessions this install chose for itself in the server's databases, then its own
+/// client-timeout session on a server-scoped server (#9895). The same
 /// rule as Lite's removal. Every failure, the timeout included, is logged and returned: a session left behind never stops
 /// the removal.
 /// </summary>
@@ -73,7 +74,9 @@ internal static class DarlingRemovedServerSessions
 
             var applied = state.LongQueryTraceApplied;
             var schemaSession = schemaSessionRecorded?.Invoke(runtime.ServerId) == true;
-            if (applied == false && !HoldsOwnFallback(runner, runtime) && !schemaSession)
+            /* #9895: a server-scoped server may hold this install's client-timeout session, which no latch or record shows, so only
+               an Azure SQL Database server with nothing else to drop is skipped. */
+            if (applied == false && runtime.Target.IsAzureSqlDb && !HoldsOwnFallback(runner, runtime) && !schemaSession)
             {
                 continue;
             }
@@ -146,11 +149,14 @@ internal static class DarlingRemovedServerSessions
         ILogger logger,
         CancellationToken cancellationToken,
         Func<int, bool>? schemaOn = null,
-        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>>? schemaInstanceGuard = null)
+        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>>? schemaInstanceGuard = null,
+        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>>? attentionInstanceGuard = null)
     {
         var others = (remaining ?? Array.Empty<MonitoredServer>()).Where(other => other.ServerId != removed.Runtime.ServerId).ToList();
         await DropLongQuerySessionAsync(removed, runner, others, traceOn, instanceGuard, logger, cancellationToken);
         await DropOwnFallbacksAsync(removed, runner, others, logger, cancellationToken);
+        await DropAttentionSessionAsync(
+            removed, runner, attentionInstanceGuard ?? (_ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers)), logger, cancellationToken);
         await DropSchemaSessionAsync(
             removed, runner, others, schemaOn ?? (_ => false), schemaInstanceGuard ?? (_ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers)), logger, cancellationToken);
     }
@@ -220,6 +226,67 @@ internal static class DarlingRemovedServerSessions
         {
             logger.LogWarning(
                 "[{Server}] Could not drop the long-query trace session of the removed server; it may remain on the server: {Message}", name, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// This install's own client-timeout session (#9895) on a server-scoped server: on premises, Managed Instance and RDS. Dropped by
+    /// its own per-install name only, never the shared <c>PerformanceMonitor_Attention</c> an older install may read. The drop does
+    /// nothing where the session is not there. The session is per install, so it stays where another registration of this install
+    /// with the collector on may keep it on the same instance (<paramref name="instanceGuard"/>). An Azure SQL Database server's own
+    /// sessions are dropped with the fallbacks. Nothing is opened for an install with no id. It never throws: the failure is
+    /// logged, because a session left behind never stops the removal.
+    /// </summary>
+    private static async Task DropAttentionSessionAsync(
+        RemovedLongQueryServer removed,
+        DarlingCollectorRunner runner,
+        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>> instanceGuard,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var server = removed.Runtime;
+        var name = server.Config.DisplayName;
+        var sessionName = runner.AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention);
+        if (sessionName is null || server.Target.IsAzureSqlDb)
+        {
+            return;
+        }
+
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var skipReason = (await instanceGuard(cancellationToken)).RemovalSkipReason();
+            if (skipReason is not null)
+            {
+                logger.LogInformation("[{Server}] The client timeout XE session was left in place on removal: {Reason}.", name, skipReason);
+                return;
+            }
+
+            if (runner.AttentionSessionDropForTests is { } drop)
+            {
+                await drop(server, sessionName, cancellationToken);
+            }
+            else
+            {
+                using var connection = new SqlConnection(DarlingXeSessions.WithoutReadOnlyIntent(server.ConnectionString));
+                await connection.OpenAsync(cancellationToken);
+                using var command = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropIfExistsSql(sessionName), connection);
+                command.CommandTimeout = 60;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            logger.LogInformation("[{Server}] Dropped this install's client timeout XE session of the removed server", name);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning(
+                "[{Server}] The client timeout XE session of the removed server was not dropped within {Seconds} seconds; it may remain on the server",
+                name, Timeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                "[{Server}] Could not drop this install's client timeout XE session of the removed server; it may remain on the server: {Message}", name, ex.Message);
         }
     }
 

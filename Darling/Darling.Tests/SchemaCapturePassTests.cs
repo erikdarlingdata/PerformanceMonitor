@@ -516,6 +516,13 @@ public sealed class SchemaCapturePassTests
                 drops.Add(database);
                 return Task.CompletedTask;
             };
+            /* #9895: a server-scoped server also gets its own client-timeout session dropped on removal, and Azure SQL Database never does. */
+            var attentionDrops = 0;
+            rig.Runner.AttentionSessionDropForTests = (_, _, _) =>
+            {
+                attentionDrops++;
+                return Task.CompletedTask;
+            };
             await rig.PassAsync(server, ct);
 
             /* What the reload does: the server is gone from the registry, its trace was never on, and no override turns the collector on. */
@@ -532,13 +539,29 @@ public sealed class SchemaCapturePassTests
             }
 
             Assert.Equal(azure ? [Sales] : [string.Empty], drops);
+            Assert.Equal(azure ? 0 : 1, attentionDrops);
 
-            /* A server the store shows no session for is not captured for it. */
-            var other = rig.Server(host: "schemapass-other");
+            /* A server the store shows no schema-changes session for is not captured for it: an Azure one is not captured at all, a
+               server-scoped one only for its client-timeout session, so the drops the pass recorded do not grow. */
+            var other = rig.Server(host: "schemapass-other", azure: azure);
             var otherStates = new List<DarlingWorker.ServerLoopState> { new() { Config = other.Config, Runtime = other, LongQueryTraceApplied = false } };
             var none = await DarlingRemovedServerSessions.RecordedSchemaSessionsAsync(
                 rig.Runner, otherStates, Array.Empty<MonitoredServer>(), NullLogger.Instance, ct);
-            Assert.Empty(DarlingRemovedServerSessions.Capture(otherStates, Array.Empty<MonitoredServer>(), rig.Runner, none));
+            var otherRemoved = DarlingRemovedServerSessions.Capture(otherStates, Array.Empty<MonitoredServer>(), rig.Runner, none);
+            if (azure)
+            {
+                Assert.Empty(otherRemoved);
+            }
+            else
+            {
+                var only = Assert.Single(otherRemoved);
+                Assert.False(only.SchemaSessionRecorded);
+                await DarlingRemovedServerSessions.DropAsync(
+                    only, rig.Runner, Array.Empty<MonitoredServer>(), overridesGone, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers),
+                    NullLogger.Instance, ct, overridesGone, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers));
+                Assert.Equal([string.Empty], drops);
+                Assert.Equal(2, attentionDrops);
+            }
         });
     }
 

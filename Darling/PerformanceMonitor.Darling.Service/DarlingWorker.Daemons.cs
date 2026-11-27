@@ -1474,6 +1474,7 @@ public sealed partial class DarlingWorker
         var remaining = _registryState.Read()?.Servers;
         bool TraceOn(int otherId) => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled;
         bool SchemaOn(int otherId) => SchemaObjectsOn(otherId);
+        bool AttentionOn(int otherId) => StoreConfigProvider.ResolveSchedule("attention", otherId, _scheduleOverrides).Enabled;
         foreach (var removed in removedServers)
         {
             using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -1490,7 +1491,9 @@ public sealed partial class DarlingWorker
                 sessionDrop.Token,
                 SchemaOn,
                 token => LongQueryTraceInstanceGuardFor(
-                    removed.Runtime.ServerId, remaining, SchemaOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)));
+                    removed.Runtime.ServerId, remaining, SchemaOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, AttentionOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)));
         }
     }
 

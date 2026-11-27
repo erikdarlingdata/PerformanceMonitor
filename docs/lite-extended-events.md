@@ -12,12 +12,13 @@ If Lite cannot read `install-id.json` (another program holds it open, or the rea
 
 - `PerformanceMonitor_Lite_<id>_LongQueryCompletions` is this install's long-query trace. Lite creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
 - `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` keep their shared names, because Darling and other installs read them too. Lite never drops them. It checks each one whenever its collector runs. It creates a missing one and starts a stopped one, so a deliberate stop does not last.
-- `PerformanceMonitor_Attention` is the client-timeout session that the `attention` collector reads. It also keeps its shared name, and Lite never drops it. Lite checks it while the `attention` collector is on. It creates a missing one with `STARTUP_STATE = ON` and starts a stopped one. On Azure SQL Database, Lite creates one in every monitored database. If a session of that name has an older definition, Lite drops it and creates it again once for each run of the app.
-- On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock`, `PerformanceMonitor_Lite_<id>_BlockedProcess` or `PerformanceMonitor_Lite_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
+- `PerformanceMonitor_Lite_<id>_Attention` is this install's client-timeout session, which the `attention` collector reads. Each install has its own, so two installs at different builds never replace each other's. Lite checks it while the `attention` collector is on. It creates a missing one with `STARTUP_STATE = ON` and starts a stopped one. On Azure SQL Database, Lite creates one in every monitored database. If the session has an older definition, Lite drops it and creates it again once for each run of the app. Removing the server drops it, unless another registration of this install on the same instance keeps it.
+- Builds before this change shared one client-timeout session, `PerformanceMonitor_Attention`. A new build never creates, reads, alters or drops it, because an older install might still read it, and it stays running. When every install that watches the server runs this build or later, drop it by hand with the statements in the last section.
+- On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock` or `PerformanceMonitor_Lite_<id>_BlockedProcess` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
 
 ## The ring buffer limit
 
-The ring buffer of the long-query, deadlock and blocked-process sessions is created with `max_events_limit` from `xe_ring_buffer_max_events` in `settings.json` (default 1000, clamped to 1000-10000), and `max_memory` of 4096 KB. A buffer holds at most that many events or 4 MB, whichever fills first. `max_memory` stays at 4096 KB whatever the setting, and a deadlock event carries its whole deadlock graph XML, so with large graphs the deadlock session's buffer fills by memory before it holds 1,000 events: the setting mostly helps the blocked-process and long-query sessions. When memory was the cap, the loss note says so. The `PerformanceMonitor_Attention` session is not affected. For the key, the loss note and how to read it, see [Extended Events ring buffer limit](lite-guide.md#extended-events-ring-buffer-limit).
+The ring buffer of the long-query, deadlock and blocked-process sessions is created with `max_events_limit` from `xe_ring_buffer_max_events` in `settings.json` (default 1000, clamped to 1000-10000), and `max_memory` of 4096 KB. A buffer holds at most that many events or 4 MB, whichever fills first. `max_memory` stays at 4096 KB whatever the setting, and a deadlock event carries its whole deadlock graph XML, so with large graphs the deadlock session's buffer fills by memory before it holds 1,000 events: the setting mostly helps the blocked-process and long-query sessions. When memory was the cap, the loss note says so. The `PerformanceMonitor_Lite_<id>_Attention` session is not affected. For the key, the loss note and how to read it, see [Extended Events ring buffer limit](lite-guide.md#extended-events-ring-buffer-limit).
 
 The limit applies when a session is created, so a session keeps the limit it was created with. The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.
 
@@ -85,7 +86,7 @@ Lite has no command that drops sessions, so run the statements below yourself. R
 
 The login needs the permission that [Microsoft Learn's `DROP EVENT SESSION` page](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql) requires. On SQL Server and Azure SQL Managed Instance that is `DROP ANY EVENT SESSION` (SQL Server 2022 and later) or `ALTER ANY EVENT SESSION`. On Azure SQL Database it is `DROP ANY DATABASE EVENT SESSION`, in each database.
 
-Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock, blocked-process and client-timeout fallbacks in Azure SQL Database only, so a server has none to drop.
+Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own long-query session. The third drops this install's own client-timeout session. Lite makes the deadlock and blocked-process fallbacks in Azure SQL Database only, so a server has none to drop.
 
 ```sql
 IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_LongQueryCompletions')
@@ -93,6 +94,9 @@ IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'P
 
 IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_LongQueryCompletions')
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_LongQueryCompletions] ON SERVER;
+
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_Attention')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_Attention] ON SERVER;
 ```
 
 Database scope (Azure SQL Database). Run these five statements in each monitored database.

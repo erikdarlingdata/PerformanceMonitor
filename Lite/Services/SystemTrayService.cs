@@ -48,6 +48,9 @@ public class SystemTrayService : IDisposable
         ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
+    /// <summary>The tray icon this service built, for tests that read what the shell is given (#9892). Null before <see cref="Initialize"/>.</summary>
+    internal TaskbarIcon? TrayIcon => _trayIcon;
+
     /// <summary>
     /// Initializes the system tray icon with context menu. Safe to call again: it disposes the old icon and
     /// re-subscribes the StateChanged handler exactly once. A theme change does not come through here; it restyles
@@ -75,6 +78,14 @@ public class SystemTrayService : IDisposable
         /* Double-click to show window */
         _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
 
+        /* #9892: a pause from anywhere (the tray menu, the Settings window) moves the tooltip, its ToolTipText and the pause
+           item together. Unsubscribe first, so a second Initialize does not stack a duplicate handler. */
+        if (_backgroundService != null)
+        {
+            _backgroundService.PausedChanged -= OnPausedChanged;
+            _backgroundService.PausedChanged += OnPausedChanged;
+        }
+
         /* Handle minimize to tray. Unsubscribe first, so a second Initialize does not stack a duplicate
            StateChanged handler on the app-lifetime window. */
         _mainWindow.StateChanged -= MainWindow_StateChanged;
@@ -100,7 +111,7 @@ public class SystemTrayService : IDisposable
            The DispatcherUnhandledException handler silently swallows this specific crash. */
         _tooltipText = new TextBlock
         {
-            Text = paused ? "Performance Monitor Lite (Paused)" : "Performance Monitor Lite",
+            Text = TooltipSentence(paused),
             Foreground = new SolidColorBrush(HasLightBackground
                 ? (Color)ColorConverter.ConvertFromString("#1A1D23")
                 : (Color)ColorConverter.ConvertFromString("#E4E6EB")),
@@ -119,6 +130,11 @@ public class SystemTrayService : IDisposable
             CornerRadius = new CornerRadius(4),
             Child = _tooltipText
         };
+
+        /* #9892: the shell takes the icon's name, which a screen reader announces and UI Automation finds the icon by, from
+           ToolTipText, and never from the TrayToolTip popup. Hardcodet sends the standard tip only when TrayToolTip is null,
+           so with both set, hover still shows only the popup. The two carry the same sentence. */
+        _trayIcon.ToolTipText = _tooltipText.Text;
 
         /* Build context menu */
         var contextMenu = new ContextMenu();
@@ -150,25 +166,43 @@ public class SystemTrayService : IDisposable
         }
     }
 
-    private void ToggleCollection()
+    /// <summary>Flips the collection's paused state. <see cref="OnPausedChanged"/> moves the tray's text to match.</summary>
+    internal void ToggleCollection()
     {
         if (_backgroundService == null) return;
 
         _backgroundService.IsPaused = !_backgroundService.IsPaused;
+    }
+
+    /// <summary>
+    /// #9892: the one place the tray's paused wording is set after the icon is built: the pause item, the styled tooltip and
+    /// the icon's ToolTipText. <see cref="CollectionBackgroundService.IsPaused"/> is set on the UI thread by the tray menu
+    /// and by the Settings window, so the handler touches WPF directly.
+    /// </summary>
+    private void OnPausedChanged(object? sender, EventArgs e)
+    {
+        if (_trayIcon == null || _backgroundService == null) return;
+
+        bool paused = _backgroundService.IsPaused;
 
         if (_pauseResumeItem != null)
         {
-            _pauseResumeItem.Header = _backgroundService.IsPaused ? "Resume Co_llection" : "Pause Co_llection";
-            _pauseResumeItem.Icon = new TextBlock { Text = _backgroundService.IsPaused ? "▶" : "⏸", Background = Brushes.Transparent };
+            _pauseResumeItem.Header = paused ? "Resume Co_llection" : "Pause Co_llection";
+            _pauseResumeItem.Icon = new TextBlock { Text = paused ? "▶" : "⏸", Background = Brushes.Transparent };
         }
 
+        string sentence = TooltipSentence(paused);
         if (_tooltipText != null)
         {
-            _tooltipText.Text = _backgroundService.IsPaused
-                ? "Performance Monitor Lite (Paused)"
-                : "Performance Monitor Lite";
+            _tooltipText.Text = sentence;
         }
+
+        _trayIcon.ToolTipText = sentence;
     }
+
+    /// <summary>The sentence the styled tooltip shows and the icon's ToolTipText carries (#9892).</summary>
+    private static string TooltipSentence(bool paused) =>
+        paused ? "Performance Monitor Lite (Paused)" : "Performance Monitor Lite";
 
     private void ExitApplication()
     {
@@ -267,6 +301,10 @@ public class SystemTrayService : IDisposable
         {
             ThemeManager.ThemeChanged -= OnThemeChanged;
             _mainWindow.StateChanged -= MainWindow_StateChanged;
+            if (_backgroundService != null)
+            {
+                _backgroundService.PausedChanged -= OnPausedChanged;
+            }
             _trayIcon.Visibility = Visibility.Collapsed;
             _trayIcon.Dispose();
             _trayIcon = null;
