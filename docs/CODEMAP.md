@@ -15,10 +15,10 @@ The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in th
 In numbers:
 
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
-- 304 Darling MCP tools and 121 Lite MCP tools.
-- 317 store migrations. The newest is version 318.
-- 4933 test classes in 5 test projects.
-- 19 CI workflows.
+- 320 Darling MCP tools and 130 Lite MCP tools.
+- 318 store migrations. The newest is version 319.
+- 4998 test classes in 5 test projects.
+- 20 CI workflows.
 
 To build, run these from the repository root:
 
@@ -203,7 +203,7 @@ Start here:
 | Project | Kind | Target framework |
 |---|---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | Test | net10.0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | Test | net10.0-windows |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | Test | net10.0, net10.0-windows |
 | [`Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj`](../Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj) | Library | net10.0 |
 | [`Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj`](../Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj) | Library | net10.0 |
 | [`Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj`](../Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj) | App | net10.0 |
@@ -228,16 +228,17 @@ Start here:
 
 ## Store migrations
 
-Darling's PostgreSQL store has 317 migrations. The newest is version 318. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
+Darling's PostgreSQL store has 318 migrations. The newest is version 319. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
 
 ## MCP tools
 
 A tool is a method that carries the `McpServerTool` attribute. Each row names the tool and the file that declares it.
 
-### Darling MCP tools (304)
+### Darling MCP tools (320)
 
 | Tool | Declared in |
 |---|---|
+| `add_alert_source` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs) |
 | `add_servers` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs) |
 | `analyze_now` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpIncidentActionTools.cs) |
 | `analyze_plan_xml` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanTools.cs) |
@@ -265,6 +266,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `create_query_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs) |
 | `create_query_tag_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs) |
 | `create_server_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs) |
+| `create_web_access_group` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `declare_change_window` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowWriteTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpChangeWindowWriteTools.cs) |
 | `delete_custom_alert_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs) |
 | `delete_custom_view` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs) |
@@ -274,6 +276,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `delete_query_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagTools.cs) |
 | `delete_query_tag_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs) |
 | `delete_server_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs) |
+| `delete_web_access_group` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `describe_custom_view_catalog` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs) |
 | `disable_collector` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs) |
 | `disable_server` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs) |
@@ -375,6 +378,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `get_people` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPeopleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPeopleTools.cs) |
 | `get_perfmon_stats` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs) |
 | `get_perfmon_trend` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs) |
+| `get_personal_tokens` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs) |
 | `get_pg_autovacuum_health` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgAutovacuumTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgAutovacuumTools.cs) |
 | `get_pg_blocking` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgBlockingTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgBlockingTools.cs) |
 | `get_pg_buffer_usage` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgServerStateTools.cs) |
@@ -474,7 +478,9 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `get_wait_trend` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs) |
 | `get_wait_types` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs) |
 | `get_waiting_tasks` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs) |
+| `get_web_access_groups` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `kill_session` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs) |
+| `list_alert_sources` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs) |
 | `list_custom_alert_rules` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs) |
 | `list_custom_alert_templates` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs) |
 | `list_custom_views` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs) |
@@ -484,7 +490,9 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `list_servers` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs) |
 | `measure_store_table` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableMeasureTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableMeasureTools.cs) |
 | `merge_deadlock_signatures` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSignatureMergeTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSignatureMergeTools.cs) |
+| `mint_personal_token` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs) |
 | `mute_analysis_finding` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs) |
+| `new_password_key` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs) |
 | `pause_collection` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs) |
 | `post_investigation_message` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.Chat.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.Chat.cs) |
 | `purge_expired_mute_rules` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs) |
@@ -493,15 +501,22 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `record_investigation_feedback` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs) |
 | `reject_investigation_note` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs) |
 | `reload_config` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs) |
+| `remove_alert_source` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs) |
 | `remove_server` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs) |
 | `remove_webhook_signing_key` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs) |
 | `reset_collector_schedules` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs) |
+| `reset_password_key` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPasswordKeyTools.cs) |
 | `restore_alert_history` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.RouteAdmin.cs) |
 | `resume_collection` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectionStateTools.cs) |
+| `revoke_personal_token` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPersonalTokenTools.cs) |
+| `rotate_alert_source` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertSourceTools.cs) |
+| `rotate_web_access_group_token` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `run_collectors_now` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorRunTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorRunTools.cs) |
 | `run_custom_view_panel` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs) |
 | `save_environment_profile` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationFeedbackTools.cs) |
 | `send_daily_health_report_now` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDailyHealthReportTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDailyHealthReportTools.cs) |
+| `send_test_notification` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.TestNotification.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.TestNotification.cs) |
+| `set_advanced_web_access` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `set_agent_actions_enabled` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgentChangeAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAgentChangeAdminTools.cs) |
 | `set_alert_threshold_override` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpThresholdOverrideTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpThresholdOverrideTools.cs) |
 | `set_collector_databases` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorScheduleTools.cs) |
@@ -538,15 +553,17 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `update_query_tag_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQueryTagRuleTools.cs) |
 | `update_server_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs) |
 | `update_service_flags` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServiceFlagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServiceFlagTools.cs) |
+| `update_web_access_group` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpWebAccessTools.cs) |
 | `validate_custom_alert_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs) |
 | `validate_custom_view` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs) |
 | `wait_for_investigation_requests` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs) |
 | `write_investigation_note` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs) |
 
-### Lite MCP tools (121)
+### Lite MCP tools (130)
 
 | Tool | Declared in |
 |---|---|
+| `add_servers` | [`Lite/Mcp/McpServerRegistryTools.cs`](../Lite/Mcp/McpServerRegistryTools.cs) |
 | `analyze_plan_xml` | [`Lite/Mcp/McpPlanTools.cs`](../Lite/Mcp/McpPlanTools.cs) |
 | `analyze_procedure_plan` | [`Lite/Mcp/McpPlanTools.cs`](../Lite/Mcp/McpPlanTools.cs) |
 | `analyze_query_plan` | [`Lite/Mcp/McpPlanTools.cs`](../Lite/Mcp/McpPlanTools.cs) |
@@ -556,8 +573,11 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `audit_config` | [`Lite/Mcp/McpAnalysisTools.cs`](../Lite/Mcp/McpAnalysisTools.cs) |
 | `claim_investigation_request` | [`Lite/Mcp/McpInvestigationTools.cs`](../Lite/Mcp/McpInvestigationTools.cs) |
 | `compare_analysis` | [`Lite/Mcp/McpAnalysisTools.cs`](../Lite/Mcp/McpAnalysisTools.cs) |
+| `create_mute_rule` | [`Lite/Mcp/McpAlertTools.MuteRules.cs`](../Lite/Mcp/McpAlertTools.MuteRules.cs) |
+| `create_notification_route` | [`Lite/Mcp/McpAlertTools.RouteAdmin.cs`](../Lite/Mcp/McpAlertTools.RouteAdmin.cs) |
 | `create_query_tag` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `create_query_tag_rule` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
+| `delete_mute_rule` | [`Lite/Mcp/McpAlertTools.MuteRules.cs`](../Lite/Mcp/McpAlertTools.MuteRules.cs) |
 | `delete_notification_route` | [`Lite/Mcp/McpAlertTools.cs`](../Lite/Mcp/McpAlertTools.cs) |
 | `delete_query_tag` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `delete_query_tag_rule` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
@@ -659,13 +679,18 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `list_query_tags` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `list_servers` | [`Lite/Mcp/McpDiscoveryTools.cs`](../Lite/Mcp/McpDiscoveryTools.cs) |
 | `mute_analysis_finding` | [`Lite/Mcp/McpAnalysisTools.cs`](../Lite/Mcp/McpAnalysisTools.cs) |
+| `remove_server` | [`Lite/Mcp/McpServerRegistryTools.cs`](../Lite/Mcp/McpServerRegistryTools.cs) |
 | `reset_collector_schedules` | [`Lite/Mcp/McpCollectorScheduleTools.cs`](../Lite/Mcp/McpCollectorScheduleTools.cs) |
+| `set_mute_rule_enabled` | [`Lite/Mcp/McpAlertTools.MuteRules.cs`](../Lite/Mcp/McpAlertTools.MuteRules.cs) |
 | `set_notification_route_enabled` | [`Lite/Mcp/McpAlertTools.cs`](../Lite/Mcp/McpAlertTools.cs) |
 | `set_server_excluded_databases` | [`Lite/Mcp/McpServerAdminTools.cs`](../Lite/Mcp/McpServerAdminTools.cs) |
 | `submit_investigation_report` | [`Lite/Mcp/McpInvestigationTools.cs`](../Lite/Mcp/McpInvestigationTools.cs) |
 | `test_query_tag_rule` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `unassign_query_tag` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `unmute_analysis_finding` | [`Lite/Mcp/McpAnalysisTools.cs`](../Lite/Mcp/McpAnalysisTools.cs) |
+| `update_alert_settings` | [`Lite/Mcp/McpAlertSettingsWriteTools.cs`](../Lite/Mcp/McpAlertSettingsWriteTools.cs) |
+| `update_mute_rule` | [`Lite/Mcp/McpAlertTools.MuteRules.cs`](../Lite/Mcp/McpAlertTools.MuteRules.cs) |
+| `update_notification_route` | [`Lite/Mcp/McpAlertTools.RouteAdmin.cs`](../Lite/Mcp/McpAlertTools.RouteAdmin.cs) |
 | `update_query_tag` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `update_query_tag_rule` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 
@@ -676,10 +701,10 @@ A test class is a file whose name ends in `Tests.cs`.
 | Test project | Test classes |
 |---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | 0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3635 |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3675 |
 | [`Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj`](../Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj) | 0 |
-| [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 74 |
-| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1224 |
+| [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 75 |
+| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1248 |
 
 ## CI
 
@@ -692,6 +717,7 @@ A test class is a file whose name ends in `Tests.cs`.
 | [`.github/workflows/darling-helm-release.yml`](../.github/workflows/darling-helm-release.yml) | Darling Helm release | `workflow_dispatch`, `workflow_run` |
 | [`.github/workflows/darling-helm.yml`](../.github/workflows/darling-helm.yml) | Darling Helm chart | `pull_request`, `workflow_call`, `workflow_dispatch` |
 | [`.github/workflows/darling-linux-store.yml`](../.github/workflows/darling-linux-store.yml) | Darling Linux store | `pull_request`, `workflow_call`, `workflow_dispatch` |
+| [`.github/workflows/darling-linux-tests.yml`](../.github/workflows/darling-linux-tests.yml) | Darling Linux tests | `pull_request`, `workflow_call`, `workflow_dispatch` |
 | [`.github/workflows/darling-msi.yml`](../.github/workflows/darling-msi.yml) | Darling MSI | `pull_request`, `workflow_call`, `workflow_dispatch` |
 | [`.github/workflows/darling-ui-smoke.yml`](../.github/workflows/darling-ui-smoke.yml) | Darling UI smoke | `workflow_call`, `workflow_dispatch` |
 | [`.github/workflows/darling-upgrade-shapes.yml`](../.github/workflows/darling-upgrade-shapes.yml) | Darling upgrade shapes | `pull_request`, `workflow_call`, `workflow_dispatch` |
@@ -707,4 +733,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `9abed9cb1`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `ae7176e58`. To refresh it, run `python tools/codemap/codemap.py`.
