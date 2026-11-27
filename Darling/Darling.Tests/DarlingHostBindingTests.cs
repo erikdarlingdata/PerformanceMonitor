@@ -455,15 +455,23 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void NestedMcpEnums_MirrorSharedBindEnums_1To1_ForTheAdapterCast()
     {
-        Assert.Equal((int)DarlingHostBinding.BindMode.LoopbackOnly, (int)DarlingMcpHostService.McpBindMode.LoopbackOnly);
-        Assert.Equal((int)DarlingHostBinding.BindMode.NetworkAndLoopback, (int)DarlingMcpHostService.McpBindMode.NetworkAndLoopback);
+        /* Every member, in order: the adapter casts by number, so a member added to one enum and not the other, or placed elsewhere, shifts every
+           reason after it. Names and numbers are read from both enums, so a new member cannot be left out of this check. */
+        AssertSameMembersInOrder(Enum.GetValues<DarlingHostBinding.BindMode>(), Enum.GetValues<DarlingMcpHostService.McpBindMode>());
+        AssertSameMembersInOrder(Enum.GetValues<DarlingHostBinding.BindReason>(), Enum.GetValues<DarlingMcpHostService.McpBindReason>());
+    }
 
-        Assert.Equal((int)DarlingHostBinding.BindReason.LoopbackByDefault, (int)DarlingMcpHostService.McpBindReason.LoopbackByDefault);
-        Assert.Equal((int)DarlingHostBinding.BindReason.NetworkExposed, (int)DarlingMcpHostService.McpBindReason.NetworkExposed);
-        Assert.Equal((int)DarlingHostBinding.BindReason.DedicatedLoginRequired, (int)DarlingMcpHostService.McpBindReason.DedicatedLoginRequired);
-        Assert.Equal((int)DarlingHostBinding.BindReason.ListenInvalid, (int)DarlingMcpHostService.McpBindReason.ListenInvalid);
-        Assert.Equal((int)DarlingHostBinding.BindReason.TokenMissing, (int)DarlingMcpHostService.McpBindReason.TokenMissing);
-        Assert.Equal((int)DarlingHostBinding.BindReason.AllowFromInvalid, (int)DarlingMcpHostService.McpBindReason.AllowFromInvalid);
+    private static void AssertSameMembersInOrder<TShared, TMcp>(TShared[] shared, TMcp[] mcp)
+        where TShared : struct, Enum
+        where TMcp : struct, Enum
+    {
+        Assert.Equal(shared.Length, mcp.Length);
+        for (var i = 0; i < shared.Length; i++)
+        {
+            Assert.Equal(shared[i].ToString(), mcp[i].ToString());
+            Assert.Equal(Convert.ToInt32(shared[i]), Convert.ToInt32(mcp[i]));
+            Assert.Equal(i, Convert.ToInt32(shared[i]));
+        }
     }
 
     /* ================================================================================================

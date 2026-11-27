@@ -154,7 +154,7 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     [InlineData(true, true, true)]
     [InlineData(false, false, false)]
     public void ASuperuserOrAnOwnerRoleMember_IsPrivileged(bool superuser, bool ownerMember, bool expectedPrivileged) =>
-        Assert.Equal(expectedPrivileged, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember).Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged);
+        Assert.Equal(expectedPrivileged, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember, sessionUserDiffers: false).Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged);
 
     [Theory]
     [InlineData("Unprivileged", "NetworkAndLoopback", "NetworkExposed")]
@@ -483,8 +483,100 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
 
         Assert.True(loopback, "the loopback listener must be up");
         Assert.False(network, "no network listener may be bound");
+
+        /* Control: the same dial reaches a listener that does bind this machine's network address, so a dial that fails for another reason
+           (a firewall, a closed adapter) cannot make the check above pass. */
+        var lan = LanAddress()!;
+        using var control = new TcpListener(lan, 0);
+        control.Start();
+        Assert.True(await CanConnectAsync(lan, ((IPEndPoint)control.LocalEndpoint).Port), "the dial must reach a listener on this machine's network address");
+
         var refusal = ownerNamesUser ? "could not be checked first" : DarlingStoreLogins.OwnerUserUnknownText(surface);
         Assert.Contains(log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal) && l.Contains(refusal, StringComparison.Ordinal));
+    }
+
+    /* ---- The probe's own paths that need no store ---- */
+
+    /// <summary>A cancellation that is not the stop token (a connect that is cancelled from inside) is a failed probe with its class, and does not
+    /// escape the host start.</summary>
+    [Fact]
+    public async Task ACancellationThatIsNotTheStopToken_IsAFailedProbe_NotAnEscapingCancellation()
+    {
+        var postgres = OwnStore(Owner, webConnectionString: Dedicated);
+
+        var result = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+            DarlingStoreLogins.Surface.Web, postgres, CancellationToken.None, openConnection: (_, _) => throw new OperationCanceledException());
+
+        Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Failed, result.Verdict);
+        Assert.Equal(nameof(OperationCanceledException), result.ErrorClass);
+    }
+
+    /// <summary>A string that names no user cannot be compared with session_user: refused as failed, and nothing is connected.</summary>
+    [Fact]
+    public async Task AProbeOfAStringThatNamesNoUser_IsFailed_WithoutConnecting()
+    {
+        var postgres = OwnStore(Owner, webConnectionString: OwnerWithNoUser);
+        var connected = false;
+
+        var result = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+            DarlingStoreLogins.Surface.Web, postgres, CancellationToken.None, openConnection: (_, _) => { connected = true; return Task.CompletedTask; });
+
+        Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Failed, result.Verdict);
+        Assert.Contains("names no user", result.ErrorClass, StringComparison.Ordinal);
+        Assert.False(connected);
+    }
+
+    [Fact]
+    public void NpgsqlDefaultUser_IsPguserWhenItIsSet_ElseTheOperatingSystemUser()
+    {
+        Assert.Equal("from-env", DarlingStoreLogins.NpgsqlDefaultUser(name => name == "PGUSER" ? "from-env" : null, "os-user"));
+        Assert.Equal("os-user", DarlingStoreLogins.NpgsqlDefaultUser(_ => null, "os-user"));
+        Assert.Equal("os-user", DarlingStoreLogins.NpgsqlDefaultUser(_ => "", "os-user"));
+    }
+
+    /* ---- One read of the login reference per start: a file rewritten after the probe is not served ---- */
+
+    [Theory]
+    [MemberData(nameof(Surfaces))]
+    public async Task ALoginFileRewrittenAfterTheProbe_IsNotServed_AndTheNextStartChecksTheNewLogin(bool web)
+    {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
+        const string checkedString = "Host=pg.example;Database=darling;Username=dashboard;Password=checked-secret";
+        const string rewrittenString = "Host=pg.example;Database=darling;Username=postgres;Password=rewritten-secret";
+        var path = Path.Combine(Path.GetTempPath(), $"darling-9894-login-{Guid.NewGuid():N}");
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+        try
+        {
+            await File.WriteAllTextAsync(path, checkedString);
+            var postgres = OwnStore(Owner, webConnectionString: web ? $"file:{path}" : null, mcpConnectionString: web ? null : $"file:{path}");
+            var probed = new DarlingStoreLogins.LoginProbeResult(
+                DarlingStoreLogins.LoginProbeVerdict.Unprivileged, LoginSha256: DarlingStoreLogins.LoginSha256(checkedString));
+
+            /* Control: the file is what the probe checked, so the pool gets that login. */
+            var unchanged = new CapturingTestLogger();
+            Assert.Equal(checkedString, await DarlingStoreLogins.ResolveUnmanagedAsync(surface, postgres, unchanged, CancellationToken.None, exposed: true, probed: probed));
+            Assert.Equal(0, unchanged.CountAtLevel(LogLevel.Critical));
+
+            /* The file is rewritten between the probe and the pool: no login is served, and the Critical names the change, not a password. */
+            await File.WriteAllTextAsync(path, rewrittenString);
+            var changed = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(surface, postgres, changed, CancellationToken.None, exposed: true, probed: probed));
+            Assert.Equal(1, changed.CountAtLevel(LogLevel.Critical));
+            Assert.Contains(changed.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal) && l.Contains("changed while the service was starting", StringComparison.Ordinal));
+            Assert.DoesNotContain("rewritten-secret", changed.Joined, StringComparison.Ordinal);
+
+            /* A surface that is not exposed has nothing to check, and the next start's probe holds the new login. */
+            Assert.Equal(rewrittenString, await DarlingStoreLogins.ResolveUnmanagedAsync(surface, postgres, new CapturingTestLogger(), CancellationToken.None, exposed: false, probed: probed));
+            var nextProbe = new DarlingStoreLogins.LoginProbeResult(
+                DarlingStoreLogins.LoginProbeVerdict.Unprivileged, LoginSha256: DarlingStoreLogins.LoginSha256(rewrittenString));
+            Assert.Equal(rewrittenString, await DarlingStoreLogins.ResolveUnmanagedAsync(surface, postgres, new CapturingTestLogger(), CancellationToken.None, exposed: true, probed: nextProbe));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+            File.Delete(path);
+        }
     }
 
     /* ---- A probe that does not answer, and a stop that interrupts it ---- */
@@ -632,14 +724,25 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         Assert.Equal(1, bothNoUser.CountAtLevel(LogLevel.Critical));
         Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, noUser, verdict: null));
 
-        /* A string that names a user is not the owner's, and a string that names none beside an owner that does is not known to be. */
+        /* A string that names a user is not the owner's, and a string that names none beside an owner that names another user than the one
+           Npgsql defaults to is not the owner's either. */
+        const string otherOwner = "Host=pg.example;Database=darling;Username=not-the-default-user-9894";
         var named = new CapturingTestLogger();
         Report(Dedicated, noUser, named);
         Assert.Equal(0, named.CountAtLevel(LogLevel.Critical));
         var unnamed = new CapturingTestLogger();
-        Report(noUser, Owner, unnamed);
+        Report(noUser, otherOwner, unnamed);
         Assert.Equal(0, unnamed.CountAtLevel(LogLevel.Critical));
-        Assert.Null(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, Owner, verdict: null));
+        Assert.Null(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, otherOwner, verdict: null));
+
+        /* A string that names no user logs in as Npgsql's default user: beside an owner that names that user it is the owner. */
+        var defaultUser = DarlingStoreLogins.NpgsqlDefaultUser();
+        Assert.False(string.IsNullOrEmpty(defaultUser));
+        var ownerIsDefault = $"Host=pg.example;Database=darling;Username={defaultUser}";
+        var asDefault = new CapturingTestLogger();
+        Report(noUser, ownerIsDefault, asDefault);
+        Assert.Equal(1, asDefault.CountAtLevel(LogLevel.Critical));
+        Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(surface, noUser, ownerIsDefault, verdict: null));
 
         /* The same user is still the owner. */
         var same = new CapturingTestLogger();

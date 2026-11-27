@@ -866,7 +866,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken, exposed: networkMode);
+                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken, exposed: networkMode, probed: loginProbe);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();

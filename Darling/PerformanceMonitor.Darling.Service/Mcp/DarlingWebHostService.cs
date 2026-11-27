@@ -1210,7 +1210,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken, exposed: networkMode);
+                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken, exposed: networkMode, probed: loginProbe);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();

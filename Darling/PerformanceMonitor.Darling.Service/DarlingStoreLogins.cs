@@ -485,7 +485,8 @@ internal static class DarlingStoreLogins
     /// (<see cref="ReportContainerExposureOnOwnerLogin"/>).
     /// </summary>
     internal static async Task<string?> ResolveUnmanagedAsync(
-        Surface surface, PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken, bool exposed = false)
+        Surface surface, PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken, bool exposed = false,
+        LoginProbeResult? probed = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(logger);
@@ -513,6 +514,16 @@ internal static class DarlingStoreLogins
             {
                 logger.LogError(
                     "{What}: {Setting} is set but resolves to a blank connection string, and the owner login is never used in its place",
+                    notThisAttempt, setting);
+                return null;
+            }
+
+            /* #9894: the probe checked the login this reference resolved to then. A `file:` reference is read again here, so a file rewritten since
+               would hand the pool a login the probe never checked: an exposed surface is not served then, and the next start probes again. */
+            if (exposed && probed is { } probedLogin && !string.Equals(probedLogin.LoginSha256, LoginSha256(configured), StringComparison.Ordinal))
+            {
+                logger.LogCritical(
+                    "{What}: the login reference {Setting} changed while the service was starting, so the login checked before the network listener is not the one it would connect with. Not started this attempt, and the next start checks the login again",
                     notThisAttempt, setting);
                 return null;
             }
@@ -880,7 +891,12 @@ internal static class DarlingStoreLogins
 
     /// <summary>The probe's answer. <see cref="ErrorClass"/> is set for <see cref="LoginProbeVerdict.Failed"/> only, and holds a type name and
     /// SQLSTATE, never the connection string or a password.</summary>
-    internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null);
+    internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null, string? LoginSha256 = null);
+
+    /// <summary>The SHA-256 of a resolved connection string, in hex: what the probe carries so the pool can tell it resolved the same login the probe
+    /// checked. Never logged, and never the string itself.</summary>
+    internal static string LoginSha256(string resolvedConnectionString) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(resolvedConnectionString)));
 
     /// <summary>The seconds the probe waits to connect, and for its one command. Short, so a start never waits on it for long.</summary>
     internal const int LoginProbeSeconds = 10;
@@ -894,16 +910,20 @@ internal static class DarlingStoreLogins
     /// connected login (<c>current_user</c>) or the login the session started as (<c>session_user</c>) is a superuser. A login whose role is switched
     /// at connect (<c>ALTER ROLE ... SET role</c>, or <c>Options=-c role=...</c>) shows a limited <c>current_user</c> and can <c>SET ROLE</c> back to
     /// what <c>session_user</c> is. Second column: whether either is a member of the role that owns the schema or of the one that owns the table.
-    /// No row (no such schema or table) is a failed probe.</summary>
+    /// Third column: whether <c>session_user</c> is not the user name the probe connected with (<c>$3</c>): a superuser login started with
+    /// <c>Options=-c session_authorization=&lt;low role&gt;</c> shows the low role as both <c>current_user</c> and <c>session_user</c> and can
+    /// <c>SET SESSION AUTHORIZATION</c> back, so a session that is not the login it connected as is refused. Every catalog name is qualified with
+    /// <c>pg_catalog.</c>, so a role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
     private const string LoginProbeSql =
-        "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
-        + "pg_has_role(current_user, n.nspowner, 'MEMBER') OR pg_has_role(session_user, n.nspowner, 'MEMBER') "
-        + "OR pg_has_role(current_user, c.relowner, 'MEMBER') OR pg_has_role(session_user, c.relowner, 'MEMBER') "
-        + "FROM pg_namespace AS n JOIN pg_class AS c ON c.relnamespace = n.oid WHERE n.nspname = $1 AND c.relname = $2";
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
+        + "pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER') OR pg_catalog.pg_has_role(session_user, n.nspowner, 'MEMBER') "
+        + "OR pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER') OR pg_catalog.pg_has_role(session_user, c.relowner, 'MEMBER'), "
+        + "session_user::pg_catalog.text <> $3::pg_catalog.text "
+        + "FROM pg_catalog.pg_namespace AS n JOIN pg_catalog.pg_class AS c ON c.relnamespace = n.oid WHERE n.nspname = $1 AND c.relname = $2";
 
-    /// <summary>PURE: the probe's two answers as a verdict. Either one true is <see cref="LoginProbeVerdict.Privileged"/>.</summary>
-    internal static LoginProbeResult ClassifyLoginProbe(bool isSuperuser, bool isOwnerMember) =>
-        new(isSuperuser || isOwnerMember ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
+    /// <summary>PURE: the probe's three answers as a verdict. Any one true is <see cref="LoginProbeVerdict.Privileged"/>.</summary>
+    internal static LoginProbeResult ClassifyLoginProbe(bool isSuperuser, bool isOwnerMember, bool sessionUserDiffers) =>
+        new(isSuperuser || isOwnerMember || sessionUserDiffers ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
 
     /// <summary>PURE: the error class a failed probe reports: the exception type, plus the SQLSTATE when the store refused it.</summary>
     internal static string DescribeProbeFailure(Exception failure)
@@ -922,10 +942,11 @@ internal static class DarlingStoreLogins
     /// superuser or a member of the store owner role. The name check cannot see either, because a superuser or an owner-role member can carry
     /// any name. Never throws for a connection or query failure: that is <see cref="LoginProbeVerdict.Failed"/> with its error class, and so is
     /// a timeout or a cancellation the stop token did not ask for. Only a cancellation while the service stops propagates.
-    /// <paramref name="timeoutSeconds"/> bounds the connect and the command (a test shortens it).
+    /// <paramref name="timeoutSeconds"/> bounds the connect and the command (a test shortens it). <paramref name="openConnection"/> replaces the connect (a test makes it throw).
     /// </summary>
     internal static async Task<LoginProbeResult> ProbeSurfaceLoginAsync(
-        Surface surface, PostgresConfig postgres, CancellationToken cancellationToken, int timeoutSeconds = LoginProbeSeconds)
+        Surface surface, PostgresConfig postgres, CancellationToken cancellationToken, int timeoutSeconds = LoginProbeSeconds,
+        Func<NpgsqlConnection, CancellationToken, Task>? openConnection = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -933,17 +954,30 @@ internal static class DarlingStoreLogins
         try
         {
             var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
-            var builder = new NpgsqlConnectionStringBuilder(DarlingSecretSource.Resolve(raw ?? "", setting))
+            var resolved = DarlingSecretSource.Resolve(raw ?? "", setting);
+            var builder = new NpgsqlConnectionStringBuilder(resolved)
             {
                 Pooling = false,
                 Timeout = timeoutSeconds,
                 CommandTimeout = timeoutSeconds,
             };
+            /* A dedicated login always names its user (CheckLoginNames refuses one that does not), so a string with none reaches here only from a
+               caller that skipped the names. Without the name there is nothing to compare session_user with: refuse it as failed. */
+            if (string.IsNullOrEmpty(builder.Username))
+            {
+                return new LoginProbeResult(LoginProbeVerdict.Failed, "the connection string names no user, so the session user cannot be compared with it");
+            }
+
             await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
-            await connection.OpenAsync(cancellationToken);
+            await (openConnection is null ? connection.OpenAsync(cancellationToken) : openConnection(connection, cancellationToken));
             await using var command = new NpgsqlCommand(LoginProbeSql, connection)
             {
-                Parameters = { new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema }, new NpgsqlParameter { Value = LoginProbeOwnedTable } },
+                Parameters =
+                {
+                    new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema },
+                    new NpgsqlParameter { Value = LoginProbeOwnedTable },
+                    new NpgsqlParameter { Value = builder.Username },
+                },
             };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
@@ -951,7 +985,7 @@ internal static class DarlingStoreLogins
                 return new LoginProbeResult(LoginProbeVerdict.Failed, "the config schema or its tables were not found");
             }
 
-            return ClassifyLoginProbe(reader.GetBoolean(0), reader.GetBoolean(1));
+            return ClassifyLoginProbe(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2)) with { LoginSha256 = LoginSha256(resolved) };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1000,7 +1034,20 @@ internal static class DarlingStoreLogins
         login.Source == LoginSource.Owner
         || (login.Source == LoginSource.Configured
             && TryReadLoginUsers(login.ConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser)
-            && string.Equals(configuredUser ?? "", ownerUser ?? "", StringComparison.Ordinal));
+            && string.Equals(EffectiveLoginUser(configuredUser), EffectiveLoginUser(ownerUser), StringComparison.Ordinal));
+
+    /// <summary>The user Npgsql logs in as when a connection string names none (#9894): <c>PGUSER</c> when it is set and not empty, else the
+    /// operating system user name. A test passes both sources.</summary>
+    internal static string? NpgsqlDefaultUser(Func<string, string?>? getEnvironmentVariable = null, string? osUserName = null)
+    {
+        var fromEnvironment = (getEnvironmentVariable ?? Environment.GetEnvironmentVariable).Invoke("PGUSER");
+        return string.IsNullOrEmpty(fromEnvironment) ? osUserName ?? Environment.UserName : fromEnvironment;
+    }
+
+    /// <summary>The user a connection string logs in as: the one it names, else Npgsql's default user. A string that names none beside an owner string
+    /// that names the default user is the owner's login, and two that name none are the same default user.</summary>
+    private static string EffectiveLoginUser(string? namedUser) =>
+        string.IsNullOrEmpty(namedUser) ? NpgsqlDefaultUser() ?? "" : namedUser;
 
     /// <summary>Lets a test see the container line, and each surface's login warning, again.</summary>
     internal static void ResetContainerExposureLogForTests()
@@ -1087,15 +1134,17 @@ internal static class DarlingStoreLogins
             return null;
         }
 
-        /* Two strings that name no user connect as the same default user: that is the owner, not a login of the surface's own (#9894). */
-        if (string.IsNullOrEmpty(configuredUser) && !string.IsNullOrEmpty(ownerUser))
+        /* A string that names no user connects as Npgsql's default user. That is the owner's login when the owner's string names the same
+           user, or none (#9894). Beside an owner that names a different user it is not known to be the owner, so nothing is said. */
+        var sameUser = string.Equals(EffectiveLoginUser(configuredUser), EffectiveLoginUser(ownerUser), StringComparison.Ordinal);
+        if (string.IsNullOrEmpty(configuredUser) && !string.IsNullOrEmpty(ownerUser) && !sameUser)
         {
             return null;
         }
 
         var (what, setting, role) = Describe(surface);
         what = whatOverride ?? what;
-        if (string.Equals(configuredUser ?? "", ownerUser ?? "", StringComparison.Ordinal))
+        if (sameUser)
         {
             return $"{setting} logs in as {(string.IsNullOrEmpty(configuredUser) ? "the default user" : $"'{configuredUser}'")}, the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "
                 + $"what the least-privilege {role} role holds it to: the secret-column carve, the narrow write grants and the "

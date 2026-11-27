@@ -202,8 +202,8 @@ internal static class DarlingHostBinding
     /// PURE (#9894): the probe of a surface's own login applied to a bind that would expose it. A decision that is not an exposure is
     /// returned as it is, and so is an exposure whose login the probe found unprivileged. Only an explicit
     /// <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/> passes: a privileged login (a superuser, or a member of the store owner
-    /// role), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Unprivileged by the enum's
-    /// order, so a result that was never filled in must still be told apart from a real answer by its verdict, never by default) turn the
+    /// role), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Failed, the enum's first member, so a result that was
+    /// never filled in refuses too, and is still told apart from a real answer by its verdict, never by default) turn the
     /// exposure into loopback-only. A privileged login gets the reason that says so, every other refusal the probe-failed reason.
     /// </summary>
     internal static BindDecision ApplyLoginProbe(BindDecision bind, DarlingStoreLogins.LoginProbeResult probe)
