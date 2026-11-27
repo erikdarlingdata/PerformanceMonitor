@@ -36,7 +36,7 @@ public static partial class DarlingCliCommands
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
         "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--service-account <account>]" + Environment.NewLine +
-        "      The same for a host not yet added. Connects to no monitored server. Without --auth the default is integrated on Windows and sql on Linux and in a container." + Environment.NewLine +
+        "      The same for a host not yet added. Connects to no monitored server. Without --auth the default is integrated on Windows or with --service-account, and sql otherwise on Linux and in a container." + Environment.NewLine +
         "  --column-stats-databases adds database-level SELECT, only in the databases you list, for the optional column_stats collector (column selectivity)." + Environment.NewLine +
         "      One database per option, repeated for each: the value is taken whole, so a name with a comma or a space works (quote it)." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
@@ -240,8 +240,9 @@ public static partial class DarlingCliCommands
             label = host;
             /* #9844: with no --auth, a host not yet added gets the form its platform can use. A Windows service connects with Windows
                authentication. A Linux or Compose service has no Windows account to connect as, so its entry is a SQL login, and the script
-               names the --username login, or the placeholder login and its note when none is given. */
-            auth = args.Auth ?? ((isWindows ?? OperatingSystem.IsWindows()) ? "integrated" : "sql");
+               names the --username login, or the placeholder login and its note when none is given. A --service-account names the Windows
+               account to grant, so it keeps integrated on every platform and the typed account is never dropped. */
+            auth = args.Auth ?? ((args.ServiceAccount is not null || (isWindows ?? OperatingSystem.IsWindows())) ? "integrated" : "sql");
             username = args.Username;
         }
 

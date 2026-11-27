@@ -714,6 +714,26 @@ public sealed class MonitoringGrantScriptTests
         Assert.Equal(named.Out, (await Run(true, "--host", "sql01", "--auth", "sql", "--username", "DarlingMonitor")).Out);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Verb_ForAHostWithAServiceAccountAndNoAuth_PrintsTheWindowsScriptForIt(bool isWindows)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        // A typed --service-account names the Windows account to grant, so with no --auth it keeps integrated on every platform.
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--service-account", @"CORP\gmsa-darling$" }, output, error, TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP", isWindows: isWindows);
+
+        Assert.Equal(0, code);
+        Assert.Equal("", error.ToString());
+        Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
+        Assert.DoesNotContain("WITH PASSWORD", output.ToString());
+        Assert.DoesNotContain(MonitoringGrantScript.PlaceholderLogin, output.ToString());
+    }
+
     [Fact]
     public async Task Verb_ReadsTheServiceAccountFromTheCaller_ForWindowsAuth()
     {
