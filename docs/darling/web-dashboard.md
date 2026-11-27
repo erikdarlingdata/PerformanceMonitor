@@ -217,7 +217,7 @@ The `web` role has one more narrow grant: `config.database_state_expected`. It i
 
 ## Reach it from a browser on another machine
 
-Add a `network` block to `web` in `darling.json`, or let `--configure-network` write it for the bundled store. With your own PostgreSQL outside a container, write the block by hand and set `postgres.webConnectionString` to the `web` login that `provision-roles.sql` creates (see [Opt-in Network Endpoints](network-endpoints.md#web-endpoint-browser-over-the-lan)):
+Add a `network` block to `web` in `darling.json`, or let `--configure-network` write it for the bundled store. With your own PostgreSQL outside a container, write the block by hand. Then set `postgres.webConnectionString` to the `web` login that `provision-roles.sql` creates (see [Opt-in Network Endpoints](network-endpoints.md#web-endpoint-browser-over-the-lan)):
 
 ```json
 "web": {
@@ -263,7 +263,7 @@ Two gates apply, and the order matters:
 
 **Proof:** the dashboard renders in the remote browser, and the address bar shows no `?token=`.
 
-The exposure is fail-closed. Any of these sends the endpoint back to loopback: an unparseable `listen`, an invalid `allowFrom`, a missing token, or your own PostgreSQL outside a container with no `postgres.webConnectionString` that names a login other than the store owner's. The service logs a critical line that says which one. The tokens (`token`, `encryptedToken` and `tokens`) still gate the loopback dashboard. The endpoint never half-exposes. With no token at all, the loopback dashboard does not start either (see [Turn it on](#turn-it-on)).
+The exposure is fail-closed. Any of these sends the endpoint back to loopback: an unparseable `listen`, an invalid `allowFrom`, a missing token, or no `postgres.webConnectionString` that names a login other than the store owner's (your own PostgreSQL outside a container only). The service logs a critical line that says which one. The tokens (`token`, `encryptedToken` and `tokens`) still gate the loopback dashboard. The endpoint never half-exposes. With no token at all, the loopback dashboard does not start either (see [Turn it on](#turn-it-on)).
 
 TLS is opt-in. Without it, the token and the cookie travel in clear on the segment. The CIDR bounds who can route to the port. It does not protect the wire. An exposed dashboard with no certificate says so at every start. Point `web.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape), or put a TLS-terminating reverse proxy in front of the port. The certificate applies to the LAN listener only, and loopback stays plain HTTP. A missing or expired certificate keeps the dashboard loopback-only and does not fall back to cleartext.
 
