@@ -205,26 +205,14 @@ SELECT
 """;
 
     /// <summary>
-    /// The captured calls as a CTE named <c>calls</c>, for the sample list (<see cref="Samples"/>) only. MATERIALIZED: the CTE is read once, however
-    /// many listed samples look at it. Left to inline, the sample list runs the whole call scan again for every listed sample (#9507: 72 ms against
-    /// 4 ms for a page of samples on a week at 60 samples a minute).
+    /// The captured calls as a CTE named <c>calls</c>. MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline,
+    /// the sample list (<see cref="Samples"/>) runs the whole call scan again for every listed sample (#9507: 72 ms against 4 ms for a page of
+    /// samples on a week at 60 samples a minute).
     /// </summary>
     private static string CallsCte(string eventsRelation, string range) => $"""
 calls AS MATERIALIZED (
     {CallsSelect(eventsRelation, range)}
 )
-""";
-
-    /// <summary>
-    /// The captured calls as a derived table aliased <paramref name="alias"/>, for the reads that join EVERY under-floor sample in the range to the
-    /// calls (<see cref="MatchedCte"/>, <see cref="MatchedCalls"/>). Inline, never a CTE (#9881): a CTE scan is parallel restricted, so a join to it
-    /// reads millions of samples in one process, and its estimate (thousands of calls for a few dozen) makes the planner sort every sample by session
-    /// on disk for a merge join. Inline, the planner builds a hash on the few calls and probes it from a parallel scan of the samples.
-    /// </summary>
-    private static string CallsInline(string eventsRelation, string range, string alias) => $"""
-(
-    {CallsSelect(eventsRelation, range)}
-) AS {alias}
 """;
 
     /// <summary>
@@ -277,7 +265,7 @@ matched AS (
         AND   event_kind = '{KindSample}'
         AND   interrupt_duration_us < {MinInterruptDurationUs}
     ) AS s
-    INNER JOIN {CallsInline(eventsRelation, range, "c")}
+    INNER JOIN calls AS c
         ON {MatchOn("c", "s")}
     GROUP BY s.attention_event_id, s.collection_time, s.database_name, s.client_app_name
 )
@@ -335,7 +323,8 @@ ORDER BY collection_time DESC
     /// of this one server.
     /// </summary>
     public static string BaselineMinutes(string logRelation, string eventsRelation) => $"""
-WITH {MatchedCte(eventsRelation, BaselineRange)},
+WITH {CallsCte(eventsRelation, BaselineRange)},
+{MatchedCte(eventsRelation, BaselineRange)},
 runs AS (
     SELECT date_trunc('minute', collection_time) AS minute
     FROM {logRelation}
@@ -422,7 +411,8 @@ ORDER BY collection_time DESC
     /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/> or the matched call's own statement; the three parts never overlap), matched_samples (bigint, #9507: the part under the floor
     /// that matches a captured call, <see cref="MatchOn"/>, and is not Azure Data Studio or dbatools metadata work. Such a sample is judged, not left out: the attention event timed the cancel, the call is what ran).</summary>
     public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
-WITH {MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
+{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
 matched_groups AS (
     SELECT
         collection_time,
@@ -587,10 +577,11 @@ ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event
     /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling.
     /// </summary>
     public static string MatchedCalls(string eventsRelation, int limit) => $"""
-WITH hit AS (
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
+hit AS (
     SELECT DISTINCT c.id
     FROM (SELECT * FROM {eventsRelation}) AS s
-    INNER JOIN {CallsInline(eventsRelation, "collection_time >= $2" + Ceiling(true), "c")}
+    INNER JOIN calls AS c
         ON {MatchOn("c", "s")}
     WHERE s.server_id = $1
     AND   s.collection_time > $2
