@@ -482,4 +482,88 @@ public sealed class PgTargetStageBudgetLiveTests
             $"2 findings have no drill-down detail ({PgTargetFactKeys.DeadlockRate} x2)",
             StageTimeBudget.Describe(new StageTimeCuts([], null, cut.DrillDownsLeftOutForTime, null))!, StringComparison.Ordinal);
     }
+
+    /// <summary>Reads how many finding rows the store holds for the target.</summary>
+    private static async Task<long> StoredFindingsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var count = new NpgsqlCommand("SELECT COUNT(*) FROM analysis_findings WHERE server_id = $1", connection);
+        count.Parameters.AddWithValue(ServerId);
+        return (long)(await count.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// A current on-demand pass that left a family out for time stores no findings, so the findings table keeps what the
+    /// last whole pass wrote. The service decides that from the left-out records on the pass's context, and the
+    /// PostgreSQL-target cuts fill the same records. The pass still returns its findings to the caller. The same pass with
+    /// no budget leaves nothing out and stores them.
+    /// </summary>
+    [Fact]
+    public async Task ACurrentPassThatLeftAFamilyOutForTime_StoresNoFindings_AndTheSamePassWithNoBudgetStoresThem()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live PostgreSQL-target stored findings test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 18, ct);
+
+        /* The history the pass asks for before it runs (a row more than a day back) and one row a minute across the
+           four-hour window. */
+        var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+        var windowStart = windowEnd.AddHours(-4);
+        await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+        for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+        /* A finding no heavy family feeds: one database grows from 100 GB to 140 GB, hourly across the growth lookback. */
+        const long gib = 1024L * 1024 * 1024;
+        const int hours = 14 * 24;
+        var lookbackStart = windowEnd.AddDays(-PgTargetScorer.GrowthLookbackDays);
+        for (var hour = 1; hour <= hours; hour++)
+        {
+            using var size = new NpgsqlCommand(@"
+INSERT INTO pg_database_size_stats
+    (collection_id, collection_time, server_id, server_name, database_name, size_bytes, total_bytes, is_template, allows_connections)
+VALUES ($1, $2, $3, $4, 'appdb', $5, NULL, FALSE, TRUE)", connection);
+            size.Parameters.AddWithValue(996_600_000_000L + hour);
+            size.Parameters.AddWithValue(lookbackStart.AddHours(hour));
+            size.Parameters.AddWithValue(ServerId);
+            size.Parameters.AddWithValue(ServerName);
+            size.Parameters.AddWithValue(100 * gib + (long)((hour - 1) / (double)(hours - 1) * 40 * gib));
+            await size.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* The family budget has ended before the pass starts, so the two heavy families are left out. The detectors and
+           the drill-downs have no budget here: the family cut alone holds the findings back. */
+        var cut = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = TimeSpan.Zero,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = null
+        };
+        var cutFindings = await cut.AnalyzeAsync(ServerId, ServerName, 4, ct).WaitAsync(Limit, ct);
+        Assert.Equal(new[] { "queries", "io" }, cut.LastFamiliesLeftOutForTime);
+        Assert.True(cut.LastPassLeftOutForTime);
+        Assert.Contains(cutFindings, finding => finding.RootFactKey == PgTargetFactKeys.DatabaseGrowth);
+        Assert.Equal(0, await StoredFindingsAsync(connection, ct));
+
+        /* No budget: nothing is left out, and the findings are stored. */
+        var whole = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = null
+        };
+        var wholeFindings = await whole.AnalyzeAsync(ServerId, ServerName, 4, ct).WaitAsync(Limit, ct);
+        Assert.Empty(whole.LastFamiliesLeftOutForTime);
+        Assert.False(whole.LastPassLeftOutForTime);
+        Assert.Contains(wholeFindings, finding => finding.RootFactKey == PgTargetFactKeys.DatabaseGrowth);
+        Assert.True(await StoredFindingsAsync(connection, ct) > 0, "A whole pass stores its findings.");
+    }
 }
