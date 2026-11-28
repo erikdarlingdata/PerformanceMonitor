@@ -53,6 +53,22 @@ public sealed class FinOpsRecommendationFiguresTests
         });
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("de-DE")]
+    public void Memory_PercentHasNoSpaceBeforeTheSign_WhateverTheHostCulture(string cultureName)
+    {
+        // #9942: P0 follows the host's percent pattern ("25 %" on the invariant culture a Linux host without a locale
+        // runs under, and in de-DE), so the same advice read differently per host. The text is read by people and agents
+        // on other machines, so it always prints "25%".
+        InCulture(cultureName, () =>
+        {
+            var memory = FinOpsRecommendationFigures.MemoryRightSizing(Util(16384), 4096, 16, "w", 0m)!;
+            Assert.Contains("uses 25% of 16GB RAM", memory.Finding, StringComparison.Ordinal);
+            Assert.Contains("(25% utilization)", memory.Detail, StringComparison.Ordinal);
+        });
+    }
+
     // ── Memory right-sizing (original :269 sampleCount >= 16, :272-276 ratio, target and GB compare, :282 severity, :288 savings) ──
 
     [Fact]

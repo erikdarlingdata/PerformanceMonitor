@@ -177,7 +177,7 @@ public sealed class DarlingMcpTools
                    over families that were never read is not an all-clear. */
                 var allClear = coverageCaveat is null
                     ? "No significant findings. All metrics are within normal ranges."
-                    : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed: a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.";
+                    : $"No significant findings in the {PercentText.Of(coverage!.Fraction)} of this window the collector observed: a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.";
                 return McpHelpers.Status(
                     "empty",
                     (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")

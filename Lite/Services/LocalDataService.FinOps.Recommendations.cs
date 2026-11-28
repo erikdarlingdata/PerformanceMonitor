@@ -431,8 +431,8 @@ AND   collection_time >= $2";
                             Category = "Memory",
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
-                            Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Finding = $"Memory over-provisioned (P95 SQL memory uses {PercentText.Of(memRatio)} of {util.PhysicalMemoryMb / 1024}GB RAM)",
+                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({PercentText.Of(memRatio)} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -785,8 +785,8 @@ AND   collection_time >= $2";
                             Category = "Hardware",
                             Severity = "Medium",
                             Confidence = "Medium",
-                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {PercentText.Of(memRatio)})",
+                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({PercentText.Of(memRatio)}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m

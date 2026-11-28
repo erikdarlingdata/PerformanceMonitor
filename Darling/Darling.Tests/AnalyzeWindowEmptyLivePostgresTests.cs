@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -209,7 +208,7 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
                old Warning; names the coverage the witness measured; never says collection may be down. */
             var lines = logger.Joined;
             Assert.Contains("Information: [DarlingAnalysisService] The collector observed the analysis window for " + ServerName, lines, StringComparison.Ordinal);
-            Assert.Contains("but emitted no fact over it: the collector observed " + service.LastWindowCoverage!.Fraction.ToString("P0", CultureInfo.CurrentCulture) + " of this 4h window", lines, StringComparison.Ordinal);
+            Assert.Contains("but emitted no fact over it: the collector observed " + PercentText.Of(service.LastWindowCoverage!.Fraction) + " of this 4h window", lines, StringComparison.Ordinal);
             Assert.Contains("an all-clear from this pass rests on that coverage", lines, StringComparison.Ordinal);
             Assert.DoesNotContain("collection may be down", lines, StringComparison.Ordinal);
             Assert.DoesNotContain("No observed collection in the analysis window", lines, StringComparison.Ordinal);

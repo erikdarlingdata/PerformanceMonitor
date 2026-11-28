@@ -19,9 +19,13 @@ public static class PercentText
 {
     /// <summary><paramref name="fraction"/> times 100, rounded to <paramref name="decimals"/> places (0 or 1), with a
     /// thousands separator and a trailing <c>%</c>: 1.1 gives "110%" and 0.0334 with one decimal gives "3.3%".</summary>
-    public static string Of(double fraction, int decimals = 0)
-    {
-        var format = decimals <= 0 ? "#,##0" : "#,##0." + new string('0', decimals);
-        return (fraction * 100).ToString(format, CultureInfo.InvariantCulture) + "%";
-    }
+    public static string Of(double fraction, int decimals = 0) =>
+        (fraction * 100).ToString(NumberFormat(decimals), CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>The same for a <see cref="decimal"/> fraction, scaled and rounded as a decimal so the figure is the one
+    /// the old <c>P0</c> format printed for it (#9942).</summary>
+    public static string Of(decimal fraction, int decimals = 0) =>
+        (fraction * 100m).ToString(NumberFormat(decimals), CultureInfo.InvariantCulture) + "%";
+
+    private static string NumberFormat(int decimals) => decimals <= 0 ? "#,##0" : "#,##0." + new string('0', decimals);
 }

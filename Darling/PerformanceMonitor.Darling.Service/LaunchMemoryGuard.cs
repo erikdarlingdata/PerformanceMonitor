@@ -11,6 +11,8 @@ using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
@@ -221,16 +223,16 @@ internal sealed class LaunchMemoryGuard
             if (collectionCompleted)
             {
                 _logger.LogCritical(
-                    "Memory over the line even after a full garbage collection: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
-                    reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
+                    "Memory over the line even after a full garbage collection: {Metric} {FigureMb}MB is over {Pct} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
+                    reading.Metric, Mb(reading.Bytes), PercentText.Of(DarlingWorker.MemoryGuardFraction), Mb(reading.LimitBytes), reading.LimitSource);
             }
             else
             {
                 /* The collection or the reading after it threw (#5479): the figure is the one from before, so the line
                    must not claim a collection that did not finish. The next attempt is a minute away. */
                 _logger.LogCritical(
-                    "Memory over the line and the full garbage collection (or the reading after it) failed, so the figure was not re-checked: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. The guard tries the garbage collection again about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
-                    reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
+                    "Memory over the line and the full garbage collection (or the reading after it) failed, so the figure was not re-checked: {Metric} {FigureMb}MB is over {Pct} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. The guard tries the garbage collection again about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
+                    reading.Metric, Mb(reading.Bytes), PercentText.Of(DarlingWorker.MemoryGuardFraction), Mb(reading.LimitBytes), reading.LimitSource);
             }
         }
 
@@ -238,8 +240,8 @@ internal sealed class LaunchMemoryGuard
         {
             _lastWarning = now;
             _logger.LogWarning(
-                "The memory launch guard has held collection off for {HeldFor}: {Metric} {FigureMb}MB is still over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}); {InFlight} collection bodies still in flight. No new collection runs while it holds.",
-                FormatHeld(now - _heldSince), reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction,
+                "The memory launch guard has held collection off for {HeldFor}: {Metric} {FigureMb}MB is still over {Pct} of the {LimitMb}MB limit ({LimitSource}); {InFlight} collection bodies still in flight. No new collection runs while it holds.",
+                FormatHeld(now - _heldSince), reading.Metric, Mb(reading.Bytes), PercentText.Of(DarlingWorker.MemoryGuardFraction),
                 Mb(reading.LimitBytes), reading.LimitSource, inFlightBodies);
         }
 
