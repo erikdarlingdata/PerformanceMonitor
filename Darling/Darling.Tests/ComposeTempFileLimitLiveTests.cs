@@ -98,6 +98,13 @@ public sealed class ComposeTempFileLimitLiveTests
                 Assert.Equal("1MB", reader.GetString(0));
             }
 
+            /* The read spills only when its rows outgrow work_mem, and a TimescaleDB store tunes work_mem above the 4MB default,
+               so the read may fit in memory there. The minimum makes the same read spill on any store. */
+            await using (var smallWorkMem = new NpgsqlCommand("SET work_mem = '64kB'", asRole))
+            {
+                await smallWorkMem.ExecuteNonQueryAsync(ct);
+            }
+
             await using var spill = new NpgsqlCommand(
                 "SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 500000) g;", asRole);
 

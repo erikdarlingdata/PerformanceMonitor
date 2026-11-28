@@ -205,7 +205,10 @@ ANALYZE collect.zz_lk_wide;", ct);
         var indexPlain = await ReadRowsAsync(connection, WithPlainIndexLookups(indexSql), ct);
         Assert.Equal(indexPlain, indexShipped);
 
-        var tableSql = DarlingStoreTableHealthReader.BuildSql(scratch.TimescaleEnabled);
+        /* The statement reads relallfrozen only from 18: the version the connection reports is the one the product probes and passes. */
+        await using var versionCommand = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection);
+        var serverVersion = (int)(await versionCommand.ExecuteScalarAsync(ct))!;
+        var tableSql = DarlingStoreTableHealthReader.BuildSql(scratch.TimescaleEnabled, serverVersion);
         var tableShipped = await ReadRowsAsync(connection, tableSql, ct);
         var tablePlain = await ReadRowsAsync(connection, WithPlainTableLookup(tableSql), ct);
         Assert.Equal(tablePlain, tableShipped);
