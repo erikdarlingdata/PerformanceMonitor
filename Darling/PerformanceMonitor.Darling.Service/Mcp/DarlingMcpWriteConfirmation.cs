@@ -18,6 +18,8 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Common;
+using static PerformanceMonitor.Common.McpWriteConfirmation;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -26,6 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// (the 2026-07-28 revision, SEP-2322): the call answers "input required" with one yes or no question, the client asks its user and
 /// sends the same call again with the answer, and only then does the tool run. The endpoint stays stateless, so nothing is held
 /// between the two calls and no session is needed. A plain server-to-client elicitation call cannot work on a stateless server.
+/// The flow itself is <see cref="McpWriteConfirmation"/> in <c>PerformanceMonitor.Common</c>, which Lite's two tools use as well.
 ///
 /// <para><b>One filter, every listed tool.</b> <see cref="Filter"/> is registered once, so a listed tool needs no change of its
 /// own and a tool added to <see cref="ToolNames"/> is covered the day it is listed. It sits after the unknown-argument guard (a call
@@ -45,9 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingMcpWriteConfirmation
 {
     /// <summary>The key of the one input request, and of its answer when the client sends the call again.</summary>
-    internal const string InputKey = "confirm_write";
-
-    private const string AnswerField = "confirm";
+    internal const string InputKey = McpWriteConfirmation.InputKey;
 
     /// <summary>
     /// The listed tools, each with the sentence that names what the call would change. The sentence is read from the call's own
@@ -79,94 +80,42 @@ internal static class DarlingMcpWriteConfirmation
                 : "Reset the fleet-wide collector schedules back to the defaults?",
             ["clear_change_window"] = a => $"Clear change window {Q(a, "window_id")} now? Every request it still holds is released at once.",
             ["clear_quiet_window"] = a => $"End the quiet window of rule {Q(a, "rule_id")} now? Alerts it held back are delivered again.",
+
+            /* These six carry their own confirm step: the call without confirm: true only says what it would do and changes nothing, so
+               it asks nothing. The call that acts (confirm: true) is the one that asks. revoke_personal_token has no confirm step, so it
+               always asks. */
+            ["delete_web_access_group"] = a => IsTrue(a, "confirm")
+                ? $"Delete web access group {Q(a, "group")}? Its token and its existing sessions stop working at once, and this cannot be undone."
+                : null,
+            ["remove_alert_source"] = a => IsTrue(a, "confirm")
+                ? $"Remove external alert source {Q(a, "name")}? Its database login is dropped and its sessions end, so it can no longer send alerts."
+                : null,
+            ["reset_password_key"] = a => IsTrue(a, "confirm")
+                ? "Reset the password key? Every saved password sealed with the old key can no longer be opened and has to be entered again, and a reset has no undo."
+                : null,
+            ["revoke_personal_token"] = a => $"Revoke personal token {Q(a, "token_id")}? Whatever uses it stops working at once.",
+            ["rotate_alert_source"] = a => IsTrue(a, "confirm")
+                ? $"Give external alert source {Q(a, "name")} a new password? The old password stops working for a new connection at once."
+                : null,
+            ["rotate_web_access_group_token"] = a => IsTrue(a, "confirm")
+                ? $"Replace the token of web access group {Q(a, "group")}? The old token and the group's existing sessions stop working at once."
+                : null,
         };
 
     /// <summary>The tools that ask, by name. <c>purge_now</c> is listed here and described separately, because its question reads the store.</summary>
     internal static IReadOnlyCollection<string> ToolNames { get; } =
         Describers.Keys.Append("purge_now").OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
-    /// <summary>The call-tool filter.</summary>
-    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> Filter =>
-        next => async (request, cancellationToken) =>
-        {
-            var name = request.Params?.Name;
-            if (name is null || !ToolNames.Contains(name) || !ClientCanBeAsked(request) || IsAgentCall(request))
-            {
-                return await next(request, cancellationToken).ConfigureAwait(false);
-            }
-
-            var arguments = request.Params!.Arguments ?? new Dictionary<string, JsonElement>();
-            if (request.Params.InputResponses is { } responses && responses.TryGetValue(InputKey, out var response))
-            {
-                if (!IsYes(response))
-                {
-                    return Declined(name);
-                }
-
-                if (name == "purge_now")
-                {
-                    await SeatPurgeConfirmAsync(request, arguments, cancellationToken).ConfigureAwait(false);
-                }
-
-                return await next(request, cancellationToken).ConfigureAwait(false);
-            }
-
-            var question = name == "purge_now"
-                ? await PurgeQuestionAsync(request, arguments, cancellationToken).ConfigureAwait(false)
-                : Describers[name](arguments);
-            if (question is null)
-            {
-                return await next(request, cancellationToken).ConfigureAwait(false);
-            }
-
-            throw new InputRequiredException(
-                new Dictionary<string, InputRequest> { [InputKey] = InputRequest.ForElicitation(Ask(question)) },
-                requestState: null);
-        };
-
-    /// <summary>The question as an elicitation form: one box, on, that Accept leaves on and Decline never sends.</summary>
-    internal static ElicitRequestParams Ask(string question) => new()
-    {
-        Message = question,
-        RequestedSchema = new ElicitRequestParams.RequestSchema
-        {
-            Properties = new Dictionary<string, ElicitRequestParams.PrimitiveSchemaDefinition>
-            {
-                [AnswerField] = new ElicitRequestParams.BooleanSchema { Title = "Go ahead", Default = true },
-            },
-            Required = [AnswerField],
-        },
-    };
-
-    /// <summary>What a call answers when the user said no: a normal result that says nothing was changed.</summary>
-    internal static CallToolResult Declined(string tool) => new()
-    {
-        Content =
-        [
-            new TextContentBlock
-            {
-                Text = new JsonObject
-                {
-                    ["status"] = "declined",
-                    ["tool"] = tool,
-                    ["changed"] = false,
-                    ["message"] = "The user declined, so nothing was changed.",
-                }.ToJsonString(),
-            },
-        ],
-    };
-
-    private static bool ClientCanBeAsked(RequestContext<CallToolRequestParams> request)
-    {
-        var server = request.Server;
-        if (server is null || !server.IsMrtrSupported || server.ClientCapabilities?.Elicitation is null)
-        {
-            return false;
-        }
-
-        // A tool this caller is not served is unknown to it, and asking about it would only end in the unknown-tool error.
-        return server.ServerOptions?.ToolCollection is { } tools && tools.TryGetPrimitive(request.Params!.Name, out _);
-    }
+    /// <summary>The call-tool filter: the shared core (<see cref="McpWriteConfirmation"/>) with this host's tools, questions and agent rule.</summary>
+    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> Filter { get; } = McpWriteConfirmation.Create(
+        ToolNames,
+        (request, arguments, cancellationToken) => request.Params!.Name == "purge_now"
+            ? PurgeQuestionAsync(request, arguments, cancellationToken)
+            : Task.FromResult(Describers[request.Params.Name](arguments)),
+        IsAgentCall,
+        (request, name, arguments, cancellationToken) => name == "purge_now"
+            ? SeatPurgeConfirmAsync(request, arguments, cancellationToken)
+            : Task.CompletedTask);
 
     /// <summary>An agent has no user to ask: the investigations arm's token (a gated seat), and any call that carries an <c>agent_action</c>.</summary>
     private static bool IsAgentCall(RequestContext<CallToolRequestParams> request)
@@ -179,22 +128,6 @@ internal static class DarlingMcpWriteConfirmation
         }
 
         return DarlingAgentActionSeat.IsGated(request.Services?.GetService<DarlingAgentActionSeat>());
-    }
-
-    private static bool IsYes(InputResponse response)
-    {
-        var raw = response.RawValue;
-        if (raw.ValueKind != JsonValueKind.Object
-            || !raw.TryGetProperty("action", out var action)
-            || !string.Equals(action.GetString(), "accept", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        return !(raw.TryGetProperty("content", out var content)
-            && content.ValueKind == JsonValueKind.Object
-            && content.TryGetProperty(AnswerField, out var box)
-            && box.ValueKind == JsonValueKind.False);
     }
 
     private static async Task<string?> PurgeQuestionAsync(
@@ -240,27 +173,4 @@ internal static class DarlingMcpWriteConfirmation
 
     private static int? IntOf(IDictionary<string, JsonElement> arguments, string key) =>
         arguments.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
-
-    private static bool Has(IDictionary<string, JsonElement> arguments, string key) =>
-        arguments.TryGetValue(key, out var value) && value.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
-
-    private static bool IsFalse(IDictionary<string, JsonElement> arguments, string key) =>
-        arguments.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.False;
-
-    /// <summary>An argument's value as the question quotes it: a string in single quotes, anything else as written, capped at 80 characters.</summary>
-    private static string Q(IDictionary<string, JsonElement> arguments, string key)
-    {
-        if (!arguments.TryGetValue(key, out var value))
-        {
-            return "(not given)";
-        }
-
-        var text = value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : value.ToString();
-        if (text.Length > 80)
-        {
-            text = text[..80] + "...";
-        }
-
-        return value.ValueKind == JsonValueKind.String ? "'" + text + "'" : text;
-    }
 }

@@ -477,6 +477,12 @@ internal static class McpCallTimingFilter
                 call.Finish(McpCallTimingRecorder.OutcomeCancelled, null);
                 throw;
             }
+            catch (InputRequiredException)
+            {
+                /* #9562: the question a destructive write tool asks before it runs is not a call that failed, and nothing ran. The call
+                   that carries the answer is the one that is timed. */
+                throw;
+            }
             catch (Exception)
             {
                 call.Finish(McpCallTimingRecorder.OutcomeException, null);

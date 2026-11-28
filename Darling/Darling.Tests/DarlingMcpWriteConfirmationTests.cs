@@ -54,7 +54,47 @@ public sealed class DarlingMcpWriteConfirmationTests
         ["reset_collector_schedules", "{}", "fleet-wide"],
         ["clear_change_window", "{\"window_id\":21,\"reason\":\"cancelled\"}", "change window 21"],
         ["clear_quiet_window", "{\"rule_id\":\"quiet-31\"}", "quiet-31"],
+        ["delete_web_access_group", "{\"group\":\"ops-readers\",\"confirm\":true}", "ops-readers"],
+        ["remove_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}", "zabbix-east"],
+        ["reset_password_key", "{\"confirm\":true,\"confirm_fingerprint\":\"abc123\"}", "password key"],
+        ["revoke_personal_token", "{\"token_id\":\"tok-41\"}", "tok-41"],
+        ["rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}", "zabbix-east"],
+        ["rotate_web_access_group_token", "{\"group\":\"ops-readers\",\"confirm\":true}", "ops-readers"],
     ];
+
+    /// <summary>The tools that carry their own confirm step: the call without <c>confirm: true</c> only says what it would do, so it asks nothing.</summary>
+    [Theory]
+    [InlineData("delete_web_access_group", "{\"group\":\"ops-readers\"}")]
+    [InlineData("remove_alert_source", "{\"name\":\"zabbix-east\"}")]
+    [InlineData("reset_password_key", "{}")]
+    [InlineData("rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":false}")]
+    [InlineData("rotate_web_access_group_token", "{\"group\":\"ops-readers\"}")]
+    public async Task AToolsOwnPreviewCall_AsksNothing(string tool, string arguments)
+    {
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+
+        var answer = await CallAsync(server, tool, arguments, negotiate: true);
+
+        Assert.Null(QuestionOf(answer));
+    }
+
+    /// <summary>
+    /// <c>purge_now</c> through the path with no store to read (this host has none, as a front door has none): the generic question, which
+    /// still names the retention the call carries, and a call without one says each collector's configured retention.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"retention_days\":7}", "to 7 days now")]
+    [InlineData("{}", "configured retention")]
+    public async Task PurgeNowWithNoStore_AsksTheGenericQuestion(string arguments, string named)
+    {
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+
+        var answer = await CallAsync(server, "purge_now", arguments, negotiate: true);
+
+        var question = QuestionOf(answer);
+        Assert.NotNull(question);
+        Assert.Contains(named, question, StringComparison.Ordinal);
+    }
 
     [Theory]
     [MemberData(nameof(ListedTools))]
