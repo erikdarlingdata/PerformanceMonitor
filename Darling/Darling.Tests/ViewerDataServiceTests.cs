@@ -757,6 +757,15 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal("hasHostHourlyHashIndexDropped", map.GetParameters()[^1].Name);
         Assert.Equal(321, (int)map.Invoke(null, allButV322)!);
 
+        /* #9863: an index dropped by hand shows the V322 sentinel on a store that never ran V321, so the V322 arm also needs V321's sentinel. A store with the V322 sentinel
+           and every sentinel below V321's maps to 320, and a store with both maps to 322. */
+        var withoutV321 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        var v321Ordinal = Array.FindIndex(map.GetParameters(), p => p.Name == "hasSlowReadConnectionOpens");
+        Assert.True(v321Ordinal >= 0);
+        withoutV321[v321Ordinal] = false;
+        Assert.Equal(320, (int)map.Invoke(null, withoutV321)!);
+        Assert.Equal(322, (int)map.Invoke(null, Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray())!);
+
         /* #9923: the V321 sentinel (the connection open columns on the slow read record) is the one before the last, so a store that has every sentinel but that one and V322's is a V320 store
            and maps to 320, not 321. Each sentinel below shifts one place from the end. */
         var allButV321 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();

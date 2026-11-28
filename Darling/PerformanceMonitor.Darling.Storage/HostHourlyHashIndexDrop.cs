@@ -13,9 +13,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rollup. V287 creates it and V322 drops it, so a fresh store makes the empty index and removes it in the same ladder, and V287's text stays
 /// as it shipped.
 ///
-/// <para><b>No reader takes it.</b> The wide row joins the materialized units, and the query-tag filter, the one read by <c>query_hash</c>,
-/// also carries <c>server_id</c> and the bucket range, which <c>ux_query_stats_host_hourly</c> leads with. The index's cost is the build's own
-/// writes: every row the hourly build inserts lands on a random leaf of it, and those leaf reads are most of the build's block reads.</para>
+/// <para><b>The one read it served.</b> The wide row joins the materialized units, so the only read by <c>query_hash</c> is the query-tag
+/// filter. That filter also carries <c>server_id</c> and the bucket range, so <c>ux_query_stats_host_hourly</c> serves it, and without this
+/// index it reads a wider range of that index, which is slower on a long window. The index's cost is the build's own writes: every row the
+/// hourly build inserts lands on a random leaf of it, and those leaf reads are most of the build's block reads.</para>
 ///
 /// <para><b>A short exclusive lock.</b> A plain <c>DROP INDEX</c> takes <c>ACCESS EXCLUSIVE</c> on the rollup for an instant, inside the
 /// migration's transaction, so a build running at that moment makes the migration wait and the next build waits behind it. It cannot be

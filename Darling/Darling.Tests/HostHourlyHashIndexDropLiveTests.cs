@@ -21,7 +21,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// V322 (#9863) on a real store: the hourly host rollup keeps its unique index and loses <c>idx_query_stats_host_hourly_hash</c>, on a store
-/// the ladder builds from empty and on a store that holds the index and rollup rows at V321. Each test is a behaviour of the migrated store.
+/// the ladder builds from empty and on a store that holds the index and rollup rows at V321, and the Viewer's probe does not read a store below V321 whose index was dropped by hand as V322. Each test is a behaviour of the migrated store.
 /// </summary>
 public sealed class HostHourlyHashIndexDropLiveTests
 {
@@ -100,6 +100,36 @@ public sealed class HostHourlyHashIndexDropLiveTests
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.False(await IndexExistsAsync(connection, HashIndex, ct));
             Assert.Equal(before, await ScalarAsync(connection, RollupFingerprintSql, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AStoreBelowV321_WhoseHashIndexWasDroppedByHand_DoesNotReadAsV322()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V322 live tests (they mint their own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            /* A store at V320, which has the rollup and its hash index, then the index dropped by hand: the index's absence alone does not make it a V322 store. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, HostHourlyHashIndexDrop.Version - 2, ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + (HostHourlyHashIndexDrop.Version - 1), ct);
+            Assert.True(await IndexExistsAsync(connection, HashIndex, ct), "the store at V320 holds the index");
+            await ExecAsync(connection, "DROP INDEX " + HashIndex, ct);
+
+            Assert.Equal(HostHourlyHashIndexDrop.Version - 2, await ProbedVersionAsync(connection, ct));
             bodySucceeded = true;
         }
         finally

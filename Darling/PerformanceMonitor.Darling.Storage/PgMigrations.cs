@@ -4149,8 +4149,9 @@ END $$;";
            total milliseconds, counted beside statement_count and no longer inside it. Two nullable integer columns, no default, no rewrite: old rows keep NULL.
            An older build ignores them. */
         new Migration(SlowReadConnectionOpens.Version, "slow-read-connection-opens", SlowReadConnectionOpens.AddColumnsSql),
-        /* V322 (#9863): drops idx_query_stats_host_hourly_hash on the hourly host rollup. No reader takes it: the wide row joins the materialized units, and the query-tag
-           filter also carries server_id and the bucket range, which ux_query_stats_host_hourly leads with. Its upkeep is most of the hourly build's block reads. V287's
+        /* V322 (#9863): drops idx_query_stats_host_hourly_hash on the hourly host rollup. The wide row joins the materialized units, so the only read by query_hash is the
+           query-tag filter, which also carries server_id and the bucket range, so ux_query_stats_host_hourly serves it and it reads a wider range of that index, slower
+           on a long window. The index's upkeep is most of the hourly build's block reads. V287's
            text is unchanged, so a fresh store makes the empty index at V287 and drops it here. A plain DROP INDEX takes a short exclusive lock on the rollup while the
            rung runs, and a build in flight makes the rung wait. No rows move. An older build never names the index. */
         new Migration(HostHourlyHashIndexDrop.Version, "host-hourly-hash-index-drop", HostHourlyHashIndexDrop.DropSql),
