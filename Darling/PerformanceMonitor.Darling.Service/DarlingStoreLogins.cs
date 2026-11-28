@@ -968,7 +968,7 @@ internal static class DarlingStoreLogins
     /// for <see cref="ClassifyLoginProbe"/>'s version rule on <c>CREATEROLE</c>. Seventh: whether either is a member of any role (itself included)
     /// that can read one of the carve's secret columns, however it got the right (a table grant, a column grant, a role it inherits from, or
     /// ownership), so the <c>admin</c> role and a hand-made login with SELECT on <c>config.config_monitored_servers</c> are refused with the rest.
-    /// A table or column the store does not have is looked up through the catalog and is no match, never an error. Every catalog name is
+    /// A table or column the store does not have is looked up through the catalog and is no match, never an error (the two arrays are zipped by ROWS FROM, because a two-argument unnest cannot be schema-qualified). Every catalog name is
     /// qualified with <c>pg_catalog.</c>, so a role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
     private const string LoginProbeSql =
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
@@ -982,7 +982,7 @@ internal static class DarlingStoreLogins
         + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolreplication AND rolname IN (current_user, session_user)), "
         + "pg_catalog.current_setting('server_version_num')::pg_catalog.int4, "
         + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r "
-        + "JOIN pg_catalog.unnest($5::pg_catalog.text[], $6::pg_catalog.text[]) AS s(table_name, column_name) ON true "
+        + "JOIN ROWS FROM (pg_catalog.unnest($5::pg_catalog.text[]), pg_catalog.unnest($6::pg_catalog.text[])) AS s(table_name, column_name) ON true "
         + "JOIN pg_catalog.pg_class AS t ON t.relnamespace = n.oid AND t.relname = s.table_name "
         + "JOIN pg_catalog.pg_attribute AS a ON a.attrelid = t.oid AND a.attname = s.column_name AND a.attnum > 0 AND NOT a.attisdropped "
         + "WHERE (pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') OR pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER')) "
