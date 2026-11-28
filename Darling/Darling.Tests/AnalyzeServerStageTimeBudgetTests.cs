@@ -21,6 +21,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -551,6 +552,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
                     StageTimeBudget.Describe(new StageTimeCuts(Detectors, TimeSpan.Zero, [], TimeSpan.Zero))!,
                     doc.RootElement.GetProperty("message").GetString()!,
                     StringComparison.Ordinal);
+
+                /* A pass that left a detector out stored no findings, and the reply says where the stored ones are. */
+                Assert.Contains(StageTimeBudget.NotStored, doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+                Assert.All(entries, e => Assert.Contains(StageTimeBudget.LastWholePass, e.GetProperty("read_it_with").GetString()!, StringComparison.Ordinal));
             }
             Assert.Equal(Detectors, service.LastStageCuts.Detectors);
             Assert.Equal(TimeSpan.Zero, service.LastStageCuts.DetectorBudget);
@@ -571,6 +576,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
                 Assert.Empty(LeftOut(doc.RootElement, "detectors_left_out"));
                 Assert.Empty(LeftOut(doc.RootElement, "drill_downs_left_out"));
             }
+            Assert.DoesNotContain(StageTimeBudget.NotStored, whole, StringComparison.Ordinal);
             Assert.Empty(service.LastStageCuts.Detectors);
 
             bodySucceeded = true;
@@ -580,6 +586,231 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    private const int NotStoredServerId = -987965;
+    private const string NotStoredServerName = "cut-pass-not-stored-9879";
+
+    /// <summary>
+    /// Stands in front of the real detector. With a deadline to fire, it holds the object stats detector, the last of the
+    /// nine, on a table lock, fires the deadline once the store shows that read waiting, and lets the pass go on.
+    /// </summary>
+    private sealed class LastDetectorHeld(IAnomalyDetector inner, string connectionString) : IAnomalyDetector
+    {
+        /// <summary>The deadline of the pass to cut, or null to run every detector to its end.</summary>
+        public CancellationTokenSource? DeadlineToFire { get; set; }
+
+        public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context)
+        {
+            if (DeadlineToFire is not { } deadline)
+                return await inner.DetectAnomaliesAsync(context);
+
+            var ct = context.PassToken;
+            await using var locker = new NpgsqlConnection(connectionString);
+            await locker.OpenAsync(ct);
+            await using var watcher = new NpgsqlConnection(connectionString);
+            await watcher.OpenAsync(ct);
+            await using var held = await HoldReadsOfAsync(locker, "collect.index_object_stats", ct);
+            var run = inner.DetectAnomaliesAsync(context);
+            await AReadWaitsForTheLockAsync(watcher, ct);
+            deadline.Cancel();
+            var facts = await run.WaitAsync(Limit, ct);
+            await held.RollbackAsync(ct);
+            return facts;
+        }
+    }
+
+    /// <summary>
+    /// A current pass that left something out for time stores no findings, so the newest stored batch stays the last
+    /// whole pass for the latest-batch read and for <c>get_analysis_findings</c>, with the drill-down and the remediation
+    /// that batch stored. Each stage is cut in turn. The family and drill-down deadlines have fired before the pass starts.
+    /// The detector deadline is fired by hand while the last detector waits on a lock, after the wait detector has added
+    /// the pass's finding. Nothing here waits on a clock. A current pass that leaves nothing out stores its batch.
+    /// </summary>
+    [Theory]
+    [InlineData("family")]
+    [InlineData("detector")]
+    [InlineData("drill_down")]
+    public async Task ACurrentPassThatLeftSomethingOutForTime_StoresNoFindings_AndTheLastWholePassStaysTheLatest(string stage)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live cut-pass persistence test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        using (var register = new NpgsqlCommand(@"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, 15, $3, $3)", connection))
+        {
+            register.Parameters.AddWithValue(NotStoredServerId);
+            register.Parameters.AddWithValue(NotStoredServerName);
+            register.Parameters.AddWithValue(Naive(DateTime.UtcNow));
+            await register.ExecuteNonQueryAsync(ct);
+        }
+
+        /* More than a day of wait history in one hour-of-day and day-of-week bucket, then three heavy collections a week
+           later at the same hour: one ANOMALY_WAIT_PROFILE fact, which roots a finding. */
+        var day = DateTime.UtcNow.Date.AddDays(-8);
+        while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+        var historyStart = Naive(day.AddHours(10));
+        for (var i = 0; i < 12; i++)
+            await PlantNotStoredWaitAsync(connection, historyStart.AddMinutes(5 * i), (i == 5 || i == 6) ? 0L : 60_000L, ct);
+        var incidentStart = historyStart.AddDays(7);
+        for (var minutes = 5; minutes <= 15; minutes += 5)
+            await PlantNotStoredWaitAsync(connection, incidentStart.AddMinutes(minutes), 200_000L, ct);
+
+        await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* A current pass (no as_of) over the incident's hour. */
+        AnalysisContext Pass() => new()
+        {
+            ServerId = NotStoredServerId,
+            ServerName = NotStoredServerName,
+            TimeRangeStart = incidentStart,
+            TimeRangeEnd = incidentStart.AddHours(1),
+            ServerUtcOffset = TimeSpan.Zero,
+            CancellationToken = ct
+        };
+
+        LastDetectorHeld? detector = null;
+        var service = new DarlingAnalysisService(
+            postgres, sqlServerDetectorWrapper: inner => detector = new LastDetectorHeld(inner, scratch.ConnectionString));
+
+        /* The whole pass: nothing left out, so its findings are stored. */
+        var whole = Pass();
+        Assert.NotEmpty(await service.AnalyzeAsync(whole).WaitAsync(Limit, ct));
+        Assert.False(whole.LeftOutForTime);
+        Assert.True(whole.StoresFindings);
+        Assert.False(service.LastPassLeftOutForTime);
+
+        /* This store's finding is an anomaly, which has no drill-down of its own. The whole pass's rows are given the
+           drill-down and the remediation a drilled finding stores, through the store's own serializers, so the reads below
+           have detail to lose. */
+        using (var detail = new NpgsqlCommand(
+            "UPDATE analysis_findings SET drill_down_json = $2, remediation_action_json = $3 WHERE server_id = $1", connection))
+        {
+            detail.Parameters.AddWithValue(NotStoredServerId);
+            detail.Parameters.AddWithValue(DrillDownSerializer.Serialize(new Dictionary<string, object> { ["top_waits"] = "FB9879N_TEST_WAIT" })!);
+            detail.Parameters.AddWithValue(AlertContextSerializer.SerializeAction(new RemediationAction(
+                FactKey: "MISSING_INDEX",
+                Action: "set",
+                Targets: [],
+                MissingIndexTargets: [new MissingIndexTarget("dbo.Posts", 83.2, "CREATE NONCLUSTERED INDEX [ix_fb9879n] ON [dbo].[Posts] ([OwnerUserId]);")])));
+            Assert.True(await detail.ExecuteNonQueryAsync(ct) > 0);
+        }
+
+        var storedByTheWholePass = await StoredFindingRowsAsync(connection, ct);
+        Assert.NotEmpty(storedByTheWholePass);
+        var latestOfTheWholePass = LatestBatch(await service.GetLatestFindingsAsync(NotStoredServerId));
+        Assert.NotEmpty(latestOfTheWholePass);
+        Assert.All(latestOfTheWholePass, line => Assert.EndsWith("drill_down=True remediation=True", line, StringComparison.Ordinal));
+        var readOfTheWholePass = ReadBack(await DarlingMcpTools.GetAnalysisFindings(service, postgres, NotStoredServerName, include_drilldown: true));
+        Assert.NotEmpty(readOfTheWholePass);
+        Assert.All(readOfTheWholePass, line => Assert.Contains("FB9879N_TEST_WAIT", line, StringComparison.Ordinal));
+        Assert.All(readOfTheWholePass, line => Assert.Contains("ix_fb9879n", line, StringComparison.Ordinal));
+
+        /* The same pass again with one stage cut. */
+        var fired = new CancellationToken(canceled: true);
+        using var detectorDeadline = new CancellationTokenSource();
+        var cut = Pass();
+        if (stage == "family")
+        {
+            cut.FamilyDeadline = fired;
+        }
+        else if (stage == "detector")
+        {
+            cut.DetectorDeadline = detectorDeadline.Token;
+            detector!.DeadlineToFire = detectorDeadline;
+        }
+        else
+        {
+            cut.DrillDownDeadline = fired;
+        }
+
+        var cutFindings = await service.AnalyzeAsync(cut).WaitAsync(Limit, ct);
+        detector!.DeadlineToFire = null;
+
+        if (stage == "family")
+            Assert.NotEmpty(cut.FamiliesLeftOutForTime);
+        else if (stage == "detector")
+            Assert.Equal(new[] { "object_stats" }, cut.DetectorsLeftOutForTime);
+        else
+            Assert.NotEmpty(cut.DrillDownsLeftOutForTime);
+        Assert.True(cut.LeftOutForTime);
+        Assert.True(cut.PersistFindings);
+        Assert.False(cut.StoresFindings);
+        Assert.True(service.LastPassLeftOutForTime);
+
+        /* The cut pass still has the finding to write, so it is the rule that keeps it out of the store. */
+        Assert.NotEmpty(cutFindings);
+        Assert.Contains(cutFindings, finding => finding.RootFactKey == "ANOMALY_WAIT_PROFILE");
+
+        /* No row was written, and both reads still return the whole pass's batch with the detail it stored. */
+        Assert.Equal(storedByTheWholePass, await StoredFindingRowsAsync(connection, ct));
+        Assert.Equal(latestOfTheWholePass, LatestBatch(await service.GetLatestFindingsAsync(NotStoredServerId)));
+        Assert.Equal(readOfTheWholePass, ReadBack(await DarlingMcpTools.GetAnalysisFindings(service, postgres, NotStoredServerName, include_drilldown: true)));
+
+        /* A current pass that leaves nothing out stores its batch, and that batch is then the latest. */
+        var again = Pass();
+        Assert.NotEmpty(await service.AnalyzeAsync(again).WaitAsync(Limit, ct));
+        Assert.True(again.StoresFindings);
+        Assert.False(service.LastPassLeftOutForTime);
+        Assert.Equal(storedByTheWholePass.Count * 2, (await StoredFindingRowsAsync(connection, ct)).Count);
+        Assert.NotEqual(latestOfTheWholePass, LatestBatch(await service.GetLatestFindingsAsync(NotStoredServerId)));
+    }
+
+    /// <summary>Every stored finding row of the server: its id, its batch time, its drill-down and its remediation, in id order.</summary>
+    private static async Task<List<string>> StoredFindingRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+SELECT finding_id::text || ' at ' || analysis_time::text
+       || ' drill_down=' || COALESCE(drill_down_json, 'null')
+       || ' remediation=' || COALESCE(remediation_action_json, 'null')
+FROM analysis_findings
+WHERE server_id = $1
+ORDER BY finding_id", connection);
+        command.Parameters.AddWithValue(NotStoredServerId);
+        var rows = new List<string>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            rows.Add(reader.GetString(0));
+        return rows;
+    }
+
+    /// <summary>The latest-batch read, one line per finding: which row it is and whether it carries a drill-down and a remediation.</summary>
+    private static List<string> LatestBatch(List<AnalysisFinding> findings) =>
+        findings.Select(f => $"{f.FindingId} at {f.AnalysisTime:o} drill_down={f.DrillDown is not null} remediation={f.Remediation is not null}").ToList();
+
+    /// <summary>The <c>get_analysis_findings</c> reply, one line per finding: which row represents it, how often it occurred, and its drill-down and remediation as served.</summary>
+    private static List<string> ReadBack(string reply)
+    {
+        static string Field(JsonElement finding, string name) =>
+            finding.TryGetProperty(name, out var value) ? value.GetRawText() : "absent";
+
+        using var doc = JsonDocument.Parse(reply);
+        return doc.RootElement.GetProperty("findings").EnumerateArray()
+            .Select(f => $"{Field(f, "finding_id")} at {Field(f, "analysis_time")} x{Field(f, "occurrences")} drill_down={Field(f, "drill_down")} remediation={Field(f, "remediation_command")}")
+            .ToList();
+    }
+
+    private static async Task PlantNotStoredWaitAsync(NpgsqlConnection connection, DateTime at, long waitMs, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'FB9879N_TEST_WAIT', 50, $5)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(NotStoredServerId);
+        command.Parameters.AddWithValue(NotStoredServerName);
+        command.Parameters.AddWithValue(waitMs);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>The reply's entries under <paramref name="field"/>, from the top level or from <c>hints</c>, and none when the reply has no such field.</summary>

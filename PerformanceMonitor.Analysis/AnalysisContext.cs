@@ -148,6 +148,17 @@ public class AnalysisContext
     public List<string> DrillDownsLeftOutForTime { get; } = [];
 
     /// <summary>
+    /// Whether the pass left anything out because a time budget ended (#9879): a family
+    /// (<see cref="FamiliesLeftOutForTime"/>), an anomaly detector (<see cref="DetectorsLeftOutForTime"/>) or a finding's
+    /// drill-down (<see cref="DrillDownsLeftOutForTime"/>). Such a pass stores no findings
+    /// (<see cref="StoresFindings"/>): its batch would be the newest one, and the reads that serve the newest batch as the
+    /// server's current state would show findings missing or without their drill-down and remediation. Read it once the
+    /// stages have run, since they fill the three lists. Always false with no budget, which is the scheduled pass.
+    /// </summary>
+    public bool LeftOutForTime =>
+        FamiliesLeftOutForTime.Count > 0 || DetectorsLeftOutForTime.Count > 0 || DrillDownsLeftOutForTime.Count > 0;
+
+    /// <summary>
     /// The host's stopping token, and ONLY that (#2430). Default <see cref="CancellationToken.None"/>,
     /// which reads as "this pass has no shutdown to distinguish" — correct for the on-demand callers,
     /// whose cancellation is never a service stop.
@@ -203,6 +214,13 @@ public class AnalysisContext
     /// caller, who will not have read this comment.</para></para>
     /// </summary>
     public bool PersistFindings => AsOfUtc is null;
+
+    /// <summary>
+    /// Whether this pass writes its findings and notifies listeners of them: a current pass
+    /// (<see cref="PersistFindings"/>) that left nothing out for time (<see cref="LeftOutForTime"/>). The stored latest
+    /// batch is therefore always a whole pass. Read it after the drill-down stage, the last one that can leave something out.
+    /// </summary>
+    public bool StoresFindings => PersistFindings && !LeftOutForTime;
 
     /// <summary>
     /// The NOMINAL length of the examined window in milliseconds — <see cref="TimeRangeEnd"/> minus

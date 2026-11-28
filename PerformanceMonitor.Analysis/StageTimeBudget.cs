@@ -46,16 +46,31 @@ public static class StageTimeBudget
     /// <summary>The reason word every entry carries: the same one a <c>families_left_out</c> entry does.</summary>
     public const string Reason = FamilyTimeBudget.Reason;
 
-    /// <summary>The sentences for the reply's caveat, or null when the pass cut neither stage.</summary>
+    /// <summary>
+    /// What a reply says about the store when the pass left anything out for time, in any of the three stages: a
+    /// family, an anomaly detector or a drill-down (<see cref="AnalysisContext.LeftOutForTime"/>). Such a pass stores no
+    /// findings, so the stored latest batch is the last pass that left nothing out. Said once per reply, after the
+    /// sentences that name what was left out.
+    /// </summary>
+    public const string NotStored =
+        "This pass's findings were not stored, because it left something out for time: get_analysis_findings shows the last whole pass, not this one.";
+
+    /// <summary>Where a left-out entry's <c>read_it_with</c> sends the reader for the stored findings.</summary>
+    public const string LastWholePass = "get_analysis_findings for the last whole pass (this pass stored no findings)";
+
+    /// <summary>
+    /// The sentences for the reply's caveat, or null when the pass cut neither stage. They name what was left out. Where
+    /// the stored findings are is <see cref="NotStored"/>, which the reply adds once.
+    /// </summary>
     public static string? Describe(StageTimeCuts cuts)
     {
         ArgumentNullException.ThrowIfNull(cuts);
         var detectors = cuts.Detectors.Count == 0
             ? null
-            : $"{Count(cuts.Detectors.Count, "anomaly detector was", "anomaly detectors were")} left out for time ({string.Join(", ", cuts.Detectors)}): this call gives the anomaly detectors {Seconds(cuts.DetectorBudget, OnDemandDetectors)} s from its start and {(cuts.Detectors.Count == 1 ? "that one" : "those")} had not finished, so no anomaly finding from {(cuts.Detectors.Count == 1 ? "it" : "them")} is in this answer and {(cuts.Detectors.Count == 1 ? "its" : "their")} absence is not an all-clear. The same call again often finishes, because the baselines it waited for are kept, and the scheduled pass runs every detector without a budget (get_analysis_findings).";
+            : $"{Count(cuts.Detectors.Count, "anomaly detector was", "anomaly detectors were")} left out for time ({string.Join(", ", cuts.Detectors)}): this call gives the anomaly detectors {Seconds(cuts.DetectorBudget, OnDemandDetectors)} s from its start and {(cuts.Detectors.Count == 1 ? "that one" : "those")} had not finished, so no anomaly finding from {(cuts.Detectors.Count == 1 ? "it" : "them")} is in this answer and {(cuts.Detectors.Count == 1 ? "its" : "their")} absence is not an all-clear. The same call again often finishes, because the baselines it waited for are kept, and the scheduled pass runs every detector without a budget.";
         var drillDowns = cuts.DrillDowns.Count == 0
             ? null
-            : $"{Count(cuts.DrillDowns.Count, "finding has", "findings have")} no drill-down detail ({string.Join(", ", Distinct(cuts.DrillDowns).Select(group => group.Count == 1 ? group.Key : $"{group.Key} x{group.Count}"))}): this call stops drilling into findings {Seconds(cuts.DrillDownBudget, OnDemandDrillDowns)} s from its start. Each finding itself is in this answer and is complete; only its supporting detail (top queries, plans, remediation) is missing. The scheduled pass drills into every finding (get_analysis_findings).";
+            : $"{Count(cuts.DrillDowns.Count, "finding has", "findings have")} no drill-down detail ({string.Join(", ", Distinct(cuts.DrillDowns).Select(group => group.Count == 1 ? group.Key : $"{group.Key} x{group.Count}"))}): this call stops drilling into findings {Seconds(cuts.DrillDownBudget, OnDemandDrillDowns)} s from its start. Each finding itself is in this answer and is complete; only its supporting detail (top queries, plans, remediation) is missing. The scheduled pass drills into every finding.";
         return detectors is null ? drillDowns : drillDowns is null ? detectors : $"{detectors} {drillDowns}";
     }
 
@@ -81,7 +96,7 @@ public static class StageTimeBudget
                 ["detector"] = detector,
                 ["reason"] = Reason,
                 ["budget_seconds"] = seconds,
-                ["read_it_with"] = "the same call again, or get_analysis_findings for the scheduled pass"
+                ["read_it_with"] = $"the same call again, or {LastWholePass}"
             }).ToArray());
         }
 
@@ -94,7 +109,7 @@ public static class StageTimeBudget
                 ["findings"] = group.Count,
                 ["reason"] = Reason,
                 ["budget_seconds"] = seconds,
-                ["read_it_with"] = "a shorter hours_back, or get_analysis_findings for the scheduled pass"
+                ["read_it_with"] = $"a shorter hours_back, or {LastWholePass}"
             }).ToArray());
         }
 
