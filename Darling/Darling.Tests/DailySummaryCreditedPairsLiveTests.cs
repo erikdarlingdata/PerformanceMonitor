@@ -87,6 +87,18 @@ public sealed class DailySummaryCreditedPairsLiveTests
            shape's. With them off, the pair read can only take the index-only scan if no column outside the index is named. */
         await ExecuteAsync(connection, "SET enable_seqscan = off; SET enable_bitmapscan = off", ct);
         var plan = await PlanAsync(connection, sql, start, end, ct);
+        Console.WriteLine("DIAG9943 Daily " + plan.RootElement[0].GetRawText());
+        await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
+        await ExecuteAsync(connection, $"PREPARE cp_plan_t(int, timestamp, timestamp, timestamp) AS {sql}", ct);
+        await using (var dc = new NpgsqlCommand($"EXPLAIN (ANALYZE, BUFFERS) EXECUTE cp_plan_t({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", connection))
+        {
+            var lines = new System.Text.StringBuilder();
+            await using var dr = await dc.ExecuteReaderAsync(ct);
+            while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
+            Console.WriteLine("DIAG9943 Daily text
+" + sql + "
+" + lines);
+        }
         var nodes = new List<(string Type, string Index, double Loops, double Rows)>();
         Collect(plan.RootElement[0].GetProperty("Plan"), nodes);
         Assert.Contains(nodes, n => n.Type == "Index Only Scan" && n.Index.EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)

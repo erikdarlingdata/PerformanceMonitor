@@ -295,6 +295,16 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
             pages = ExplainBuffers.DataPages(await command.ExecuteScalarAsync(ct));
         }
 
+        await using (var diag = Command(connection, "EXPLAIN (ANALYZE, BUFFERS) " + sql, compiled))
+        {
+            var lines = new System.Text.StringBuilder();
+            await using var dr = await diag.ExecuteReaderAsync(ct);
+            while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
+            Console.WriteLine("DIAG9943 Fleet pages=" + pages + "
+" + sql + "
+" + lines);
+        }
+
         return pages;
     }
 
