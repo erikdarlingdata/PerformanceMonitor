@@ -112,14 +112,24 @@ RUN_STARTED=""
 RUN_TOOL_VERSION=""
 RUN_STOP_CHECK=""
 RUN_ROLLBACK_FOLDER=""
+# What a --rollback read of the run it steps back from (#9940): the run id, and the state, end time and exit code as
+# the JSON values that run's record held. read_stepped_back_run sets them, and only a --rollback calls it.
+STEPPED_BACK_RUN_ID=""
+STEPPED_BACK_STATE=null
+STEPPED_BACK_ENDED=null
+STEPPED_BACK_EXIT=null
 write_upgrade_run() {
-    local folder="$1" state="$2" exit_code="${3:-null}" first_error="${4:-}" ended=null temp
+    local folder="$1" state="$2" exit_code="${3:-null}" first_error="${4:-}" ended=null temp stepped_back=""
     [ -n "${RUN_ID}" ] && [ -d "${folder}" ] && root_only_writable "${folder}" || return 0
     [ "${state}" = in_progress ] || ended="\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+    # The record of a --rollback names the run it steps back from, after the fields every record has. An upgrade's
+    # record has no such fields, and a build that does not know them reads the rest of the record as it is (#9940).
+    [ -z "${STEPPED_BACK_RUN_ID}" ] || stepped_back="$(printf ',\n  "stepped_back_run_id": "%s",\n  "stepped_back_state": %s,\n  "stepped_back_ended_utc": %s,\n  "stepped_back_exit_code": %s' \
+        "${STEPPED_BACK_RUN_ID}" "${STEPPED_BACK_STATE}" "${STEPPED_BACK_ENDED}" "${STEPPED_BACK_EXIT}")"
     if temp="$(mktemp "${folder}/${RUN_RECORD_NAME}.XXXXXXXX" 2>/dev/null)"; then
-        if printf '{\n  "run_id": "%s",\n  "state": "%s",\n  "tool_version": %s,\n  "target_build": %s,\n  "started_utc": "%s",\n  "ended_utc": %s,\n  "exit_code": %s,\n  "stop_check": %s,\n  "rollback_folder": %s,\n  "first_error": %s,\n  "verified_utc": null\n}\n' \
+        if printf '{\n  "run_id": "%s",\n  "state": "%s",\n  "tool_version": %s,\n  "target_build": %s,\n  "started_utc": "%s",\n  "ended_utc": %s,\n  "exit_code": %s,\n  "stop_check": %s,\n  "rollback_folder": %s,\n  "first_error": %s,\n  "verified_utc": null%s\n}\n' \
             "${RUN_ID}" "${state}" "$(json_text "${RUN_TOOL_VERSION}")" "$(json_text "${STAGED_VERSION}")" "${RUN_STARTED}" "${ended}" "${exit_code}" \
-            "$(json_text "${RUN_STOP_CHECK}")" "$(json_text "${RUN_ROLLBACK_FOLDER}")" "$(json_text "${first_error}")" >"${temp}" \
+            "$(json_text "${RUN_STOP_CHECK}")" "$(json_text "${RUN_ROLLBACK_FOLDER}")" "$(json_text "${first_error}")" "${stepped_back}" >"${temp}" \
             && chmod 644 "${temp}" && mv -f -T "${temp}" "${folder}/${RUN_RECORD_NAME}"; then
             return 0
         fi
@@ -134,12 +144,45 @@ die_recorded() {
     die "$1"
 }
 
+# The JSON value of one field of a record that write_upgrade_run made, which puts each field on a line of its own. $1
+# is the record's text and $2 the field. Prints nothing when the record has no such line.
+record_field() {
+    printf '%s\n' "$1" | sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\\(.*[^,[:space:]]\\),\\{0,1\\}[[:space:]]*\$/\\1/p" | sed -n 1p
+}
+
+# Reads what the build in ${INSTALL_ROOT} last recorded of its own run, the run this --rollback steps back from (#9940).
+# That build moves to ${FAILED_ROOT} with its record, where no service reads it again, so a run that is taken back
+# before the service's next store pass would stay in_progress in the store for good. The rollback's record names that
+# run and what its record last said, and the build that goes back closes the run's row with it. A value is taken only
+# in the exact form write_upgrade_run gives it, so the rollback's record is valid JSON whatever the file holds. The
+# file is read only when it is a plain file in a folder that only root can write, and 64 KB of it at most. With no
+# file, or no run id in it, the rollback's record names no run and the store's rows stay as they are.
+read_stepped_back_run() {
+    local file="${INSTALL_ROOT}/${RUN_RECORD_NAME}" text value
+    local id_form='^"([0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})"$'
+    local state_form='^"(in_progress|succeeded|failed|verified)"$'
+    local time_form='^"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,7})?Z"$'
+    local number_form='^-?[0-9]{1,9}$'
+    [ -f "${file}" ] && [ ! -L "${file}" ] && root_only_writable "${INSTALL_ROOT}" || return 0
+    text="$(head -c 65536 -- "${file}" 2>/dev/null | printable)" || return 0
+    value="$(record_field "${text}" run_id)"
+    [[ "${value}" =~ ${id_form} ]] || return 0
+    STEPPED_BACK_RUN_ID="${BASH_REMATCH[1]}"
+    value="$(record_field "${text}" state)"
+    [[ ! "${value}" =~ ${state_form} ]] || STEPPED_BACK_STATE="${value}"
+    value="$(record_field "${text}" ended_utc)"
+    [[ ! "${value}" =~ ${time_form} ]] || STEPPED_BACK_ENDED="${value}"
+    value="$(record_field "${text}" exit_code)"
+    [[ ! "${value}" =~ ${number_form} ]] || STEPPED_BACK_EXIT="${value}"
+}
+
 # Starts the record of a --rollback (#9821). A rollback is a run of its own, with its own run id, and the build it puts
 # back stores it as one more row: in_progress, then succeeded or failed. target_build is the build that goes back, and
 # rollback_folder is the folder that holds the build the rollback replaces, so the row reads as a step back and the
 # newest row names the build that runs. The states and the fields are the ones an upgrade writes, so every build that
-# stores upgrade runs can read the record, and an older build reads no record at all. $1 is the folder of the build
-# that goes back. restore_previous writes the record into that build's folder, and nowhere else.
+# stores upgrade runs can read the record, and an older build reads no record at all. The record also names the run
+# the rollback steps back from (#9940), read here while that run's build is still in ${INSTALL_ROOT}. $1 is the folder
+# of the build that goes back. restore_previous writes the record into that build's folder, and nowhere else.
 begin_rollback_run() {
     RUN_ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
     [[ "${RUN_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || RUN_ID=""
@@ -148,6 +191,7 @@ begin_rollback_run() {
     [ ! -f "${SCRIPT_DIR}/${SERVICE_DLL}" ] || RUN_TOOL_VERSION="$(build_version "${SCRIPT_DIR}")"
     STAGED_VERSION="$(build_version "$1")"
     RUN_ROLLBACK_FOLDER="${FAILED_ROOT}"
+    read_stepped_back_run
 }
 
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The

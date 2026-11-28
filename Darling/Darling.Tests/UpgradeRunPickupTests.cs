@@ -622,4 +622,315 @@ public sealed class UpgradeRunPickupTests
         pickup.LogRecordedOnce(new UpgradeRunPickupResult(UpgradeRunPickupOutcome.RecordedAndRemoved, run, "verified"));
         Assert.Single(logger.Informations);
     }
+
+    /* An exit_code that is present and is not a JSON number makes the file malformed, with the problem named. A string, an object, a
+       boolean and a number too large for an integer are all refused the same way, and none of them throws. A JSON null is an exit code
+       that is not given, as it is for a run in progress. */
+    [Theory]
+    [InlineData("\"1\"")]
+    [InlineData("{}")]
+    [InlineData("true")]
+    [InlineData("[1]")]
+    [InlineData("1.5")]
+    [InlineData("4294967296")]
+    public void AnExitCodeThatIsNotANumber_IsAMalformedFile_AndDoesNotThrow(string exitCodeJson)
+    {
+        var text = RunJson(Guid.NewGuid(), "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":" + exitCodeJson + ",", StringComparison.Ordinal);
+        Assert.Contains("\"exit_code\":" + exitCodeJson + ",", text, StringComparison.Ordinal);
+
+        Assert.False(UpgradeRunPickup.TryParse(text, out var run, out var problem));
+
+        Assert.Null(run);
+        Assert.Equal("exit_code is not a number", problem);
+    }
+
+    [Fact]
+    public void AnExitCodeOfNull_IsARunWithNoExitCode()
+    {
+        var id = Guid.NewGuid();
+        var text = RunJson(id, "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":null,", StringComparison.Ordinal);
+        Assert.Contains("\"exit_code\":null,", text, StringComparison.Ordinal);
+
+        Assert.True(UpgradeRunPickup.TryParse(text, out var run, out var problem), problem);
+
+        Assert.Equal(id, run!.RunId);
+        Assert.Equal(UpgradeRuns.Succeeded, run.State);
+        Assert.Null(run.ExitCode);
+    }
+
+    /* A pickup of a file whose exit_code is not a number does what it does for any malformed file: the outcome is Malformed, the file
+       stays where it is, one warning is logged for the content however many passes read it, and the store is not reached. The connection
+       here is never opened, so a pickup that went on to the store would fail. */
+    [Theory]
+    [InlineData("\"1\"")]
+    [InlineData("{}")]
+    [InlineData("true")]
+    public async Task APickupOfAFileWhoseExitCodeIsNotANumber_IsMalformed_WarnsOnce_KeepsTheFile_AndNeverReachesTheStore(string exitCodeJson)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var folder = Directory.CreateTempSubdirectory("darling-9940-").FullName;
+        try
+        {
+            var logger = new CountingLogger();
+            var pickup = new UpgradeRunPickup(logger);
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var text = RunJson(Guid.NewGuid(), "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":" + exitCodeJson + ",", StringComparison.Ordinal);
+            File.WriteAllText(file, text);
+            await using var connection = new NpgsqlConnection();
+
+            for (var i = 0; i < 3; i++)
+            {
+                var result = await pickup.PickUpAsync(connection, folder, DateTime.UtcNow, ct);
+                Assert.Equal(UpgradeRunPickupOutcome.Malformed, result.Outcome);
+                Assert.Null(result.RunId);
+            }
+
+            Assert.Equal(1, logger.Warnings);
+            Assert.Equal(text, File.ReadAllText(file));
+            Assert.Equal(System.Data.ConnectionState.Closed, connection.State);
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    /* #9940: the file upgrade-darling.sh --rollback writes when it could read the record of the run it steps back from, in the script's
+       own layout: the rollback's run, then the four fields that name the other run. A null argument writes JSON null. */
+    private static string SteppingBackRunJson(
+        Guid id, string state, DateTime started, string steppedBackId, string? steppedBackState, DateTime? steppedBackEnded, int? steppedBackExit)
+    {
+        var record = RollbackRunJson(id, state, started);
+        return record[..record.LastIndexOf("\n}", StringComparison.Ordinal)]
+            + ",\n  \"stepped_back_run_id\": \"" + steppedBackId + "\",\n  \"stepped_back_state\": " + (steppedBackState is null ? "null" : "\"" + steppedBackState + "\"")
+            + ",\n  \"stepped_back_ended_utc\": " + (steppedBackEnded is null ? "null" : "\"" + steppedBackEnded.Value.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + "\"")
+            + ",\n  \"stepped_back_exit_code\": " + (steppedBackExit is null ? "null" : steppedBackExit.Value.ToString(CultureInfo.InvariantCulture)) + "\n}\n";
+    }
+
+    private static async Task<(string State, DateTime? EndedAt, int? ExitCode, DateTime UpdatedAt)> RunRowAsync(NpgsqlConnection connection, Guid id)
+    {
+        await using var command = new NpgsqlCommand("SELECT state, ended_at, exit_code, updated_at FROM collect.upgrade_runs WHERE run_id = $1", connection);
+        command.Parameters.AddWithValue(id);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "the run has no row");
+        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetDateTime(3));
+    }
+
+    /* #9940: the rollback's file names the run it steps back from and what that run's file last said. */
+    [Fact]
+    public void ARollbacksFile_ThatNamesTheRunItStepsBackFrom_ParsesWithThatRun()
+    {
+        var id = Guid.NewGuid();
+        var upgrade = Guid.NewGuid();
+        var started = new DateTime(2026, 11, 27, 0, 33, 5, DateTimeKind.Utc);
+        var upgradeEnded = started.AddSeconds(-50);
+
+        Assert.True(UpgradeRunPickup.TryParse(
+            SteppingBackRunJson(id, "in_progress", started, upgrade.ToString(), "succeeded", upgradeEnded, 0), out var run, out var problem), problem);
+
+        Assert.Equal(id, run!.RunId);
+        Assert.Equal(UpgradeRuns.InProgress, run.State);
+        Assert.Equal("/opt/darling.failed", run.RollbackFolder);
+        Assert.Equal(new UpgradeRunSteppedBack(upgrade, UpgradeRuns.Succeeded, upgradeEnded, 0), run.SteppedBack);
+    }
+
+    /* #9940: the four fields are extra to a run. One that does not read is left out, and the file is still the rollback's own run: a run id
+       that is no GUID, or the rollback's own, names no run. A state no file carries, an end that is no time and an exit code that is no
+       number are read as not given. */
+    [Fact]
+    public void SteppedBackFieldsThatDoNotRead_LeaveTheRollbacksOwnRunWhole()
+    {
+        var id = Guid.NewGuid();
+        var upgrade = Guid.NewGuid();
+        var started = new DateTime(2026, 11, 27, 0, 33, 5, DateTimeKind.Utc);
+
+        Assert.True(UpgradeRunPickup.TryParse(SteppingBackRunJson(id, "succeeded", started, "not-a-guid", "succeeded", started, 0), out var noGuid, out var problem), problem);
+        Assert.Equal(id, noGuid!.RunId);
+        Assert.Null(noGuid.SteppedBack);
+
+        Assert.True(UpgradeRunPickup.TryParse(SteppingBackRunJson(id, "succeeded", started, id.ToString(), "succeeded", started, 0), out var ownId, out problem), problem);
+        Assert.Null(ownId!.SteppedBack);
+
+        var odd = SteppingBackRunJson(id, "succeeded", started, upgrade.ToString(), "rolled_sideways", null, null)
+            .Replace("\"stepped_back_ended_utc\": null", "\"stepped_back_ended_utc\": \"yesterday\"", StringComparison.Ordinal)
+            .Replace("\"stepped_back_exit_code\": null", "\"stepped_back_exit_code\": \"zero\"", StringComparison.Ordinal);
+        Assert.True(UpgradeRunPickup.TryParse(odd, out var oddRun, out problem), problem);
+        Assert.Equal(UpgradeRuns.Succeeded, oddRun!.State);
+        Assert.Equal(new UpgradeRunSteppedBack(upgrade, null, null, null), oddRun.SteppedBack);
+
+        Assert.True(UpgradeRunPickup.TryParse(RollbackRunJson(id, "succeeded", started), out var plain, out problem), problem);
+        Assert.Null(plain!.SteppedBack);
+    }
+
+    /* #9940: a build reads a record that a newer script wrote. Fields it does not know, whatever their JSON kind, change nothing: the run
+       parses to the same values as the record without them. */
+    [Fact]
+    public void ARecordWithFieldsThisBuildDoesNotKnow_ParsesAsTheSameRun()
+    {
+        var id = Guid.NewGuid();
+        var started = new DateTime(2026, 11, 27, 0, 33, 5, DateTimeKind.Utc);
+        var known = RollbackRunJson(id, "succeeded", started);
+        var newer = known[..known.LastIndexOf("\n}", StringComparison.Ordinal)]
+            + ",\n  \"a_later_text\": \"x\",\n  \"a_later_number\": 7,\n  \"a_later_object\": { \"run_id\": \"" + Guid.NewGuid() + "\", \"state\": \"failed\" },\n  \"a_later_list\": [1, \"two\", null]\n}\n";
+
+        Assert.True(UpgradeRunPickup.TryParse(known, out var knownRun, out var problem), problem);
+        Assert.True(UpgradeRunPickup.TryParse(newer, out var newerRun, out problem), problem);
+
+        Assert.Equal(knownRun, newerRun);
+    }
+
+    /* #9940: what the named row is closed with. The run's own file is the witness when it said succeeded or failed. Anything else, a
+       verified or in_progress state or none at all, gives stepped_back, ended at the rollback's start and with no exit code. */
+    [Theory]
+    [InlineData("succeeded", true, 0, "succeeded", true, 0)]
+    [InlineData("failed", true, 1, "failed", true, 1)]
+    [InlineData("succeeded", false, null, "succeeded", false, null)]
+    [InlineData("in_progress", false, null, "stepped_back", false, null)]
+    [InlineData("in_progress", true, 3, "stepped_back", false, null)]
+    [InlineData("verified", true, 0, "stepped_back", false, null)]
+    [InlineData(null, false, null, "stepped_back", false, null)]
+    public void TheClose_TakesTheFilesFinalStateAndEnd_AndIsSteppedBackAtTheRollbacksStartOtherwise(
+        string? fileState, bool fileHasEnd, int? fileExit, string expectedState, bool expectsFileEnd, int? expectedExit)
+    {
+        var rollbackStarted = new DateTime(2026, 11, 27, 0, 33, 5);
+        var fileEnded = rollbackStarted.AddMinutes(-1);
+
+        var (state, ended, exitCode) = UpgradeRuns.SteppedBackClose(
+            new UpgradeRunSteppedBack(Guid.NewGuid(), fileState, fileHasEnd ? fileEnded : null, fileExit), rollbackStarted);
+
+        Assert.Equal(expectedState, state);
+        Assert.Equal(expectsFileEnd ? fileEnded : rollbackStarted, ended);
+        Assert.Equal(expectedExit, exitCode);
+    }
+
+    /* #9940: an upgrade taken back before the service's next store pass. Its row is in_progress, and the file that says how it ended moved away
+       with its build. The rollback's file names the run, so the pickup that stores the rollback's row closes the upgrade's: with the file's state,
+       end and exit code when the file had them, and as stepped_back at the rollback's start when it did not. The passes after that write nothing
+       to either row, and the read behind get_service_starts reports the closed row as stored. */
+    [Theory]
+    [InlineData("succeeded", 0, "succeeded")]
+    [InlineData("failed", 1, "failed")]
+    [InlineData("in_progress", null, "stepped_back")]
+    [InlineData(null, null, "stepped_back")]
+    public async Task ARollbackThatNamesARunStillInProgress_ClosesItsRow_AndTheNextPassesChangeNothing(string? fileState, int? fileExit, string expectedState)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9940-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var logger = new CountingLogger();
+            var pickup = new UpgradeRunPickup(logger);
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var upgrade = Guid.NewGuid();
+            var rollback = Guid.NewGuid();
+            var now = new DateTime(2026, 11, 27, 12, 0, 0, DateTimeKind.Utc);
+            var rollbackStarted = now.AddMinutes(-2);
+            var final = fileState is "succeeded" or "failed";
+            DateTime? fileEnded = final ? now.AddMinutes(-3) : null;
+
+            File.WriteAllText(file, RunJson(upgrade, "in_progress", started: now.AddMinutes(-4)));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(-4), ct)).Outcome);
+            Assert.Equal((1L, "in_progress"), await RowAsync(connection, upgrade));
+
+            File.WriteAllText(file, SteppingBackRunJson(rollback, "in_progress", rollbackStarted, upgrade.ToString(), fileState, fileEnded, fileExit));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            Assert.Equal((2L, "in_progress"), await RowAsync(connection, rollback));
+            var closed = await RunRowAsync(connection, upgrade);
+            Assert.Equal(expectedState, closed.State);
+            Assert.Equal(DateTime.SpecifyKind(fileEnded ?? rollbackStarted, DateTimeKind.Unspecified), closed.EndedAt);
+            Assert.Equal(fileExit is null || !final ? null : fileExit, closed.ExitCode);
+            Assert.Equal(DateTime.SpecifyKind(now, DateTimeKind.Unspecified), closed.UpdatedAt);
+            Assert.Single(logger.Informations, line => line.Contains("closed in the store as " + expectedState, StringComparison.Ordinal));
+
+            File.WriteAllText(file, SteppingBackRunJson(rollback, "succeeded", rollbackStarted, upgrade.ToString(), fileState, fileEnded, fileExit));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
+            Assert.Equal((2L, "succeeded"), await RowAsync(connection, rollback));
+            Assert.Equal(closed, await RunRowAsync(connection, upgrade));
+            var rollbackRow = await RunRowAsync(connection, rollback);
+
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(10), ct)).Outcome);
+            Assert.Equal(closed, await RunRowAsync(connection, upgrade));
+            Assert.Equal(rollbackRow, await RunRowAsync(connection, rollback));
+            Assert.Single(logger.Informations, line => line.Contains("closed in the store", StringComparison.Ordinal));
+
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var runs = await UpgradeRuns.ReadAsync(dataSource, now.AddHours(1), ct);
+            var read = Assert.Single(runs, r => r.RunId == upgrade);
+            Assert.Equal(expectedState, read.State);
+            Assert.Equal(expectedState, read.RecordedState);
+            Assert.Equal(fileEnded ?? rollbackStarted, read.EndedUtc);
+            Assert.Equal(UpgradeRuns.Succeeded, Assert.Single(runs, r => r.RunId == rollback).State);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /* #9940: the close matches only a row that is still in_progress. A run whose row already has its end keeps it, whatever the rollback's
+       file says of that run, and a run the store never saw gets no row. A later file of the run itself is still stored: the placeholder
+       stepped_back ranks with succeeded and failed, so the run's own word replaces it and an in_progress copy does not. */
+    [Fact]
+    public async Task ARowThatHasItsEnd_IsLeftAsItIs_ARunTheStoreNeverSawGetsNoRow_AndTheRunsOwnFileStillWins()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9940-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var now = new DateTime(2026, 11, 27, 12, 0, 0, DateTimeKind.Utc);
+            var rollbackStarted = now.AddMinutes(-2);
+
+            var ended = Guid.NewGuid();
+            File.WriteAllText(file, RunJson(ended, "succeeded", started: now.AddMinutes(-9)));
+            await pickup.PickUpAsync(connection, folder, now.AddMinutes(-8), ct);
+            var before = await RunRowAsync(connection, ended);
+            File.WriteAllText(file, SteppingBackRunJson(Guid.NewGuid(), "succeeded", rollbackStarted, ended.ToString(), "failed", now.AddMinutes(-3), 1));
+            await pickup.PickUpAsync(connection, folder, now, ct);
+            Assert.Equal(before, await RunRowAsync(connection, ended));
+
+            var unseen = Guid.NewGuid();
+            File.WriteAllText(file, SteppingBackRunJson(Guid.NewGuid(), "succeeded", rollbackStarted, unseen.ToString(), "succeeded", now.AddMinutes(-3), 0));
+            await pickup.PickUpAsync(connection, folder, now, ct);
+            Assert.Equal((3L, ""), await RowAsync(connection, unseen));
+
+            var placeholder = Guid.NewGuid();
+            File.WriteAllText(file, RunJson(placeholder, "in_progress", started: now.AddMinutes(-6)));
+            await pickup.PickUpAsync(connection, folder, now.AddMinutes(-6), ct);
+            File.WriteAllText(file, SteppingBackRunJson(Guid.NewGuid(), "succeeded", rollbackStarted, placeholder.ToString(), null, null, null));
+            await pickup.PickUpAsync(connection, folder, now, ct);
+            Assert.Equal("stepped_back", (await RunRowAsync(connection, placeholder)).State);
+
+            File.WriteAllText(file, RunJson(placeholder, "in_progress", started: now.AddMinutes(-6)));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(1), ct)).Outcome);
+            Assert.Equal("stepped_back", (await RunRowAsync(connection, placeholder)).State);
+
+            File.WriteAllText(file, RunJson(placeholder, "succeeded", started: now.AddMinutes(-6)));
+            await pickup.PickUpAsync(connection, folder, now.AddMinutes(2), ct);
+            var own = await RunRowAsync(connection, placeholder);
+            Assert.Equal("succeeded", own.State);
+            Assert.Equal(0, own.ExitCode);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
 }
