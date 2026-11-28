@@ -117,6 +117,34 @@ public sealed class QueryFleetSummaryCoveringIndexLiveTests
         }
     }
 
+    /// <summary>Puts the rows of the three rollups in random physical order. A refresh writes a rollup in its aggregate's output order, and the order the
+    /// planner picks differs between PostgreSQL versions: PostgreSQL 17 sorts by the hash and writes the statement's rows side by side, about seven to a
+    /// heap page, where 18 spreads them. The statement then reads 192 pages on 17, below the 250 the assertion below needs (#9943). A shuffle puts the
+    /// hash's rows on about a page each on both, the shape the page counts below are asserted on.</summary>
+    private static async Task ScatterRollupsAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        var chunks = new List<string>();
+        await using (var relations = new NpgsqlCommand(@"SELECT format('%I.%I', ch.chunk_schema, ch.chunk_name)
+            FROM timescaledb_information.continuous_aggregates ca
+            JOIN timescaledb_information.chunks ch ON ch.hypertable_schema = ca.materialization_hypertable_schema AND ch.hypertable_name = ca.materialization_hypertable_name
+            WHERE ca.view_name IN ('query_stats_interval_hourly', 'query_stats_hourly', 'query_store_stats_corrected_hourly')", c))
+        await using (var reader = await relations.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                chunks.Add(reader.GetString(0));
+            }
+        }
+
+        foreach (var chunk in chunks)
+        {
+            await Exec(c, $"CREATE TEMP TABLE pm9943_scatter AS SELECT * FROM {chunk} ORDER BY random()", ct);
+            await Exec(c, $"TRUNCATE {chunk}", ct);
+            await Exec(c, $"INSERT INTO {chunk} SELECT * FROM pm9943_scatter", ct);
+            await Exec(c, "DROP TABLE pm9943_scatter", ct);
+        }
+    }
+
     private static async Task VacuumRollupsAsync(NpgsqlConnection c, CancellationToken ct)
     {
         var tables = new List<string>();
@@ -314,6 +342,7 @@ public sealed class QueryFleetSummaryCoveringIndexLiveTests
                 Assert.True(await IsCoveringAsync(c, name, ct), name + " should be covering on a fresh store");
             }
 
+            await ScatterRollupsAsync(c, ct);
             await VacuumRollupsAsync(c, ct);
             await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
 

@@ -239,20 +239,20 @@ internal static class PgStatementTable
 
     /// <summary>
     /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
-    /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
+    /// <c>1</c>s, under one of six WHERE/LIMIT/OFFSET suffixes (no OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an OFFSET alike, so <c>LIMIT 1</c> and <c>OFFSET 0</c> were one entry there, #9943). Every shape has at least one subtraction and two columns,
     /// so the family shares no entry with <see cref="Shape"/>'s sums, with a bare <c>SELECT 1</c>, or with a test's own
     /// single-column statements.
     /// </summary>
     internal static string HeadroomShape(int n)
     {
-        var variant = n & 7;
-        var rest = n >> 3;
+        var variant = n % 6;
+        var rest = n / 6;
         var items = rest / 8 + 2;
         var terms = rest % 8 + 1;
         var item = "1" + string.Concat(Enumerable.Repeat("-1", terms));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+            + (variant >= 2 ? " LIMIT 1" : string.Empty)
+            + (variant >= 4 ? " OFFSET 0" : string.Empty);
         return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 
@@ -301,7 +301,7 @@ internal static class PgStatementTable
         var passSize = Math.Max(1, max * 5 / 100);
         var maxPasses = (max + passSize - 1) / passSize + 1;
         var shapes = max + FillBatch + maxPasses * (passSize + FillBatch);
-        var side = (int)Math.Ceiling(Math.Sqrt(shapes / 8.0)) + 1;
+        var side = (int)Math.Ceiling(Math.Sqrt(shapes / 6.0)) + 1;
         var runs = callsAtMost + 1;
         var next = 0;
         var dealloc = start;
@@ -426,21 +426,21 @@ internal static class PgStatementTable
 
     /// <summary>
     /// The <paramref name="n"/>-th distinct shape of the filler's family: two or more columns of <c>1</c>, each a sum of some
-    /// more, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter the module's query id, so a
+    /// more, under one of six WHERE/LIMIT/OFFSET suffixes (no OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an OFFSET alike, so <c>LIMIT 1</c> and <c>OFFSET 0</c> were one entry there, #9943). Constants and aliases do not enter the module's query id, so a
     /// shape has to differ in structure to get an entry of its own, and a single-column shape would be a test's own
     /// <c>SELECT $1 + $2</c>. <paramref name="side"/> bounds the columns and the terms; the family holds
-    /// <c>8 * side * (side + 1)</c> shapes.
+    /// <c>6 * side * (side + 1)</c> shapes.
     /// </summary>
     internal static string Shape(int n, int side)
     {
-        var variant = n & 7;
-        var rest = n >> 3;
+        var variant = n % 6;
+        var rest = n / 6;
         var items = rest / (side + 1) + 2;
         var terms = rest % (side + 1);
         var item = "1" + string.Concat(Enumerable.Repeat("+1", terms));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+            + (variant >= 2 ? " LIMIT 1" : string.Empty)
+            + (variant >= 4 ? " OFFSET 0" : string.Empty);
         return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 }
