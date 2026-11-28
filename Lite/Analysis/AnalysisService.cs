@@ -162,7 +162,11 @@ public class AnalysisService
             /* #5630: the same fetcher serves the plan-regression inputs check; a caller with none passes no source. */
             planFetcher as IQueryStorePlanSource,
             /* #9195: a service is built per pass, so the judged plan pairs live with the store. */
-            PlanInputOutcomeCache.For(duckDb));
+            PlanInputOutcomeCache.For(duckDb))
+        {
+            /* #9957: the pass and every MCP call build their own service, so the keep of the cost read's rows belongs to the store. */
+            CostKeep = PlanRegressionCostKeep.For(duckDb)
+        };
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);

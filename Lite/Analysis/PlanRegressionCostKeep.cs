@@ -10,7 +10,8 @@ namespace PerformanceMonitorLite.Analysis;
 /// The rows the plan regression cost statement returned, kept for <see cref="KeepFor"/> so the reads that ask for the same rows share
 /// one scan (#9888, #9957). One keep belongs to a store (<see cref="For"/>), not to a collector: the scheduled pass and every MCP call
 /// build their own <see cref="AnalysisService"/>, and with it their own <see cref="DuckDbFactCollector"/>, so a keep held by the
-/// collector never answered a second read.
+/// collector never answered a second read. An <see cref="AnalysisService"/> gives its collector the store's keep; a collector built
+/// on its own keeps a private one.
 /// </summary>
 internal sealed class PlanRegressionCostKeep
 {
@@ -27,10 +28,9 @@ internal sealed class PlanRegressionCostKeep
 
     /// <summary>
     /// What decides the statement's rows: the server, the window the statement ran over (<c>last_execution_time</c> from
-    /// <paramref name="ScanStart"/>, <c>collection_time</c> up to <paramref name="ScanEnd"/>), the secondary-replica scope, and for a read
-    /// whose end is the clock the number of rows the store held for the server up to that end (<paramref name="Rows"/>, null for an anchored read).
+    /// <paramref name="ScanStart"/>, <c>collection_time</c> up to <paramref name="ScanEnd"/>) and the secondary-replica scope.
     /// </summary>
-    internal readonly record struct Key(int ServerId, DateTime ScanStart, DateTime ScanEnd, string Secondaries, long? Rows);
+    internal readonly record struct Key(int ServerId, DateTime ScanStart, DateTime ScanEnd, string Secondaries);
 
     private readonly record struct Entry(List<DuckDbFactCollector.RankedPlanRegression> Rows, long At);
 
@@ -54,6 +54,12 @@ internal sealed class PlanRegressionCostKeep
 
     /// <summary>Entries held, including any that expired and have not been asked for since.</summary>
     internal int Count { get { lock (_gate) return _entries.Count; } }
+
+    /// <summary>Drops every entry, for a store whose rows were replaced.</summary>
+    internal void Clear()
+    {
+        lock (_gate) _entries.Clear();
+    }
 
     /// <summary>The kept rows for <paramref name="key"/>, or null when none are kept or they are older than <see cref="KeepFor"/>. A hit is counted.</summary>
     internal List<DuckDbFactCollector.RankedPlanRegression>? TryGet(Key key)

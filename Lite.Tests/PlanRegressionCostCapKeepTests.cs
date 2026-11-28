@@ -293,12 +293,6 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
         var (_, repeat) = await ReadClockCostAsync(pass, At(Now.AddSeconds(66), clock: true));
         Assert.True(repeat.FromKeep);
         Assert.Equal(2, keep.StatementRuns);
-
-        /* The backfill worker stores rows with a collection_time below the newest: the newest does not move, the row count does. */
-        InsertRow(collected: Now.AddHours(-3), lastExec: Now.AddHours(-3));
-        var (_, afterBackfill) = await ReadClockCostAsync(read, At(Now.AddSeconds(67), clock: true));
-        Assert.False(afterBackfill.FromKeep);
-        Assert.Equal(3, keep.StatementRuns);
     }
 
     [Fact]
@@ -337,7 +331,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
     }
 
     [Fact]
-    public async Task ARepeatedCompare_SharesTheScanOfBothWindows_WhileTheRowsOfBothAreInTheHotTable()
+    public async Task ARepeatedCompare_SharesTheScanOfBothWindows_WhileEachEndHasARowFromTheLastDay()
     {
         var time = new ManualTime();
         var keep = new PlanRegressionCostKeep(time);
@@ -345,8 +339,9 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
         async Task<(bool Comparison, bool Baseline)> CompareAsync(DuckDbFactCollector collector, DateTime end)
         {
             var comparison = await ReadClockCostAsync(collector, At(end, clock: true));
-            /* compare_analysis: baseline_hours_back 28, so the baseline window ends 24 hours before the comparison window. */
-            var baseline = await ReadClockCostAsync(collector, At(end.AddHours(-24), clock: true));
+            /* compare_analysis: the baseline window ends before the comparison window. The seeded store holds old rows
+               about five days back, so this baseline ends two hours after them, as a baseline the newest rows of which are a day old or less. */
+            var baseline = await ReadClockCostAsync(collector, At(end.AddDays(-5).AddHours(2), clock: true));
             return (comparison.Time.FromKeep, baseline.Time.FromKeep);
         }
 

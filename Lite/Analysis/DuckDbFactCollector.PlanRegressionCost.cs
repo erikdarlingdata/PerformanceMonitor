@@ -510,22 +510,25 @@ LIMIT 100";
     /// <summary>
     /// The window the cost statement scans, and what keys the keep for it (#9957). <c>ScanStart</c> is the lower bound on
     /// <c>last_execution_time</c> (the window start less 14 days) and <c>ScanEnd</c> the upper bound on <c>collection_time</c>.
-    /// <c>Rows</c> is set only for a window whose end was the clock: the rows the store held for the server up to <c>ScanEnd</c>.
     /// </summary>
-    internal readonly record struct PlanRegressionCostWindow(DateTime ScanStart, DateTime ScanEnd, long? Rows)
+    internal readonly record struct PlanRegressionCostWindow(DateTime ScanStart, DateTime ScanEnd)
     {
-        /// <summary>The context's own window: an anchored read, or a read whose store held no row to clamp to.</summary>
+        /// <summary>The context's own window: an anchored read, or a read whose store held no recent row to clamp to.</summary>
         internal static PlanRegressionCostWindow Exact(AnalysisContext context) =>
-            new(context.TimeRangeStart.AddDays(-14), context.TimeRangeEnd, null);
+            new(context.TimeRangeStart.AddDays(-14), context.TimeRangeEnd);
     }
+
+    /// <summary>How far before a clock window's end the newest row is looked for. A server with no row that recent keeps its exact window.</summary>
+    internal static readonly TimeSpan PlanRegressionCostNewestRowLookback = TimeSpan.FromDays(1);
 
     /// <summary>
     /// The window the cost statement runs over for <paramref name="context"/> (#9957). An anchored read, or any read whose end is not the
     /// clock, keeps its exact window. A read whose end is the clock ends at the newest <c>collection_time</c> the store holds for the server
     /// at or before it: the statement cannot see a row after that, so the rows are the same, and the end no longer moves from one read to the
-    /// next. The start follows from that end and the window's length, so two reads of one length between two collections scan the same
-    /// window. The row count up to that end is in the key, so the backfill worker's rows (stored with a back-dated <c>collection_time</c>
-    /// below the newest) and deleted rows run the statement again. A store with no row for the server, or a read that fails, keeps the exact window.
+    /// next, so the reads between two collections share one scan. The start follows from that end and the window's length. The newest row is
+    /// read through the archive view, looking back <see cref="PlanRegressionCostNewestRowLookback"/> so the read prunes the archive; a store
+    /// with no row that recent for the server, or a read that fails, keeps the exact window. The key does not see rows stored below the newest
+    /// <c>collection_time</c> (the backfill worker's, a repair's deletes), so those reach a read once the keep's lifetime ends.
     /// </summary>
     internal async Task<PlanRegressionCostWindow> ResolvePlanRegressionCostWindowAsync(AnalysisContext context)
     {
@@ -537,16 +540,14 @@ LIMIT 100";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
             using var cmd = connection.CreateCommand();
-            /* The hot table, not the view: the newest rows are always hot, and a count over the view would move when the archive
-               takes rows out of the hot table although the rows the statement reads are the same. */
-            cmd.CommandText = "SELECT max(collection_time), count(*) FROM query_store_stats WHERE server_id = $1 AND collection_time <= $2";
+            cmd.CommandText = "SELECT max(collection_time) FROM v_query_store_stats WHERE server_id = $1 AND collection_time <= $2 AND collection_time >= $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken) || reader.IsDBNull(0)) return exact;
-            var newest = DateTime.SpecifyKind(Convert.ToDateTime(reader.GetValue(0)), DateTimeKind.Utc);
-            var rows = Convert.ToInt64(reader.GetValue(1));
-            return new PlanRegressionCostWindow(newest - (context.TimeRangeEnd - context.TimeRangeStart) - TimeSpan.FromDays(14), newest, rows);
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd - PlanRegressionCostNewestRowLookback });
+            var value = await cmd.ExecuteScalarAsync(context.CancellationToken);
+            if (value is not DateTime at) return exact;
+            var newest = DateTime.SpecifyKind(at, DateTimeKind.Utc);
+            return new PlanRegressionCostWindow(newest - (context.TimeRangeEnd - context.TimeRangeStart) - TimeSpan.FromDays(14), newest);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -572,7 +573,7 @@ LIMIT 100";
         var cap = PlanRegressionCostCapForTests ?? PlanRegressionCostCap;
         var scan = window ?? await ResolvePlanRegressionCostWindowAsync(context);
         var secondaries = context.SecondaryReplicaDatabases is { Count: > 0 } set ? string.Join('\u001f', set.OrderBy(d => d, StringComparer.Ordinal)) : "";
-        var key = new PlanRegressionCostKeep.Key(context.ServerId, scan.ScanStart, scan.ScanEnd, secondaries, scan.Rows);
+        var key = new PlanRegressionCostKeep.Key(context.ServerId, scan.ScanStart, scan.ScanEnd, secondaries);
         var keep = CostKeep;
         var ranked = keep.TryGet(key);
 
@@ -609,12 +610,12 @@ LIMIT 100";
     private PlanRegressionCostKeep? _costKeep;
 
     /// <summary>
-    /// The keep this collector reads and fills: the store's own, shared with every collector on it (#9957). A test that needs a read
-    /// that no earlier read can answer sets its own.
+    /// The keep this collector reads and fills. A collector built on its own holds a private keep; <see cref="AnalysisService"/> sets the
+    /// store's keep (<see cref="PlanRegressionCostKeep.For"/>) on the collector it builds, so the pass and every MCP call share one (#9957).
     /// </summary>
     internal PlanRegressionCostKeep CostKeep
     {
-        get => _costKeep ??= PlanRegressionCostKeep.For(_duckDb);
+        get => _costKeep ??= new PlanRegressionCostKeep();
         set => _costKeep = value;
     }
 
