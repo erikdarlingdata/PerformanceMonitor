@@ -81,7 +81,7 @@ MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on,
 
 `--enable-web` and `--enable-mcp` are Windows only, so they do not run in the container. The same `UPDATE` with `web_enabled` turns the web dashboard on after the first start.
 
-To restart the service on compose, run `docker compose restart darling`. Do not restart the store with it. A plain `docker compose restart` stops both services at once, and the service logs warnings because the store goes away under it. To restart both in order, run `docker compose down` and then `docker compose up -d`. A restart does not change the container's image, its mounted secrets or its command line. Only `up -d` does.
+To restart the service on compose, run `docker compose restart darling`. Do not restart the store with it. A plain `docker compose restart` stops both services at once. The service then logs one Information line, with no warnings, saying the store went down while it stopped. It did not write the last update of this start's row in the service start history, or the collector-cost and read-latency samples since the last hourly flush. To restart both in order, run `docker compose down` and then `docker compose up -d`. A restart does not change the container's image, its mounted secrets or its command line. Only `up -d` does.
 
 To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
