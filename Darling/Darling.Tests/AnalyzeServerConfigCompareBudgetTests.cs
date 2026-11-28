@@ -489,4 +489,46 @@ VALUES ($1, $2, $2, TRUE, 15, $3, $3)", connection))
         }
         Assert.Empty(service.LastStageCuts.Compares);
     }
+
+    [Fact]
+    public async Task AMutedConfigurationChange_WithAnEndedCompareBudget_IsNotNamedAsLeftOut()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live muted compare budget test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var incidentStart = await PlantAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var asOfUtc = DateTime.SpecifyKind(incidentStart.AddHours(1), DateTimeKind.Utc);
+
+        /* The compare's budget has ended before the pass starts, and the other stages have none. */
+        var service = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = null,
+            OnDemandConfigCompareBudget = TimeSpan.Zero
+        };
+
+        /* The card is in the answer, so the pass names its compare as left out. */
+        var shown = await service.AnalyzeAsync(ServerId, ServerName, 1, ct, asOfUtc: asOfUtc);
+        var card = ConfigFinding(shown);
+        Assert.Equal(new[] { ConfigChangeAttribution.FactKey }, service.LastStageCuts.Compares);
+        Assert.True(service.LastPassLeftOutForTime);
+
+        /* The same story muted: the card is not in the answer, so the pass names no compare and has left nothing out. */
+        await new PgFindingStore(postgres).MuteStoryAsync(ServerId, card.StoryPathHash, card.StoryPath, "muted for the compare budget test");
+        var muted = await service.AnalyzeAsync(ServerId, ServerName, 1, ct, asOfUtc: asOfUtc);
+        Assert.DoesNotContain(muted, finding => finding.RootFactKey == ConfigChangeAttribution.FactKey);
+        Assert.Equal(OtherFindings(shown), OtherFindings(muted));
+        Assert.NotEmpty(muted);
+        Assert.Empty(service.LastStageCuts.Compares);
+        Assert.False(service.LastStageCuts.Any);
+        Assert.False(service.LastPassLeftOutForTime);
+    }
 }

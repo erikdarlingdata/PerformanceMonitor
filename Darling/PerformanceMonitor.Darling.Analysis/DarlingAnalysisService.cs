@@ -856,6 +856,10 @@ public sealed class DarlingAnalysisService
             //    absolution findings are dropped here and never enriched.
             var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
 
+            /* #9879: a compare left out for time is the pass's concern only while its finding is in the answer. A card
+               the mute filter dropped is neither shown nor stored, so its missing verdict leaves nothing out of the pass. */
+            context.ComparesLeftOutForTime.RemoveAll(key => findings.All(finding => finding.RootFactKey != key));
+
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built
             //    action; the cheap config drill-downs run below the 0.5 gate inside the collector).
             await engine.DrillDown.EnrichFindingsAsync(findings, context);
@@ -884,8 +888,8 @@ public sealed class DarlingAnalysisService
             //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
             //    reused read up to PlanRegressionCandidateCache.RefreshAfter old: the same band as
             //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
-            //    #9879: a current pass that left anything out for time (a family, an anomaly detector or a finding's
-            //    drill-down) writes nothing either. Its batch would be the newest, so get_analysis_findings and the
+            //    #9879: a current pass that left anything out for time (a family, an anomaly detector, a configuration
+            //    change's compare or a finding's drill-down) writes nothing either. Its batch would be the newest, so get_analysis_findings and the
             //    viewer's latest batch would serve findings that are missing, or that have no drill-down and no
             //    remediation, until the next scheduled pass. The stored latest batch stays the last whole pass.
             //    AnalysisContext.StoresFindings is both rules, read here once every stage that can leave something out
