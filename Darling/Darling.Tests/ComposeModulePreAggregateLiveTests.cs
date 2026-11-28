@@ -128,6 +128,123 @@ public sealed class ComposeModulePreAggregateLiveTests
         });
     }
 
+    /// <summary>A ranked series with no residual whose module filter gives the outer statement a WHERE of its own: the top-N membership
+    /// test is joined to it with AND. The statement text is asserted to have that shape (the module filter's WHERE on the outer query,
+    /// then the membership on the next line), and its rows equal the join-first statement's on every route and scope.</summary>
+    [Fact]
+    public async Task ARankedSeries_WithAModuleFilter_AndNoResidual_AddsTheTopNTestToTheFilter_AndReadsTheSameRows()
+    {
+        string[] panels =
+        {
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":3,\"groupBy\":[\"object_name\"],\"viz\":\"line\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"usp_Shared\"}]}",
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"database_name\",\"statement\"],\"viz\":\"line\",\"filters\":[{\"dimension\":\"database_name\",\"op\":\"neq\",\"value\":\"TieDb\"},{\"dimension\":\"object_name\",\"op\":\"like\",\"value\":\"usp_%\"}]}",
+        };
+
+        await RunLiveAsync(async store =>
+        {
+            foreach (var run in store.Runs())
+            {
+                foreach (var panel in panels)
+                {
+                    var (_, sql, _) = await AssertSameRowsAsync(store, run, panel);
+                    Assert.True(
+                        System.Text.RegularExpressions.Regex.IsMatch(sql, "\nWHERE [^\n]*m\\.object_name[^\n]*\n  AND EXISTS \\(SELECT 1 FROM topn AS t WHERE "),
+                        $"the outer statement does not add the top-N test to its module filter: [{run.Name}] {panel}\n{sql}");
+                }
+            }
+        });
+    }
+
+    /// <summary>The hash limit guard of the ad hoc fold. The store gets more module handles than a 64kB work_mem's hash limit holds by
+    /// the planner's own estimate, and the panel runs in a transaction at that work_mem. Without the runner's prelude the fold's IN is a
+    /// plain SubPlan (a scan of the keys per fact row); after it, on the same connection and transaction, the same EXPLAIN shows a
+    /// hashed SubPlan, and the runner's rows on that connection equal the join-first statement's. The runner puts the multiplier back on a
+    /// connection it shares, never lowers it, and leaves a statement without the fold alone.</summary>
+    [Fact]
+    public async Task TheAdHocFold_RunsUnderTheRunnersHashLimit_AndIsAHashedSubPlan_AtASmallWorkMem()
+    {
+        const string panel = "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":50,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
+        await RunLiveAsync(async store =>
+        {
+            await store.PlantManyModulesAsync(6000);
+            var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
+            Assert.True(parseError is null, parseError);
+            foreach (var run in new[] { "fleet 4 h, raw, map first", "fleet 24 h, hourly edges, map first" }.Select(name => store.Runs().Single(r => r.Name == name)))
+            {
+                var (folded, foldedError) = ComposeCompiler.Compile(plan!, store.Context(plan!, run));
+                Assert.True(foldedError is null, foldedError);
+                var (joinedFirst, joinedError) = ComposeCompiler.CompileCore(plan!, store.Context(plan!, run), singleScanRankedTimeSeries: true, moduleJoinPreAggregate: false);
+                Assert.True(joinedError is null, joinedError);
+                Assert.True(folded!.FoldsAdHocHandles, run.Name);
+                Assert.Contains(AdHocFold, folded.Sql, StringComparison.Ordinal);
+                Assert.False(joinedFirst!.FoldsAdHocHandles, run.Name);
+
+                var expected = await ComposePanelRunner.RunComposedQueryAsync(store.DataSource, joinedFirst, 120, store.Ct);
+                Assert.True(expected.Count > 0, run.Name);
+
+                await using var connection = await store.DataSource.OpenConnectionAsync(store.Ct);
+                await using var transaction = await connection.BeginTransactionAsync(store.Ct);
+                await ExecuteAsync(connection, "SET LOCAL work_mem = '64kB'", store.Ct);
+                var prior = await SettingAsync(connection, store.Ct);
+
+                var unguarded = await ExplainAsync(connection, folded, store.Ct);
+                Assert.True(unguarded.Contains("SubPlan", StringComparison.Ordinal) && !unguarded.Contains("hashed SubPlan", StringComparison.Ordinal),
+                    $"the plant does not pass the 64kB hash limit, so the guard is not exercised: [{run.Name}]\n{unguarded}");
+
+                var rows = await ComposePanelRunner.RunComposedQueryAsync(store.DataSource, folded, 120, store.Ct, connection);
+                Assert.True(string.Equals(expected.ToJsonString(), rows.ToJsonString(), StringComparison.Ordinal),
+                    $"rows differ: [{run.Name}]\nexpected {expected.ToJsonString()}\nactual   {rows.ToJsonString()}");
+                Assert.Equal(prior, await SettingAsync(connection, store.Ct));
+
+                Assert.Equal(prior, await ComposePanelRunner.RaiseModuleKeyHashLimitAsync(connection, folded, store.Ct));
+                var guarded = await ExplainAsync(connection, folded, store.Ct);
+                Assert.True(guarded.Contains("hashed SubPlan", StringComparison.Ordinal), $"the guarded fold is not a hashed SubPlan: [{run.Name}]\n{guarded}");
+                Assert.Equal("1000", await SettingAsync(connection, store.Ct));
+
+                /* a statement without the fold changes nothing, and a work_mem that already gives the limit keeps the multiplier */
+                await ExecuteAsync(connection, "SET LOCAL hash_mem_multiplier = 2", store.Ct);
+                Assert.Null(await ComposePanelRunner.RaiseModuleKeyHashLimitAsync(connection, joinedFirst, store.Ct));
+                Assert.Equal("2", await SettingAsync(connection, store.Ct));
+                await ExecuteAsync(connection, "SET LOCAL work_mem = '1GB'", store.Ct);
+                Assert.Equal("2", await ComposePanelRunner.RaiseModuleKeyHashLimitAsync(connection, folded, store.Ct));
+                Assert.Equal("2", await SettingAsync(connection, store.Ct));
+                await ExecuteAsync(connection, "SET LOCAL work_mem = '4MB'", store.Ct);
+                Assert.Equal("2", await ComposePanelRunner.RaiseModuleKeyHashLimitAsync(connection, folded, store.Ct));
+                Assert.Equal("16", await SettingAsync(connection, store.Ct));
+            }
+        });
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<string> SettingAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT current_setting('hash_mem_multiplier')", connection);
+        return (string)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<string> ExplainAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("EXPLAIN (VERBOSE) " + compiled.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter.Clone());
+        }
+
+        var lines = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            lines.Add(reader.GetString(0));
+        }
+
+        return string.Join("\n", lines);
+    }
+
     [Fact]
     public async Task TheFleetPanel_ByDatabaseAndObject_CompilesThePreAggregatedShape_AndReadsThePlantedValues()
     {
@@ -498,6 +615,47 @@ public sealed class ComposeModulePreAggregateLiveTests
             }
 
             (_rollups, _coverage) = await ComposeStoreAvailability.GetRollupsAsync(DataSource, Ct);
+        }
+
+        /// <summary>Plants <paramref name="count"/> module handles on server A, newer than the map's watermark (so m reads them from its
+        /// overlay), each with a fact row, plus as many ad hoc fact rows, and refreshes the planner's statistics so its estimate of m
+        /// counts them.</summary>
+        public async Task PlantManyModulesAsync(int count)
+        {
+            var at = DateTime.SpecifyKind(H2.AddMinutes(25), DateTimeKind.Unspecified);
+            var firstId = Interlocked.Add(ref s_collectionId, 3L * count) - (3L * count);
+            await using (var procs = new NpgsqlCommand(@"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+SELECT $1 + g, $2, $3, $4, 'BulkDb', 'dbo', 'usp_Bulk' || g, '0xB' || g, 1, 1, 1, 300
+FROM generate_series(1, $5) AS g", Connection))
+            {
+                procs.Parameters.AddWithValue(firstId);
+                procs.Parameters.AddWithValue(at);
+                procs.Parameters.AddWithValue(s_serverIds[ServerA]);
+                procs.Parameters.AddWithValue(ServerA);
+                procs.Parameters.AddWithValue(count);
+                await procs.ExecuteNonQueryAsync(Ct);
+            }
+
+            await using (var facts = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+SELECT $1 + $5 + g, $2, $3, $4, 'BulkDb', 'HB' || (g % 40), CASE WHEN g <= $5 THEN '0xB' || g ELSE '0xBAd' || g END, 10 + g, (3 * g) + 1, 1, 300
+FROM generate_series(1, 2 * $5) AS g", Connection))
+            {
+                facts.Parameters.AddWithValue(firstId);
+                facts.Parameters.AddWithValue(at);
+                facts.Parameters.AddWithValue(s_serverIds[ServerA]);
+                facts.Parameters.AddWithValue(ServerA);
+                facts.Parameters.AddWithValue(count);
+                await facts.ExecuteNonQueryAsync(Ct);
+            }
+
+            await using var analyze = new NpgsqlCommand("ANALYZE collect.procedure_stats; ANALYZE collect.query_stats; ANALYZE collect.module_map", Connection);
+            await analyze.ExecuteNonQueryAsync(Ct);
         }
 
         private async Task QsAsync(string server, string database, string hash, string? handle, DateTime at, long? worker, int? interval)

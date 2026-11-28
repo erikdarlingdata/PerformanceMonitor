@@ -92,7 +92,13 @@ public sealed record ComposeRunContext(
 /// compiler actually took (<see cref="ComposeRoute.Raw"/> for annotation queries, whose event tables have no
 /// rollups) — the runner reads the route to tell the user when a raw/hourly fallback cannot retain the whole
 /// requested window on a retention-active store (#1665).</summary>
-public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route);
+public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route)
+{
+    /// <summary>#9960: the statement folds the ad hoc handles of its module pre-aggregate, an uncorrelated IN over m's keys that
+    /// PostgreSQL hashes only when it estimates the key set fits <c>work_mem</c> times <c>hash_mem_multiplier</c>. The panel runner
+    /// raises that limit for this statement alone (<c>ComposePanelRunner.RaiseModuleKeyHashLimitAsync</c>).</summary>
+    public bool FoldsAdHocHandles { get; init; }
+}
 
 /// <summary>
 /// Compiles a validated <see cref="PanelPlan"/> into a parameterized Postgres query. IRON RULES, all
@@ -819,6 +825,7 @@ public static class ComposeCompiler
            column runs inside the pre-aggregate and needs no column outside. */
         var moduleKeyColumns = new List<string> { "server_name", "sql_handle" };
         var handleReadOutsideJoin = false;
+        var adHocFold = false;
         if (modulePartials is not null)
         {
             void Keep(string? column)
@@ -944,11 +951,13 @@ public static class ComposeCompiler
                    per module handle plus one per (server, other kept columns).
 
                    The membership test is an uncorrelated IN over m's keys, which the planner runs as a hashed SubPlan (one hash
-                   probe per fact row) when it estimates the key set fits its hash memory (work_mem times hash_mem_multiplier),
-                   and as a per-row scan of the materialized keys when it does not. m holds one row per (server_name, module
-                   handle) with a procedure_stats row in the window: it grows with servers times stored modules, never with ad
-                   hoc traffic, and its two text keys are small beside that limit on a field-size fleet. No statement shape makes
-                   the planner hash; only its size estimate decides. m is read twice (here and by the join), so the planner
+                   probe per fact row) only when it estimates the key set fits its hash limit (work_mem times hash_mem_multiplier),
+                   and otherwise as a per-row scan of the materialized keys for every fact row. No statement shape makes the planner
+                   hash; only that size test decides. m holds one row per (server_name, module handle) with a procedure_stats row in
+                   the window: it grows with servers times stored modules, never with ad hoc traffic, and on a field-size fleet the
+                   key set can pass the limit of a small work_mem. The compiled statement says it carries the fold
+                   (ComposeCompiled.FoldsAdHocHandles), and the panel runner raises hash_mem_multiplier for that statement alone so
+                   the limit is at least 64 MB, never lowering it. m is read twice (here and by the join), so the planner
                    materializes it and computes it once.
 
                    A statement that reads the fact's handle outside the join (a group, a filter or a fallback column on
@@ -956,6 +965,7 @@ public static class ComposeCompiler
                 var folded = $"CASE WHEN ({FactAlias}.server_name, {FactAlias}.sql_handle) IN (SELECT {ModuleKeyAlias}.server_name, {ModuleKeyAlias}.sql_handle FROM {ModuleAlias} AS {ModuleKeyAlias}) THEN {FactAlias}.sql_handle END";
                 keys[1] = folded;
                 selects[1] = folded + " AS sql_handle";
+                adHocFold = true;
             }
 
             if (bucketed)
@@ -1223,7 +1233,7 @@ public static class ComposeCompiler
                 break;
         }
 
-        return (new ComposeCompiled(sql.ToString(), p.Parameters, route), null);
+        return (new ComposeCompiled(sql.ToString(), p.Parameters, route) { FoldsAdHocHandles = adHocFold }, null);
     }
 
     /// <summary>
@@ -2350,7 +2360,8 @@ public static class ComposeCompiler
         if (aggregate == ComposeAggregate.Count)
         {
             /* Before the module join a statement with no group (Scalar) can combine zero pre-aggregated rows, where COUNT(*)
-               over the fact rows is 0 and a SUM is NULL, so the sum falls back to 0. A grouped row always has a partial. */
+               over the fact rows is 0 and a SUM is NULL, so the sum falls back to 0. A grouped row always has a partial.
+               No module-join source has a count measure today; the arm serves a future one. */
             var counted = $"SUM({P(partials.Add(PartialKind.CountStar, null))})";
             return beforeModuleJoin ? $"CAST(COALESCE({counted}, 0) AS double precision)" : $"CAST({counted} AS double precision)";
         }
