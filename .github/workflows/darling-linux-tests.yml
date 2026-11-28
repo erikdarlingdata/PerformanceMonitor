@@ -141,6 +141,8 @@ jobs:
           set -uo pipefail
           # One -class "*.<Name>" pair per name. A name outside [A-Za-z0-9_] fails the step before the test host starts.
           filter=()
+          # No globbing: an input of * would otherwise expand to directory names, which pass the name check below.
+          set -f
           for name in ${TEST_CLASSES}; do
             if [[ ! "${name}" =~ ^[A-Za-z0-9_]+$ ]]; then
               echo "::error::The classes input holds '${name}', which is not a test class name. Use space-separated names of letters, digits and underscores."
@@ -148,6 +150,7 @@ jobs:
             fi
             filter+=(-class "*.${name}")
           done
+          set +f
           heading='### Darling suite on Linux (report-only, #9686)'
           if [ "${#filter[@]}" -gt 0 ]; then
             heading="### Darling suite on Linux, only the classes: ${TEST_CLASSES} (report-only, #9686)"
