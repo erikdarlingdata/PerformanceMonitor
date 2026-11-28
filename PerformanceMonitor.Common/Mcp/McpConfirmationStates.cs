@@ -108,6 +108,14 @@ public sealed class McpConfirmationStates
         lock (_gate)
         {
             var oldest = _clock.GetUtcNow().ToUnixTimeMilliseconds() - (long)MaxAge.TotalMilliseconds;
+
+            // The clock moved past the state's age between Check and here: the prune below would drop its spent nonce and
+            // the add would then succeed a second time, so a state that old is refused before either step.
+            if (ticket.IssuedAtMs <= oldest)
+            {
+                return false;
+            }
+
             foreach (var expired in _spent.Where(kv => kv.Value <= oldest).Select(kv => kv.Key).ToList())
             {
                 _spent.Remove(expired);

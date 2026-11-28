@@ -121,7 +121,8 @@ internal static class DarlingMcpWriteConfirmation
             : Task.FromResult<Question?>(Describers[request.Params.Name](arguments) is { } text ? new Question(text) : null),
         IsAgentCall,
         (request, name, _, _) => name == "purge_now" && !frontDoor ? SeatPurgeConfirm(request) : Task.CompletedTask,
-        frontDoor ? null : (tool, state) => tool == "purge_now" && McpConfirmTokens.Shared.IsIssued(state, DarlingMcpIncidentActionTools.PurgeScope),
+        frontDoor ? null : (tool, state) => tool == "purge_now" && McpConfirmTokens.Shared.IsAsked(state, DarlingMcpIncidentActionTools.PurgeScope),
+        frontDoor ? null : (_, state) => McpConfirmTokens.Shared.Revoke(state),
         states);
 
     /// <summary>An agent has no user to ask: the investigations arm's token (a gated seat), and any call that carries an <c>agent_action</c>.</summary>
@@ -160,7 +161,7 @@ internal static class DarlingMcpWriteConfirmation
             .Select(g => $"{(int)g!["retention_days"]!} days for {(int)g["collector_count"]!} collectors")
             .ToList();
         /* The confirm value for the plan this question shows is the question's state: the client echoes it, and a yes redeems it. */
-        var confirm = McpConfirmTokens.Shared.Issue("purge", DarlingMcpIncidentActionTools.PurgeScope, preview.Plan);
+        var confirm = McpConfirmTokens.Shared.Issue("purge", DarlingMcpIncidentActionTools.PurgeScope, preview.Plan, asked: true);
         return new Question(
             "Purge the whole store's collected history now? It deletes rows older than the retention that applies to each collector ("
                 + string.Join(", ", groups) + "), for every server, and the deleted rows cannot be brought back.",

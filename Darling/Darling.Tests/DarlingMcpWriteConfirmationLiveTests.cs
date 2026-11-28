@@ -287,4 +287,48 @@ public sealed class DarlingMcpWriteConfirmationLiveTests
             Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
         });
     }
+
+    /// <summary>A no spends the question's confirm value: the same state sent again with a yes inside its five minutes is asked again, and
+    /// a decline, a cancel and a cleared box all do the same.</summary>
+    [Fact]
+    public async Task APurgeNo_SpendsItsState_SoAYesOnTheSameStateIsAskedAgain_AndQueuesNothing()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            const string args = "{\"retention_days\":30}";
+            foreach (var no in new[] { "{\"action\":\"decline\"}", "{\"action\":\"cancel\"}", "{\"action\":\"accept\",\"content\":{\"confirm\":false}}" })
+            {
+                var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "purge_now", args);
+                var declined = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: no, requestState: state);
+                Assert.Equal("declined", StatusOf(declined));
+
+                var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes, requestState: state);
+                Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(yes));
+                Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
+            }
+        });
+    }
+
+    /// <summary>The confirm value a by-hand preview shows the model is not a question's state: sent as one with a yes, it is asked again and
+    /// queues nothing, and it still works the by-hand way (as <c>confirm</c>) afterwards.</summary>
+    [Fact]
+    public async Task AByHandPreviewsConfirmValue_IsNotAStateOfAQuestion_ButStillConfirmsByHand()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            const string args = "{\"retention_days\":30}";
+            var preview = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: false);
+            using var shown = JsonDocument.Parse(AnswerOf(preview));
+            var confirmValue = shown.RootElement.GetProperty("confirm_value").GetString()!;
+
+            var asState = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes, requestState: confirmValue);
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(asState));
+            Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
+
+            var byHand = await DarlingMcpWriteConfirmationTests.CallAsync(
+                server, "purge_now", $"{{\"retention_days\":30,\"confirm\":\"{confirmValue}\"}}", negotiate: false);
+            Assert.True(StatusOf(byHand) == "queued", AnswerOf(byHand));
+            Assert.Equal(1, await ScalarAsync(owner, PurgeQueued, ct));
+        });
+    }
 }

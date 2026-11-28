@@ -62,6 +62,8 @@ public static class McpWriteConfirmation
     /// <param name="onYes">Runs after a yes and before the tool, or null for nothing.</param>
     /// <param name="hostState">Whether a state is one the host issued for the tool itself (a <see cref="Question"/> that carried its own
     /// state). The host's own flow then spends it. Null when the host issues none.</param>
+    /// <param name="hostDeclined">Called with the tool and the state when the answer to a host-issued state is no, so the host spends it
+    /// (a yes is spent by the host's own flow when the tool runs). Null when the host issues no state.</param>
     /// <param name="states">The states this class issues, or null for the process-wide <see cref="McpConfirmationStates.Shared"/>.</param>
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Create(
         IReadOnlyCollection<string> toolNames,
@@ -69,6 +71,7 @@ public static class McpWriteConfirmation
         Func<RequestContext<CallToolRequestParams>, bool> isAgentCall,
         Func<RequestContext<CallToolRequestParams>, string, IDictionary<string, JsonElement>, CancellationToken, Task>? onYes = null,
         Func<string, string, bool>? hostState = null,
+        Action<string, string>? hostDeclined = null,
         McpConfirmationStates? states = null) =>
         next => async (request, cancellationToken) =>
         {
@@ -92,6 +95,11 @@ public static class McpWriteConfirmation
                 {
                     if (!IsYes(response))
                     {
+                        if (hostIssued)
+                        {
+                            hostDeclined?.Invoke(name, state);
+                        }
+
                         return Declined(name);
                     }
 

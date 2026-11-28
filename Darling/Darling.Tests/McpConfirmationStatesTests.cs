@@ -131,4 +131,22 @@ public sealed class McpConfirmationStatesTests
         Assert.True(states.TrySpend(states.Check("delete_rule", arguments, first)!.Value));
         Assert.True(states.TrySpend(states.Check("delete_rule", arguments, second)!.Value));
     }
+
+    /// <summary>The check and the spend each read the clock. A state just under the age limit at the check and over it at the spend must
+    /// not get a second spend: the spend's own prune would drop the spent nonce and the add would then succeed again.</summary>
+    [Fact]
+    public void AStateThatTurnsTenMinutesOldBetweenTheCheckAndTheSpend_IsNotSpentAgain()
+    {
+        var clock = new ManualTimeProvider();
+        var states = new McpConfirmationStates(clock);
+        var arguments = Args("{\"a\":1}");
+        var state = states.Issue("delete_rule", arguments);
+
+        clock.Advance(McpConfirmationStates.MaxAge - TimeSpan.FromMilliseconds(1));
+        Assert.True(states.TrySpend(states.Check("delete_rule", arguments, state)!.Value));
+
+        var replay = states.Check("delete_rule", arguments, state)!.Value;
+        clock.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.False(states.TrySpend(replay));
+    }
 }
