@@ -85,20 +85,24 @@ public sealed class QueryHeatmapNewestBinsLiveTests
     /// <paramref name="hashes"/> queries in every <paramref name="stepMinutes"/> step of [from, to), one sample a step, one minute into the step. Query k runs 1 + k
     /// times (the most-executed query of a cell is the highest k in it, with no ties) at 2 * 10^(k mod 4) ms an execution, so the queries land in four magnitude
     /// buckets and a step holds four cells.
+    /// <para>The rows go in ordered by time, the order a collector writes them in, so a chunk's pages hold them in time order and the newest bins sit on its last
+    /// few pages (#9965). Without the ORDER BY the planner chooses which series is the outer loop, and with the query series outside each query's rows fill their own
+    /// pages: every row of the newest bins is then on a different page from the row before it, and an index scan counts a page for each row.</para>
     /// </summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime from, DateTime to, int stepMinutes, int hashes, string database, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text,
                   delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
-              SELECT $5::bigint + row_number() OVER (), x.t + INTERVAL '1 minute', $3, $4, $9,
+              SELECT $5::bigint + row_number() OVER (ORDER BY x.t, k), x.t + INTERVAL '1 minute', $3, $4, $9,
                      '0xHM' || lpad(k::text, 3, '0'), '0xSH' || lpad(k::text, 3, '0'), 'SELECT ' || k,
                      1 + k,
                      (1 + k) * (2 * pow(10, k % 4)::bigint * 1000),
                      (1 + k) * (2 * pow(10, k % 4)::bigint * 1000),
                      100, 1000, 300
               FROM generate_series($1::timestamp, $2::timestamp - ($6::int * INTERVAL '1 minute'), $6::int * INTERVAL '1 minute') AS x(t)
-              CROSS JOIN generate_series(0, $7::int - 1) AS k", connection);
+              CROSS JOIN generate_series(0, $7::int - 1) AS k
+              ORDER BY x.t, k", connection);
         command.CommandTimeout = 300;
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(to, DateTimeKind.Unspecified));
