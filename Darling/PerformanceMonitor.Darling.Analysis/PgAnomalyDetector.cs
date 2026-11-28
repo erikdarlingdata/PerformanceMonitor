@@ -88,12 +88,16 @@ public class PgAnomalyDetector : IAnomalyDetector
 
     internal ILogger? Logger => _flowLogger.Value ?? _passLogger;
 
+    /// <summary>The provider this detector reads its baselines from.</summary>
+    internal PgBaselineProvider Baselines => _baselineProvider;
+
     /// <summary>
     /// The most detectors one pass runs at once (#9879). A detector holds one pooled connection at a time: it reads its
     /// baseline's bucket map before it opens its own connection, and the baseline it looks up afterwards is the entry
     /// that read cached. The I/O detector is the one exception: it asks for the write-latency bucket map while its own
     /// connection is open, and on a cache miss that compute opens a second one. So the detectors of one pass hold at
-    /// most this many connections and one more.
+    /// most this many connections and one more. On a pass with a detector deadline a baseline compute holds its
+    /// connection until it ends, which can be after the pass (<see cref="KeptBaselineComputes"/> limits how many).
     /// </summary>
     internal const int MaxDetectorParallelism = 4;
 
@@ -231,9 +235,12 @@ public class PgAnomalyDetector : IAnomalyDetector
     /// <para>When the context carries a <see cref="AnalysisContext.DetectorDeadline"/> (an on-demand pass), each detector
     /// reads through a token that also ends at the deadline. One that has not finished when it fires is stopped, adds no
     /// fact and no failure line, and is named in <see cref="AnalysisContext.DetectorsLeftOutForTime"/>, in detector
-    /// order. One not yet started by then is not started and is named the same way. A baseline the detector was waiting
-    /// for goes on computing on the provider's own token, so the next pass finds it. With no deadline (the scheduled
-    /// pass) every detector runs to its end on the pass's token.</para>
+    /// order. One not yet started by then is not started and is named the same way. A baseline compute the detector was
+    /// waiting for goes on, on the provider's own token (<see cref="PgBaselineProvider.GetOrComputeKeptAsync"/>), and is
+    /// stored when it finishes, so the next pass finds it. At most <see cref="KeptBaselineComputes.MaxInFlight"/> such
+    /// computes run at once over the store: one past that runs on the detector's token, stops with it and stores nothing.
+    /// With no deadline (the scheduled pass) every detector runs to its end on the pass's token, and that token cancels
+    /// its baseline computes.</para>
     /// </summary>
     internal async Task RunDetectorsAsync(
         AnalysisContext context,
@@ -244,6 +251,10 @@ public class PgAnomalyDetector : IAnomalyDetector
     {
         var deadline = context.DetectorDeadline;
         var leftOut = new bool[detectors.Count];
+
+        /* Under a deadline the baseline computes this flow's detectors start belong to the provider, not to the detector
+           the deadline stops. */
+        _baselineProvider.KeepComputesForThisFlow(deadline.CanBeCanceled);
 
         if (parallelism <= 1 || detectors.Count < 2)
         {
