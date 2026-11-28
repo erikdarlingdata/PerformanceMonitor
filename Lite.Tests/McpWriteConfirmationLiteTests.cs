@@ -35,6 +35,7 @@ namespace PerformanceMonitorLite.Tests;
 /// the call comes back with an answer. Yes runs the tool. No, a dismissed question and a cleared box answer <c>declined</c> and change
 /// nothing. Every other client runs as before.
 /// </summary>
+[InMemoryCredentials]
 public sealed class McpWriteConfirmationLiteTests : IDisposable
 {
     private const string Token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
