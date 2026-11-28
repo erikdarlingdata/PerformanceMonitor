@@ -131,6 +131,9 @@ public static class ComposeCompiler
 
     private const char ModuleAlias = 'm';
 
+    /// <summary>The alias of the module CTE where the pre-aggregate reads only its keys (#9960, the ad hoc fold).</summary>
+    private const string ModuleKeyAlias = "mk";
+
     /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
     private const string QueryStoreTable = "query_store_stats";
     private const string DefaultTraceTable = "default_trace_events";
@@ -787,7 +790,8 @@ public static class ComposeCompiler
         /* #9960: the module pre-aggregate, on every raw route that joins modules (raw and hourly-raw-edges, with either module CTE).
            m holds each (server_name, sql_handle) once, so every fact row of one pair joins the same module row (or none). The fact
            rows are therefore aggregated first, to one row per (server_name, sql_handle, the other fact columns the statement names,
-           and the bucket of a series), holding the partials of the panel's aggregate; the join runs over those rows and the outer
+           and the bucket of a series), holding the partials of the panel's aggregate (a handle with no row in m folds into one
+           NULL-handle row per remaining key, see AppendPreAggregatedFactBody); the join runs over those rows and the outer
            aggregate combines the partials (TryBuildPartialValueExpr). On a field-size fleet the fact rows outnumber the module rows
            by far, and joining them row by row sorts every fact row by the join key. An aggregate that does not decompose
            (percentile_cont, the weighted and gauge ratios) compiles the join over the fact rows. The overlay shares the fact rows,
@@ -814,10 +818,12 @@ public static class ComposeCompiler
            (a module dimension's fallback column, when it has one), and the fallback column of a module filter. A filter on a fact
            column runs inside the pre-aggregate and needs no column outside. */
         var moduleKeyColumns = new List<string> { "server_name", "sql_handle" };
+        var handleReadOutsideJoin = false;
         if (modulePartials is not null)
         {
             void Keep(string? column)
             {
+                handleReadOutsideJoin |= string.Equals(column, "sql_handle", StringComparison.Ordinal);
                 if (column is not null && !moduleKeyColumns.Contains(column, StringComparer.Ordinal))
                 {
                     moduleKeyColumns.Add(column);
@@ -928,6 +934,30 @@ public static class ComposeCompiler
             var inner = indent + "    ";
             var keys = moduleKeyColumns.Select(column => FactAlias + "." + column).ToList();
             var selects = new List<string>(keys);
+            if (!handleReadOutsideJoin)
+            {
+                /* The ad hoc fold. A handle with no row in m joins nothing, so its rows need no group of their own: the handle key
+                   is the fact's handle only when m holds its (server_name, sql_handle), and NULL otherwise. The join then matches
+                   the kept handles exactly as before, and a NULL handle matches no m row, as an unmatched handle does, so every
+                   folded row reads the same '(ad hoc)' name and the same fallback columns (each is a kept column of its own). On a
+                   field-size fleet nearly every handle is ad hoc, so the pre-aggregated rows drop from one per handle to about one
+                   per module handle plus one per (server, other kept columns).
+
+                   The membership test is an uncorrelated IN over m's keys, which the planner runs as a hashed SubPlan (one hash
+                   probe per fact row) when it estimates the key set fits its hash memory (work_mem times hash_mem_multiplier),
+                   and as a per-row scan of the materialized keys when it does not. m holds one row per (server_name, module
+                   handle) with a procedure_stats row in the window: it grows with servers times stored modules, never with ad
+                   hoc traffic, and its two text keys are small beside that limit on a field-size fleet. No statement shape makes
+                   the planner hash; only its size estimate decides. m is read twice (here and by the join), so the planner
+                   materializes it and computes it once.
+
+                   A statement that reads the fact's handle outside the join (a group, a filter or a fallback column on
+                   sql_handle) keeps the raw handle; no catalog dimension does. */
+                var folded = $"CASE WHEN ({FactAlias}.server_name, {FactAlias}.sql_handle) IN (SELECT {ModuleKeyAlias}.server_name, {ModuleKeyAlias}.sql_handle FROM {ModuleAlias} AS {ModuleKeyAlias}) THEN {FactAlias}.sql_handle END";
+                keys[1] = folded;
+                selects[1] = folded + " AS sql_handle";
+            }
+
             if (bucketed)
             {
                 keys.Add(BucketOfFact());

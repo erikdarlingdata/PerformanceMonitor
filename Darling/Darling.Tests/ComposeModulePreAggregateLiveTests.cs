@@ -44,7 +44,10 @@ public sealed class ComposeModulePreAggregateLiveTests
     };
 
     /// <summary>The marker of the pre-aggregated statement: the inner GROUP BY on the join key.</summary>
-    private const string PreAggregated = "GROUP BY f.server_name, f.sql_handle";
+    private const string PreAggregated = "GROUP BY f.server_name, " + AdHocFold;
+
+    /// <summary>The pre-aggregate's handle key: the fact's handle when m holds its (server_name, sql_handle), NULL otherwise.</summary>
+    private const string AdHocFold = "CASE WHEN (f.server_name, f.sql_handle) IN (SELECT mk.server_name, mk.sql_handle FROM m AS mk) THEN f.sql_handle END";
     private const string Hybrid = "query_stats_interval_hourly AS mid";
     private const string MapFirst = "module_map AS mm";
 
@@ -142,7 +145,8 @@ public sealed class ComposeModulePreAggregateLiveTests
                 Assert.Equal(run == day, sql.Contains(Hybrid, StringComparison.Ordinal));
                 /* the fact rows are grouped to the join key and the kept group column, the join reads those rows, and the value
                    combines the partial */
-                Assert.Contains("GROUP BY f.server_name, f.sql_handle, f.database_name\n) AS f\nLEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\nGROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')", sql, StringComparison.Ordinal);
+                Assert.Contains("GROUP BY f.server_name, " + AdHocFold + ", f.database_name\n) AS f\nLEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\nGROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')", sql, StringComparison.Ordinal);
+                Assert.Contains("SELECT f.server_name, " + AdHocFold + " AS sql_handle, f.database_name, ", sql, StringComparison.Ordinal);
                 Assert.Contains("SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS p0", sql, StringComparison.Ordinal);
                 Assert.Contains("(CAST(SUM(f.p0) AS double precision)) * 1.0 / 1000.0 AS value", sql, StringComparison.Ordinal);
 
@@ -158,15 +162,21 @@ public sealed class ComposeModulePreAggregateLiveTests
                 output?.WriteLine($"-- 9960-sql-end [{run.Name}]");
 
                 /* reference values computed from the plant, in the panel's unit (ms), so two statements that were both wrong
-                   cannot agree: the shared handle reads each server's own module name, a handle with no module row and a NULL
-                   handle read '(ad hoc)', and a group with only restart rows is NULL and sorts last */
+                   cannot agree: the shared handle reads each server's own module name, every handle with no module row (several
+                   in one server and database, the shared handle on the servers that have no module for it, an empty and a NULL
+                   handle) reads '(ad hoc)', and a group with only restart rows is NULL and sorts last */
                 Assert.Equal(store.ExpectedWorkerUs(run, "DbOne", "usp_Shared") / 1000.0, ValueOf(rows, "DbOne", "usp_Shared"));
                 Assert.Equal(store.ExpectedWorkerUs(run, "DbOne", "usp_SharedOnB") / 1000.0, ValueOf(rows, "DbOne", "usp_SharedOnB"));
                 Assert.Equal(store.ExpectedWorkerUs(run, "DbOne", "usp_Pay") / 1000.0, ValueOf(rows, "DbOne", "usp_Pay"));
                 Assert.Equal(store.ExpectedWorkerUs(run, "DbOne", "(ad hoc)") / 1000.0, ValueOf(rows, "DbOne", "(ad hoc)"));
                 Assert.Equal(store.ExpectedWorkerUs(run, "DbTwo", "usp_New") / 1000.0, ValueOf(rows, "DbTwo", "usp_New"));
+                var restartModule = (JsonObject)rows[rows.Count - 2]!;
+                Assert.Equal("usp_RestartOnly", restartModule["object_name"]!.GetValue<string>());
+                Assert.Null(restartModule["value"]);
+                /* an ad hoc handle whose every row is a restart row: its folded group exists, with no value */
                 var last = (JsonObject)rows[rows.Count - 1]!;
-                Assert.Equal("usp_RestartOnly", last["object_name"]!.GetValue<string>());
+                Assert.Equal("RestartDb", last["database_name"]!.GetValue<string>());
+                Assert.Equal("(ad hoc)", last["object_name"]!.GetValue<string>());
                 Assert.Null(last["value"]);
                 /* the two tied groups keep the tie-break's order */
                 var names = rows.OfType<JsonObject>().Select(r => r["object_name"]!.GetValue<string>()).ToList();
@@ -457,6 +467,14 @@ public sealed class ComposeModulePreAggregateLiveTests
                 await QsAsync(ServerA, "DbOne", "HS", "0xS", at.AddSeconds(50), 999_999, 0);
                 await QsAsync(Ghost, "GhostDb", "HG", "0xG", at, 800 + n, 300);
                 await QsAsync(ServerC, "DbTwo", "HR", "0xR", at, 0, 0);
+
+                /* the ad hoc fold: three more ad hoc handles in one (server, database), two of them under one query_hash, an
+                   empty handle, and an ad hoc handle whose every row is a restart row, alone in its database */
+                await QsAsync(ServerA, "DbOne", "HAd1", "0xAd1", at, 210 + n, 300);
+                await QsAsync(ServerA, "DbOne", "HAd2", "0xAd2", at, 310 + (2 * n), 300);
+                await QsAsync(ServerA, "DbOne", "HAd2", "0xAd3", at.AddSeconds(5), 410 + (3 * n), 60);
+                await QsAsync(ServerB, "DbOne", "HEmpty", string.Empty, at, 55 + n, 300);
+                await QsAsync(ServerB, "RestartDb", "HRA", "0xRA", at, 777, 0);
             }
 
             /* two modules with the same total, in the 4 h window */
