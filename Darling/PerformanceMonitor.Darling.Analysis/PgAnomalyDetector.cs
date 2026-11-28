@@ -89,9 +89,11 @@ public class PgAnomalyDetector : IAnomalyDetector
     internal ILogger? Logger => _flowLogger.Value ?? _passLogger;
 
     /// <summary>
-    /// The most detectors one pass runs at once (#9879). A detector holds its own pooled connection, and the I/O
-    /// detector also waits on a baseline compute that holds a second one, so the detectors of one pass hold at most
-    /// twice this many connections.
+    /// The most detectors one pass runs at once (#9879). A detector holds one pooled connection at a time: it reads its
+    /// baseline's bucket map before it opens its own connection, and the baseline it looks up afterwards is the entry
+    /// that read cached. The I/O detector is the one exception: it asks for the write-latency bucket map while its own
+    /// connection is open, and on a cache miss that compute opens a second one. So the detectors of one pass hold at
+    /// most this many connections and one more.
     /// </summary>
     internal const int MaxDetectorParallelism = 4;
 
@@ -187,27 +189,51 @@ public class PgAnomalyDetector : IAnomalyDetector
             DetectObjectStatsAnomalies
         ];
 
-        await RunDetectorsAsync(context, anomalies, detectors, Math.Clamp(context.DetectorParallelism, 1, MaxDetectorParallelism));
+        await RunDetectorsAsync(context, anomalies, detectors);
         return anomalies;
     }
+
+    /// <summary>
+    /// Runs the detectors of one pass (#9879): at the pass's <see cref="AnalysisContext.DetectorParallelism"/>, capped at
+    /// <see cref="MaxDetectorParallelism"/>, and on the families' gate for as long as a collector runs this read beside
+    /// its family reads (<see cref="AnomalyReadBesideFamilies.FamilyGate"/>).
+    /// </summary>
+    internal Task RunDetectorsAsync(
+        AnalysisContext context, List<Fact> anomalies, IReadOnlyList<Func<AnalysisContext, List<Fact>, Task>> detectors) =>
+        RunDetectorsAsync(
+            context, anomalies, detectors, Math.Clamp(context.DetectorParallelism, 1, MaxDetectorParallelism),
+            context.AnomalyReadBesideFamilies?.FamilyGate);
 
     /// <summary>
     /// Runs the detectors and appends their facts to <paramref name="anomalies"/> in the order the detectors are listed,
     /// whatever order they finish in (#9879). The detectors do not read each other's facts and each opens its own
     /// connection, so on a long window the wait for nine of them one after another is the sum of their store reads.
     ///
-    /// <para>With <paramref name="parallelism"/> at 1 each detector runs against the shared list in turn. Above 1, at
-    /// most that many run at once, each with a list and a held log of its own, and both are merged in detector order
+    /// <para>With <paramref name="parallelism"/> at 1 each detector runs against the shared list in turn. Above 1, that
+    /// many workers each take the next detector in the list until none is left, so at most that many run at once, each
+    /// with a list and a held log of its own, and both are merged in detector order
     /// once every detector has settled: a failing detector's line is written where it is when the detectors run in
     /// turn, and the others still add their facts. If a detector throws (only a stop from the pass's own token gets out
     /// of one), the pass waits for the detectors already running, starts none it has not started, keeps what the
     /// detectors before the failing one produced, and rethrows the failure of the earliest detector in the list.</para>
+    ///
+    /// <para>With a <paramref name="familyGate"/> the caller is the anomaly read a collector runs beside its family
+    /// reads, and it holds one slot of that gate. The first worker runs on that slot, so the first detector starts
+    /// without waiting. Every other worker first waits for a slot of the same gate, behind the family reads already
+    /// waiting for one, and keeps it until no detector is left. So the family reads and the detectors together never
+    /// hold more than the gate's slots, and a second detector runs beside the first only once a family read has given
+    /// up its slot. A worker waits only for a slot the family reads or another worker release, and neither of those
+    /// waits on a worker, so nothing waits in a circle. A worker still waiting when the last detector is taken stops
+    /// waiting, so the anomaly read ends when its detectors have and gives its own slot back to the families. Without a
+    /// gate (the detectors after collection, when the family reads are finished) no worker waits for a slot, and the
+    /// number of workers is the detectors' own limit.</para>
     /// </summary>
     internal async Task RunDetectorsAsync(
         AnalysisContext context,
         List<Fact> anomalies,
         IReadOnlyList<Func<AnalysisContext, List<Fact>, Task>> detectors,
-        int parallelism)
+        int parallelism,
+        SemaphoreSlim? familyGate = null)
     {
         if (parallelism <= 1 || detectors.Count < 2)
         {
@@ -218,17 +244,22 @@ public class PgAnomalyDetector : IAnomalyDetector
 
         var lists = new List<Fact>?[detectors.Count];
         var logs = new HeldLog?[detectors.Count];
-        var tasks = new Task[detectors.Count];
+        var runs = new Task?[detectors.Count];
+        var workers = new Task[Math.Min(parallelism, detectors.Count)];
         var stopStarting = 0;
-        using var gate = new SemaphoreSlim(parallelism);
+        var taken = 0;
+        using var noneLeft = new CancellationTokenSource();
 
-        for (var i = 0; i < detectors.Count; i++)
-            tasks[i] = RunOne(i);
+        /* The first worker runs on the slot the caller holds. Beside the families every other worker takes a slot from
+           their gate first. With no gate no worker waits for one. */
+        for (var w = 0; w < workers.Length; w++)
+            workers[w] = Work(takesFamilySlot: familyGate is not null && w > 0);
 
-        /* Waits for every detector to settle, failed or not. (A continuation, not a catch: this is not a read.) */
-        await Task.WhenAll(tasks).ContinueWith(static _ => { }, TaskScheduler.Default);
+        /* Waits for every worker, and so every detector it started, to settle, failed or not. (A continuation, not a
+           catch: this is not a read.) */
+        await Task.WhenAll(workers).ContinueWith(static _ => { }, TaskScheduler.Default);
 
-        var firstFailed = Array.FindIndex(tasks, t => t.IsFaulted || t.IsCanceled);
+        var firstFailed = Array.FindIndex(runs, r => r is { IsCompletedSuccessfully: false });
         var merged = firstFailed < 0 ? detectors.Count : firstFailed + 1;
         for (var i = 0; i < merged; i++)
         {
@@ -239,32 +270,63 @@ public class PgAnomalyDetector : IAnomalyDetector
         }
 
         if (firstFailed >= 0)
-            await tasks[firstFailed];
+            await runs[firstFailed]!;
 
-        async Task RunOne(int index)
+        /* One worker: the detectors it takes run one after another, on the slot it holds for all of them. */
+        async Task Work(bool takesFamilySlot)
         {
-            await gate.WaitAsync(CancellationToken.None);
-            var finished = false;
+            if (takesFamilySlot && !await SlotFromTheFamilies())
+                return;
             try
             {
-                if (Volatile.Read(ref stopStarting) != 0)
+                for (var index = Next(); index >= 0; index = Next())
                 {
-                    finished = true;
-                    return;
+                    var run = runs[index] = RunOne(index);
+                    await run.ContinueWith(static _ => { }, TaskScheduler.Default);
+                    if (!run.IsCompletedSuccessfully)
+                        StopStarting();
                 }
-
-                lists[index] = [];
-                if (_passLogger is { } passLogger)
-                    _flowLogger.Value = logs[index] = new HeldLog(passLogger);
-                await detectors[index](context, lists[index]!);
-                finished = true;
             }
             finally
             {
-                if (!finished)
-                    Volatile.Write(ref stopStarting, 1);
-                gate.Release();
+                if (takesFamilySlot)
+                    familyGate!.Release();
             }
+        }
+
+        /* The next detector in the list, or -1 when every one is taken or a detector has stopped the pass. Taking the
+           last one ends the wait of every worker that has no slot yet: it has nothing left to run. */
+        int Next()
+        {
+            if (Volatile.Read(ref stopStarting) != 0)
+                return -1;
+            var index = Interlocked.Increment(ref taken) - 1;
+            if (index >= detectors.Count - 1)
+                noneLeft.Cancel();
+            return index < detectors.Count ? index : -1;
+        }
+
+        /* Only a stop from the pass's own token gets out of a detector. After one, no worker starts another detector and
+           none goes on waiting for a slot. */
+        void StopStarting()
+        {
+            Volatile.Write(ref stopStarting, 1);
+            noneLeft.Cancel();
+        }
+
+        /* Waits for a slot of the families' gate: true with the slot held, false with none once no detector is left to
+           start. The wait either takes the slot or is cancelled, never both. (A continuation, not a catch: this is not a
+           read.) */
+        Task<bool> SlotFromTheFamilies() =>
+            familyGate!.WaitAsync(Timeout.Infinite, noneLeft.Token)
+                .ContinueWith(static wait => wait.IsCompletedSuccessfully, TaskScheduler.Default);
+
+        async Task RunOne(int index)
+        {
+            lists[index] = [];
+            if (_passLogger is { } passLogger)
+                _flowLogger.Value = logs[index] = new HeldLog(passLogger);
+            await detectors[index](context, lists[index]!);
         }
     }
 

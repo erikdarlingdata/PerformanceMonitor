@@ -439,7 +439,9 @@ public sealed class DarlingAnalysisService
             /* #9149: an on-demand pass overlaps its family reads. The scheduled pass (the one caller that persists caveats)
                keeps the serial loop, because its sweeps already share the store's pool. */
             FamilyParallelism = persistCollectionCaveats ? 1 : PgFactCollector.MaxFamilyParallelism,
-            DetectorParallelism = persistCollectionCaveats ? 1 : PgAnomalyDetector.MaxDetectorParallelism, /* #9879: on-demand only */
+            /* #9879: an on-demand pass also runs the detector's reads side by side. Beside the family reads they take their
+               slots from the families' gate, so the pass holds no more of them at once than that gate has. */
+            DetectorParallelism = persistCollectionCaveats ? 1 : PgAnomalyDetector.MaxDetectorParallelism,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once

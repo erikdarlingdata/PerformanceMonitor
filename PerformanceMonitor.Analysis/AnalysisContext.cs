@@ -475,6 +475,14 @@ public sealed class AnomalyReadBesideFamilies(Func<AnalysisContext, Task<List<Fa
     /// families run. The pass appends them itself, after it has counted the families that were not read.
     /// </summary>
     public List<CollectionFailure> Failures { get; set; } = [];
+
+    /// <summary>
+    /// The gate the collector's family reads run under, for as long as the collector runs this read beside them, and
+    /// null at every other time. The read holds one of its slots. A detector that runs more than one of its own reads at
+    /// once takes each further slot from this gate, so the family reads and the detector's reads together never hold
+    /// more slots than the gate has.
+    /// </summary>
+    public SemaphoreSlim? FamilyGate { get; set; }
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>
