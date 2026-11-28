@@ -276,9 +276,9 @@ calls AS MATERIALIZED (
     /// The join of every under-floor sample (alias <paramref name="sample"/>) to the calls, alias <c>c</c>, on <see cref="MatchOn"/>.
     /// Without <paramref name="callsAt"/> it joins the <c>calls</c> CTE. With it (#9881) it joins the caller's arrays, each call once per
     /// second a matching sample can sit in (<see cref="MatchSecondShifts"/>), and adds that second to the join key. A matching pair meets on
-    /// exactly one shift, the sample's second minus the call's, so the rows are the same; the key lets the join hash on (session, second),
-    /// where the session alone makes every sample meet every call of its session, and with no CTE scan in it the pass over the samples can
-    /// run in parallel workers.
+    /// exactly one shift, the sample's second minus the call's, so the rows are the same. The key gives the join an exact (session, second)
+    /// equality; at a small call count the planner may hash on the session alone and check the second as a filter, and the rows are the
+    /// same either way. With no CTE scan in the join, the pass over the samples can run in parallel workers.
     /// </summary>
     private static string JoinCalls(string sample, int? callsAt) => callsAt is int at
         ? $"""
@@ -664,41 +664,16 @@ ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event
     /// what the call itself says about the timeout. Columns: event_time, collection_time, database_name, client_app_name, client_hostname,
     /// session_id, interrupt_duration_us (the call's elapsed time), statement_text (the object name, then a colon and the statement for an RPC).
     /// A call that is Azure Data Studio or dbatools metadata work is left out, as its sample is not judged. Always bounded, the way <see cref="Samples"/>
-    /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling.
+    /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling. One statement over the <c>calls</c> CTE; the two-statement
+    /// form Darling reads (<see cref="MatchedCallIds"/>, <see cref="MatchedCallRows"/>) is built from the same two pieces, so the filters,
+    /// the order and the limit are written once.
     /// </summary>
     public static string MatchedCalls(string eventsRelation, int limit) => $"""
 WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
 hit AS (
-    SELECT DISTINCT c.id
-    FROM (SELECT * FROM {eventsRelation}) AS s
-    INNER JOIN calls AS c
-        ON {MatchOn("c", "s")}
-    WHERE s.server_id = $1
-    AND   s.collection_time > $2
-    AND   s.collection_time <= $3
-    AND   s.event_kind = '{KindSample}'
-    AND   s.interrupt_duration_us < {MinInterruptDurationUs}
-    AND   NOT c.azdata_metadata
-    AND   NOT c.dbatools_metadata
+{MatchedCallIdsBody(eventsRelation, null)}
 )
-SELECT
-    e.event_time,
-    e.collection_time,
-    e.database_name,
-    e.client_app_name,
-    e.client_hostname,
-    e.session_id,
-    e.interrupt_duration_us,
-    e.statement_text
-FROM (SELECT * FROM {eventsRelation}) AS e
-INNER JOIN hit AS h
-    ON h.id = e.attention_event_id
-WHERE e.server_id = $1
-AND   e.collection_time >= $2
-AND   e.collection_time <= $3
-AND   e.event_kind = '{KindAborted}'
-ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event_id DESC
-LIMIT {limit}
+{MatchedCallRowsSelect(eventsRelation, limit, HitJoin, "")}
 """;
 
     /// <summary>
@@ -706,28 +681,42 @@ LIMIT {limit}
     /// the ids of the calls that match an under-floor sample in the span and are not Azure Data Studio or dbatools metadata work, one row
     /// per call. Column: id (bigint). <c>$2</c> is the EXCLUSIVE span boundary, <c>$3</c> the inclusive ceiling, and the
     /// <see cref="CallArrayCount"/> array parameters start at <paramref name="callsAt"/>. The caller hands the ids to
-    /// <see cref="MatchedCallRows"/>. Two statements, because joined in one the planner must guess how many ids match: on a week with 70
-    /// calls it expected one and read the window's calls again for each of the 68 it found.
+    /// <see cref="MatchedCallRows"/>. Two statements, because joined in one the planner must guess how many ids match, and with the
+    /// calls bound it can guess one and read the window's calls again for each id it finds.
     /// </summary>
-    public static string MatchedCallIds(string eventsRelation, int callsAt) => $"""
-SELECT DISTINCT c.id
-FROM (SELECT * FROM {eventsRelation}) AS s
-{JoinCalls("s", callsAt)}
-WHERE s.server_id = $1
-AND   s.collection_time > $2
-AND   s.collection_time <= $3
-AND   s.event_kind = '{KindSample}'
-AND   s.interrupt_duration_us < {MinInterruptDurationUs}
-AND   NOT c.azdata_metadata
-AND   NOT c.dbatools_metadata
-""";
+    public static string MatchedCallIds(string eventsRelation, int callsAt) => MatchedCallIdsBody(eventsRelation, callsAt);
 
     /// <summary>
     /// The second half of <see cref="MatchedCalls"/> (#9881, PostgreSQL): the calls whose id is in the bigint array parameter
     /// <paramref name="idsAt"/>, the ids <see cref="MatchedCallIds"/> gave, with the columns, order and <paramref name="limit"/> of
     /// <see cref="MatchedCalls"/>. <c>$2</c> and <c>$3</c> are the inclusive range of the calls, the one <see cref="Calls"/> reads.
     /// </summary>
-    public static string MatchedCallRows(string eventsRelation, int limit, int idsAt) => $"""
+    public static string MatchedCallRows(string eventsRelation, int limit, int idsAt) => MatchedCallRowsSelect(eventsRelation, limit, "", IdsInArray(idsAt));
+
+    /// <summary>
+    /// The ids of the calls that match an under-floor sample in the span: the <c>hit</c> CTE of <see cref="MatchedCalls"/> and the whole of
+    /// <see cref="MatchedCallIds"/>. Without <paramref name="callsAt"/> the join reads the <c>calls</c> CTE of the statement that holds it; with
+    /// it, the caller's arrays (<see cref="JoinCalls"/>). Indented four spaces, the depth of a CTE body.
+    /// </summary>
+    private static string MatchedCallIdsBody(string eventsRelation, int? callsAt) => $"""
+    SELECT DISTINCT c.id
+    FROM (SELECT * FROM {eventsRelation}) AS s
+    {JoinCalls("s", callsAt)}
+    WHERE s.server_id = $1
+    AND   s.collection_time > $2
+    AND   s.collection_time <= $3
+    AND   s.event_kind = '{KindSample}'
+    AND   s.interrupt_duration_us < {MinInterruptDurationUs}
+    AND   NOT c.azdata_metadata
+    AND   NOT c.dbatools_metadata
+""";
+
+    /// <summary>
+    /// The aborted rows of the range that <see cref="MatchedCalls"/> and <see cref="MatchedCallRows"/> list: columns, range, kind, order and
+    /// limit, written once. The ids to keep are given by <paramref name="idJoin"/> (a join to the <c>hit</c> CTE, ending in a line break) or by
+    /// <paramref name="idFilter"/> (a predicate on a bound array, starting with a line break); the caller passes one and leaves the other empty.
+    /// </summary>
+    private static string MatchedCallRowsSelect(string eventsRelation, int limit, string idJoin, string idFilter) => $"""
 SELECT
     e.event_time,
     e.collection_time,
@@ -738,12 +727,24 @@ SELECT
     e.interrupt_duration_us,
     e.statement_text
 FROM (SELECT * FROM {eventsRelation}) AS e
-WHERE e.server_id = $1
+{idJoin}WHERE e.server_id = $1
 AND   e.collection_time >= $2
 AND   e.collection_time <= $3
-AND   e.event_kind = '{KindAborted}'
-AND   e.attention_event_id = ANY (${idsAt}::bigint[])
+AND   e.event_kind = '{KindAborted}'{idFilter}
 ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event_id DESC
 LIMIT {limit}
+""";
+
+    /// <summary>The join that keeps the aborted rows whose id is in the <c>hit</c> CTE. Ends with the line break that follows it.</summary>
+    private const string HitJoin = """
+INNER JOIN hit AS h
+    ON h.id = e.attention_event_id
+
+""";
+
+    /// <summary>The predicate that keeps the aborted rows whose id is in the bigint array parameter <paramref name="at"/>. Starts with the line break that precedes it.</summary>
+    private static string IdsInArray(int at) => $"""
+
+AND   e.attention_event_id = ANY (${at}::bigint[])
 """;
 }

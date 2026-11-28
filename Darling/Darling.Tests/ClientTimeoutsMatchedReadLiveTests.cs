@@ -16,6 +16,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -332,6 +333,74 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
             Assert.Equal(expected, baseline);
         });
     }
+
+    /* #9881: the tool reads the calls of the span (the sample list and the matched calls) over the range their own calls CTE reads, from the INCLUSIVE span
+       floor to the span ceiling, and not over the window's calls. Four rows sit one microsecond apart around the floor: a call just below it, a call exactly at it
+       and the samples just above it. The call at the floor matches its sample, so a floor that excluded it would lose that match. The call below the floor is in the
+       window but not in the span, so its sample stays unmatched, and binding the window's calls to the span reads would match it. The tool's read path is held to the
+       statements that read their own calls over the same range. */
+    [Fact]
+    public async Task TheSpanReads_HoldTheCallsFromTheInclusiveSpanFloorOn_AndMatchTheSamplesAsTheirOwnCallsDo()
+    {
+        await RunAsync(async (connection, t0, ct) =>
+        {
+            var oldest = t0.AddMinutes(40);
+            var middle = oldest.AddMinutes(1);
+            var newest = oldest.AddMinutes(2);
+            long id = 98816000000;
+            foreach (var run in new[] { oldest, middle, newest })
+            {
+                await ExecAsync(connection, "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) VALUES ($2, $1, 'matched-read-live', 'attention', $3, 5, 'SUCCESS')", ct, id++, run);
+            }
+
+            /* The span starts halfway between the two oldest runs and ends 30 seconds after the newest. */
+            var spanFloor = oldest.AddSeconds(30);
+            var spanCeiling = newest.AddSeconds(30);
+            Assert.Equal((spanFloor, spanCeiling), PerformanceMonitor.Alerting.ClientTimeoutsRead.DetailSpan([oldest, middle, newest])!.Value);
+
+            var microsecond = TimeSpan.FromTicks(10);
+            var timeout = middle.AddSeconds(-5);
+            async Task SampleAsync(string db, int session, DateTime collected) =>
+                await RowAsync(connection, id++, collected, "sample", 0, db, "app", null, 4_000, timeout, session, ct);
+            async Task CallAsync(string db, int session, string name, DateTime collected) =>
+                await RowAsync(connection, id++, collected, "aborted", 0, db, "app", $"dbo.{name}: EXEC dbo.{name}", 30_000_000, timeout.AddMilliseconds(-20), session, ct);
+
+            await CallAsync("at_span_floor", 1101, "AtFloor", spanFloor);
+            await SampleAsync("at_span_floor", 1101, spanFloor + microsecond);
+            await CallAsync("below_span_floor", 1102, "BelowFloor", spanFloor - microsecond);
+            await SampleAsync("below_span_floor", 1102, spanFloor + microsecond);
+            await CallAsync("in_span", 1103, "InSpan", middle);
+            await SampleAsync("in_span", 1103, middle);
+            await SampleAsync("no_call", 1104, middle);
+
+            await using var postgres = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, ServerId, oldest.AddMinutes(-1), newest.AddSeconds(10), 500, ct);
+
+            var expectedSamples = await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 501), spanFloor, spanCeiling, ct);
+            var expectedCalls = await ReadAsync(connection, AttentionWindowSql.MatchedCalls("attention_events", 501), spanFloor, spanCeiling, ct);
+            Assert.Equal(expectedSamples, samples.Select(SampleRow).ToList());
+            Assert.Equal(expectedCalls, window.MatchedCalls.Select(CallRow).ToList());
+
+            /* The two edge calls by name: the call exactly at the floor is matched and listed, the call a microsecond below it is neither. */
+            var matched = samples.ToDictionary(sample => sample.DatabaseName!, sample => sample.MatchedCall, StringComparer.Ordinal);
+            Assert.True(matched["at_span_floor"]);
+            Assert.False(matched["below_span_floor"]);
+            Assert.True(matched["in_span"]);
+            Assert.False(matched["no_call"]);
+            Assert.Equal(new[] { "dbo.InSpan: EXEC dbo.InSpan", "dbo.AtFloor: EXEC dbo.AtFloor" }, window.MatchedCalls.Select(call => call.StatementText ?? "").ToArray());
+        });
+    }
+
+    /* A row as the read helper prints it: the fields joined by a bar, NULL as (null), times round-trip. */
+    private static string Fields(params object?[] fields) => string.Join("|", fields.Select(field =>
+        field is null ? "(null)" : field is DateTime time ? time.ToString("o", CultureInfo.InvariantCulture) : Convert.ToString(field, CultureInfo.InvariantCulture)!));
+
+    private static string SampleRow(PerformanceMonitor.Alerting.ClientTimeoutSample sample) => Fields(
+        sample.EventTime, sample.CollectionTime, sample.DatabaseName, sample.ClientAppName, sample.ClientHostName, sample.SessionId, sample.InterruptDurationUs,
+        sample.StatementFingerprint, sample.StatementText, sample.BelowDurationFloor, sample.AzdataMetadata, sample.DbatoolsMetadata, sample.MatchedCall);
+
+    private static string CallRow(PerformanceMonitor.Alerting.ClientTimeoutMatchedCall call) => Fields(
+        call.EventTime, call.CollectionTime, call.DatabaseName, call.ClientAppName, call.ClientHostName, call.SessionId, call.ElapsedUs, call.StatementText);
 
     private static PerformanceMonitor.Alerting.AttentionBaseline? BaselineOf(List<string> minuteRows) =>
         PerformanceMonitor.Alerting.AttentionBaselineMath.Compute(
