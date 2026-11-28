@@ -993,7 +993,7 @@ public sealed partial class DarlingWorker
         else
         {
             _logger.LogInformation(
-                "Custom alert evaluator not started: this deployment has no web-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned role supply one, and a bring-your-own store supplies it with postgres.webConnectionString once tools/provision-roles.sql has run (#3285, #3970, #9700).");
+                "Custom alert evaluator not started: this deployment has no web-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned role supply one, and a bring-your-own store supplies it with postgres.webConnectionString once provision-roles.sql (in the install folder, see docs/darling/linux.md) has run (#3285, #3970, #9700).");
         }
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.

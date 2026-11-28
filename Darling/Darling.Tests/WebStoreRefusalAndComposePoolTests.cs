@@ -120,6 +120,10 @@ public sealed class WebStoreRefusalAndComposePoolTests
                 catch (ObjectDisposedException)
                 {
                 }
+                catch (InvalidOperationException)
+                {
+                    /* Stop() landed between two accepts (#9950). */
+                }
             });
         }
 
