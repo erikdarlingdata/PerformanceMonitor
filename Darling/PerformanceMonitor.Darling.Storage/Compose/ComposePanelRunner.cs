@@ -1439,6 +1439,7 @@ internal static class ComposePanelRunner
         await using var ownedScope = ownedConnection;
         await using var ownedTransactionScope = ownedTransaction;
         var connection = sharedConnection ?? ownedConnection!;
+        var priorHashMemMultiplier = await RaiseModuleKeyHashLimitAsync(connection, compiled, cancellationToken);
         await using var command = new NpgsqlCommand(compiled.Sql, connection, ownedTransaction);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
@@ -1466,7 +1467,68 @@ internal static class ComposePanelRunner
             throw new ComposeStatementClientTimeoutException(ex);
         }
 
+        /* An owned transaction ends here, and its SET LOCAL with it. A shared one belongs to the caller, who may run more
+           statements in it, so the multiplier the statement raised is put back. */
+        if (sharedConnection is not null && priorHashMemMultiplier is not null)
+        {
+            await RestoreHashMemMultiplierAsync(connection, priorHashMemMultiplier, cancellationToken);
+        }
+
         return rows;
+    }
+
+    /// <summary>#9960: the least hash limit (<c>work_mem</c> times <c>hash_mem_multiplier</c>), in bytes, that a statement folding its
+    /// ad hoc handles (<see cref="ComposeCompiled.FoldsAdHocHandles"/>) runs under.</summary>
+    internal const long ModuleKeyHashLimitBytes = 64L * 1024 * 1024;
+
+    /// <summary>#9960: PostgreSQL's ceiling on <c>hash_mem_multiplier</c>.</summary>
+    private const int HashMemMultiplierCeiling = 1000;
+
+    /// <summary>#9960: raises <c>hash_mem_multiplier</c>, transaction local, so <c>work_mem</c> times it is at least
+    /// <see cref="ModuleKeyHashLimitBytes"/> (held to the setting's ceiling), and never lowers it. The value is computed from the
+    /// session's own <c>work_mem</c>, in SQL, and the statement returns the multiplier in force before it. The prior value is read in a
+    /// materialized CTE, so it is read before <c>set_config</c> runs.</summary>
+    internal static readonly string RaiseModuleKeyHashLimitSql = string.Create(CultureInfo.InvariantCulture, $@"WITH prior AS MATERIALIZED (SELECT current_setting('hash_mem_multiplier') AS value)
+SELECT prior.value, set_config('hash_mem_multiplier',
+    GREATEST(prior.value::float8, LEAST({HashMemMultiplierCeiling}::float8, {ModuleKeyHashLimitBytes}::float8 / pg_size_bytes(current_setting('work_mem'))))::text,
+    true)
+FROM prior");
+
+    /// <summary>#9960: puts <c>hash_mem_multiplier</c> back to the value <see cref="RaiseModuleKeyHashLimitSql"/> returned, still transaction local.</summary>
+    private const string RestoreHashMemMultiplierSql = "SELECT set_config('hash_mem_multiplier', $1, true)";
+
+    /// <summary>
+    /// #9960: the hash limit guard of the ad hoc fold. A statement whose module pre-aggregate folds the ad hoc handles tests each fact
+    /// row's (server_name, sql_handle) with an uncorrelated IN over m's keys, which PostgreSQL hashes only when its estimate of the key
+    /// set fits <c>work_mem</c> times <c>hash_mem_multiplier</c>, and otherwise scans the keys once per fact row. For such a statement
+    /// this raises the multiplier in the transaction the statement runs in (<see cref="RaiseModuleKeyHashLimitSql"/>) and returns the
+    /// multiplier in force before; a statement without the fold changes nothing and returns null. The multiplier sizes every hash node
+    /// of the statement (its hash aggregates and hash joins too), so each may use up to the raised limit; <c>work_mem</c>, which sizes
+    /// every sort, is unchanged.
+    /// </summary>
+    internal static async Task<string?> RaiseModuleKeyHashLimitAsync(
+        NpgsqlConnection connection, ComposeCompiled compiled, System.Threading.CancellationToken cancellationToken)
+    {
+        if (!compiled.FoldsAdHocHandles)
+        {
+            return null;
+        }
+
+        await using var command = new NpgsqlCommand(RaiseModuleKeyHashLimitSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("The hash limit statement returned no row.");
+        }
+
+        return reader.GetString(0);
+    }
+
+    private static async Task RestoreHashMemMultiplierAsync(NpgsqlConnection connection, string prior, System.Threading.CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(RestoreHashMemMultiplierSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = prior, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>Compiles + runs the panel's event-annotation overlays (design D5) on the viewer pool, returning
