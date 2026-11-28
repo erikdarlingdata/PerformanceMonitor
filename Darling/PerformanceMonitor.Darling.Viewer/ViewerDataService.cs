@@ -1694,7 +1694,7 @@ SELECT
     to_regclass('collect.query_tag_sightings_slim') IS NOT NULL,
     /* V321 (#9923) adds the connection open count and time to the slow read record, two columns that are never dropped. The open count column is the mark that the rung ran. Found by catalog, as the V317 line above is. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.slow_reads') AND attname = 'connection_opens' AND NOT attisdropped),
-    /* V322 (#9863) drops the hash index of the hourly host rollup. The rung is marked by the index's absence, so the mark needs the rollup table too: a store older than V287 has no rollup and no index, and has not run this rung. The map reads this mark together with V321's, because an index dropped by hand on a store below V321 shows the same absence. */
+    /* V322 (#9863) drops the hash index of the hourly host rollup. The rung is marked by the index's absence, so the mark needs the rollup table too: a store older than V287 has no rollup and no index, and has not run this rung. The map reads this mark together with V321's, because an index dropped by hand on a store below V321 shows the same absence. A store at V322 or later that holds the index again reads as V321 until the service starts, because the service drops the index again on each start. */
     to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.idx_query_stats_host_hourly_hash') IS NULL";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
@@ -1978,7 +1978,8 @@ SELECT
         /* V322 (#9863): the hash index of the hourly host rollup is gone. Absence sentinel on a store that has the rollup, newest-first, and the top rung, so a fully
            migrated store maps to exactly StorageVersion.SchemaVersion and shows no upgrade banner. An index is also gone when someone drops it by hand, which a store at
            any version from V287 to V320 can show, so the arm needs V321's mark too (rungs apply in order, so a store that ran V322 has run V321) and such a store maps to
-           the rung its other marks name. */
+           the rung its other marks name. A store at V322 or later that holds the index again maps to V321 until the service starts, and the service drops the index on each start,
+           so a restart of the service clears the connect gate for it. */
         if (hasHostHourlyHashIndexDropped && hasSlowReadConnectionOpens)
         {
             return HostHourlyHashIndexDrop.Version;
