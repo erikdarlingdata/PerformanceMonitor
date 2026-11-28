@@ -197,8 +197,8 @@ LIMIT 5";
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {
                 var shippedResolved = await RowsResolvedAgainstTheDimensionAsync(
-                    connection, PgDrillDownCollector.TopCpuQueriesSql, windowStart, windowEnd, ct);
-                var oracleResolved = await RowsResolvedAgainstTheDimensionAsync(connection, OracleSql, windowStart, windowEnd, ct);
+                    connection, PgDrillDownCollector.TopCpuQueriesSql, windowStart, windowEnd, ct, upperBound: true);
+                var oracleResolved = await RowsResolvedAgainstTheDimensionAsync(connection, OracleSql, windowStart, windowEnd, ct, upperBound: false);
 
                 Assert.True(
                     shippedResolved <= Printed.Length * RowsPerPrintedGroup,
@@ -219,7 +219,7 @@ LIMIT 5";
     }
 
     private static async Task<double> RowsResolvedAgainstTheDimensionAsync(
-        NpgsqlConnection connection, string sql, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
+        NpgsqlConnection connection, string sql, DateTime windowStart, DateTime windowEnd, CancellationToken ct, bool upperBound)
     {
         await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + sql, connection)
         {
@@ -227,7 +227,11 @@ LIMIT 5";
         };
         AddWindowParameters(cmd, windowStart, windowEnd);
 
-        return ExplainJoinProbe.RowsResolvedAgainst((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable);
+        /* #9943: PostgreSQL 17 writes each loop's average row count rounded to a whole number (18 writes the fraction), so a
+           plan that resolved 20 rows over 8 loops reads as 22 there. The shipped read is bounded from above, so the
+           rounding slack is taken out of its count. The old read is a floor, so its count stays as written. */
+        return ExplainJoinProbe.RowsResolvedAgainst((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable,
+            rowAveragesRounded: upperBound && connection.PostgreSqlVersion.Major < 18);
     }
 
     private static async Task<List<JsonElement>> DrillDownRowsAsync(NpgsqlDataSource postgres, AnalysisContext context)

@@ -68,4 +68,37 @@ public sealed class ExplainJoinProbeTests
         Assert.Equal(0, ExplainJoinProbe.RowsFetchedFrom(plan, Dimension));
         Assert.Equal(0, ExplainJoinProbe.RowsResolvedAgainst(plan, Dimension));
     }
+
+    [Fact]
+    public void RowsResolvedAgainst_OnAPostgres17Plan_NeverCountsMoreThanTheRowsActuallyResolved()
+    {
+        /* PostgreSQL 17 rounds each loop's average: 8 rows over 5 loops (1.6 each) is written as 2. */
+        var plan = Explain("""
+            {"Node Type": "Nested Loop", "Join Type": "Left", "Actual Rows": 2, "Actual Loops": 5, "Plans": [
+                {"Node Type": "Index Scan", "Parent Relationship": "Outer", "Relation Name": "query_stats",
+                 "Actual Rows": 2, "Actual Loops": 5},
+                {"Node Type": "Index Scan", "Parent Relationship": "Inner", "Relation Name": "query_text_dim",
+                 "Actual Rows": 1, "Actual Loops": 8}
+            ]}
+            """);
+
+        /* Read as written it says 10 for the 8 rows that arrived, which is how an exact bound failed on 17. */
+        Assert.Equal(10, ExplainJoinProbe.RowsResolvedAgainst(plan, Dimension));
+        Assert.Equal(7.5, ExplainJoinProbe.RowsResolvedAgainst(plan, Dimension, rowAveragesRounded: true));
+    }
+
+    [Fact]
+    public void RowsResolvedAgainst_WithRoundedAverages_StillSeesARead_ThatResolvesEveryWindowRow()
+    {
+        var plan = Explain("""
+            {"Node Type": "Nested Loop", "Join Type": "Left", "Actual Rows": 140, "Actual Loops": 1, "Plans": [
+                {"Node Type": "Index Scan", "Parent Relationship": "Outer", "Relation Name": "query_stats",
+                 "Actual Rows": 140, "Actual Loops": 1},
+                {"Node Type": "Index Scan", "Parent Relationship": "Inner", "Relation Name": "query_text_dim",
+                 "Actual Rows": 1, "Actual Loops": 140}
+            ]}
+            """);
+
+        Assert.Equal(139.5, ExplainJoinProbe.RowsResolvedAgainst(plan, Dimension, rowAveragesRounded: true));
+    }
 }

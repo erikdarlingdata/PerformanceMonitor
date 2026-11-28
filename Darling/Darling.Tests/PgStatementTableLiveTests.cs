@@ -306,19 +306,21 @@ public sealed class PgStatementTableLiveTests
 
     /// <summary>
     /// The <paramref name="n"/>-th shape of the competitors' family: two or more columns of <c>1</c>, each a product of some
-    /// more, under one of eight WHERE/LIMIT/OFFSET suffixes. Products, so the family shares no entry with the fill's sums or
-    /// the headroom family's differences.
+    /// more, under one of six WHERE/LIMIT/OFFSET suffixes. Products, so the family shares no entry with the fill's sums or
+    /// the headroom family's differences. No suffix has an OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an
+    /// OFFSET alike (a constant of the same type, not told apart by the clause that holds it), so <c>LIMIT 1</c> and <c>OFFSET 0</c> were
+    /// one entry there, run by two shapes, and the entries run once before the first pass were fewer than the 250 it removes (#9943).
     /// </summary>
     private static string CompetitorShape(int n)
     {
-        var variant = n & 7;
-        var rest = n >> 3;
+        var variant = n % 6;
+        var rest = n / 6;
         var items = rest / 8 + 2;
         var terms = rest % 8 + 1;
         var item = "1" + string.Concat(System.Linq.Enumerable.Repeat("*1", terms));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+            + (variant >= 2 ? " LIMIT 1" : string.Empty)
+            + (variant >= 4 ? " OFFSET 0" : string.Empty);
         return "SELECT " + string.Join(",", System.Linq.Enumerable.Repeat(item, items)) + suffix;
     }
 }

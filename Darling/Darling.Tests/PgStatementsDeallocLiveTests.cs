@@ -302,7 +302,7 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
     /// statements than the extension can hold, a batch at a time, until the counter moves. A statement's identity is
     /// the shape of its parse tree, and neither a constant nor an alias is part of it, so the statements differ in
     /// shape: how many select items, how long an addition each one carries, and which of WHERE, LIMIT and OFFSET
-    /// follow. Does nothing when the counter is already above zero.
+    /// follow (never an OFFSET alone). Does nothing when the counter is already above zero.
     /// </summary>
     private static async Task EnsureEvictionsAsync(NpgsqlConnection connection, int maxEntries, CancellationToken ct)
     {
@@ -311,7 +311,8 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
             return;
         }
 
-        const int variants = 8;
+        /* Six variants, no OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an OFFSET alike, so LIMIT 1 and OFFSET 0 are one entry there (#9943). */
+        const int variants = 6;
         var side = (int)Math.Ceiling(Math.Sqrt((maxEntries + 1) / (double)variants)) + 1;
         var batch = new System.Text.StringBuilder();
         var inBatch = 0;
@@ -319,8 +320,8 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
         for (var variant = 0; variant < variants; variant++)
         {
             var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-                + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-                + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+                + (variant >= 2 ? " LIMIT 1" : string.Empty)
+                + (variant >= 4 ? " OFFSET 0" : string.Empty);
 
             for (var items = 1; items <= side; items++)
             {

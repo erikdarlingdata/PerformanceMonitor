@@ -367,20 +367,20 @@ public sealed class PgOwnStatementRoleLiveTests
 
     /// <summary>
     /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
-    /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
+    /// <c>1</c>s, under one of six WHERE/LIMIT/OFFSET suffixes (no OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an OFFSET alike, so <c>LIMIT 1</c> and <c>OFFSET 0</c> were one entry there, #9943). Every shape has at least one subtraction and two columns,
     /// so the family shares no entry with <see cref="FillerStatement"/>'s products, with a bare <c>SELECT 1</c>, or with the
     /// chain's own single-column statements.
     /// </summary>
     internal static string HeadroomStatement(int n)
     {
-        var variant = n & 7;
-        var rest = n >> 3;
+        var variant = n % 6;
+        var rest = n / 6;
         var items = rest / 8 + 2;
         var terms = rest % 8 + 1;
         var item = "1" + string.Concat(Enumerable.Repeat("-1", terms));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+            + (variant >= 2 ? " LIMIT 1" : string.Empty)
+            + (variant >= 4 ? " OFFSET 0" : string.Empty);
         return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 
@@ -412,7 +412,7 @@ public sealed class PgOwnStatementRoleLiveTests
         Assert.SkipWhen(max > MaxEntriesTheFillerCanFill,
             $"pg_stat_statements.max is {max}, more than the {MaxEntriesTheFillerCanFill} the one-free-slot test fills.");
 
-        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
+        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 6.0)) + 1;
         var next = 0;
         var passes = 0;
 
@@ -473,10 +473,10 @@ public sealed class PgOwnStatementRoleLiveTests
 
     /// <summary>
     /// The <paramref name="n"/>-th distinct statement shape of the filler's family: two or more columns of <c>1</c>, each a
-    /// product of one or more <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter
+    /// product of one or more <c>1</c>s, under one of six WHERE/LIMIT/OFFSET suffixes (no OFFSET without a LIMIT: PostgreSQL 17 and earlier jumble a LIMIT and an OFFSET alike, so <c>LIMIT 1</c> and <c>OFFSET 0</c> were one entry there, #9943). Constants and aliases do not enter
     /// the module's query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape
     /// would be the chain's own <c>SELECT $1 * $2</c>; <paramref name="side"/> bounds the columns and the terms, and the
-    /// family holds <c>8 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills that run
+    /// family holds <c>6 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills that run
     /// on the same database: <see cref="PgStatementTable.Shape"/> builds sums and the headroom families build differences.
     /// The chain's fill is followed by the headroom step on its own database, and the pass test's forcing fill, this fill
     /// and its hook all run on one scratch database; a shape already present there adds no entry, and this fill counts its
@@ -484,14 +484,14 @@ public sealed class PgOwnStatementRoleLiveTests
     /// </summary>
     internal static string FillerStatement(int n, int side)
     {
-        var variant = n & 7;
-        var rest = n >> 3;
+        var variant = n % 6;
+        var rest = n / 6;
         var items = rest / (side + 1) + 2;
         var terms = rest % (side + 1);
         var item = "1" + string.Concat(Enumerable.Repeat("*1", terms + 1));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
-            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
-            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+            + (variant >= 2 ? " LIMIT 1" : string.Empty)
+            + (variant >= 4 ? " OFFSET 0" : string.Empty);
         return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 
