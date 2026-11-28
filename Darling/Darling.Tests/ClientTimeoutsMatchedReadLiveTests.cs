@@ -15,7 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -299,6 +299,48 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
             Assert.Equal(await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500), start, end, ct), samples);
         });
     }
+
+    /* The alert baseline through the adapter (#9881): the calls are read first and bound to the minutes read. A day of one run a minute at 100
+       timeouts holds a ten-minute burst at 100,000 a minute, and the only sample of each burst minute is under the floor and matched to a
+       captured call, so the burst counts. With no calls bound, each burst minute reads 0. */
+    [Fact]
+    public async Task TheAlertBaseline_CountsABurst_WhoseShortSamplesMatchCapturedCalls()
+    {
+        await RunAsync(async (connection, t0, ct) =>
+        {
+            var day = t0.AddHours(1);
+            await ExecAsync(connection, "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) SELECT $2 + g, $1, 'matched-read-live', 'attention', $3 + g * INTERVAL '1 minute', 5, 'SUCCESS' FROM generate_series(0, 1439) AS g", ct, 98813000000, day);
+            await ExecAsync(connection, "INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) SELECT $2 + g, $3 + g * INTERVAL '1 minute', $1, 'matched-read-live', 'count', CASE WHEN g BETWEEN 600 AND 609 THEN 100000 ELSE 100 END FROM generate_series(0, 1439) AS g", ct, 98814000000, day);
+            long id = 98815000000;
+            for (var minute = 600; minute < 610; minute++)
+            {
+                var run = day.AddMinutes(minute);
+                var sampleTime = run.AddSeconds(-10);
+                await RowAsync(connection, id++, run, "sample", 0, "burst", "app", null, 4_000, sampleTime, 950 + minute, ct);
+                await RowAsync(connection, id++, run, "aborted", 0, "burst", "app", "dbo.P: EXEC dbo.P", 30_000_000, sampleTime.AddMilliseconds(40), 950 + minute, ct);
+            }
+
+            var now = t0.AddHours(26);
+            var from = now.AddDays(-PerformanceMonitor.Alerting.AttentionBaselineMath.LookbackDays);
+            var expected = BaselineOf(await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), from, now, ct));
+            var withNoCalls = BaselineOf(await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events", callsAt: 4), from, now, ct, new AttentionCallArrays().AddTo));
+            Assert.NotNull(expected);
+            Assert.NotEqual(expected, withNoCalls);
+
+            await using var postgres = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
+            var baseline = await new DarlingAlertReadAdapter(postgres).GetAttentionBaselineAsync(ServerId.ToString(CultureInfo.InvariantCulture), now, ct);
+            Assert.Equal(expected, baseline);
+        });
+    }
+
+    private static PerformanceMonitor.Alerting.AttentionBaseline? BaselineOf(List<string> minuteRows) =>
+        PerformanceMonitor.Alerting.AttentionBaselineMath.Compute(
+            minuteRows
+                .Select(row => row.Split('|'))
+                .Select(f => new PerformanceMonitor.Alerting.AttentionMinute(
+                    DateTime.Parse(f[0], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    long.Parse(f[1], CultureInfo.InvariantCulture)))
+                .ToList());
 
     /* The calls of a range as the arrays the matched reads take. */
     private static async Task<AttentionCallArrays> CallsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)

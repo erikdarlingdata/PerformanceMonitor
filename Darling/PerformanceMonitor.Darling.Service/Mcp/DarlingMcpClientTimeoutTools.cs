@@ -145,29 +145,35 @@ public sealed class DarlingMcpClientTimeoutTools
            their own small statement, and the planner then knows how many there are. */
         const int CallsAt = 4;
 
-        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, Action<NpgsqlCommand>? more = null)
-        {
-            await using var command = new NpgsqlCommand(sql, connection);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
-            more?.Invoke(command);
-
-            var rows = new List<T>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(map(reader));
-            }
-
-            return rows;
-        }
-
-        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
         /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
         return await AttentionReadRelation.ReadAsync<(AttentionWindow Window, List<ClientTimeoutSample> Samples)>(connection, async events =>
         {
+            /* One snapshot for every statement of the read: the calls are bound to later statements as arrays, and a collection that commits
+               between two statements must not bring samples whose calls the arrays do not hold. The transaction starts inside the relation
+               read, so the second attempt AttentionReadRelation makes after an undefined table runs in a transaction of its own: a failed
+               statement leaves its transaction aborted. */
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, Action<NpgsqlCommand>? more = null)
+            {
+                await using var command = new NpgsqlCommand(sql, connection, transaction);
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
+                more?.Invoke(command);
+
+                var rows = new List<T>();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    rows.Add(map(reader));
+                }
+
+                return rows;
+            }
+
+            var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
             var counts = await Query(AttentionWindowSql.Counts(events, bounded: true), floor, rowCeiling,
                 r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
             var windowCalls = new AttentionCallArrays();
@@ -187,6 +193,7 @@ public sealed class DarlingMcpClientTimeoutTools
             var span = ClientTimeoutsRead.DetailSpan(runs);
             if (span is null)
             {
+                await transaction.CommitAsync(cancellationToken);
                 return (new AttentionWindow(runs, counts, groups, [], [], []), []);
             }
 
@@ -232,6 +239,7 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.IsDBNull(6) ? null : r.GetInt64(6),
                     r.IsDBNull(7) ? null : r.GetString(7)), command => AttentionCallArrays.AddIds(command, matchedIds));
 
+            await transaction.CommitAsync(cancellationToken);
             return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts, MatchedCallList: matchedCalls), samples);
         }, cancellationToken);
     }

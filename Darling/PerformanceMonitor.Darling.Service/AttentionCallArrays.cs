@@ -13,11 +13,11 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// The captured calls of one range, the rows of one <see cref="AttentionWindowSql.Calls"/> or <see cref="AttentionWindowSql.BaselineCalls"/>
-/// statement, handed to the Client Timeouts reads as array parameters (#9881). A week on a busy server holds millions of under-floor samples and a
+/// statement, handed to the Client Timeouts reads (the MCP read and the alert baseline) as array parameters (#9881). A week on a busy server holds millions of under-floor samples and a
 /// few dozen calls; bound as arrays, the calls reach the planner with their true count, so it hashes them and passes over the samples in
 /// parallel workers. One array per column of the calls statement, in its column order.
 /// </summary>
