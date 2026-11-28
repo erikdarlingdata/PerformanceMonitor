@@ -146,7 +146,7 @@ public sealed class StoreMetricsLatestSkipScanLiveTests
             Assert.DoesNotContain("Seq Scan", plan, StringComparison.Ordinal);
 
             var analyzed = await ExplainAsync(connection, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) " + DarlingStoreMetricsReader.StoreMetricsLatestSql, ct);
-            Assert.Matches(new Regex(@"Sort \(actual rows=30\.00 loops=1\)"), analyzed);
+            Assert.Matches(new Regex(@"Sort \(actual rows=30(\.00)? loops=1\)"), analyzed);
 
             bodySucceeded = true;
         }
