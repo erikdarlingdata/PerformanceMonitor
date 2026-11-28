@@ -19,7 +19,7 @@ internal static class DarlingAnalysisServiceTestExtensions
     /// Runs the service's on-demand passes with no family, detector or drill-down time budget. A test that is not about
     /// the stage budgets uses this so a pass that reads the clock (the default budgets count from the start of the pass)
     /// finishes every stage whatever the runner's speed: a stage a budget stops drops its facts, anomalies or drill-downs,
-    /// adds a left-out caveat and stores no findings, and a baseline a stopped detector was computing is stored by no one.
+    /// adds a left-out caveat and stores no findings, and a baseline a stopped detector was computing ends after the pass.
     /// A test of the budgets themselves sets them explicitly and does not call this.
     /// </summary>
     internal static DarlingAnalysisService WithNoStageBudgets(this DarlingAnalysisService service)

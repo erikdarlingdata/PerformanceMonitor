@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -67,6 +69,10 @@ public sealed class BaselineCache
 {
     private readonly ConcurrentDictionary<EntryKey, PgBaselineProvider.CachedBaseline> _entries = new();
     private long _lastSweepTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>#9972: the baseline computes that outlive the pass that started them, one set for the process, so every
+    /// provider handed this tier joins a running compute and counts toward the same limit.</summary>
+    internal KeptBaselineComputes KeptComputes { get; } = new();
 
     /// <summary>A shared entry's identity: the provider kind (engine), the provider's own cache key
     /// (<c>{server}:{metric}[:{member}]</c>) and the analysis hour — the whole of what the compute's answer is a
@@ -147,5 +153,81 @@ public sealed class BaselineCache
         }
 
         return removed;
+    }
+}
+
+/// <summary>
+/// #9972: the baseline computes that run on a provider's own token (<see cref="PgBaselineProvider.GetOrComputeKeptAsync"/>
+/// for an unkeyed series, <see cref="PgBaselineProvider.GetKeyedChunkKeptAsync"/> for a set of keyed ones), so the detector
+/// deadline of an on-demand pass stops the detector's wait and not the compute. One compute runs at a time per
+/// <see cref="FlightKey"/>: a later caller of the same key joins it. A compute answers the entries it built, in the order of
+/// its keys: one for an unkeyed series.
+///
+/// <para><b>The limit.</b> A compute that outlives its pass holds one pooled store connection until it ends, for at most
+/// <see cref="PgBaselineProvider.SharedComputeTimeout"/>. One pass can leave one per detector it was running
+/// (<see cref="PgAnomalyDetector.MaxDetectorParallelism"/> on a SQL Server target, one on a PostgreSQL target, whose
+/// detectors run one after another), and each call for another hour starts new keys, so without a limit a run of calls
+/// could hold more connections than the pool has. <see cref="MaxInFlight"/> computes run at once across every provider
+/// that shares this object, of both engines. A caller past it gets null and computes on its own token.</para>
+/// </summary>
+internal sealed class KeptBaselineComputes
+{
+    /// <summary>The most computes that run on a provider's own token at once: one pass's detectors' worth.</summary>
+    internal const int MaxInFlight = PgAnomalyDetector.MaxDetectorParallelism;
+
+    /// <summary>A compute's identity: the store it reads (the data source, so two roles never join each other's compute),
+    /// the provider kind, the provider's cache key (for a keyed set, <see cref="PgBaselineProvider.KeyedFlightKeyFor"/>) and
+    /// the key time.</summary>
+    internal readonly record struct FlightKey(object Store, string Kind, string CacheKey, DateTime KeyTime);
+
+    private readonly ConcurrentDictionary<FlightKey, Lazy<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>>> _flights = new();
+    private int _inFlight;
+
+    /// <summary>How many computes hold a slot right now.</summary>
+    internal int InFlight => Volatile.Read(ref _inFlight);
+
+    /// <summary>The computes running right now. A test waits on these instead of on a clock.</summary>
+    internal Task[] Running() => _flights.Values.Where(flight => flight.IsValueCreated).Select(flight => (Task)flight.Value).ToArray();
+
+    /// <summary>
+    /// The compute already running for <paramref name="key"/>, or <paramref name="compute"/> started for it when a slot
+    /// is free. Null when <see cref="MaxInFlight"/> computes are running and none of them is this key's. The slot is given
+    /// back when the compute ends, whatever its outcome.
+    /// </summary>
+    internal Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>? JoinOrStart(
+        FlightKey key, Func<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>> compute)
+    {
+        if (_flights.TryGetValue(key, out var running))
+        {
+            return running.Value;
+        }
+
+        if (Interlocked.Increment(ref _inFlight) > MaxInFlight)
+        {
+            Interlocked.Decrement(ref _inFlight);
+            return null;
+        }
+
+        var mine = new Lazy<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>>(() => Task.Run(async () =>
+        {
+            try
+            {
+                return await compute();
+            }
+            finally
+            {
+                _flights.TryRemove(key, out _);
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }, CancellationToken.None));
+
+        var flight = _flights.GetOrAdd(key, mine);
+        if (!ReferenceEquals(flight, mine))
+        {
+            /* Another caller started this key's compute first: this one joins it and holds no slot. */
+            Interlocked.Decrement(ref _inFlight);
+        }
+
+        return flight.Value;
     }
 }
