@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -323,14 +324,16 @@ LIMIT 100";
     /// the whole read, and a pass that reads its databases in batches lets go of the store's lock between them.
     /// </summary>
     internal static async Task<List<RankedPlanRegression>> ReadRankedPlanRegressionCandidatesAsync(
-        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, IReadOnlyList<string>? databases)
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, IReadOnlyList<string>? databases,
+        PlanRegressionCostWindow? window = null)
     {
+        var scan = window ?? PlanRegressionCostWindow.Exact(context);
         var candidates = new List<RankedPlanRegression>();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        cmd.Parameters.Add(new DuckDBParameter { Value = scan.ScanStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = scan.ScanEnd });
         /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
            primary stay in the window, so the read skips those databases. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
@@ -440,7 +443,7 @@ LIMIT 100";
     internal static async Task<(List<T> Rows, PlanRegressionStatementTime Time)> ReadPlanRegressionByDatabaseAsync<T>(
         DuckDbInitializer duckDb, AnalysisContext context, ArchiveReadPlan plan,
         Func<DuckDBConnection, IReadOnlyList<string>?, Task<List<T>>> readOne, Action? betweenReads, ISet<string>? onlyDatabases = null,
-        TimeSpan? holdTarget = null)
+        TimeSpan? holdTarget = null, PlanRegressionCostWindow? window = null)
     {
         var time = default(PlanRegressionStatementTime);
         List<PlanRegressionDatabase> databases;
@@ -453,7 +456,7 @@ LIMIT 100";
             await connection.OpenAsync(context.CancellationToken);
 
             var statementFrom = Stopwatch.GetTimestamp();
-            databases = await ReadPlanRegressionDatabasesAsync(connection, context, plan);
+            databases = await ReadPlanRegressionDatabasesAsync(connection, context, plan, window);
             time.Statement += Stopwatch.GetElapsedTime(statementFrom);
             time.Held = Stopwatch.GetElapsedTime(heldFrom);
         }
@@ -505,28 +508,75 @@ LIMIT 100";
     }
 
     /// <summary>
+    /// The window the cost statement scans, and what keys the keep for it (#9957). <c>ScanStart</c> is the lower bound on
+    /// <c>last_execution_time</c> (the window start less 14 days) and <c>ScanEnd</c> the upper bound on <c>collection_time</c>.
+    /// </summary>
+    internal readonly record struct PlanRegressionCostWindow(DateTime ScanStart, DateTime ScanEnd)
+    {
+        /// <summary>The context's own window: an anchored read, or a read whose store held no recent row to clamp to.</summary>
+        internal static PlanRegressionCostWindow Exact(AnalysisContext context) =>
+            new(context.TimeRangeStart.AddDays(-14), context.TimeRangeEnd);
+    }
+
+    /// <summary>How far before a clock window's end the newest row is looked for. A server with no row that recent keeps its exact window.</summary>
+    internal static readonly TimeSpan PlanRegressionCostNewestRowLookback = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The window the cost statement runs over for <paramref name="context"/> (#9957). An anchored read, or any read whose end is not the
+    /// clock, keeps its exact window. A read whose end is the clock ends at the newest <c>collection_time</c> the store holds for the server
+    /// at or before it: the statement cannot see a row after that, so the rows are the same, and the end no longer moves from one read to the
+    /// next, so the reads between two collections share one scan. The start follows from that end and the window's length. The newest row is
+    /// read through the archive view, looking back <see cref="PlanRegressionCostNewestRowLookback"/> so the read prunes the archive; a store
+    /// with no row that recent for the server, or a read that fails, keeps the exact window. The key does not see rows stored below the newest
+    /// <c>collection_time</c> (the backfill worker's, a repair's deletes), so those reach a read once the keep's lifetime ends.
+    /// </summary>
+    internal async Task<PlanRegressionCostWindow> ResolvePlanRegressionCostWindowAsync(AnalysisContext context)
+    {
+        var exact = PlanRegressionCostWindow.Exact(context);
+        if (!context.WindowEndsAtClock) return exact;
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(context.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT max(collection_time) FROM v_query_store_stats WHERE server_id = $1 AND collection_time <= $2 AND collection_time >= $3";
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd - PlanRegressionCostNewestRowLookback });
+            var value = await cmd.ExecuteScalarAsync(context.CancellationToken);
+            if (value is not DateTime at) return exact;
+            var newest = DateTime.SpecifyKind(at, DateTimeKind.Utc);
+            return new PlanRegressionCostWindow(newest - (context.TimeRangeEnd - context.TimeRangeStart) - TimeSpan.FromDays(14), newest);
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* record: false logs the failure without marking the family unread: the read keeps its exact window, so its rows are whole. */
+            ReportCollectionFailure(ex, context, record: false);
+            return exact;
+        }
+    }
+
+    /// <summary>
     /// The cost statement's candidates in its own order and cut (#9353): the CPU lost, the factor second, the row's key last, the first
     /// <see cref="PlanRegressionCostCap"/> (#9888). Read in batches of databases (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the
     /// same rows in the same order as one statement over every database gives, ties included. The rows the statement returned beyond the cap
-    /// are counted in <see cref="PlanRegressionStatementTime.LeftOut"/>. A read for a server, window start, window end and secondary-database
-    /// scope that was made under <see cref="PlanRegressionCostKeepFor"/> ago is answered from the rows it returned, without the statement
-    /// (#9888): the periodic pass, a user's read and a repeated compare of one anchored window share one scan. The kept rows are the
-    /// statement's whole result, so the cap is applied to them on every read.
+    /// are counted in <see cref="PlanRegressionStatementTime.LeftOut"/>. A read for a server, scan window and secondary-database scope that
+    /// was made under <see cref="PlanRegressionCostKeep.KeepFor"/> ago is answered from the rows it returned, without the statement
+    /// (#9888): the periodic pass, a user's read and a repeated compare share one scan. The keep belongs to the store, so every collector
+    /// on it shares it (#9957). The kept rows are the statement's whole result, so the cap is applied to them on every read.
+    /// <paramref name="window"/> is the window <see cref="ResolvePlanRegressionCostWindowAsync"/> returned, with <paramref name="plan"/> planned
+    /// for its start; null resolves it here.
     /// </summary>
     internal async Task<(List<PlanRegressionCandidate> Candidates, PlanRegressionStatementTime Time)> ReadPlanRegressionCostAsync(
-        AnalysisContext context, ArchiveReadPlan plan)
+        AnalysisContext context, ArchiveReadPlan plan, PlanRegressionCostWindow? window = null)
     {
         var cap = PlanRegressionCostCapForTests ?? PlanRegressionCostCap;
+        var scan = window ?? await ResolvePlanRegressionCostWindowAsync(context);
         var secondaries = context.SecondaryReplicaDatabases is { Count: > 0 } set ? string.Join('\u001f', set.OrderBy(d => d, StringComparer.Ordinal)) : "";
-        var key = new PlanRegressionCostKey(context.ServerId, context.TimeRangeStart.AddDays(-14), context.TimeRangeEnd, secondaries);
-        var now = Stopwatch.GetTimestamp();
-        List<RankedPlanRegression>? ranked = null;
-        lock (_planRegressionCostKeep)
-        {
-            foreach (var expired in _planRegressionCostKeep.Where(e => Stopwatch.GetElapsedTime(e.Value.At, now) > PlanRegressionCostKeepFor).Select(e => e.Key).ToList())
-                _planRegressionCostKeep.Remove(expired);
-            if (_planRegressionCostKeep.TryGetValue(key, out var kept)) ranked = kept.Rows;
-        }
+        var key = new PlanRegressionCostKeep.Key(context.ServerId, scan.ScanStart, scan.ScanEnd, secondaries);
+        var keep = CostKeep;
+        var ranked = keep.TryGet(key);
 
         var time = default(PlanRegressionStatementTime);
         if (ranked is null)
@@ -534,14 +584,9 @@ LIMIT 100";
             Interlocked.Increment(ref _planRegressionCostStatementRuns);
             (ranked, time) = await ReadPlanRegressionByDatabaseAsync(
                 _duckDb, context, plan,
-                (connection, databases) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, databases),
-                AfterPlanRegressionDatabaseReadForTests, holdTarget: PlanRegressionHoldTargetForTests);
-            lock (_planRegressionCostKeep)
-            {
-                if (_planRegressionCostKeep.Count >= PlanRegressionCostKeepEntries)
-                    _planRegressionCostKeep.Remove(_planRegressionCostKeep.OrderBy(e => e.Value.At).First().Key);
-                _planRegressionCostKeep[key] = new KeptPlanRegressionCost(ranked, Stopwatch.GetTimestamp());
-            }
+                (connection, databases) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, databases, scan),
+                AfterPlanRegressionDatabaseReadForTests, holdTarget: PlanRegressionHoldTargetForTests, window: scan);
+            time.KeepHitsSincePreviousStatement = keep.Store(key, ranked);
         }
         else
         {
@@ -563,17 +608,18 @@ LIMIT 100";
     /// <summary>A test seam: the cap, so a test can set it below the candidates it seeds. Null in production.</summary>
     internal int? PlanRegressionCostCapForTests { get; set; }
 
-    /// <summary>#9888: how long a cost read's rows answer a repeat of the same read.</summary>
-    internal static readonly TimeSpan PlanRegressionCostKeepFor = TimeSpan.FromMinutes(2);
+    private PlanRegressionCostKeep? _costKeep;
 
-    /// <summary>#9888: the most cost reads kept at once (one per server and window), the oldest dropped first.</summary>
-    internal const int PlanRegressionCostKeepEntries = 16;
+    /// <summary>
+    /// The keep this collector reads and fills. A collector built on its own holds a private keep; <see cref="AnalysisService"/> sets the
+    /// store's keep (<see cref="PlanRegressionCostKeep.For"/>) on the collector it builds, so the pass and every MCP call share one (#9957).
+    /// </summary>
+    internal PlanRegressionCostKeep CostKeep
+    {
+        get => _costKeep ??= new PlanRegressionCostKeep();
+        set => _costKeep = value;
+    }
 
-    private readonly record struct PlanRegressionCostKey(int ServerId, DateTime WindowStart, DateTime WindowEnd, string Secondaries);
-
-    private readonly record struct KeptPlanRegressionCost(List<RankedPlanRegression> Rows, long At);
-
-    private readonly Dictionary<PlanRegressionCostKey, KeptPlanRegressionCost> _planRegressionCostKeep = new();
     private int _planRegressionCostStatementRuns;
 
     /// <summary>A test seam: how many times the cost statement ran for this collector, a read answered from the keep not counted (#9888).</summary>
@@ -587,8 +633,9 @@ LIMIT 100";
     /// read under its own short hold of the store's read lock.
     /// </summary>
     internal static async Task<List<PlanRegressionDatabase>> ReadPlanRegressionDatabasesAsync(
-        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan)
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, PlanRegressionCostWindow? window = null)
     {
+        var scan = window ?? PlanRegressionCostWindow.Exact(context);
         var databases = new List<PlanRegressionDatabase>();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = plan.Apply(@"
@@ -602,8 +649,8 @@ AND   database_name IS NOT NULL
 GROUP BY database_name
 ORDER BY database_name");
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        cmd.Parameters.Add(new DuckDBParameter { Value = scan.ScanStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = scan.ScanEnd });
         using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-databases", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {

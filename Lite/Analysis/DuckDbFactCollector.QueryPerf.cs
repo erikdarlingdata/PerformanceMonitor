@@ -415,6 +415,9 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
         /// <summary>#9888: true when the rows came from the kept result of an earlier read, so no statement ran.</summary>
         public bool FromKeep;
+
+        /// <summary>#9957: on a read that ran the statement, how many reads the keep answered since the previous statement was stored (the hit rate, since a keep answer is too fast to log).</summary>
+        public int KeepHitsSincePreviousStatement;
     }
 
     /// <summary>
@@ -462,6 +465,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// <summary>#9888: what the cost read did beyond its time: the rows left out by the cap, an answer from the kept result, or a read that found nothing.</summary>
     private static string DescribeCostRead(PlanRegressionStatementTime cost) =>
         (cost.FromKeep ? " answered from an earlier read" : "")
+        + (cost.KeepHitsSincePreviousStatement > 0 ? $" (the keep answered {cost.KeepHitsSincePreviousStatement} reads since the previous statement)" : "")
         + (cost.LeftOut > 0 ? $", {cost.LeftOut} left out past the cap of {PlanRegressionCostCap}" : "")
         + (cost.Rows == 0 && !cost.FromKeep ? " (found no candidate, so this is the floor of the statement's scan)" : "");
 
@@ -494,7 +498,10 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             var failuresRead = default(PlanRegressionStatementTime);
             var costRead = default(PlanRegressionStatementTime);
 
-            var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
+            /* #9957: the cost statement's window first, because the archive plan must be taken for its start: a read whose end is the clock
+               ends at the newest row the store holds, so its start is earlier than the context's. */
+            var costWindow = await ResolvePlanRegressionCostWindowAsync(context);
+            var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", costWindow.ScanStart, context.CancellationToken);
             var archivePlanTime = Stopwatch.GetElapsedTime(passStarted);
 
             /* #9353: one lock acquisition and one connection per statement, not one across both. The two reads are independent
@@ -528,7 +535,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             AfterPlanRegressionFailuresReadForTests?.Invoke();
 
             /* #9353: the cost statement is the pass's longest hold of the read lock, so it is read one database at a time. */
-            (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan);
+            (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan, costWindow);
             costRead.Rows = candidates.Count;
 
             /* #9888: a read that found nothing raises no fact, so the reply carries the floor of its scan through the context. */

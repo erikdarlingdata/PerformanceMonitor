@@ -394,7 +394,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         foreach (var cap in new int?[] { DuckDbFactCollector.PlanRegressionCandidateLimit, null })
         {
             var effectiveCap = cap ?? DuckDbFactCollector.PlanRegressionCostCap;
-            var (inTurn, _) = await new DuckDbFactCollector(_duckDb) { PlanRegressionCostCapForTests = cap }.ReadPlanRegressionCostAsync(context, plan);
+            var (inTurn, _) = await new DuckDbFactCollector(_duckDb) { CostKeep = new PlanRegressionCostKeep(), PlanRegressionCostCapForTests = cap }.ReadPlanRegressionCostAsync(context, plan);
             var keptAtCap = expected.Take(effectiveCap).ToList();
             Assert.Equal(keptAtCap, inTurn.Select(c => (c.DatabaseName, c.QueryId)).ToList());
         }
@@ -439,7 +439,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         var context = Context();
         var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), TestContext.Current.CancellationToken);
 
-        var (inTurn, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, plan);
+        var (inTurn, _) = await new DuckDbFactCollector(_duckDb) { CostKeep = new PlanRegressionCostKeep() }.ReadPlanRegressionCostAsync(context, plan);
         var oneStatement = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
 
         var expected = ReplicaTieOrder.Select(r => (r.Database, r.QueryId, r.LatestPlanId)).ToList();
