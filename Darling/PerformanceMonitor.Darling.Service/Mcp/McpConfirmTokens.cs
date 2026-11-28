@@ -64,6 +64,19 @@ internal sealed class McpConfirmTokens
     }
 
     /// <summary>
+    /// Whether <paramref name="value"/> is held for <paramref name="scope"/> now: issued by this process for that scope, not yet used and
+    /// not expired. It spends nothing, and says nothing about the plan (<see cref="TryRedeem"/> checks that when the call acts).
+    /// </summary>
+    internal bool IsIssued(string value, string scope)
+    {
+        lock (_gate)
+        {
+            Prune(_clock.GetUtcNow());
+            return _issued.TryGetValue(value, out var held) && string.Equals(held.Scope, scope, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// True once, for a value this process issued for exactly this scope and plan less than <see cref="Lifetime"/> ago; the value is then spent.
     /// A value presented for another scope or plan is refused and stays valid for the one it was issued for.
     /// </summary>

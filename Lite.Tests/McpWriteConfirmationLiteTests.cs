@@ -29,11 +29,14 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// Lite's two destructive write tools, <c>delete_mute_rule</c> and <c>remove_server</c>, ask the user to confirm before they run (#9562),
-/// through Lite's REAL <see cref="McpHostService"/> (its pipeline, its stateless endpoint, its served tool set) spoken to over HTTP. A
-/// client that negotiated the 2026-07-28 multi round-trip flow and declares elicitation gets one question, and nothing changes until
-/// the call comes back with an answer. Yes runs the tool. No, a dismissed question and a cleared box answer <c>declined</c> and change
-/// nothing. Every other client runs as before.
+/// Lite's destructive write tools ask the user to confirm before they run (#9562). <c>delete_mute_rule</c> and <c>remove_server</c> are
+/// run end to end here (a mute rule store and a server list to look at). <c>delete_notification_route</c>, <c>delete_query_tag</c>,
+/// <c>delete_query_tag_rule</c> and <c>reset_collector_schedules</c> are asked and declined the same way. It goes through Lite's REAL
+/// <see cref="McpHostService"/> (its pipeline, its stateless endpoint, its served tool set) spoken to over HTTP. A client that
+/// negotiated the 2026-07-28 multi round-trip flow and declares elicitation gets one question, and nothing changes until the call
+/// comes back with an answer that echoes the question's state. Yes runs the tool, once. No, a dismissed question and a cleared box
+/// answer <c>declined</c> and change nothing. An answer with no state, or a state of another call, an altered state or an answered
+/// one, is asked again. Every other client runs as before.
 /// </summary>
 [InMemoryCredentials]
 public sealed class McpWriteConfirmationLiteTests : IDisposable
@@ -165,10 +168,11 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
     /// <summary>
     /// A tools/call the way a 2026-07-28 client sends one: the protocol version and the client's capabilities travel in the request's own
     /// <c>_meta</c> (the stateless endpoint has no session to hold them). <paramref name="negotiate"/> false sends a bare call, as an
-    /// older client does. <paramref name="inputResponse"/> is the answer a client sends back when it asks again.
+    /// older client does. <paramref name="inputResponse"/> is the answer a client sends back when it asks again, and
+    /// <paramref name="requestState"/> is the state the question carried, which the client echoes with it.
     /// </summary>
     private static async Task<string> CallAsync(
-        Running host, string tool, string argumentsJson, bool negotiate, string? inputResponse = null, bool elicitation = true)
+        Running host, string tool, string argumentsJson, bool negotiate, string? inputResponse = null, bool elicitation = true, string? requestState = null)
     {
         var meta = negotiate
             ? "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
@@ -176,7 +180,8 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
               + "\"io.modelcontextprotocol/clientCapabilities\":" + (elicitation ? "{\"elicitation\":{\"form\":{}}}" : "{}") + "},"
             : string.Empty;
         var responses = inputResponse is null ? string.Empty : "\"inputResponses\":{\"" + McpWriteConfirmation.InputKey + "\":" + inputResponse + "},";
-        var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{" + meta + responses
+        var state = requestState is null ? string.Empty : "\"requestState\":\"" + requestState + "\",";
+        var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{" + meta + responses + state
             + "\"name\":\"" + tool + "\",\"arguments\":" + argumentsJson + "}}";
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/")
@@ -213,6 +218,22 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
             : null;
     }
 
+    /// <summary>The <c>requestState</c> a question carries, which the client echoes with its answer; null when the call asked nothing.</summary>
+    private static string? StateOf(string body)
+    {
+        var root = RootOf(body);
+        return root.TryGetProperty("result", out var result) && result.TryGetProperty("requestState", out var state) ? state.GetString() : null;
+    }
+
+    /// <summary>Asks the call, takes the state the question carried, and returns it (the first call of a real client).</summary>
+    private static async Task<string> AskAsync(Running host, string tool, string arguments)
+    {
+        var asked = await CallAsync(host, tool, arguments, negotiate: true);
+        return StateOf(asked) ?? throw new Xunit.Sdk.XunitException("The call was not asked, or its question carried no state: " + asked);
+    }
+
+    private const string Yes = "{\"action\":\"accept\",\"content\":{\"confirm\":true}}";
+
     /// <summary>The status word of a finished call's own JSON answer, or null when the call did not finish with a JSON answer.</summary>
     private static string? StatusOf(string body)
     {
@@ -234,9 +255,14 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
         }
     }
 
-    private static bool Present(Running host, string tool) => tool == DeleteRule
-        ? host.Rules.Held.Any(r => r.Id == RuleId)
-        : host.Servers.GetAllServers().Any(s => s.DisplayName == ServerLabel);
+    /// <summary>The two tools whose effect this host can see (a mute rule store and a server list). The other four answer a question or a
+    /// <c>declined</c> result, and a tool that had run would answer its own status, so those are told apart by the status.</summary>
+    private static bool Present(Running host, string tool) => tool switch
+    {
+        DeleteRule => host.Rules.Held.Any(r => r.Id == RuleId),
+        RemoveServer => host.Servers.GetAllServers().Any(s => s.DisplayName == ServerLabel),
+        _ => true,
+    };
 
     public static IEnumerable<object[]> BothTools() =>
     [
@@ -244,10 +270,28 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
         [RemoveServer, ServerArguments, ServerLabel],
     ];
 
+    /// <summary>Every tool that asks: the tool, a call that would change something, what its question names, and another call to the same tool.</summary>
+    public static IEnumerable<object[]> AllTools() =>
+    [
+        [DeleteRule, RuleArguments, RuleId, "{\"rule_id\":\"other-rule\"}"],
+        [RemoveServer, ServerArguments, ServerLabel, "{\"server_name\":\"Other-Server\"}"],
+        ["delete_notification_route", "{\"route_id\":41}", "notification route 41", "{\"route_id\":42}"],
+        ["delete_query_tag", "{\"tag_id\":12}", "query tag 12", "{\"tag_id\":13}"],
+        ["delete_query_tag_rule", "{\"rule_id\":13}", "query tag rule 13", "{\"rule_id\":14}"],
+        ["reset_collector_schedules", "{\"server_name\":\"" + ServerLabel + "\"}", ServerLabel, "{\"server_name\":\"Other-Server\"}"],
+        ["reset_collector_schedules", "{}", "fleet-wide", "{\"server_name\":\"" + ServerLabel + "\"}"],
+    ];
+
+    public static IEnumerable<object[]> Declines() =>
+        from row in AllTools()
+        from answer in new[] { "{\"action\":\"decline\"}", "{\"action\":\"cancel\"}", "{\"action\":\"accept\",\"content\":{\"confirm\":false}}" }
+        select new object[] { row[0], row[1], answer };
+
     [Theory]
-    [MemberData(nameof(BothTools))]
-    public async Task ANegotiatingClient_IsAskedOneQuestion_ThatNamesWhatWillChange_AndNothingChangesYet(string tool, string arguments, string named)
+    [MemberData(nameof(AllTools))]
+    public async Task ANegotiatingClient_IsAskedOneQuestion_ThatNamesWhatWillChange_AndNothingChangesYet(string tool, string arguments, string named, string other)
     {
+        _ = other;
         var host = await StartAsync();
 
         var answer = await CallAsync(host, tool, arguments, negotiate: true);
@@ -256,6 +300,7 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
         Assert.NotNull(question);
         Assert.Contains(named, question, StringComparison.Ordinal);
         Assert.True(Present(host, tool), "the question was asked but the tool had already run");
+        Assert.False(string.IsNullOrEmpty(StateOf(answer)), "the question carried no state for the answer to echo");
     }
 
     [Theory]
@@ -264,8 +309,9 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
     {
         _ = named;
         var host = await StartAsync();
+        var state = await AskAsync(host, tool, arguments);
 
-        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: "{\"action\":\"accept\",\"content\":{\"confirm\":true}}");
+        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes, requestState: state);
 
         Assert.Null(QuestionOf(answer));
         Assert.Equal(tool == DeleteRule ? "deleted" : "removed", StatusOf(answer));
@@ -273,22 +319,78 @@ public sealed class McpWriteConfirmationLiteTests : IDisposable
     }
 
     [Theory]
-    [InlineData(DeleteRule, RuleArguments, "{\"action\":\"decline\"}")]
-    [InlineData(DeleteRule, RuleArguments, "{\"action\":\"cancel\"}")]
-    [InlineData(DeleteRule, RuleArguments, "{\"action\":\"accept\",\"content\":{\"confirm\":false}}")]
-    [InlineData(RemoveServer, ServerArguments, "{\"action\":\"decline\"}")]
-    [InlineData(RemoveServer, ServerArguments, "{\"action\":\"cancel\"}")]
-    [InlineData(RemoveServer, ServerArguments, "{\"action\":\"accept\",\"content\":{\"confirm\":false}}")]
+    [MemberData(nameof(Declines))]
     public async Task NoADismissedQuestionAndAClearedBox_AnswerDeclined_AndChangeNothing(string tool, string arguments, string inputResponse)
     {
         var host = await StartAsync();
+        var state = await AskAsync(host, tool, arguments);
 
-        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: inputResponse);
+        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: inputResponse, requestState: state);
 
         var result = RootOf(answer).GetProperty("result");
         Assert.False(result.TryGetProperty("isError", out var isError) && isError.GetBoolean());
         Assert.Equal("declined", StatusOf(answer));
         Assert.True(Present(host, tool), "a no ran the tool");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllTools))]
+    public async Task AFirstCallThatAlreadyCarriesAYes_IsAskedAndRunsNothing(string tool, string arguments, string named, string other)
+    {
+        _ = (named, other);
+        var host = await StartAsync();
+
+        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes);
+
+        Assert.NotNull(QuestionOf(answer));
+        Assert.True(Present(host, tool), "an answer nobody asked for ran the tool");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllTools))]
+    public async Task AYesWithTheStateOfAnotherCall_IsAskedAgain_AndRunsNothing(string tool, string arguments, string named, string other)
+    {
+        _ = named;
+        var host = await StartAsync();
+        var stateOfOther = await AskAsync(host, tool, other);
+
+        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes, requestState: stateOfOther);
+
+        Assert.NotNull(QuestionOf(answer));
+        Assert.True(Present(host, tool), "a state asked for other arguments let this call run");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllTools))]
+    public async Task AYesWithATamperedState_IsAskedAgain_AndRunsNothing(string tool, string arguments, string named, string other)
+    {
+        _ = (named, other);
+        var host = await StartAsync();
+        var state = await AskAsync(host, tool, arguments);
+        var tampered = (state[0] == 'A' ? 'B' : 'A') + state[1..];
+
+        var answer = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes, requestState: tampered);
+
+        Assert.NotNull(QuestionOf(answer));
+        Assert.True(Present(host, tool), "an altered state let the call run");
+    }
+
+    [Theory]
+    [MemberData(nameof(BothTools))]
+    public async Task AnAnsweredRetryReplayedWithTheSameStateAndYes_IsAskedAgain_AndRunsNothing(string tool, string arguments, string named)
+    {
+        _ = named;
+        var host = await StartAsync();
+        var state = await AskAsync(host, tool, arguments);
+        var first = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes, requestState: state);
+        Assert.Null(QuestionOf(first));
+        Assert.False(Present(host, tool), "the first yes did not run the tool");
+
+        /* A replay that ran the tool would answer the tool's own status (not_found now), not a question. */
+        var replay = await CallAsync(host, tool, arguments, negotiate: true, inputResponse: Yes, requestState: state);
+
+        Assert.NotNull(QuestionOf(replay));
+        Assert.Null(StatusOf(replay));
     }
 
     [Theory]

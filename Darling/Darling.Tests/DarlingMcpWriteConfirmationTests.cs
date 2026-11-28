@@ -153,8 +153,9 @@ public sealed class DarlingMcpWriteConfirmationTests
     public async Task ADeclinedOrDismissedQuestion_AnswersDeclined_AsANormalResult(string action)
     {
         using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
 
-        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: $"{{\"action\":\"{action}\"}}");
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: $"{{\"action\":\"{action}\"}}", requestState: state);
 
         var result = ResultOf(answer);
         Assert.False(result.TryGetProperty("isError", out var isError) && isError.GetBoolean());
@@ -167,12 +168,95 @@ public sealed class DarlingMcpWriteConfirmationTests
     public async Task AnAcceptWithTheBoxCleared_IsNo()
     {
         using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
 
         var answer = await CallAsync(
-            server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"accept\",\"content\":{\"confirm\":false}}");
+            server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"accept\",\"content\":{\"confirm\":false}}", requestState: state);
 
         using var body = JsonDocument.Parse(ResultOf(answer).GetProperty("content")[0].GetProperty("text").GetString()!);
         Assert.Equal("declined", body.RootElement.GetProperty("status").GetString());
+    }
+
+    private const string Yes = "{\"action\":\"accept\",\"content\":{\"confirm\":true}}";
+
+    /// <summary>A call that ran would answer the tool's own result. A question, with a new state, means it did not run.</summary>
+    private static void AssertAskedAgain(string answer, string why)
+    {
+        Assert.True(QuestionOf(answer) is not null, why + ": " + answer);
+        Assert.False(string.IsNullOrEmpty(StateOf(answer)), "the new question carried no state");
+    }
+
+    [Theory]
+    [InlineData("delete_known_pattern", "{\"id\":77}")]
+    [InlineData("remove_server", "{\"server_name\":\"sql-prod-7\"}")]
+    [InlineData("rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}")]
+    public async Task AFirstCallThatAlreadyCarriesAYes_IsAsked_AndRunsNothing(string tool, string arguments)
+    {
+        using var server = await Build();
+
+        var answer = await CallAsync(server, tool, arguments, negotiate: true, inputResponse: Yes);
+
+        AssertAskedAgain(answer, "an answer nobody asked for ran the tool");
+    }
+
+    [Fact]
+    public async Task AYesWithAStateAskedForOtherArguments_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":78}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(answer, "a state asked for pattern 77 let pattern 78 run");
+        Assert.Contains("known pattern 78", QuestionOf(answer), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AYesWithAStateAskedForAnotherTool_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(server, "delete_custom_view", "{\"view_id\":77}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(answer, "a state asked for another tool let this one run");
+    }
+
+    [Fact]
+    public async Task AYesWithATamperedState_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+        var tampered = (state[0] == 'A' ? 'B' : 'A') + state[1..];
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: tampered);
+
+        AssertAskedAgain(answer, "an altered state let the call run");
+    }
+
+    [Fact]
+    public async Task AYesWithNoState_OrJunkForAState_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+
+        var none = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: null);
+        var junk = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: "not-a-state");
+
+        AssertAskedAgain(none, "an answer with no state ran the tool");
+        AssertAskedAgain(junk, "an answer with a junk state ran the tool");
+    }
+
+    [Fact]
+    public async Task ANoOnAState_SpendsIt_SoAYesOnTheSameStateIsAskedAgain()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+        var no = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"decline\"}", requestState: state);
+        Assert.Null(QuestionOf(no));
+
+        var yes = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(yes, "a yes after a no on the same state ran the tool");
     }
 
     [Fact]
@@ -189,10 +273,11 @@ public sealed class DarlingMcpWriteConfirmationTests
     /// <summary>
     /// A tools/call the way a 2026-07-28 client sends one: the protocol version and the client's capabilities travel in the request's own
     /// <c>_meta</c> (the stateless endpoint has no session to hold them). <paramref name="negotiate"/> false sends a bare call, as an
-    /// older client does. <paramref name="inputResponse"/> is the answer a client sends back when it asks again.
+    /// older client does. <paramref name="inputResponse"/> is the answer a client sends back when it asks again, and
+    /// <paramref name="requestState"/> is the state the question carried, which the client echoes with it.
     /// </summary>
     internal static async Task<string> CallAsync(
-        TestServer server, string tool, string argumentsJson, bool negotiate, string? inputResponse = null, bool elicitation = true)
+        TestServer server, string tool, string argumentsJson, bool negotiate, string? inputResponse = null, bool elicitation = true, string? requestState = null)
     {
         var meta = negotiate
             ? "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
@@ -200,7 +285,8 @@ public sealed class DarlingMcpWriteConfirmationTests
               + "\"io.modelcontextprotocol/clientCapabilities\":" + (elicitation ? "{\"elicitation\":{\"form\":{}}}" : "{}") + "},"
             : string.Empty;
         var responses = inputResponse is null ? string.Empty : "\"inputResponses\":{\"" + DarlingMcpWriteConfirmation.InputKey + "\":" + inputResponse + "},";
-        var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{" + meta + responses
+        var state = requestState is null ? string.Empty : "\"requestState\":\"" + requestState + "\",";
+        var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{" + meta + responses + state
             + "\"name\":\"" + tool + "\",\"arguments\":" + argumentsJson + "}}";
 
         var context = await server.SendAsync(c =>
@@ -249,6 +335,23 @@ public sealed class DarlingMcpWriteConfirmationTests
         }
 
         return request.Clone();
+    }
+
+    /// <summary>The <c>requestState</c> a question carries, which the client echoes with its answer; null when the call asked nothing.</summary>
+    internal static string? StateOf(string body)
+    {
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        return document.RootElement.TryGetProperty("result", out var result) && result.TryGetProperty("requestState", out var state)
+            ? state.GetString()
+            : null;
+    }
+
+    /// <summary>Asks the call and returns the state its question carried (the first call of a real client).</summary>
+    internal static async Task<string> AskAsync(TestServer server, string tool, string argumentsJson)
+    {
+        var asked = await CallAsync(server, tool, argumentsJson, negotiate: true);
+        return StateOf(asked) ?? throw new Xunit.Sdk.XunitException("The call was not asked, or its question carried no state: " + asked);
     }
 
     internal static string? QuestionOf(string body) =>

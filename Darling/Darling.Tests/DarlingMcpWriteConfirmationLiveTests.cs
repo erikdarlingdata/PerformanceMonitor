@@ -105,14 +105,57 @@ public sealed class DarlingMcpWriteConfirmationLiveTests
 
             foreach (var no in new[] { "{\"action\":\"decline\"}", "{\"action\":\"cancel\"}", "{\"action\":\"accept\",\"content\":{\"confirm\":false}}" })
             {
-                var declined = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: no);
+                var noState = await DarlingMcpWriteConfirmationTests.AskAsync(server, "delete_server_tag", args);
+                var declined = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: no, requestState: noState);
                 Assert.Equal("declined", StatusOf(declined));
                 Assert.Equal(1, await TagCountAsync(owner, tag, ct));
             }
 
-            var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: Yes);
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "delete_server_tag", args);
+            var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: Yes, requestState: state);
             Assert.Equal("deleted", StatusOf(yes));
             Assert.Equal(0, await TagCountAsync(owner, tag, ct));
+        });
+    }
+
+    /// <summary>A yes counts once: the same retry sent again with the same state and yes is asked again, and the tool does not run a second time
+    /// (a second run would answer <c>not_found</c> here, and a tool with a side effect would repeat it).</summary>
+    [Fact]
+    public async Task AnAnsweredRetry_ReplayedWithTheSameStateAndYes_IsAskedAgain_AndRunsNothing()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            var tag = await AddServerTagAsync(owner, "Replayed", ct);
+            var args = $"{{\"tag_id\":{tag}}}";
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "delete_server_tag", args);
+            var first = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: Yes, requestState: state);
+            Assert.Equal("deleted", StatusOf(first));
+
+            var replay = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", args, negotiate: true, inputResponse: Yes, requestState: state);
+
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(replay));
+            Assert.Equal(0, await TagCountAsync(owner, tag, ct));
+        });
+    }
+
+    /// <summary>The question was asked of one call. A yes echoing its state on a call for another tag deletes nothing, and an answer that
+    /// carries no state (a client that skipped the first call) deletes nothing either.</summary>
+    [Fact]
+    public async Task AYesOnlyCountsForTheCallThatWasAsked_NotForAnotherRowNorForNoQuestionAtAll()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            var asked = await AddServerTagAsync(owner, "Asked", ct);
+            var other = await AddServerTagAsync(owner, "Other", ct);
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "delete_server_tag", $"{{\"tag_id\":{asked}}}");
+
+            var forOther = await DarlingMcpWriteConfirmationTests.CallAsync(
+                server, "delete_server_tag", $"{{\"tag_id\":{other}}}", negotiate: true, inputResponse: Yes, requestState: state);
+            var noState = await DarlingMcpWriteConfirmationTests.CallAsync(server, "delete_server_tag", $"{{\"tag_id\":{asked}}}", negotiate: true, inputResponse: Yes);
+
+            Assert.Contains($"server tag {other}", DarlingMcpWriteConfirmationTests.QuestionOf(forOther), StringComparison.Ordinal);
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(noState));
+            Assert.Equal(2, await TagCountAsync(owner, asked, ct) + await TagCountAsync(owner, other, ct));
         });
     }
 
@@ -168,26 +211,80 @@ public sealed class DarlingMcpWriteConfirmationLiveTests
         });
     }
 
+    private const string PurgeQueued = "SELECT count(*) FROM config.config_command WHERE command_type = 'purge_now'";
+
     [Fact]
     public async Task APurge_NamesTheRetentionItApplies_YesQueuesItOnce_NoQueuesNothing()
     {
         await WithStoreAsync(async (server, owner, ct) =>
         {
             const string args = "{\"retention_days\":30}";
-            const string queued = "SELECT count(*) FROM config.config_command WHERE command_type = 'purge_now'";
 
             var asked = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true);
             Assert.Contains("30 days for", DarlingMcpWriteConfirmationTests.QuestionOf(asked), StringComparison.Ordinal);
-            Assert.Equal(0, await ScalarAsync(owner, queued, ct));
+            Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
 
+            var noState = await DarlingMcpWriteConfirmationTests.AskAsync(server, "purge_now", args);
             var declined = await DarlingMcpWriteConfirmationTests.CallAsync(
-                server, "purge_now", args, negotiate: true, inputResponse: "{\"action\":\"decline\"}");
+                server, "purge_now", args, negotiate: true, inputResponse: "{\"action\":\"decline\"}", requestState: noState);
             Assert.Equal("declined", StatusOf(declined));
-            Assert.Equal(0, await ScalarAsync(owner, queued, ct));
+            Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
 
-            var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes);
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "purge_now", args);
+            var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes, requestState: state);
             Assert.True(StatusOf(yes) == "queued", AnswerOf(yes));
-            Assert.Equal(1, await ScalarAsync(owner, queued, ct));
+            Assert.Equal(1, await ScalarAsync(owner, PurgeQueued, ct));
+
+            /* The confirm value the question issued is spent by that yes: sent again, the same retry is asked again and queues nothing more. */
+            var replay = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes, requestState: state);
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(replay));
+            Assert.Equal(1, await ScalarAsync(owner, PurgeQueued, ct));
+        });
+    }
+
+    /// <summary>The #6230 contract holds through the question: a retention that changed between the question and the yes is refused as
+    /// <c>confirm_mismatch</c>, never purged, exactly as the by-hand confirm value for the old plan would be.</summary>
+    [Fact]
+    public async Task APurgeWhoseRetentionChangedBetweenTheQuestionAndTheYes_IsRefusedAsConfirmMismatch_AndQueuesNothing()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            const string args = "{}";
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "purge_now", args);
+
+            await using (var change = new NpgsqlCommand(
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'wait_stats', 1234)", owner))
+            {
+                await change.ExecuteNonQueryAsync(ct);
+            }
+
+            var yes = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", args, negotiate: true, inputResponse: Yes, requestState: state);
+
+            using var answer = JsonDocument.Parse(AnswerOf(yes));
+            Assert.Equal("refused", answer.RootElement.GetProperty("status").GetString());
+            Assert.Equal("confirm_mismatch", answer.RootElement.GetProperty("reason").GetString());
+            Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
+        });
+    }
+
+    [Fact]
+    public async Task APurgeYes_ForAnotherRetention_ATamperedState_OrNoStateAtAll_QueuesNothing()
+    {
+        await WithStoreAsync(async (server, owner, ct) =>
+        {
+            var state = await DarlingMcpWriteConfirmationTests.AskAsync(server, "purge_now", "{\"retention_days\":30}");
+
+            var otherRetention = await DarlingMcpWriteConfirmationTests.CallAsync(
+                server, "purge_now", "{\"retention_days\":31}", negotiate: true, inputResponse: Yes, requestState: state);
+            var tampered = await DarlingMcpWriteConfirmationTests.CallAsync(
+                server, "purge_now", "{\"retention_days\":30}", negotiate: true, inputResponse: Yes, requestState: state + "x");
+            var noState = await DarlingMcpWriteConfirmationTests.CallAsync(server, "purge_now", "{\"retention_days\":30}", negotiate: true, inputResponse: Yes);
+
+            using var refused = JsonDocument.Parse(AnswerOf(otherRetention));
+            Assert.Equal("confirm_mismatch", refused.RootElement.GetProperty("reason").GetString());
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(tampered));
+            Assert.NotNull(DarlingMcpWriteConfirmationTests.QuestionOf(noState));
+            Assert.Equal(0, await ScalarAsync(owner, PurgeQueued, ct));
         });
     }
 }

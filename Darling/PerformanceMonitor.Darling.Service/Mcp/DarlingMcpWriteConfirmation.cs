@@ -41,9 +41,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// still decide whether the tool is served at all, and a tool that is not served never asks.</para>
 ///
 /// <para><b>The answer.</b> Accept with the box left on is yes and the call runs. Decline, cancel, or an accept with the box cleared
-/// is no: nothing runs, and the call answers <c>status: declined</c> as a normal result, not an error. For <c>purge_now</c>, which
-/// has its own show-then-confirm step, a yes issues that step's confirm value for the plan the question showed, so one yes queues
-/// the purge.</para>
+/// is no: nothing runs, and the call answers <c>status: declined</c> as a normal result, not an error. A yes counts only on a call that
+/// echoes the question's <c>requestState</c> for this tool and these arguments, once (<see cref="McpWriteConfirmation"/>). For
+/// <c>purge_now</c>, which has its own show-then-confirm step, the state is the confirm value (#6230) issued for the plan the question
+/// showed, and a yes redeems that value, so one yes queues the purge, and a plan that changed in between is refused as
+/// <c>confirm_mismatch</c>.</para>
 /// </summary>
 internal static class DarlingMcpWriteConfirmation
 {
@@ -112,15 +114,15 @@ internal static class DarlingMcpWriteConfirmation
     /// the generic question, and only on the call that carries <c>confirm</c> (the call that acts, as for the tools with their own
     /// confirm step), because the store the front door forwards to answers a call without it with its own preview.
     /// </summary>
-    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> FilterFor(bool frontDoor) => McpWriteConfirmation.Create(
+    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> FilterFor(bool frontDoor, McpConfirmationStates? states = null) => McpWriteConfirmation.Create(
         ToolNames,
         (request, arguments, cancellationToken) => request.Params!.Name == "purge_now"
             ? PurgeQuestionAsync(request, arguments, frontDoor, cancellationToken)
-            : Task.FromResult(Describers[request.Params.Name](arguments)),
+            : Task.FromResult<Question?>(Describers[request.Params.Name](arguments) is { } text ? new Question(text) : null),
         IsAgentCall,
-        (request, name, arguments, cancellationToken) => name == "purge_now" && !frontDoor
-            ? SeatPurgeConfirmAsync(request, arguments, cancellationToken)
-            : Task.CompletedTask);
+        (request, name, _, _) => name == "purge_now" && !frontDoor ? SeatPurgeConfirm(request) : Task.CompletedTask,
+        frontDoor ? null : (tool, state) => tool == "purge_now" && McpConfirmTokens.Shared.IsIssued(state, DarlingMcpIncidentActionTools.PurgeScope),
+        states);
 
     /// <summary>An agent has no user to ask: the investigations arm's token (a gated seat), and any call that carries an <c>agent_action</c>.</summary>
     private static bool IsAgentCall(RequestContext<CallToolRequestParams> request)
@@ -135,7 +137,7 @@ internal static class DarlingMcpWriteConfirmation
         return DarlingAgentActionSeat.IsGated(request.Services?.GetService<DarlingAgentActionSeat>());
     }
 
-    private static async Task<string?> PurgeQuestionAsync(
+    private static async Task<Question?> PurgeQuestionAsync(
         RequestContext<CallToolRequestParams> request, IDictionary<string, JsonElement> arguments, bool frontDoor, CancellationToken cancellationToken)
     {
         var retention = IntOf(arguments, "retention_days");
@@ -148,38 +150,41 @@ internal static class DarlingMcpWriteConfirmation
         var postgres = frontDoor ? null : request.Services?.GetService<NpgsqlDataSource>();
         if (postgres is null)
         {
-            return retention is int days
+            return new Question(retention is int days
                 ? $"Purge the whole store's collected history to {days.ToString(CultureInfo.InvariantCulture)} days now? Deleted rows cannot be brought back."
-                : "Purge the whole store's collected history to each collector's configured retention now? Deleted rows cannot be brought back.";
+                : "Purge the whole store's collected history to each collector's configured retention now? Deleted rows cannot be brought back.");
         }
 
         var preview = await DarlingMcpIncidentActionTools.PreviewPurgeAsync(postgres, retention, cancellationToken).ConfigureAwait(false);
         var groups = preview.Groups
             .Select(g => $"{(int)g!["retention_days"]!} days for {(int)g["collector_count"]!} collectors")
             .ToList();
-        return "Purge the whole store's collected history now? It deletes rows older than the retention that applies to each collector ("
-            + string.Join(", ", groups) + "), for every server, and the deleted rows cannot be brought back.";
+        /* The confirm value for the plan this question shows is the question's state: the client echoes it, and a yes redeems it. */
+        var confirm = McpConfirmTokens.Shared.Issue("purge", DarlingMcpIncidentActionTools.PurgeScope, preview.Plan);
+        return new Question(
+            "Purge the whole store's collected history now? It deletes rows older than the retention that applies to each collector ("
+                + string.Join(", ", groups) + "), for every server, and the deleted rows cannot be brought back.",
+            confirm);
     }
 
     /// <summary>
-    /// A yes to <c>purge_now</c> is the user's confirmation of the plan the question showed, so the call carries the confirm value its
-    /// own show-then-confirm step would have asked for. The plan is read again here, so a retention that changed while the user
-    /// answered is purged to what it is now, exactly as a second call by hand would.
+    /// A yes to <c>purge_now</c> is the user's confirmation of the plan the question showed, and the state the yes echoes is the
+    /// confirm value issued for that plan (#6230). The call carries that value, so <c>purge_now</c> redeems it itself: a retention that
+    /// changed while the user answered is refused as <c>confirm_mismatch</c> and shown again, exactly as a second call by hand would.
+    /// Nothing is issued here, so a yes can never be turned into a confirm value for a plan the user did not see.
     /// </summary>
-    private static async Task SeatPurgeConfirmAsync(
-        RequestContext<CallToolRequestParams> request, IDictionary<string, JsonElement> arguments, CancellationToken cancellationToken)
+    private static Task SeatPurgeConfirm(RequestContext<CallToolRequestParams> request)
     {
-        if (request.Services?.GetService<NpgsqlDataSource>() is not { } postgres)
+        if (request.Services?.GetService<NpgsqlDataSource>() is null)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        var preview = await DarlingMcpIncidentActionTools.PreviewPurgeAsync(postgres, IntOf(arguments, "retention_days"), cancellationToken).ConfigureAwait(false);
-        var confirm = McpConfirmTokens.Shared.Issue("purge", DarlingMcpIncidentActionTools.PurgeScope, preview.Plan);
-        request.Params!.Arguments = new Dictionary<string, JsonElement>(arguments)
+        request.Params!.Arguments = new Dictionary<string, JsonElement>(request.Params.Arguments ?? new Dictionary<string, JsonElement>())
         {
-            ["confirm"] = JsonSerializer.SerializeToElement(confirm),
+            ["confirm"] = JsonSerializer.SerializeToElement(request.Params.RequestState),
         };
+        return Task.CompletedTask;
     }
 
     private static int? IntOf(IDictionary<string, JsonElement> arguments, string key) =>

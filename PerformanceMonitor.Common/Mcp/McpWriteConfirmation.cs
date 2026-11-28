@@ -33,6 +33,13 @@ namespace PerformanceMonitor.Common;
 ///
 /// <para><b>The answer.</b> Accept with the box left on is yes and the call runs. Decline, cancel, or an accept with the box cleared
 /// is no: nothing runs, and the call answers <c>status: declined</c> as a normal result, not an error.</para>
+///
+/// <para><b>A yes counts only for the question that was asked, once.</b> Every question carries a <c>requestState</c>, which the client
+/// echoes when it sends the call again (<see cref="McpConfirmationStates"/>). An answer counts only on a call that echoes a state this
+/// process issued for this same tool and these same arguments, less than ten minutes ago, that no earlier answer has used. A call that
+/// carries an answer with no state, or a state for another tool or other arguments, or an altered, expired or already used state, is
+/// treated as having no answer yet: it is asked again and nothing runs. A host may issue its own state for a tool, as Darling's
+/// <c>purge_now</c> does with the confirm value its own two-step flow issues (which is single use and expires on its own).</para>
 /// </summary>
 public static class McpWriteConfirmation
 {
@@ -41,8 +48,11 @@ public static class McpWriteConfirmation
 
     private const string AnswerField = "confirm";
 
+    /// <summary>One question: its text, and the <c>requestState</c> the host issued for it (null for a state <see cref="McpConfirmationStates"/> issues).</summary>
+    public sealed record Question(string Text, string? State = null);
+
     /// <summary>The question for a listed call, or null when this call changes nothing, so it runs without one.</summary>
-    public delegate Task<string?> QuestionOf(
+    public delegate Task<Question?> QuestionOf(
         RequestContext<CallToolRequestParams> request, IDictionary<string, JsonElement> arguments, CancellationToken cancellationToken);
 
     /// <summary>Builds the call-tool filter.</summary>
@@ -50,11 +60,16 @@ public static class McpWriteConfirmation
     /// <param name="question">The question for a listed call.</param>
     /// <param name="isAgentCall">Whether the call is an agent's: it has no user to ask and runs as before.</param>
     /// <param name="onYes">Runs after a yes and before the tool, or null for nothing.</param>
+    /// <param name="hostState">Whether a state is one the host issued for the tool itself (a <see cref="Question"/> that carried its own
+    /// state). The host's own flow then spends it. Null when the host issues none.</param>
+    /// <param name="states">The states this class issues, or null for the process-wide <see cref="McpConfirmationStates.Shared"/>.</param>
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Create(
         IReadOnlyCollection<string> toolNames,
         QuestionOf question,
         Func<RequestContext<CallToolRequestParams>, bool> isAgentCall,
-        Func<RequestContext<CallToolRequestParams>, string, IDictionary<string, JsonElement>, CancellationToken, Task>? onYes = null) =>
+        Func<RequestContext<CallToolRequestParams>, string, IDictionary<string, JsonElement>, CancellationToken, Task>? onYes = null,
+        Func<string, string, bool>? hostState = null,
+        McpConfirmationStates? states = null) =>
         next => async (request, cancellationToken) =>
         {
             var name = request.Params?.Name;
@@ -64,30 +79,41 @@ public static class McpWriteConfirmation
             }
 
             var arguments = request.Params!.Arguments ?? new Dictionary<string, JsonElement>();
-            if (request.Params.InputResponses is { } responses && responses.TryGetValue(InputKey, out var response))
+            var issuer = states ?? McpConfirmationStates.Shared;
+            if (request.Params.InputResponses is { } responses && responses.TryGetValue(InputKey, out var response)
+                && !string.IsNullOrEmpty(request.Params.RequestState))
             {
-                if (!IsYes(response))
-                {
-                    return Declined(name);
-                }
+                var state = request.Params.RequestState;
+                var hostIssued = hostState is not null && hostState(name, state);
+                var ticket = hostIssued ? null : issuer.Check(name, arguments, state);
 
-                if (onYes is not null)
+                /* The first answer to a state spends it, a no included, so a no cannot be followed by a yes on the same state. */
+                if (hostIssued || (ticket is { } valid && issuer.TrySpend(valid)))
                 {
-                    await onYes(request, name, arguments, cancellationToken).ConfigureAwait(false);
-                }
+                    if (!IsYes(response))
+                    {
+                        return Declined(name);
+                    }
 
-                return await next(request, cancellationToken).ConfigureAwait(false);
+                    if (onYes is not null)
+                    {
+                        await onYes(request, name, arguments, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    return await next(request, cancellationToken).ConfigureAwait(false);
+                }
             }
 
-            var text = await question(request, arguments, cancellationToken).ConfigureAwait(false);
-            if (text is null)
+            /* No answer yet, or an answer that is not for a question this process asked of this call, or one already used: ask (again). */
+            var asked = await question(request, arguments, cancellationToken).ConfigureAwait(false);
+            if (asked is null)
             {
                 return await next(request, cancellationToken).ConfigureAwait(false);
             }
 
             throw new InputRequiredException(
-                new Dictionary<string, InputRequest> { [InputKey] = InputRequest.ForElicitation(Ask(text)) },
-                requestState: null);
+                new Dictionary<string, InputRequest> { [InputKey] = InputRequest.ForElicitation(Ask(asked.Text)) },
+                requestState: asked.State ?? issuer.Issue(name, arguments));
         };
 
     /// <summary>The question as an elicitation form: one box, on, that Accept leaves on and Decline never sends.</summary>
