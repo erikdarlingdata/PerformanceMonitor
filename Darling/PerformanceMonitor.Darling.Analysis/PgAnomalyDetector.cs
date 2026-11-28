@@ -360,34 +360,13 @@ public class PgAnomalyDetector : IAnomalyDetector
                 await detectors[index](context, lists[index]!);
         }
 
-        /* Runs one detector through a token that ends at the deadline as well as at the pass's own token. Only a stop the
-           deadline caused is taken here: the pass's token is checked first, so an abandoned pass still unwinds. */
+        /* Runs one detector through a token that ends at the deadline as well as at the pass's own token
+           (StageDeadline). A detector the budget stopped, or one not started because it had ended, is not a failed
+           read: it is named in the left-out record and logs no failure line. */
         async Task RunUnderDeadline(int index, List<Fact> detectorFacts)
         {
-            if (deadline.IsCancellationRequested)
-            {
+            if (!await StageDeadline.RunAsync(context, deadline, () => detectors[index](context, detectorFacts)))
                 RecordBudgetCut(index);
-                return;
-            }
-
-            var passToken = context.PassToken;
-            using var both = CancellationTokenSource.CreateLinkedTokenSource(passToken, deadline);
-            context.UseTokenForThisFlow(both.Token);
-            try
-            {
-                await detectors[index](context, detectorFacts);
-            }
-            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, passToken) && deadline.IsCancellationRequested
-                                       && AnalysisShutdown.IsShutdownResidue(ex))
-            {
-                /* The shapes a detector's own catch lets through once the token it reads is signalled. A detector the
-                   budget stopped is not a failed read: it is named in the left-out record and logs no failure line. */
-                RecordBudgetCut(index);
-            }
-            finally
-            {
-                context.UseTokenForThisFlow(null);
-            }
         }
 
         /* The one writer of the left-out record. The reply's detectors_left_out is built from it, in detector order, once

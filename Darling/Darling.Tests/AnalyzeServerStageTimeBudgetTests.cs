@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #9879: an on-demand pass gives its anomaly detectors and its drill-downs a stated time, as it does its heavy family
 /// reads. These tests drive <see cref="PgAnomalyDetector.RunDetectorsAsync"/> and
-/// <see cref="DrillDownTimeBudget.RunAsync"/> with planted reads, so no store is read. The deadline is a token the test
+/// <see cref="PgDrillDownCollector.EnrichEachAsync"/> with planted reads, so no store is read. The deadline is a token the test
 /// fires by hand while a read is held, and a held read never finishes by itself, so no assert waits on a clock:
 /// <see cref="Limit"/> only bounds a run that hangs.
 /// </summary>
@@ -215,7 +215,7 @@ public sealed class AnalyzeServerStageTimeBudgetTests
             await Task.Delay(Timeout.InfiniteTimeSpan, ctx.CancellationToken);
         }
 
-        var run = DrillDownTimeBudget.RunAsync(findings, context, DrillInto);
+        var run = PgDrillDownCollector.EnrichEachAsync(findings, context, DrillInto);
         await heldStarted.Task.WaitAsync(Limit);
         deadline.Cancel();
         await run.WaitAsync(Limit);
@@ -238,7 +238,7 @@ public sealed class AnalyzeServerStageTimeBudgetTests
         var context = new AnalysisContext { DrillDownDeadline = withDeadline ? deadline.Token : CancellationToken.None };
         var findings = new List<AnalysisFinding> { Finding("FIRST"), Finding("SECOND") };
 
-        await DrillDownTimeBudget.RunAsync(findings, context, (finding, _) =>
+        await PgDrillDownCollector.EnrichEachAsync(findings, context, (finding, _) =>
         {
             finding.DrillDown = new Dictionary<string, object> { ["rows"] = 1 };
             return Task.CompletedTask;
@@ -257,7 +257,7 @@ public sealed class AnalyzeServerStageTimeBudgetTests
         var findings = new List<AnalysisFinding> { Finding("HELD"), Finding("NEVER") };
         var heldStarted = Hook();
 
-        var run = DrillDownTimeBudget.RunAsync(findings, context, async (_, ctx) =>
+        var run = PgDrillDownCollector.EnrichEachAsync(findings, context, async (_, ctx) =>
         {
             heldStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ctx.CancellationToken);

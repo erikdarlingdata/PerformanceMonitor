@@ -123,11 +123,49 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
     /// Enriches each finding's DrillDown dictionary based on its story path.
     /// </summary>
     public Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context) =>
-        DrillDownTimeBudget.RunAsync(findings, context, EnrichFindingAsync);
+        EnrichEachAsync(findings, context, EnrichFindingAsync);
+
+    /// <summary>
+    /// Runs the drill-down of each finding, one finding after another, and stops at the pass's
+    /// <see cref="AnalysisContext.DrillDownDeadline"/> when it carries one (#9879). Over a long window one finding's
+    /// drill-down reads can take longer than every stage before them.
+    ///
+    /// <para>With a deadline (an on-demand pass), each drill-down reads through a token that also ends at the deadline.
+    /// One that has not finished when it fires is stopped and its finding keeps no drill-down: a drill-down stopped half
+    /// way would build a remediation from half the rows. A finding not reached by then is not drilled. Either one is named
+    /// in <see cref="AnalysisContext.DrillDownsLeftOutForTime"/> by its root fact key, and the finding itself stays in the
+    /// pass's answer. With no deadline (the scheduled pass) every drill-down runs to its end on the pass's token.</para>
+    /// </summary>
+    internal static async Task EnrichEachAsync(
+        List<AnalysisFinding> findings, AnalysisContext context, Func<AnalysisFinding, AnalysisContext, Task> enrichOne)
+    {
+        var deadline = context.DrillDownDeadline;
+        foreach (var finding in findings)
+        {
+            /* #2299: between findings is the natural abandon point. The per-finding catch deliberately does NOT swallow
+               shutdown residue, so this throw (and any residue from a drill-down mid-read) unwinds the pass to the
+               service's single Information line. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            if (!deadline.CanBeCanceled)
+            {
+                await enrichOne(finding, context);
+                continue;
+            }
+
+            if (!await StageDeadline.RunAsync(context, deadline, () => enrichOne(finding, context)))
+            {
+                /* The one writer of the left-out record. The reply's drill_downs_left_out is built from it, in finding
+                   order. */
+                finding.DrillDown = null;
+                context.DrillDownsLeftOutForTime.Add(finding.RootFactKey);
+            }
+        }
+    }
 
     /// <summary>
     /// The drill-down of one finding. Its catch does not swallow a stop from the token the flow reads, so a stop of the
-    /// pass or of the drill-down deadline (#9879) reaches <see cref="DrillDownTimeBudget.RunAsync"/>.
+    /// pass or of the drill-down deadline (#9879) reaches <see cref="EnrichEachAsync"/>.
     /// </summary>
     private async Task EnrichFindingAsync(AnalysisFinding finding, AnalysisContext context)
     {
