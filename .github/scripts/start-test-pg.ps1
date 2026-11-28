@@ -9,7 +9,7 @@
   clusters the old shards did. Run from the repository root, after Darling/artifacts/pg-runtime.zip was extracted to
   Darling/artifacts/pg-runtime.
 
-  -Mode Start   initdb + start the 5541 store and the seven log-format clusters (5542-5548), create the `darling`
+  -Mode Start   initdb + start the 5541 store and the nine log-format clusters (5542-5550), create the `darling`
                 database on each, and run the 5545 workload (one real error, connection and lock-wait event in its log).
   -Mode Env     print the DARLING_TEST_PG* variables the live classes read, one NAME=VALUE per line, and nothing else.
                 run-ci-leg.ps1 reads them from here so the ports live in one place.
@@ -25,6 +25,23 @@
                 extracted too (the store), but starts nothing of it. Env prints DARLING_TEST_PG_TARGET_<major> for the same
                 -Majors.
 
+  Ports. Every port named above is a base port. -PortOffset (default: the DARLING_TEST_PG_PORT_OFFSET environment
+  variable, else 0) is added to each one, in Start, StartTargets and Env: the store listens on 5541 + the offset, the
+  log-format clusters on 5542-5550 + the offset and an old-major target on 5600 + the major + the offset. With no offset
+  every port is its base port. -Mode Stop takes no offset: it finds the clusters by their data directories under -TempDir.
+  The offset is a whole number, 0 or more, that keeps the highest port (5550, or 5600 + the largest -Majors entry, plus
+  the offset) at or below 65535; anything else stops the script with an error.
+
+  A second run on one machine uses its own -TempDir (the data directories and logs are named by -TempDir, not by the
+  port), its own -PortOffset and its own repository checkout (the runtimes under Darling\artifacts belong to -Root). The
+  same offset goes to Start, StartTargets and Env; run-ci-leg.ps1 reads -Mode Env, so the environment variable carries
+  the offset to it. Offsets 100 apart keep the runs' port ranges apart (the store and log-format clusters take ten ports,
+  the targets 5600 + the major):
+      $env:DARLING_TEST_PG_PORT_OFFSET = 100
+      .github\scripts\start-test-pg.ps1 -Mode Start -TempDir C:\pg-b
+      .github\scripts\run-ci-leg.ps1 ...
+      .github\scripts\start-test-pg.ps1 -Mode Stop -TempDir C:\pg-b
+
   The superuser is `darling` with trust auth: acceptable only on an ephemeral, loopback-only CI runner with throwaway
   data. The worker settings on 5541 are the product's own derivation (timescaledb.max_background_workers =
   HypertableCount + 2 = 74, max_worker_processes = 3 + 74 + 8 = 85; #1888); CiClusterWorkerSizingTests keys on the
@@ -38,37 +55,74 @@ param(
     # The repository root (the workspace). Default: the current directory.
     [string] $Root = (Get-Location).Path,
     # Where the data directories and logs go. Default: the runner temp folder, else the system temp folder.
-    [string] $TempDir = $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath().TrimEnd('\', '/') })
+    [string] $TempDir = $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath().TrimEnd('\', '/') }),
+    # Added to every port (see the Ports paragraph above). Empty or unset: 0. A string, not an int, so a bad value from the
+    # environment variable is rejected below with a message that names it, not by the parameter binder.
+    [string] $PortOffset = $env:DARLING_TEST_PG_PORT_OFFSET
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $bin = Join-Path $Root 'Darling\artifacts\pg-runtime\pgsql\bin'
 $targetsRoot = Join-Path $Root 'Darling\artifacts\pg-targets'
-# One loopback port per old major, clear of the store (5541) and the log-format clusters (5542-5550).
-function Get-TargetPort([string] $major) { return 5600 + [int]$major }
+# The base ports, before the offset. One loopback port per old major, clear of the store (5541) and the log-format
+# clusters (5542-5550).
+$targetBasePort = 5600
+
+# -Mode Stop finds its clusters by data directory and never reads a port, so it neither reads nor rejects an offset (it
+# has to exit 0).
+$offset = 0
+if ($Mode -ne 'Stop') {
+    $highestBasePort = 5550
+    foreach ($m in $Majors) { $highestBasePort = [Math]::Max($highestBasePort, $targetBasePort + [int]$m) }
+    $offsetText = "$PortOffset".Trim()
+    if ($offsetText -ne '') {
+        $parsed = 0
+        if (-not [int]::TryParse($offsetText, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref] $parsed)) {
+            throw "-PortOffset / DARLING_TEST_PG_PORT_OFFSET must be a whole number, not '$offsetText'"
+        }
+        if ($parsed -lt 0) { throw "-PortOffset / DARLING_TEST_PG_PORT_OFFSET must not be negative, not $parsed" }
+        if (($highestBasePort + [long]$parsed) -gt 65535) {
+            throw "-PortOffset / DARLING_TEST_PG_PORT_OFFSET $parsed puts the highest port ($highestBasePort + $parsed) past 65535"
+        }
+        $offset = $parsed
+    }
+}
+
+# Every port the clusters and the Env output use: the base port plus the offset.
+$storePort = 5541 + $offset
+$csvlogPort = 5542 + $offset
+$jsonlogPort = 5543 + $offset
+$stderrCsvlogPort = 5544 + $offset
+$logTargetPort = 5545 + $offset
+$rotateStderrPort = 5546 + $offset
+$rotateCsvlogPort = 5547 + $offset
+$rotateJsonlogPort = 5548 + $offset
+$logzoneBerlinPort = 5549 + $offset
+$logzoneLaPort = 5550 + $offset
+function Get-TargetPort([string] $major) { return $targetBasePort + [int]$major + $offset }
 
 if ($Mode -eq 'Env') {
     $c = { param($port) "Host=127.0.0.1;Port=$port;Username=darling;Database=darling" }
     $vars = [ordered]@{
-        DARLING_TEST_PG                     = & $c 5541
+        DARLING_TEST_PG                     = & $c $storePort
         DARLING_TEST_PGRUNTIME              = (Join-Path $Root 'Darling\artifacts\pg-runtime')
-        DARLING_TEST_PG_CSVLOG              = & $c 5542
-        DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN  = & $c 5542
+        DARLING_TEST_PG_CSVLOG              = & $c $csvlogPort
+        DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN  = & $c $csvlogPort
         # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
-        DARLING_TEST_PG_CSVLOG_ONLY         = & $c 5542
-        DARLING_TEST_PG_JSONLOG             = & $c 5543
-        DARLING_TEST_PG_AUTOEXPLAIN         = & $c 5544
-        DARLING_TEST_PG_CSVLOG_SIBLING      = & $c 5544
-        DARLING_TEST_PG_LOG_TARGET          = & $c 5545
-        DARLING_TEST_PG_UTC_LOG_TARGET      = & $c 5545
-        # #4704: dedicated rotation clusters (5546 stderr, 5547 csvlog, 5548 jsonlog).
-        DARLING_TEST_PG_LOGROTATE           = & $c 5546
-        DARLING_TEST_PG_LOGROTATE_CSV       = & $c 5547
-        DARLING_TEST_PG_LOGROTATE_JSON      = & $c 5548
-        # #6866: log_timezone is a named local zone (5549 Europe/Berlin on stderr, 5550 America/Los_Angeles on csvlog).
-        DARLING_TEST_PG_LOGZONE_BERLIN      = & $c 5549
-        DARLING_TEST_PG_LOGZONE_LA          = & $c 5550
+        DARLING_TEST_PG_CSVLOG_ONLY         = & $c $csvlogPort
+        DARLING_TEST_PG_JSONLOG             = & $c $jsonlogPort
+        DARLING_TEST_PG_AUTOEXPLAIN         = & $c $stderrCsvlogPort
+        DARLING_TEST_PG_CSVLOG_SIBLING      = & $c $stderrCsvlogPort
+        DARLING_TEST_PG_LOG_TARGET          = & $c $logTargetPort
+        DARLING_TEST_PG_UTC_LOG_TARGET      = & $c $logTargetPort
+        # #4704: dedicated rotation clusters (base ports 5546 stderr, 5547 csvlog, 5548 jsonlog).
+        DARLING_TEST_PG_LOGROTATE           = & $c $rotateStderrPort
+        DARLING_TEST_PG_LOGROTATE_CSV       = & $c $rotateCsvlogPort
+        DARLING_TEST_PG_LOGROTATE_JSON      = & $c $rotateJsonlogPort
+        # #6866: log_timezone is a named local zone (base ports 5549 Europe/Berlin on stderr, 5550 America/Los_Angeles on csvlog).
+        DARLING_TEST_PG_LOGZONE_BERLIN      = & $c $logzoneBerlinPort
+        DARLING_TEST_PG_LOGZONE_LA          = & $c $logzoneLaPort
     }
     # #6985: the old-target clusters StartTargets starts, named only for the majors the caller asks for.
     foreach ($m in $Majors) { $vars["DARLING_TEST_PG_TARGET_$m"] = & $c (Get-TargetPort $m) }
@@ -166,7 +220,7 @@ $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 if ($LASTEXITCODE -ge 8) { throw "robocopy of the initdb template failed ($LASTEXITCODE)" }
 $global:LASTEXITCODE = 0
 Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
-Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+Add-Content -Path "$dataDir\postgresql.conf" -Value "port = $storePort"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
@@ -177,11 +231,12 @@ Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
 & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
 if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
-& "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+& "$bin\createdb.exe" -h 127.0.0.1 -p $storePort -U darling darling
 if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 
-# #4160: seven more small clusters, one per log-format shape, so the csvlog/jsonlog/auto_explain/rotation live tests stop
-# skipping in CI. No TimescaleDB jobs run on these, so 8/16 workers is plenty.
+# #4160: nine more small clusters, one per log-format shape, so the csvlog/jsonlog/auto_explain/rotation live tests stop
+# skipping in CI. No TimescaleDB jobs run on these, so 8/16 workers is plenty. The ports below are base ports: each cluster
+# listens on its base port plus the offset.
 #   5542 csvlog: PgLogEventsCsvlogLiveTests, PgDeadlocksCsvlogLiveTests, PgRaiseShapedRecordsLiveTests and
 #     PgPlanCaptureCsvLiveTests (auto_explain). deadlock_timeout is short so a two-session deadlock fires inside a test's
 #     patience; log_min_messages is notice because LOG ranks above ERROR in the server-log severity order and a
@@ -230,21 +285,21 @@ function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLine
 
 function Get-TempPath([string] $name) { return (Join-Path $TempDir $name) }
 
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-csvlog') (Get-TempPath 'darling-pg-csvlog.log') 5542 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-csvlog') (Get-TempPath 'darling-pg-csvlog.log') $csvlogPort @(
     "logging_collector = on",
     "log_destination = 'csvlog'",
     "log_timezone = 'UTC'"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-jsonlog') (Get-TempPath 'darling-pg-jsonlog.log') 5543 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-jsonlog') (Get-TempPath 'darling-pg-jsonlog.log') $jsonlogPort @(
     "logging_collector = on",
     "log_destination = 'jsonlog'"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-stderrcsvlog') (Get-TempPath 'darling-pg-stderrcsvlog.log') 5544 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-stderrcsvlog') (Get-TempPath 'darling-pg-stderrcsvlog.log') $stderrCsvlogPort @(
     "logging_collector = on",
     "log_destination = 'stderr,csvlog'",
     "log_line_prefix = '%m [%p] %Q '"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logtarget') (Get-TempPath 'darling-pg-logtarget.log') 5545 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logtarget') (Get-TempPath 'darling-pg-logtarget.log') $logTargetPort @(
     "logging_collector = on",
     "log_destination = 'stderr'",
     "log_timezone = 'UTC'",
@@ -253,31 +308,31 @@ Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logtarget') (Get-TempPath '
     "log_disconnections = on",
     "log_lock_waits = on"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-stderr') (Get-TempPath 'darling-pg-rotate-stderr.log') 5546 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-stderr') (Get-TempPath 'darling-pg-rotate-stderr.log') $rotateStderrPort @(
     "logging_collector = on",
     "log_destination = 'stderr'",
     "log_timezone = 'UTC'",
     "log_line_prefix = '%m [%p] %Q '",
     "log_lock_waits = on"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-csvlog') (Get-TempPath 'darling-pg-rotate-csvlog.log') 5547 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-csvlog') (Get-TempPath 'darling-pg-rotate-csvlog.log') $rotateCsvlogPort @(
     "logging_collector = on",
     "log_destination = 'csvlog'",
     "log_timezone = 'UTC'",
     "log_lock_waits = on"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-jsonlog') (Get-TempPath 'darling-pg-rotate-jsonlog.log') 5548 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-jsonlog') (Get-TempPath 'darling-pg-rotate-jsonlog.log') $rotateJsonlogPort @(
     "logging_collector = on",
     "log_destination = 'jsonlog'",
     "log_timezone = 'UTC'",
     "log_lock_waits = on"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-berlin') (Get-TempPath 'darling-pg-logzone-berlin.log') 5549 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-berlin') (Get-TempPath 'darling-pg-logzone-berlin.log') $logzoneBerlinPort @(
     "logging_collector = on",
     "log_destination = 'stderr'",
     "log_timezone = 'Europe/Berlin'"
 )
-Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-la') (Get-TempPath 'darling-pg-logzone-la.log') 5550 @(
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-la') (Get-TempPath 'darling-pg-logzone-la.log') $logzoneLaPort @(
     "logging_collector = on",
     "log_destination = 'csvlog'",
     "log_timezone = 'America/Los_Angeles'"
@@ -287,7 +342,7 @@ Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-la') (Get-TempPath 
 # written by the server itself before the tests read the log. Bounded and loud: a missing precondition throws rather
 # than leaving the log quiet and the later assertion to fail with no explanation. psql takes libpq flags, not an
 # Npgsql-style connection string.
-$logTargetArgs = @("-h", "127.0.0.1", "-p", "5545", "-U", "darling", "-d", "darling")
+$logTargetArgs = @("-h", "127.0.0.1", "-p", "$logTargetPort", "-U", "darling", "-d", "darling")
 
 # Connection + disconnection: an ordinary short-lived connection.
 & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "SELECT 1"
@@ -316,7 +371,7 @@ Remove-Job $holder
 
 # Failed login: a FATAL the target's own authentication path writes, distinct from the ERROR above. Targets a
 # deliberately nonexistent database.
-& "$bin\psql.exe" "-h" "127.0.0.1" "-p" "5545" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
+& "$bin\psql.exe" "-h" "127.0.0.1" "-p" "$logTargetPort" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
 if ($LASTEXITCODE -eq 0) { throw "5545 failed-login workload: connecting to a nonexistent database unexpectedly succeeded" }
 # the failed login is expected; don't let its exit code end the step
 $global:LASTEXITCODE = 0
