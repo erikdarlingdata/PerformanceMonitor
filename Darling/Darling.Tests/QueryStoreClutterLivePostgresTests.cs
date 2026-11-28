@@ -983,19 +983,22 @@ public sealed class QueryStoreClutterLivePostgresTests
     /* ─────────────────────────── #9958: the wait is what is left of the read bar ─────────────────────────── */
 
     /// <summary>
-    /// #9958: the wait the call gives the fleet computation is what is left of the 5 s read bar after the time the call has used, and
-    /// never less than the 1 s floor. Whole milliseconds in and out, so no figure here is rounded.
+    /// #9958: the wait the call gives the fleet computation is what is left of the 5 s read bar after the time the call has used and
+    /// the 0.5 s allowance for the work after the wait, and never less than the 0.25 s floor. Whole milliseconds in and out, so no
+    /// figure here is rounded.
     /// </summary>
     [Theory]
-    [InlineData(0, 5000)]
-    [InlineData(1000, 4000)]
-    [InlineData(2500, 2500)]
-    [InlineData(3999, 1001)]
-    [InlineData(4000, 1000)]
-    [InlineData(4500, 1000)]
-    [InlineData(5000, 1000)]
-    [InlineData(30000, 1000)]
-    public void TheFleetWait_IsWhatIsLeftOfTheReadBar_AndNeverUnderTheFloor(int elapsedMs, int expectedWaitMs)
+    [InlineData(0, 4500)]
+    [InlineData(1000, 3500)]
+    [InlineData(2500, 2000)]
+    [InlineData(4000, 500)]
+    [InlineData(4249, 251)]
+    [InlineData(4250, 250)]
+    [InlineData(4251, 250)]
+    [InlineData(4500, 250)]
+    [InlineData(5000, 250)]
+    [InlineData(30000, 250)]
+    public void TheFleetWait_IsWhatIsLeftOfTheReadBarLessTheAllowance_AndNeverUnderTheFloor(int elapsedMs, int expectedWaitMs)
     {
         Assert.Equal(TimeSpan.FromMilliseconds(expectedWaitMs), DarlingMcpQueryStoreClutterTools.FleetWait(TimeSpan.FromMilliseconds(elapsedMs)));
     }
@@ -1031,7 +1034,7 @@ public sealed class QueryStoreClutterLivePostgresTests
 
     /// <summary>
     /// #9958: a held fleet computation. The per-server reads use 3 s of the bar on the manual clock, so the call gives the computation
-    /// the 2 s that are left, and the seam that fires the bound stands for those 2 s being spent. The first call answers with the
+    /// the 1.5 s that are left once the allowance is kept back, and the seam that fires the bound stands for those 1.5 s being spent. The first call answers with the
     /// overrun note and the same per-server figures as a call with the fleet arm off. The computation goes on. Once it ends, having
     /// run over the read bar, a later call in the clock hour gets its reference with no second computation.
     /// </summary>
@@ -1064,7 +1067,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             var withoutFleet = await PerServerOfAsync(postgres, asOf, includeFleetMedian: false);
             Assert.Empty(waits);
 
-            /* the 2 s that are left are spent: the bound fires with the computation still held */
+            /* the 1.5 s that are left are spent: the bound fires with the computation still held */
             DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = fleetBudget =>
             {
                 fleetBudget.Cancel();
@@ -1073,7 +1076,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             var first = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
             Assert.Equal("null", first.Median);
             Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, first.Note);
-            Assert.Equal(TimeSpan.FromSeconds(2), Assert.Single(waits));
+            Assert.Equal(TimeSpan.FromSeconds(1.5), Assert.Single(waits));
             Assert.Equal(withoutFleet, await PerServerOfAsync(postgres, asOf, includeFleetMedian: true));
             await entered.Task.WaitAsync(HeldCallGivesUp, ct);
             Assert.False(release.Task.IsCompleted);
@@ -1101,7 +1104,7 @@ public sealed class QueryStoreClutterLivePostgresTests
 
     /// <summary>
     /// #9958: a fleet computation that ends inside what is left of the bar is in the first answer. The per-server reads use 1 s of the
-    /// bar on the manual clock, the call gives the computation the 4 s that are left, and nothing fires the bound or holds the
+    /// bar on the manual clock, the call gives the computation the 3.5 s that are left once the allowance is kept back, and nothing fires the bound or holds the
     /// computation: the reference is there because the computation ended first. The per-server figures are the same with the fleet
     /// arm off.
     /// </summary>
@@ -1127,7 +1130,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.NotEqual("null", first.Median);
             Assert.NotEqual(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, first.Note);
             Assert.StartsWith("Discrete medians", first.Note, StringComparison.Ordinal);
-            Assert.Equal(TimeSpan.FromSeconds(4), Assert.Single(waits));
+            Assert.Equal(TimeSpan.FromSeconds(3.5), Assert.Single(waits));
             Assert.Equal(withoutFleet, await PerServerOfAsync(postgres, asOf, includeFleetMedian: true));
         }
         finally
@@ -1139,8 +1142,8 @@ public sealed class QueryStoreClutterLivePostgresTests
 
     /// <summary>
     /// #9958: a reference that took under the read bar but that its call stopped waiting for is kept for the clock hour. The per-server
-    /// reads use 3 s of the bar on the manual clock, so the call gives the computation the 2 s that are left, and the seam that fires the
-    /// bound stands for those 2 s being spent with the computation held. The computation ends at an age of 3 s, under the bar. The first
+    /// reads use 3 s of the bar on the manual clock, so the call gives the computation the 1.5 s that are left once the allowance is kept
+    /// back, and the seam that fires the bound stands for those 1.5 s being spent with the computation held. The computation ends at an age of 3 s, under the bar. The first
     /// call answered with the overrun note, so a later call in the clock hour gets the kept reference ("computed at", took 3.0 s) with no
     /// second computation. A store whose per-server reads take that long would otherwise overrun on every call and never get a reference.
     /// </summary>
@@ -1178,7 +1181,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             var first = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
             Assert.Equal("null", first.Median);
             Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, first.Note);
-            Assert.Equal(TimeSpan.FromSeconds(2), Assert.Single(waits));
+            Assert.Equal(TimeSpan.FromSeconds(1.5), Assert.Single(waits));
             await entered.Task.WaitAsync(HeldCallGivesUp, ct);
 
             /* the computation ends at an age of 3 s, under the 5 s bar: it is not dear, and the call that stopped waiting keeps it */
@@ -1204,7 +1207,7 @@ public sealed class QueryStoreClutterLivePostgresTests
 
     /// <summary>
     /// #9958: a reference that took under the read bar and that every call that waited for it received is dropped as it finishes. The
-    /// per-server reads use 1 s of the bar on the manual clock, the call gives the computation the 4 s that are left, and the
+    /// per-server reads use 1 s of the bar on the manual clock, the call gives the computation the 3.5 s that are left, and the
     /// computation takes 1 s on the manual clock with nothing firing the bound. Both calls get a reference, and the second one is a
     /// computation of its own, not a kept one.
     /// </summary>
@@ -1251,8 +1254,8 @@ public sealed class QueryStoreClutterLivePostgresTests
     /// <summary>
     /// #9958: a call that arrives when the computation is already older than its own wait answers at once with the overrun note, and
     /// the reference is kept for the clock hour even when it ends under the read bar. Call A has no per-server time and waits for the
-    /// whole bar; call B arrives at a computation 3 s old with 3 s of its own per-server reads, so its 2 s wait is over before it
-    /// starts. Once the computation ends at an age of 3 s, a call C gets the kept reference with no second computation.
+    /// whole bar less the allowance; call B arrives at a computation 3 s old with 3 s of its own per-server reads, so its 1.5 s wait is
+    /// over before it starts. Once the computation ends at an age of 3 s, a call C gets the kept reference with no second computation.
     /// </summary>
     [Fact]
     public async Task ACallThatArrivesAfterItsWaitWasOver_KeepsTheReference_ThatEndsUnderTheBar()
@@ -1281,7 +1284,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             callA = FleetOfAsync(postgres, asOf);
             await entered.Task.WaitAsync(HeldCallGivesUp, ct);
 
-            /* B's per-server reads take 3 s, and the computation is then 3 s old: past B's 2 s wait */
+            /* B's per-server reads take 3 s, and the computation is then 3 s old: past B's 1.5 s wait */
             PerServerReadsTake(clock, TimeSpan.FromSeconds(3));
             var b = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
             Assert.Equal("null", b.Median);

@@ -37,7 +37,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// computation queued behind that same call.</para>
 ///
 /// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's wait, which is what is
-/// left of the read bar after the call's own per-server reads (<c>DarlingMcpQueryStoreClutterTools.FleetWait</c>). From then on a
+/// left of the read bar after the call's own per-server reads and the allowance for the work after the wait
+/// (<c>DarlingMcpQueryStoreClutterTools.FleetWait</c>). From then on a
 /// call for the same key answers at once: still computing, the kept reference, or unfinished.</para>
 ///
 /// <para><b>What is kept.</b> A reference stays until the clock hour it was started in ends when it took longer than
