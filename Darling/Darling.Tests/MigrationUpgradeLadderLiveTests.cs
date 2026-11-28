@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -35,7 +36,7 @@ namespace Darling.Tests;
 /// against the fixed build it climbs V39→V54 clean, including from a mid-failure retry.</para>
 /// </summary>
 [Collection("live-postgres")]
-public sealed class MigrationUpgradeLadderLiveTests
+public sealed class MigrationUpgradeLadderLiveTests : IClassFixture<MigrationUpgradeLadderLiveTests.LadderDatabaseGuard>
 {
     private const string SkipReason =
         "DARLING_TEST_PG not set — this test needs a scratch PostgreSQL (with the timescaledb " +
@@ -53,7 +54,7 @@ public sealed class MigrationUpgradeLadderLiveTests
     /// "Exception while writing to stream". Which is exactly what CI reported the moment this became a
     /// Theory: v3.3.0 green, v3.5.0 red, and nothing wrong with either ladder.</para>
     /// </summary>
-    private static string ScratchDatabaseFor(string fixtureFileName)
+    internal static string ScratchDatabaseFor(string fixtureFileName)
     {
         var version = Regex.Match(fixtureFileName, @"v(\d+)\.(\d+)\.(\d+)");
         return version.Success
@@ -113,11 +114,107 @@ public sealed class MigrationUpgradeLadderLiveTests
         Assert.True(root is not null,
             "Could not locate the repository root (walked up from the test binary looking for " +
             "PerformanceMonitor.sln) — the fixture lives in the source tree.");
-        var scratchDatabase = ScratchDatabaseFor(fixtureFileName);
         var fixturePath = Path.Combine(
             root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar), fixtureFileName);
         Assert.True(File.Exists(fixturePath), $"Previous-release ladder fixture missing: {fixturePath}");
 
+        await ClimbAsync(baseConnectionString!, fixturePath, ScratchDatabaseFor(fixtureFileName));
+    }
+
+    /// <summary>
+    /// A climb that throws (a rung that fails, a fixture batch that does not apply) still drops its database (#9929).
+    /// A database that carries the TimescaleDB extension holds a background-worker slot for its scheduler for as long as
+    /// it exists, so one left behind by a failed case costs a later class a worker. The failing path is the one a finally
+    /// block is easiest to get wrong, so it is pinned on its own.
+    /// </summary>
+    [Fact]
+    public async Task AClimbThatFails_StillDropsItsScratchDatabase()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
+
+        const string scratchDatabase = "darling_upgrade_ladder_test_cleanup_failing";
+        var fixturePath = Path.Combine(Path.GetTempPath(), $"migration-ladder-cleanup-{Guid.NewGuid():N}.sql");
+        await File.WriteAllTextAsync(
+            fixturePath,
+            "-- header\n-- ===BATCH=== bootstrap\nSELECT 1;\n-- ===BATCH=== fails\nSELECT * FROM no_such_table_9929;\n");
+        try
+        {
+            var failure = await Assert.ThrowsAsync<PostgresException>(
+                () => ClimbAsync(baseConnectionString!, fixturePath, scratchDatabase));
+            Assert.Equal("42P01", failure.SqlState);
+            Assert.Empty(await LadderDatabaseGuard.ExistingAsync(baseConnectionString!, new[] { scratchDatabase }));
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+        }
+    }
+
+    /// <summary>
+    /// A climb that finishes drops its database, and the guard that reports leftovers lists a database that is there and
+    /// none that is not. The class fixture asks the same question once every case of the class has run, so a case that
+    /// leaves its database behind fails this class, not a later class that needed the worker slot.
+    /// </summary>
+    [Fact]
+    public async Task AClimbThatPasses_DropsItsScratchDatabase_AndTheGuardListsOneThatIsLeftBehind()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
+
+        var root = FindRepoRoot();
+        Assert.True(root is not null, "Could not locate the repository root.");
+        /* The newest release by version, not by file name: "v3.9.0" sorts after "v3.14.0" as text, and the newest
+           fixture is the shortest climb. */
+        var newest = Directory
+            .EnumerateFiles(
+                Path.Combine(root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar)),
+                "migration-ladder-v*.sql")
+            .Select(path => (FilePath: path, Version: Regex.Match(Path.GetFileName(path), @"v(\d+\.\d+\.\d+)")))
+            .Where(f => f.Version.Success)
+            .OrderBy(f => System.Version.Parse(f.Version.Groups[1].Value))
+            .Last()
+            .FilePath;
+        const string scratchDatabase = "darling_upgrade_ladder_test_cleanup_real";
+
+        await ClimbAsync(baseConnectionString!, newest, scratchDatabase);
+
+        Assert.Empty(await LadderDatabaseGuard.ExistingAsync(baseConnectionString!, new[] { scratchDatabase }));
+
+        /* The guard reports a database that is there: made by hand, seen, then removed. */
+        try
+        {
+            await using (var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString!)))
+            {
+                await admin.OpenAsync();
+                await using var create = new NpgsqlCommand($"CREATE DATABASE {scratchDatabase}", admin);
+                await create.ExecuteNonQueryAsync();
+            }
+
+            Assert.Equal(
+                new[] { scratchDatabase },
+                await LadderDatabaseGuard.ExistingAsync(baseConnectionString!, new[] { scratchDatabase, "darling_upgrade_ladder_test_cleanup_absent" }));
+        }
+        finally
+        {
+            await DropScratchDatabaseAsync(baseConnectionString!, scratchDatabase);
+        }
+
+        Assert.Empty(await LadderDatabaseGuard.ExistingAsync(baseConnectionString!, new[] { scratchDatabase }));
+    }
+
+    /// <summary>
+    /// Builds <paramref name="scratchDatabase"/> from the fixture, climbs the current ladder over it, and drops it again
+    /// whether the climb passed or threw.
+    ///
+    /// <para>The database is gone when the case ends, not at the start of the next run (#9929). Every database that
+    /// carries the TimescaleDB extension holds one background-worker slot for its scheduler for as long as it exists,
+    /// and the stock <c>timescale/timescaledb</c> image starts with 16: a store that keeps one database per ladder fixture
+    /// leaves a later class with no worker to run a job on. The drop at the start stays, so a run that was killed part
+    /// way through still starts clean. A failure of the drop at the end never replaces the failure of the climb it follows.</para>
+    /// </summary>
+    internal static async Task ClimbAsync(string baseConnectionString, string fixturePath, string scratchDatabase)
+    {
         /* Scratch database, dropped and recreated per run — the fixture creates schemas, hypertables,
            roles-adjacent grants, and the version table, none of which may leak between runs. The
            darling role is cluster-level and idempotently ensured (rung SQL grants to it). */
@@ -132,28 +229,42 @@ public sealed class MigrationUpgradeLadderLiveTests
             {
                 await role.ExecuteNonQueryAsync();
             }
-
-            /* Clear this process's own pooled connections to the scratch database BEFORE forcing the drop.
-               Per-fixture naming already stops one case killing another's pooled connection; this covers the
-               same hazard within a single case, where the pool key would be identical. Cheap, and the
-               alternative failure is a socket error thrown a long way from its cause. */
-            var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
-            NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
-
-            /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
-            await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, scratchDatabase);
-            await using (var drop = new NpgsqlCommand(
-                $"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin))
-            {
-                await drop.ExecuteNonQueryAsync();
-            }
-
-            await using (var create = new NpgsqlCommand($"CREATE DATABASE {scratchDatabase}", admin))
-            {
-                await create.ExecuteNonQueryAsync();
-            }
         }
 
+        await DropScratchDatabaseAsync(baseConnectionString, scratchDatabase);
+
+        await using (var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString)))
+        {
+            await admin.OpenAsync();
+            await using var create = new NpgsqlCommand($"CREATE DATABASE {scratchDatabase}", admin);
+            await create.ExecuteNonQueryAsync();
+        }
+
+        Exception? failure = null;
+        try
+        {
+            await ApplyAndClimbAsync(baseConnectionString, fixturePath, scratchDatabase);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                await DropScratchDatabaseAsync(baseConnectionString, scratchDatabase);
+            }
+            catch (Exception ex) when (failure is not null)
+            {
+                Console.Error.WriteLine($"Ladder scratch database {scratchDatabase} was not dropped after a failed climb ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+    }
+
+    private static async Task ApplyAndClimbAsync(string baseConnectionString, string fixturePath, string scratchDatabase)
+    {
         var scratch = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
 
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -203,6 +314,72 @@ public sealed class MigrationUpgradeLadderLiveTests
             + PayloadDimensions.CompressedContentColumn + "'", connection))
         {
             Assert.Equal(1L, await gz.ExecuteScalarAsync());
+        }
+    }
+
+    /// <summary>
+    /// Drops <paramref name="scratchDatabase"/> if it exists: this process's pooled connections to it are cleared first,
+    /// then its TimescaleDB jobs are quiesced, then <c>DROP DATABASE ... WITH (FORCE)</c> runs on an unpooled admin
+    /// connection. The same drop serves the start of a case and its end.
+    /// </summary>
+    private static async Task DropScratchDatabaseAsync(string baseConnectionString, string scratchDatabase)
+    {
+        /* Clear this process's own pooled connections to the scratch database BEFORE forcing the drop.
+           Per-fixture naming already stops one case killing another's pooled connection; this covers the
+           same hazard within a single case, where the pool key would be identical. Cheap, and the
+           alternative failure is a socket error thrown a long way from its cause. */
+        var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
+        NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
+
+        /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, scratchDatabase);
+
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString));
+        await admin.OpenAsync();
+        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin);
+        await drop.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Runs once the class's last case has finished and fails the class when a database a ladder case builds is still on
+    /// the store (#9929). The names are the ones the Theory's fixtures map to, so a database some other run left under a
+    /// name no current fixture produces is not this class's to judge. No store configured, nothing to check.
+    /// </summary>
+    public sealed class LadderDatabaseGuard : IAsyncLifetime
+    {
+        public ValueTask InitializeAsync() => default;
+
+        public async ValueTask DisposeAsync()
+        {
+            var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+            if (string.IsNullOrEmpty(baseConnectionString))
+            {
+                return;
+            }
+
+            var names = LadderFixtures().Select(row => ScratchDatabaseFor(row.Data)).Distinct(StringComparer.Ordinal).ToList();
+            var remaining = await ExistingAsync(baseConnectionString, names);
+            Assert.True(
+                remaining.Count == 0,
+                "Ladder scratch databases outlived the class: " + string.Join(", ", remaining)
+                + ". Each holds a TimescaleDB background-worker slot for its scheduler, and a later class on a small store runs out of workers (#9929).");
+        }
+
+        /// <summary>The members of <paramref name="names"/> that exist as databases on the store.</summary>
+        internal static async Task<IReadOnlyList<string>> ExistingAsync(string baseConnectionString, IReadOnlyCollection<string> names)
+        {
+            await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString));
+            await admin.OpenAsync();
+            await using var query = new NpgsqlCommand("SELECT datname FROM pg_database WHERE datname = ANY($1) ORDER BY datname", admin);
+            query.Parameters.AddWithValue(names.ToArray());
+            var found = new List<string>();
+            await using var reader = await query.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                found.Add(reader.GetString(0));
+            }
+
+            return found;
         }
     }
 
