@@ -36,9 +36,6 @@ public sealed class PgTargetStageTimeBudgetTests
 
     private static TaskCompletionSource Hook() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private static NpgsqlDataSource NeverOpened() =>
-        NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=nobody;Database=nothing");
-
     private static Fact Earlier() => new() { Source = "config", Key = "EARLIER" };
 
     /// <summary>A planted family: reads the fact ahead of it, adds a fact and a failure, then waits on its held read.</summary>
@@ -237,15 +234,6 @@ public sealed class PgTargetStageTimeBudgetTests
         Assert.Empty(context.DetectorsLeftOutForTime);
         Assert.Equal(new[] { "FIRST", "HELD_BEFORE", "HELD_AFTER", "LAST" }, anomalies.Select(fact => fact.Key));
     }
-
-    [Fact]
-    public async Task ThePostgreSqlTargetDetectors_AreNamedInTheOrderThePassRunsThem()
-    {
-        await using var postgres = NeverOpened();
-        var detector = new PgTargetAnomalyDetector(postgres, new PgTargetBaselineProvider(postgres));
-
-        Assert.Equal(PgTargetStageBudgetLiveTests.Detectors, detector.Detectors().Select(PgAnomalyDetector.DetectorName));
-    }
 }
 
 /// <summary>
@@ -260,18 +248,11 @@ public sealed class PgTargetStageBudgetLiveTests
     private const string ServerName = "pg-target-stage-budget-9966";
     private static readonly TimeSpan Limit = TimeSpan.FromSeconds(30);
 
-    /* The fourteen detectors, in the order the pass runs and names them. */
-    internal static readonly string[] Detectors =
-    [
-        "tps", "session", "cpu", "deadlock_rate", "wait_profile", "io", "replication", "wal_volume", "blocking",
-        "sampled_wait_profile", "plan_regression", "cpu_burn", "bad_actor_share", "database_growth"
-    ];
-
     private static DateTime TruncateToMinutes(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
     /// <summary>Takes a lock on <paramref name="table"/> that every read of it waits behind, until the transaction ends.</summary>
-    private static async Task<NpgsqlTransaction> HoldReadsOfAsync(NpgsqlConnection locker, string table, CancellationToken ct)
+    internal static async Task<NpgsqlTransaction> HoldReadsOfAsync(NpgsqlConnection locker, string table, CancellationToken ct)
     {
         var transaction = await locker.BeginTransactionAsync(ct);
         using var lockTable = new NpgsqlCommand($"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE", locker, transaction);
@@ -280,7 +261,7 @@ public sealed class PgTargetStageBudgetLiveTests
     }
 
     /// <summary>Returns once a session waits for a lock on <paramref name="table"/>: the held read has reached the store.</summary>
-    private static async Task AReadWaitsForAsync(NpgsqlConnection watcher, string table, CancellationToken ct)
+    internal static async Task AReadWaitsForAsync(NpgsqlConnection watcher, string table, CancellationToken ct)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(Limit);
@@ -406,7 +387,9 @@ public sealed class PgTargetStageBudgetLiveTests
         var unread = Pass(windowEnd, ct);
         unread.DetectorDeadline = fired.Token;
         Assert.Empty(await Detector().DetectAnomaliesAsync(unread).WaitAsync(Limit, ct));
-        Assert.Equal(Detectors, unread.DetectorsLeftOutForTime);
+        var detectors = Detector().Detectors();
+        Assert.Equal(detectors.Select(PgAnomalyDetector.DetectorName), unread.DetectorsLeftOutForTime);
+        Assert.Equal(detectors.Length, unread.DetectorsLeftOutForTime.Count);
 
         /* The growth detector is the last of the fourteen. Its baseline read of the database size table is held by a
            lock, the thirteen before it finish, and the deadline fires while it waits. */

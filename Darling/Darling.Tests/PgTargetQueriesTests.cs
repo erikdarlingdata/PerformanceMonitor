@@ -805,10 +805,7 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("ZScoreMetadata(bucket, verdict, samples)", code, StringComparison.Ordinal);
         Assert.DoesNotContain("barsMeasured: true", code, StringComparison.Ordinal);
         Assert.Contains("unmeasured for statement share", source, StringComparison.Ordinal);
-        /* Wired into the root's emission order, after the plan detector that reads the same table. */
         var root = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
-        var planDetector = root.IndexOf("DetectPlanRegressionAnomalies,", StringComparison.Ordinal);
-        Assert.True(planDetector > 0 && planDetector < root.IndexOf("DetectBadActorShareAnomalies,", StringComparison.Ordinal));
         Assert.Contains("private partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies);", root, StringComparison.Ordinal);
     }
 

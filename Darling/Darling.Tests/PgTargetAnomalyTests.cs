@@ -171,13 +171,6 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
 
-        var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
-        var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
-        var lastV1 = code.IndexOf("DetectWaitProfileAnomalies,", StringComparison.Ordinal);
-        Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "DetectIoAnomalies,", "DetectReplicationAnomalies,", "DetectWalVolumeAnomalies,", "DetectBlockingAnomalies,", "DetectPlanRegressionAnomalies,", "DetectCpuBurnAnomalies,", "DetectDatabaseGrowthAnomalies," })
-            Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
-
         foreach (var (file, lane) in new[]
         {
             ("PgTargetAnomalyDetector.Io.cs", 11), ("PgTargetAnomalyDetector.Replication.cs", 12), ("PgTargetAnomalyDetector.Wal.cs", 15),

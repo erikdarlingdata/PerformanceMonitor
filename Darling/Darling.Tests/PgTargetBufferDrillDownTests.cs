@@ -584,6 +584,112 @@ public sealed class PgTargetBufferDrillDownTests
         return fact;
     }
 
+    /// <summary>The reply's cut list for <paramref name="field"/>, wherever the reply keeps it.</summary>
+    private static List<JsonElement> LeftOutOf(JsonElement reply, string field)
+    {
+        if (reply.TryGetProperty(field, out var top))
+            return top.EnumerateArray().ToList();
+        if (reply.TryGetProperty("hints", out var hints) && hints.ValueKind == JsonValueKind.Object
+            && hints.TryGetProperty(field, out var nested))
+            return nested.EnumerateArray().ToList();
+        return [];
+    }
+
+    private static bool CarriesADrillDown(JsonElement card) =>
+        card.TryGetProperty("drill_down", out var drillDown) && drillDown.ValueKind == JsonValueKind.Object;
+
+    /// <summary>
+    /// A buffer-composition drill-down held past the drill-down budget of an on-demand pass (#9966), through the whole
+    /// reply. The capture table is locked by another session, so the drill-down read waits behind it and never finishes by
+    /// itself. The budget ends while it waits. The reply still carries every finding the whole pass returns, in the same
+    /// order with the same stories and severities, the held finding has no drill-down and is named in
+    /// <c>drill_downs_left_out</c> by its root fact key, and the findings that had no drill-down keep none. The same pass
+    /// with no budget carries the drill-down and names nothing.
+    /// </summary>
+    [Fact]
+    public async Task ADrillDownHeldPastItsBudget_LeavesTheFindingInTheReplyWithoutIt_NamesIt_AndTheRestOfTheReplyIsWhole()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live drill-down budget reply test (it mints its own scratch database).");
+
+        var limit = TimeSpan.FromSeconds(60);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+        var windowStart = windowEnd.AddHours(-1);
+        await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 18, ct);
+        await PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), blksRead: 1000, blksHit: 1000, ct);
+        for (var m = -1; m <= 60; m++)
+        {
+            var mm = Math.Max(m, 0);
+            await PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(m), blksRead: 1_000_000 + 3000L * mm, blksHit: 1_000_000 + 3000L * mm, ct);
+        }
+        await PgTargetKnobsTests.PlantConfigSnapshotAsync(connection, ServerId, ServerName, windowEnd.AddMinutes(-30), ct);
+        await PlantCaptureAsync(connection, windowEnd.AddMinutes(-30), poolUsed: 15400, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+        /* No budget: the buffer finding carries its composition and nothing is left out. */
+        var whole = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = null
+        };
+        var wholeReply = await DarlingMcpTools.AnalyzeServer(whole, postgres, ServerName, 1, as_of: asOf).WaitAsync(limit, ct);
+        using var wholeDocument = JsonDocument.Parse(wholeReply);
+        var wholeCards = wholeDocument.RootElement.GetProperty("findings").EnumerateArray().ToList();
+        string RootKeyOf(JsonElement card) => card.GetProperty("root_fact").GetProperty("key").GetString()!;
+        var wholeBuffer = Assert.Single(wholeCards, card => RootKeyOf(card) == PgTargetFactKeys.BufferCachePressure);
+        Assert.True(CarriesADrillDown(wholeBuffer));
+        Assert.Empty(LeftOutOf(wholeDocument.RootElement, "drill_downs_left_out"));
+
+        /* A drill-down budget that ends while the capture read waits behind the lock. */
+        var budget = TimeSpan.FromSeconds(8);
+        var cut = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = budget
+        };
+        string cutReply;
+        await using (var locker = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await locker.OpenAsync(ct);
+            await using var held = await PgTargetStageBudgetLiveTests.HoldReadsOfAsync(locker, "pg_buffer_usage", ct);
+            var run = DarlingMcpTools.AnalyzeServer(cut, postgres, ServerName, 1, as_of: asOf);
+            await PgTargetStageBudgetLiveTests.AReadWaitsForAsync(connection, "pg_buffer_usage", ct);
+            cutReply = await run.WaitAsync(limit, ct);
+            await held.RollbackAsync(ct);
+        }
+
+        using var cutDocument = JsonDocument.Parse(cutReply);
+        var cutCards = cutDocument.RootElement.GetProperty("findings").EnumerateArray().ToList();
+        Assert.Equal(wholeCards.Select(RootKeyOf), cutCards.Select(RootKeyOf));
+        Assert.Equal(wholeCards.Select(card => card.GetProperty("story_path").GetString()), cutCards.Select(card => card.GetProperty("story_path").GetString()));
+        Assert.Equal(wholeCards.Select(card => card.GetProperty("severity").GetDouble()), cutCards.Select(card => card.GetProperty("severity").GetDouble()));
+        for (var i = 0; i < cutCards.Count; i++)
+        {
+            var heldCard = RootKeyOf(cutCards[i]) == PgTargetFactKeys.BufferCachePressure;
+            Assert.Equal(!heldCard && CarriesADrillDown(wholeCards[i]), CarriesADrillDown(cutCards[i]));
+        }
+
+        var entry = Assert.Single(LeftOutOf(cutDocument.RootElement, "drill_downs_left_out"));
+        Assert.Equal(PgTargetFactKeys.BufferCachePressure, entry.GetProperty("finding").GetString());
+        Assert.Equal(1, entry.GetProperty("findings").GetInt32());
+        Assert.Equal(StageTimeBudget.Reason, entry.GetProperty("reason").GetString());
+        Assert.Equal(budget.TotalSeconds, entry.GetProperty("budget_seconds").GetDouble());
+        Assert.Equal(new[] { PgTargetFactKeys.BufferCachePressure }, cut.LastStageCuts.DrillDowns);
+        Assert.Empty(cut.LastStageCuts.Detectors);
+        Assert.Empty(cut.LastFamiliesLeftOutForTime);
+    }
+
     private static int CountOf(string text, string needle) => (text.Length - text.Replace(needle, string.Empty, StringComparison.Ordinal).Length) / needle.Length;
 
     private static DateTime TruncateToMinutes(DateTime value) =>
