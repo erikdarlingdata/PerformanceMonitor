@@ -78,7 +78,7 @@ public sealed class ComposeModulePreAggregateLiveTests
                     }
 
                     /* the Sum-mode ratio, a different unit, and a short top N whose last place is decided by the tie-break */
-                    await AssertSameRowsAsync(store, run, $"{{\"source\":\"query_stats\",\"measure\":\"query_avg_cpu_us\",\"topN\":50,\"groupBy\":{grouping},\"viz\":\"table\"}}");
+                    await AssertSameRowsAsync(store, run, $"{{\"source\":\"query_stats\",\"ratio\":\"query_avg_cpu_us\",\"topN\":50,\"groupBy\":{grouping},\"viz\":\"table\"}}");
                     await AssertSameRowsAsync(store, run, $"{{\"source\":\"query_stats\",\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\",\"unit\":\"s\",\"topN\":3,\"groupBy\":{grouping},\"viz\":\"table\"}}");
                     await AssertSameRowsAsync(store, run, $"{{\"source\":\"query_stats\",\"measure\":\"query_executions\",\"aggregate\":\"sum\",\"topN\":4,\"groupBy\":{grouping},\"viz\":\"table\"}}");
                     compared += 3;
@@ -101,7 +101,7 @@ public sealed class ComposeModulePreAggregateLiveTests
             /* a ranked time series, with and without the residual series */
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":3,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}",
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":3,\"includeOther\":true,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"line\"}",
-            "{\"source\":\"query_stats\",\"measure\":\"query_avg_cpu_us\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}",
+            "{\"source\":\"query_stats\",\"ratio\":\"query_avg_cpu_us\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}",
             /* a scalar whose only module reference is a filter, and one whose filter matches nothing */
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"viz\":\"stat\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"like\",\"value\":\"usp_%\"}]}",
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"min\",\"viz\":\"stat\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"usp_NoSuchModule\"}]}",
@@ -110,7 +110,7 @@ public sealed class ComposeModulePreAggregateLiveTests
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"max\",\"topN\":50,\"groupBy\":[\"database_name\"],\"viz\":\"table\",\"filters\":[{\"dimension\":\"statement\",\"op\":\"like\",\"value\":\"H%\"}]}",
             /* an overlay: both values decompose, over the same pre-aggregated rows */
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"(ad hoc)\"}],\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"max\"}}",
-            "{\"source\":\"query_stats\",\"measure\":\"query_avg_elapsed_us\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"(ad hoc)\"}],\"overlay\":{\"measure\":\"query_worker_us\",\"aggregate\":\"avg\"}}",
+            "{\"source\":\"query_stats\",\"ratio\":\"query_avg_elapsed_us\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"(ad hoc)\"}],\"overlay\":{\"measure\":\"query_worker_us\",\"aggregate\":\"avg\"}}",
         };
 
         await RunLiveAsync(async store =>
