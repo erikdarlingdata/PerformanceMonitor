@@ -16,10 +16,19 @@ name: Darling Linux tests
 #
 # Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that
 # changes this file, the systemd script or the test project file, so a change to how the legs build or run proves itself.
+# A manual dispatch takes an optional `classes` input (#9942): space-separated test class names, such as
+# `PgTargetVacuumTests`. Empty runs the whole suite. With names, linux-suite runs only those classes (minutes, not the
+# whole hour) and linux-systemd is skipped. The nightly and the pull request always run the whole suite.
 # Never add `pull_request_target`: the jobs build and run the checked-out code and must not get a write token or secrets.
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      classes:
+        description: 'Space-separated test class names to run alone (for example PgTargetVacuumTests). Empty runs the whole suite.'
+        type: string
+        required: false
+        default: ''
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -125,8 +134,24 @@ jobs:
         shell: bash
         env:
           DARLING_TEST_PG: Host=127.0.0.1;Port=5541;Username=darling;Database=darlingtest
+          # The dispatch input, passed through the environment and never spliced into the script text (#9942). Empty on
+          # every other trigger, which runs the whole suite.
+          TEST_CLASSES: ${{ github.event.inputs.classes }}
         run: |
           set -uo pipefail
+          # One -class "*.<Name>" pair per name. A name outside [A-Za-z0-9_] fails the step before the test host starts.
+          filter=()
+          for name in ${TEST_CLASSES}; do
+            if [[ ! "${name}" =~ ^[A-Za-z0-9_]+$ ]]; then
+              echo "::error::The classes input holds '${name}', which is not a test class name. Use space-separated names of letters, digits and underscores."
+              exit 1
+            fi
+            filter+=(-class "*.${name}")
+          done
+          heading='### Darling suite on Linux (report-only, #9686)'
+          if [ "${#filter[@]}" -gt 0 ]; then
+            heading="### Darling suite on Linux, only the classes: ${TEST_CLASSES} (report-only, #9686)"
+          fi
           results="${RUNNER_TEMP}/darling-linux-suite"
           mkdir -p "${results}"
           # Which test files the build left out, and why (the LeaveOutViewerTestFiles target of the project file).
@@ -134,12 +159,12 @@ jobs:
           # The step's shell runs with -e, so the test host's exit code is caught here and the report below still runs when it fails.
           code=0
           dotnet Darling/Darling.Tests/bin/Release/net10.0/Darling.Tests.dll -noColor -trait- "Platform=Windows" \
-            -xml "${results}/results.xml" > "${results}/output.log" 2>&1 || code=$?
+            "${filter[@]}" -xml "${results}/results.xml" > "${results}/output.log" 2>&1 || code=$?
           # grep exits 1 when nothing matches, which is the green run.
           grep -E '\[FAIL\]' "${results}/output.log" | head -n 200 || true
           grep -E 'Total: [0-9]+' "${results}/output.log" | tail -n 1 || true
           {
-            echo '### Darling suite on Linux (report-only, #9686)'
+            echo "${heading}"
             echo ''
             echo '```'
             grep -E 'Total: [0-9]+' "${results}/output.log" | tail -n 1 || echo "No summary line: the test host exited with ${code} before it finished."
@@ -171,6 +196,8 @@ jobs:
   # the pack are the ones nightly.yml's linux job runs. It reports without blocking (continue-on-error) while it is new.
   linux-systemd:
     name: Darling under systemd (linux-x64 tarball)
+    # A dispatch that names classes is a quick run of those classes, not a check of the tarball (#9942).
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.classes == ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
