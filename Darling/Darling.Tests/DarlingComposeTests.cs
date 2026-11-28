@@ -3528,11 +3528,15 @@ public sealed class DarlingComposeTests
         var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true));
 
         Assert.Equal(ComposeRawModuleCteOracleLiveTests.OldModuleCte
-            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
-            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.p0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM (\n"
+            + "    SELECT f.server_name, f.sql_handle, f.database_name, SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS p0\n"
+            + "    FROM " + EdgeFrom("sum") + " AS f\n"
+            + "    WHERE f.collection_time >= $1\n"
+            + "      AND f.collection_time <= $2\n"
+            + "    GROUP BY f.server_name, f.sql_handle, f.database_name\n"
+            + ") AS f\n"
             + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
-            + "WHERE f.collection_time >= $1\n"
-            + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
             + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $5", compiled.Sql);
@@ -3588,11 +3592,15 @@ public sealed class DarlingComposeTests
         var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
 
         Assert.Equal(ModuleCte("$5")
-            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
-            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.p0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM (\n"
+            + "    SELECT f.server_name, f.sql_handle, f.database_name, SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS p0\n"
+            + "    FROM " + EdgeFrom("sum") + " AS f\n"
+            + "    WHERE f.collection_time >= $1\n"
+            + "      AND f.collection_time <= $2\n"
+            + "    GROUP BY f.server_name, f.sql_handle, f.database_name\n"
+            + ") AS f\n"
             + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
-            + "WHERE f.collection_time >= $1\n"
-            + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
             + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $6", compiled.Sql);

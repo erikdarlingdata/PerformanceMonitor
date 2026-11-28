@@ -144,7 +144,7 @@ public sealed class ComposeModulePreAggregateLiveTests
                    combines the partial */
                 Assert.Contains("GROUP BY f.server_name, f.sql_handle, f.database_name\n) AS f\nLEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\nGROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')", sql, StringComparison.Ordinal);
                 Assert.Contains("SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS p0", sql, StringComparison.Ordinal);
-                Assert.Contains("(CAST(SUM(f.p0) AS double precision)) * 1 / 1000 AS value", sql, StringComparison.Ordinal);
+                Assert.Contains("(CAST(SUM(f.p0) AS double precision)) * 1.0 / 1000.0 AS value", sql, StringComparison.Ordinal);
 
                 var output = TestContext.Current.TestOutputHelper;
                 output?.WriteLine($"-- 9960-sql-begin [{run.Name}]");
