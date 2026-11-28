@@ -340,8 +340,8 @@ public sealed class ComposeModulePreAggregateLiveTests
     {
         private readonly ScratchPostgres _scratch;
         private readonly List<Planted> _rows = new();
-        private readonly Dictionary<(string Server, string Handle), string> _modules = new();
-        private RollupAvailability? _rollups;
+        private readonly Dictionary<(string Server, string Handle), (string Name, DateTime At)> _modules = new();
+        private RollupAvailability _rollups;
         private RollupCoverage? _coverage;
         private DateTime? _watermark;
 
@@ -386,24 +386,25 @@ public sealed class ComposeModulePreAggregateLiveTests
         {
             ComposeHourlyEdgesVerdict? verdict = null;
             if (run.Verdict
-                && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, Anchor, run.Start, WindowEnd, _rollups!, _coverage!, ComposeSourceRouter.IsFleetScope(run.Servers), out _) is { } candidate)
+                && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, Anchor, run.Start, WindowEnd, _rollups, _coverage!, ComposeSourceRouter.IsFleetScope(run.Servers), out _) is { } candidate)
             {
                 verdict = new ComposeHourlyEdgesVerdict(candidate.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, run.Servers);
             }
 
-            return new ComposeRunContext(run.Servers, run.Start, WindowEnd, ComposeRunContext.NoVariables, _rollups!, Anchor, _coverage!,
+            return new ComposeRunContext(run.Servers, run.Start, WindowEnd, ComposeRunContext.NoVariables, _rollups, Anchor, _coverage!,
                 HourlyEdges: verdict, ModuleMapThrough: run.Watermark ? _watermark : null, UnregisteredServers: run.Unregistered);
         }
 
         /// <summary>The planted sum of delta_worker_time (microseconds) the panel reads for (<paramref name="database"/>, <paramref name="objectName"/>)
-        /// in <paramref name="run"/>'s window and scope: measured rows only, each row named by its own server's module for its handle.</summary>
+        /// in <paramref name="run"/>'s window and scope: measured rows only, each row named by its own server's module for its handle
+        /// when that module's newest procedure_stats row is inside the window, and '(ad hoc)' otherwise.</summary>
         public double ExpectedWorkerUs(Run run, string database, string objectName) =>
             _rows.Where(r => r.At >= run.Start && r.At <= WindowEnd
                     && (run.Servers is null || run.Servers.Contains(r.Server, StringComparer.Ordinal))
                     && r.Database == database
                     && r.Interval != 0
                     && r.Worker is not null
-                    && (r.Handle is not null && _modules.TryGetValue((r.Server, r.Handle), out var name) ? name : "(ad hoc)") == objectName)
+                    && (r.Handle is not null && _modules.TryGetValue((r.Server, r.Handle), out var module) && module.At >= run.Start ? module.Name : "(ad hoc)") == objectName)
                 .Sum(r => (double)r.Worker!.Value);
 
         public async Task PlantAsync()
@@ -414,18 +415,19 @@ public sealed class ComposeModulePreAggregateLiveTests
                 await QsAsync(ServerA, "AnchorDb", "HA", "0xA", h.AddMinutes(30), 1000, 300);
             }
 
-            /* the modules the map learns at its refresh: one handle shared by three servers (two names and no module row), one
-               name on two servers, a module on the unregistered name, two tied modules and one that only ever restarts */
-            var early = H1.AddHours(2);
-            await ProcAsync(ServerA, "DbOne", "usp_Shared", "0xS", early);
-            await ProcAsync(ServerB, "DbOne", "usp_SharedOnB", "0xS", early);
-            await ProcAsync(ServerA, "DbOne", "usp_Pay", "0xP", early);
-            await ProcAsync(ServerB, "DbOne", "usp_Pay", "0xP", early);
-            await ProcAsync(Ghost, "DbOne", "usp_Ghost", "0xG", early);
-            await ProcAsync(ServerA, "TieDb", "usp_TieA", "0xT1", early);
-            await ProcAsync(ServerA, "TieDb", "usp_TieB", "0xT2", early);
-            await ProcAsync(ServerC, "DbTwo", "usp_RestartOnly", "0xR", early);
-            await ProcAsync(ServerC, "DbTwo", "usp_OldName", "0xN", early);
+            /* the modules the map learns at its refresh, inside both windows: one handle shared by three servers (two names and no
+               module row), a module on the unregistered name, two tied modules and one that only ever restarts. usp_Pay is one name
+               on two servers, and server B's row is older than the 4 h window, so that window reads its handle as '(ad hoc)'. */
+            var known = H2.AddHours(-2);
+            await ProcAsync(ServerA, "DbOne", "usp_Shared", "0xS", known);
+            await ProcAsync(ServerB, "DbOne", "usp_SharedOnB", "0xS", known);
+            await ProcAsync(ServerA, "DbOne", "usp_Pay", "0xP", known);
+            await ProcAsync(ServerB, "DbOne", "usp_Pay", "0xP", H1.AddHours(2));
+            await ProcAsync(Ghost, "GhostDb", "usp_Ghost", "0xG", known);
+            await ProcAsync(ServerA, "TieDb", "usp_TieA", "0xT1", known);
+            await ProcAsync(ServerA, "TieDb", "usp_TieB", "0xT2", known);
+            await ProcAsync(ServerC, "DbTwo", "usp_RestartOnly", "0xR", known);
+            await ProcAsync(ServerC, "DbTwo", "usp_OldName", "0xN", known);
             await ProcAsync(ServerA, "DbOne", "usp_Filler", "0xW", H2.AddHours(-1));
 
             /* both raw edges of the 24 h window, whole hours between them, and three instants inside the 4 h window */
@@ -453,7 +455,7 @@ public sealed class ComposeModulePreAggregateLiveTests
                 await QsAsync(ServerA, "DbOne", "HNull", null, at, 40 + n, 300);
                 await QsAsync(ServerB, "DbOne", "HP", "0xP", at.AddSeconds(45), null, 300);
                 await QsAsync(ServerA, "DbOne", "HS", "0xS", at.AddSeconds(50), 999_999, 0);
-                await QsAsync(Ghost, "DbOne", "HG", "0xG", at, 800 + n, 300);
+                await QsAsync(Ghost, "GhostDb", "HG", "0xG", at, 800 + n, 300);
                 await QsAsync(ServerC, "DbTwo", "HR", "0xR", at, 0, 0);
             }
 
@@ -518,7 +520,10 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, 1, 1, 1, 300)", Connection);
             insert.Parameters.AddWithValue(handle);
             await insert.ExecuteNonQueryAsync(Ct);
             /* the newest row of a (server, handle) names it */
-            _modules[(server, handle)] = objectName;
+            if (!_modules.TryGetValue((server, handle), out var newest) || at >= newest.At)
+            {
+                _modules[(server, handle)] = (objectName, at);
+            }
         }
 
         public async ValueTask DisposeAsync()
