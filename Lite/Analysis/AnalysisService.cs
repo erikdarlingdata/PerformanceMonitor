@@ -171,6 +171,11 @@ public class AnalysisService
         _anomalyDetector = new AnomalyDetector(duckDb, _baselineProvider);
     }
 
+    /// <summary>A test seam: the clock an unanchored read ends its window at (#9957). Null reads the system clock.</summary>
+    internal Func<DateTime>? UtcNowForTests { get; set; }
+
+    private DateTime UtcNow => UtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+
     /// <summary>
     /// Runs the full analysis pipeline for a server.
     /// Default time range is the last 4 hours.
@@ -194,7 +199,7 @@ public class AnalysisService
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
         DateTime? asOfUtc = null)
     {
-        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -204,6 +209,7 @@ public class AnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            WindowEndsAtClock = asOfUtc is null,
             CancellationToken = cancellationToken
         };
 
@@ -623,7 +629,7 @@ public class AnalysisService
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
         int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
-        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -633,6 +639,7 @@ public class AnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            WindowEndsAtClock = asOfUtc is null,
             CancellationToken = cancellationToken,
             /* #9195: get_analysis_facts is an interactive read. The plan check answers from what the background pass cached and
                fetches at most the allowance's few plans (3 fetches, 3 s). */
@@ -756,6 +763,10 @@ public class AnalysisService
     /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
     /// the facts did not make.</para>
     ///
+    /// <para>#9957: <paramref name="windowsEndAtClock"/> is true when the comparison window's end is the clock (no <c>as_of</c>), and so is the
+    /// baseline window's, which hangs off it. Each window's plan regression cost read then ends at the newest row the store holds up to its
+    /// end, so a repeated compare between two collections shares the scan of both windows. False keeps every window's exact bounds.</para>
+    ///
     /// <para>#9195: <paramref name="interactive"/> is true for <c>compare_analysis</c>, a read someone is waiting on: both windows'
     /// plan checks then answer from the outcomes a background pass cached, and share one allowance of at most 3 live plan
     /// fetches in 3 s for the pairs it lacks. The config-change attribution inside the pass leaves it false, so the pass keeps
@@ -768,7 +779,7 @@ public class AnalysisService
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
-        CancellationToken cancellationToken = default, bool interactive = false)
+        CancellationToken cancellationToken = default, bool interactive = false, bool windowsEndAtClock = false)
     {
         /* #9195: one allowance for the whole call, so the two windows together make at most 3 fetches in 3 s. */
         var allowance = interactive ? new InteractivePlanFetchAllowance() : null;
@@ -780,6 +791,7 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
+            WindowEndsAtClock = windowsEndAtClock,
             CancellationToken = cancellationToken,
             InteractiveRead = interactive,
             InteractiveFetches = allowance
@@ -791,6 +803,7 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
+            WindowEndsAtClock = windowsEndAtClock,
             CancellationToken = cancellationToken,
             InteractiveRead = interactive,
             InteractiveFetches = allowance
