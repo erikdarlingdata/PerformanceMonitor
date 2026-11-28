@@ -165,12 +165,14 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectSessionFactsAsync(context, facts);
         await CollectVacuumFactsAsync(context, facts);
         await CollectWaitFactsAsync(context, facts);
-        await CollectQueryFactsAsync(context, facts);
+        /* #9966: the queries family here and the io family below are the two an on-demand pass runs under its family
+           deadline (RunUnderTheFamilyDeadlineAsync says why). Every other family always runs. */
+        await RunUnderTheFamilyDeadlineAsync(context, facts, CollectQueryFactsAsync, QueriesFamily);
         await CollectCpuFactsAsync(context, facts);
         /* v2 (#3691): the three new families, after every v1 family so a v2 fact composed at collect time can
            read a v1 context fact already in the list (the Config-first rule, extended). Stubs until lanes 11 /
            12 / 13 land. */
-        await CollectIoFactsAsync(context, facts);
+        await RunUnderTheFamilyDeadlineAsync(context, facts, CollectIoFactsAsync, IoFamily);
         await CollectReplicationFactsAsync(context, facts);
         await CollectBloatFactsAsync(context, facts);
         /* wave 3 (#3691, between waves): the blocking family, last — its chain fact reads the idle-in-transaction and
@@ -189,6 +191,67 @@ public sealed partial class PgTargetFactCollector : IFactCollector
 
         return facts;
     }
+
+    /// <summary>
+    /// Runs one heavy family of an on-demand pass under its time budget (#9966). The heavy families are the two whose
+    /// read takes every row of the window from a table that holds many rows per collection, at a one-minute cadence:
+    /// the queries family (<c>pg_statement_stats</c>, one row per statement series per collection) and the io family
+    /// (<c>pg_io_stats</c>, one row per backend type, object and context per collection). A long window on a busy target
+    /// makes those two slow. Every other family reads a latest snapshot, one row per collection or per database, or a
+    /// table collected hourly or daily, and is called directly.
+    ///
+    /// <para>When the context carries a <see cref="AnalysisContext.FamilyDeadline"/>, <paramref name="family"/> reads
+    /// through a token that also ends at the deadline (<see cref="StageDeadline.RunAsync"/>, the helper the detector and
+    /// drill-down stages use). The families of this collector run one after another against one list, and a family reads
+    /// the facts of the families before it from that list, so the family runs against <paramref name="facts"/> itself. If
+    /// the deadline stops it, or has fired before it starts, the facts it added are removed again, the failures it
+    /// recorded are dropped, and <paramref name="familyName"/> is added to
+    /// <see cref="AnalysisContext.FamiliesLeftOutForTime"/>: a family the budget stopped is not a failed read. A stop
+    /// from the pass's own token still unwinds the pass. With no deadline (the scheduled pass) the family is called
+    /// directly, as every other family is.</para>
+    /// </summary>
+    internal static async Task RunUnderTheFamilyDeadlineAsync(
+        AnalysisContext context, List<Fact> facts, Func<AnalysisContext, List<Fact>, Task> family, string familyName)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(family);
+
+        var deadline = context.FamilyDeadline;
+        if (!deadline.CanBeCanceled)
+        {
+            await family(context, facts);
+            return;
+        }
+
+        /* The family's failures are kept aside until it finishes, so one the deadline stops leaves none behind. */
+        var factsBefore = facts.Count;
+        var ownFailures = context.BufferCollectionFailuresForThisFlow();
+        bool finished;
+        try
+        {
+            finished = await StageDeadline.RunAsync(context, () => family(context, facts), deadline);
+        }
+        finally
+        {
+            context.StopBufferingCollectionFailuresForThisFlow();
+        }
+
+        if (!finished)
+        {
+            facts.RemoveRange(factsBefore, facts.Count - factsBefore);
+            context.FamiliesLeftOutForTime.Add(familyName);
+            return;
+        }
+
+        context.CollectionFailures.AddRange(ownFailures);
+    }
+
+    /// <summary>
+    /// The family label of the partial file the caller sits in: the label <see cref="ReportCollectionFailure"/> gives a
+    /// failure recorded in that file, so a family the time budget leaves out is named as its failures are.
+    /// </summary>
+    private static string FamilyOfThisFile([CallerFilePath] string file = "") => CollectionFailure.FamilyOfFile(file);
 
     /// <summary>
     /// audit_config's own collection (#4192): exactly the three families its CONFIG_PG_* facts and its

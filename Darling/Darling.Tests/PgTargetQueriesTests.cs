@@ -807,7 +807,8 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("unmeasured for statement share", source, StringComparison.Ordinal);
         /* Wired into the root's emission order, after the plan detector that reads the same table. */
         var root = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
-        Assert.True(root.IndexOf("await DetectPlanRegressionAnomalies(context, anomalies);", StringComparison.Ordinal) < root.IndexOf("await DetectBadActorShareAnomalies(context, anomalies);", StringComparison.Ordinal));
+        var planDetector = root.IndexOf("DetectPlanRegressionAnomalies,", StringComparison.Ordinal);
+        Assert.True(planDetector > 0 && planDetector < root.IndexOf("DetectBadActorShareAnomalies,", StringComparison.Ordinal));
         Assert.Contains("private partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies);", root, StringComparison.Ordinal);
     }
 

@@ -123,8 +123,8 @@ public sealed class PgTargetSampledWaitTests
 
         /* Reachable from the root, after the wave-3 detector. */
         var root = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
-        var blocking = root.IndexOf("await DetectBlockingAnomalies(context, anomalies);", StringComparison.Ordinal);
-        var sampled = root.IndexOf("await DetectSampledWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
+        var blocking = root.IndexOf("DetectBlockingAnomalies,", StringComparison.Ordinal);
+        var sampled = root.IndexOf("DetectSampledWaitProfileAnomalies,", StringComparison.Ordinal);
         Assert.True(blocking > 0 && sampled > blocking);
     }
 

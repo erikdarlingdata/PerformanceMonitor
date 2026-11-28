@@ -173,9 +173,9 @@ public sealed class PgTargetAnomalyTests
 
         var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
-        var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
+        var lastV1 = code.IndexOf("DetectWaitProfileAnomalies,", StringComparison.Ordinal);
         Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);", "await DetectPlanRegressionAnomalies(context, anomalies);", "await DetectCpuBurnAnomalies(context, anomalies);", "await DetectDatabaseGrowthAnomalies(context, anomalies);" })
+        foreach (var call in new[] { "DetectIoAnomalies,", "DetectReplicationAnomalies,", "DetectWalVolumeAnomalies,", "DetectBlockingAnomalies,", "DetectPlanRegressionAnomalies,", "DetectCpuBurnAnomalies,", "DetectDatabaseGrowthAnomalies," })
             Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
 
         foreach (var (file, lane) in new[]

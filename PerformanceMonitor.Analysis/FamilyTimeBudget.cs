@@ -21,6 +21,9 @@ namespace PerformanceMonitor.Analysis;
 /// stats) each read every row of the window, and the call waited for the slowest of them. The pass now gives those four a
 /// stated time. One that has not finished is stopped, and the reply names it in <c>families_left_out</c>, in the style of
 /// <c>findings_left_out</c>: which family, why, and where its findings can still be read.
+///
+/// <para>#9966: a PostgreSQL target has two such families, <c>queries</c> (every statement-history row of the window) and
+/// <c>io</c> (every I/O counter row of the window), under the same budget and named the same way.</para>
 /// </summary>
 public static class FamilyTimeBudget
 {
@@ -39,8 +42,8 @@ public static class FamilyTimeBudget
         var seconds = (budget ?? OnDemand).TotalSeconds.ToString("0.#", CultureInfo.InvariantCulture);
         var names = string.Join(", ", leftOut);
         return leftOut.Count == 1
-            ? $"1 family was left out for time ({names}): this call gives the heavy query-history reads {seconds} s from its start and that read had not finished, so no finding from it is in this answer and its absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings)."
-            : $"{leftOut.Count} families were left out for time ({names}): this call gives the heavy query-history reads {seconds} s from its start and those reads had not finished, so no finding from them is in this answer and their absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings).";
+            ? $"1 family was left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and that read had not finished, so no finding from it is in this answer and its absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings)."
+            : $"{leftOut.Count} families were left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and those reads had not finished, so no finding from them is in this answer and their absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings).";
     }
 
     /// <summary>
