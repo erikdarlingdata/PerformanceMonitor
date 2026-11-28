@@ -343,6 +343,10 @@ public sealed class DarlingMcpPgTrendTools
                 note = "mean_exec_ms is the point's total execution time over its calls - what ONE "
                      + "execution cost then - and peak_mean_exec_ms the costliest single interval inside it. Both "
                      + "are null where nothing ran, because a mean over no executions is absent rather than zero. "
+                     + "first_mean_exec_ms and last_mean_exec_ms are not the first and last point. Each is the mean "
+                     + "of ONE collection interval, the first and the last that ran the statement in the window, so a "
+                     + "single interval sets each and it can sit far from its point's mean_exec_ms. The points' "
+                     + "mean_exec_ms is the steadier comparison for a step. "
                      + "A step that persists is a plan or index change; a spike that recovers is usually "
                      + "contention, which get_pg_wait_trend and get_pg_blocking speak to.",
                 points = points.Select(p => new
