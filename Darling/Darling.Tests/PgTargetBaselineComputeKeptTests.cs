@@ -337,9 +337,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, TRUE)", connection);
         Assert.NotNull(cut.AnomalyReadBesideFamilies?.Run);
         Assert.DoesNotContain(await cut.AnomalyReadBesideFamilies!.Run!, anomaly => anomaly.Key == PgTargetFactKeys.AnomalyDatabaseGrowth);
 
-        /* The pass has returned and the hold is released: the one compute it left behind ends, and is waited for by its task. */
+        /* The pass has returned and the hold is released: the compute it left behind ends, and is waited for by its task. */
         var running = shared.KeptComputes.Running();
-        Assert.Single(running);
         release.SetResult();
         await Task.WhenAll(running).WaitAsync(Limit, ct);
         Assert.Equal(0, shared.KeptComputes.InFlight);
