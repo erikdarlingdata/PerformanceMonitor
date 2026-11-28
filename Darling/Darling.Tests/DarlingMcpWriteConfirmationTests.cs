@@ -118,7 +118,7 @@ public sealed class DarlingMcpWriteConfirmationTests
             ? new DarlingFrontDoorRouter(new Darling.Tests.FrontDoor.FakeFrontDoorDirectory("use1"), new Darling.Tests.FrontDoor.FakeFrontDoorPeers(), TimeSpan.FromSeconds(30))
             : null;
         return DarlingMcpWritePolicyTests.BuildServer(
-            config ?? Config, Token, owner: owner, personalSeat: new DarlingPersonalTokenSeat(null, null, owner), frontDoor: router);
+            config ?? Config, Token, owner: owner, personalSeat: new DarlingPersonalTokenSeat(null, null, owner), frontDoor: router, postgresConfig: new PostgresConfig());
     }
 
     [Theory]

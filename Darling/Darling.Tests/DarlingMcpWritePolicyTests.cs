@@ -543,7 +543,7 @@ public sealed class DarlingMcpWritePolicyTests
     internal static async Task<TestServer> BuildServer(
         McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling",
         DarlingMcpTokenSet? tokens = null, bool? requireToken = null, StoreOwnerSource? owner = null,
-        DarlingPersonalTokenSeat? personalSeat = null, DarlingFrontDoorRouter? frontDoor = null)
+        DarlingPersonalTokenSeat? personalSeat = null, DarlingFrontDoorRouter? frontDoor = null, PostgresConfig? postgresConfig = null)
     {
         var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
@@ -554,6 +554,8 @@ public sealed class DarlingMcpWritePolicyTests
         builder.Services.AddSingleton(postgres);
         if (personalSeat is not null)
             builder.Services.AddSingleton(personalSeat);
+        if (postgresConfig is not null)
+            builder.Services.AddSingleton(postgresConfig);
         if (owner is not null)
             builder.Services.AddSingleton(owner);
         builder.Services.AddSingleton(new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(
