@@ -281,11 +281,11 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     public void AFailedProbe_NamesTheExceptionAndSqlState_NeverTheConnectionString()
     {
         Assert.Equal("TimeoutException", DarlingStoreLogins.DescribeProbeFailure(new NpgsqlException("connect failed", new TimeoutException())));
-        Assert.Equal("InvalidOperationException", DarlingStoreLogins.DescribeProbeFailure(new InvalidOperationException("Password=secret")));
+        Assert.Equal("InvalidOperationException", DarlingStoreLogins.DescribeProbeFailure(new InvalidOperationException("Password=hunter2-9894")));
 
         var text = DarlingStoreLogins.LoginProbeFailedText(DarlingStoreLogins.Surface.Web, "NpgsqlException");
         Assert.Contains("NpgsqlException", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("secret", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2-9894", text, StringComparison.Ordinal);
     }
 
     /* ---- Item 2 through the real start path: a store that cannot be reached ---- */
@@ -1067,16 +1067,19 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                         + "AND pg_catalog.has_column_privilege(current_user, 'config.config_notification', 'slack_url', 'SELECT')";
                     break;
                 case "table_select":
+                    setup.Add($"GRANT USAGE ON SCHEMA config TO {loginName}");
                     setup.Add($"GRANT SELECT ON config.config_monitored_servers TO {loginName}");
                     proof = "SELECT pg_catalog.has_table_privilege(current_user, 'config.config_monitored_servers', 'SELECT')";
                     break;
                 case "column_select":
+                    setup.Add($"GRANT USAGE ON SCHEMA config TO {loginName}");
                     setup.Add($"GRANT SELECT (signing_key) ON config.config_notification TO {loginName}");
                     proof = "SELECT pg_catalog.has_column_privilege(current_user, 'config.config_notification', 'signing_key', 'SELECT') "
                         + "AND NOT pg_catalog.has_table_privilege(current_user, 'config.config_notification', 'SELECT')";
                     break;
                 case "noinherit_member_of_admin_grants":
                     setup.Add($"CREATE ROLE {groupName} NOLOGIN");
+                    setup.Add($"GRANT USAGE ON SCHEMA config TO {loginName}");
                     setup.AddRange(ViewerGrantReplay.StatementsFor(groupName, scratch.DatabaseName, "admin"));
                     setup.Add($"GRANT {groupName} TO {loginName}");
                     proof = $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER') AND NOT pg_catalog.pg_has_role(current_user, '{groupName}', 'USAGE') "
@@ -1092,6 +1095,7 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                 case "second_table_owner_member":
                     /* server_tags holds no secret column, so only the owner arm can refuse this login. */
                     setup.Add($"CREATE ROLE {groupName} NOLOGIN");
+                    setup.Add($"GRANT USAGE ON SCHEMA config TO {loginName}");
                     setup.Add($"GRANT {groupName} TO CURRENT_USER");
                     setup.Add($"ALTER TABLE config.server_tags OWNER TO {groupName}");
                     setup.Add($"GRANT {groupName} TO {loginName}");
