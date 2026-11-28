@@ -4018,10 +4018,21 @@ function Remove-DarlingStaleFiles([string]$installRoot, $relativePaths, $shipped
 #   - at the end: the end time, exit code, the stop check's result, the rollback folder, the first error if it failed, and
 #     state succeeded or failed.
 #   - -MarkVerified rewrites it to verified once the operator's checks pass. It does no upgrade.
+#   - the rollback backup does not hold it (#9940, Get-DarlingRollbackBackupFiles). A rollback on Windows is the backup's files copied
+#     back by hand, so the record of the run that is taken back stays in the install root with its last state, and the build that is
+#     put back records that state at its start.
 #
 # Every write goes to a temp file in the same folder and is moved over the old file, so a reader never sees half a file. The
 # service account gets Modify on the file itself (not on the install root), because the service removes the file once the run is
 # verified or failed and the install root gives it only Read and Execute.
+
+# The files of the install root that go into a rollback backup: every file but upgrade-run.json (#9940). The record is written as
+# in_progress before the backup is taken, so a backup that held it would hold this run's first state. Copied back by hand in a
+# rollback, that copy would replace the record of how the run ended, and the store's row for the run would stay in_progress for good
+# when the rollback came before the service's next store pass. The record is not a file of the build that the backup keeps.
+function Get-DarlingRollbackBackupFiles([string]$installRoot) {
+    return @(Get-ChildItem -LiteralPath $installRoot -File -Force | Where-Object { $_.Name -ne 'upgrade-run.json' })
+}
 
 # The product version of an exe, or $null when it has none or cannot be read.
 function Get-DarlingBuildVersion([string]$exePath) {
@@ -4891,7 +4902,7 @@ else {
         # rejected: it multiplies what #2525 is about - retained disk - to cover a case whose real fix is
         # re-extracting a zip you still have, and it still would not cover pg-runtime. The failure paths
         # below say this rather than leaving an operator to discover it while recovering.
-        Get-ChildItem -LiteralPath $InstallRoot -File -Force | Copy-Item -Destination $backupPath -Force
+        Get-DarlingRollbackBackupFiles $InstallRoot | Copy-Item -Destination $backupPath -Force
 
         # HARDEN THE SECRETS WE JUST COPIED (#2574). darling.json holds every monitored server's
         # encryptedPassword plus the MCP and web tokens, all DPAPI LocalMachine scope with an entropy

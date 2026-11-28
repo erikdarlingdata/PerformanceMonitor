@@ -38,8 +38,13 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>A rollback is a run of its own</b> (#9821). <c>upgrade-darling.sh --rollback</c> writes a file with a new run id into the
 /// folder of the build it puts back, with the states and fields of an upgrade: <c>target_build</c> is the build that is back and
-/// <c>rollback_folder</c> is the folder that holds the build it replaced. It is a second row, so the row of the upgrade it undid stays
-/// as it was, whatever its state, and the newest row names the build that runs.</para>
+/// <c>rollback_folder</c> is the folder that holds the build it replaced. It is a second row, and the newest row names the build that runs.</para>
+///
+/// <para><b>A rollback closes the run it steps back from</b> (#9940). The build the rollback replaces goes to another folder with its
+/// <see cref="UpgradeRunPickup.FileName"/>, so no pass reads that file again. The rollback's file names that run (<c>stepped_back_run_id</c>) and
+/// what its file last said (<c>stepped_back_state</c>, <c>stepped_back_ended_utc</c>, <c>stepped_back_exit_code</c>). The build that stores the
+/// rollback's row closes the named row when it is still <c>in_progress</c>: with <c>succeeded</c> or <c>failed</c> and the file's end time, or
+/// with <see cref="SteppedBack"/> and the rollback's start time when the file never said how the run ended. A row in any other state stays as it is.</para>
 /// </summary>
 public static class UpgradeRuns
 {
@@ -60,6 +65,10 @@ public static class UpgradeRuns
 
     /// <summary>The operator's checks passed and <c>-MarkVerified</c> said so.</summary>
     public const string Verified = "verified";
+
+    /// <summary>The stored state of a run that a rollback stepped back from before the run's file said how it ended (#9940). No file carries it:
+    /// the service writes it when it closes the row a rollback names.</summary>
+    public const string SteppedBack = "stepped_back";
 
     /// <summary>The states a file may carry, in the order a run moves through them.</summary>
     public static readonly IReadOnlyList<string> States = new[] { InProgress, Succeeded, Failed, Verified };
@@ -137,6 +146,34 @@ END";
 
     /// <summary>The statement's word for a file behind the stored row: nothing was written, and the file is stale.</summary>
     public const string Stale = "stale";
+
+    /// <summary>
+    /// Closes the run a rollback stepped back from (#9940): only a row still <c>in_progress</c> matches, so a row that already has its end, and a
+    /// second pass over the same rollback file, write nothing. $1 the run id, $2 the state, $3 the end (never before the row's start), $4 the exit
+    /// code and null to keep the row's, $5 the time of the write.
+    /// </summary>
+    public const string CloseSteppedBackSql = @"
+UPDATE collect.upgrade_runs
+SET state = $2,
+    ended_at = GREATEST($3, started_at),
+    exit_code = COALESCE($4, exit_code),
+    updated_at = $5
+WHERE run_id = $1
+AND   state = 'in_progress'";
+
+    /// <summary>
+    /// What the row of a stepped-back run is closed with (#9940). The run's own file is the better witness: when it said <see cref="Succeeded"/> or
+    /// <see cref="Failed"/>, the row gets that state, the file's end time and its exit code. A file that said anything else, or that the rollback could
+    /// not read, gives <see cref="SteppedBack"/> with the rollback's start as the end and no exit code, because that start is the first moment the run
+    /// is known to be over. A final state with no end time in the file takes the rollback's start too.
+    /// </summary>
+    public static (string State, DateTime EndedUtc, int? ExitCode) SteppedBackClose(UpgradeRunSteppedBack steppedBack, DateTime rollbackStartedUtc)
+    {
+        ArgumentNullException.ThrowIfNull(steppedBack);
+        return steppedBack.State is Succeeded or Failed
+            ? (steppedBack.State, steppedBack.EndedUtc ?? rollbackStartedUtc, steppedBack.ExitCode)
+            : (SteppedBack, rollbackStartedUtc, null);
+    }
 
     /// <summary>The bounded retention delete, run after each record.</summary>
     public const string RetentionDeleteSql = @"
@@ -274,7 +311,12 @@ LIMIT $1;";
 /// <summary>One stored upgrade run as a read reports it (#9902). <paramref name="State"/> is <see cref="UpgradeRuns.DerivedState"/> and <paramref name="RecordedState"/> is what the store holds.</summary>
 public sealed record UpgradeRunRead(Guid RunId, string State, string RecordedState, string? TargetBuild, DateTime StartedUtc, DateTime? EndedUtc);
 
-/// <summary>The run a file describes. Text fields are capped when the file is read.</summary>
+/// <summary>The run a rollback's file names as the one it steps back from (#9940), with what that run's own file last said. <paramref name="State"/>,
+/// <paramref name="EndedUtc"/> and <paramref name="ExitCode"/> are null when the rollback could not read them.</summary>
+public sealed record UpgradeRunSteppedBack(Guid RunId, string? State, DateTime? EndedUtc, int? ExitCode);
+
+/// <summary>The run a file describes. Text fields are capped when the file is read. <paramref name="SteppedBack"/> is set only by a rollback's file that
+/// names the run it steps back from (#9940).</summary>
 public sealed record UpgradeRunFile(
     Guid RunId,
     string State,
@@ -286,7 +328,8 @@ public sealed record UpgradeRunFile(
     string? StopCheck,
     string? RollbackFolder,
     string? FirstError,
-    DateTime? VerifiedUtc);
+    DateTime? VerifiedUtc,
+    UpgradeRunSteppedBack? SteppedBack = null);
 
 /// <summary>What one pickup did.</summary>
 public enum UpgradeRunPickupOutcome
@@ -386,6 +429,10 @@ public sealed class UpgradeRunPickup
         }
 
         var recorded = await RecordAsync(connection, run!, nowUtc, cancellationToken);
+        if (run!.SteppedBack is { } steppedBack)
+        {
+            await CloseSteppedBackAsync(connection, run, steppedBack, nowUtc, cancellationToken);
+        }
 
         /* A file behind the stored row (an older copy put back from a rollback backup) changed nothing and is stale: it is removed. A file
            equal to the stored row (#9852) is current and writes nothing: it is kept or removed by its state and age like one that was written. */
@@ -501,7 +548,7 @@ public sealed class UpgradeRunPickup
 
             run = new UpgradeRunFile(
                 runId, state, Text(root, "tool_version"), Text(root, "target_build"), started.Value, ended, exitCode,
-                Text(root, "stop_check"), Text(root, "rollback_folder"), Text(root, "first_error"), verified);
+                Text(root, "stop_check"), Text(root, "rollback_folder"), Text(root, "first_error"), verified, SteppedBackOf(root, runId));
             problem = "";
             return true;
         }
@@ -541,6 +588,48 @@ public sealed class UpgradeRunPickup
         retention.Parameters.Add(new NpgsqlParameter { Value = now.AddDays(-UpgradeRuns.RetentionDays), NpgsqlDbType = NpgsqlDbType.Timestamp });
         await retention.ExecuteNonQueryAsync(cancellationToken);
         return recorded;
+    }
+
+    /// <summary>
+    /// Closes the row of the run a rollback stepped back from (#9940), and logs it when a row changed. It runs on every pickup of the rollback's file,
+    /// after the rollback's own row is stored, so a close that a store failure stopped is tried again at the next pass. Once the row is closed the
+    /// statement matches nothing.
+    /// </summary>
+    private async Task CloseSteppedBackAsync(
+        NpgsqlConnection connection, UpgradeRunFile rollback, UpgradeRunSteppedBack steppedBack, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var (state, ended, exitCode) = UpgradeRuns.SteppedBackClose(steppedBack, rollback.StartedUtc);
+        await using var close = new NpgsqlCommand(UpgradeRuns.CloseSteppedBackSql, connection) { CommandTimeout = 30 };
+        close.Parameters.Add(new NpgsqlParameter { Value = steppedBack.RunId, NpgsqlDbType = NpgsqlDbType.Uuid });
+        close.Parameters.Add(new NpgsqlParameter { Value = state, NpgsqlDbType = NpgsqlDbType.Text });
+        close.Parameters.Add(new NpgsqlParameter { Value = DateTime.SpecifyKind(ended, DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+        close.Parameters.Add(new NpgsqlParameter { Value = (object?)exitCode ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+        close.Parameters.Add(new NpgsqlParameter { Value = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+        if (await close.ExecuteNonQueryAsync(cancellationToken) > 0)
+        {
+            _logger.LogInformation(
+                "Upgrade run {RunId} closed in the store as {State}: the rollback {RollbackRunId} stepped back from it before its end was recorded",
+                steppedBack.RunId, state, rollback.RunId);
+        }
+    }
+
+    /// <summary>
+    /// The run a rollback's file names as the one it steps back from (#9940), or null when the file names none. The fields are extra to a run: one
+    /// that does not read is left out, and the file still parses as the rollback's own run. A file that names its own run id names none.
+    /// </summary>
+    private static UpgradeRunSteppedBack? SteppedBackOf(JsonElement root, Guid ownRunId)
+    {
+        if (!TryGuid(root, "stepped_back_run_id", out var runId) || runId == ownRunId)
+        {
+            return null;
+        }
+
+        var state = Text(root, "stepped_back_state");
+        TryTime(root, "stepped_back_ended_utc", out var ended);
+        int? exitCode = root.TryGetProperty("stepped_back_exit_code", out var code) && code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var number)
+            ? number
+            : null;
+        return new UpgradeRunSteppedBack(runId, state is not null && UpgradeRuns.States.Contains(state) ? state : null, ended, exitCode);
     }
 
     private void WarnOnce(string key, string message, params object?[] args)

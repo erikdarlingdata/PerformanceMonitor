@@ -437,4 +437,37 @@ public sealed class DarlingUpgradeRunRecordTests
             Cleanup(folder);
         }
     }
+
+    /// <summary>
+    /// #9940: the rollback backup takes every file of the install root but the run record. The record is in_progress when the backup is taken, and a
+    /// rollback on Windows copies the backup's files back by hand, so a backup that held it would put the run's first state over the record of how
+    /// the run ended. Folders are not part of a backup, and a folder that has the record's name is not a file to leave out or to copy.
+    /// </summary>
+    [Fact]
+    public void TheRollbackBackup_TakesEveryRootFileButTheRunRecord()
+    {
+        var folder = NewFolder();
+        try
+        {
+            var install = Directory.CreateDirectory(Path.Combine(folder, "install")).FullName;
+            Directory.CreateDirectory(Path.Combine(folder, "backup"));
+            File.WriteAllText(Path.Combine(install, "darling.json"), "{}");
+            File.WriteAllText(Path.Combine(install, "PerformanceMonitor.Darling.Service.dll"), "build");
+            File.WriteAllText(Path.Combine(install, "upgrade-run.json.note"), "another file");
+            File.WriteAllText(Path.Combine(install, "upgrade-run.json"), "{\"run_id\":\"" + Guid.NewGuid() + "\",\"state\":\"in_progress\"}");
+            File.WriteAllText(Path.Combine(Directory.CreateDirectory(Path.Combine(install, "viewer")).FullName, "viewer.dll"), "viewer");
+
+            var output = Run(folder,
+                "Get-DarlingRollbackBackupFiles (Join-Path $root 'install') | Copy-Item -Destination (Join-Path $root 'backup') -Force; "
+                + "'copied=' + ((Get-ChildItem -LiteralPath (Join-Path $root 'backup') -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join '|')",
+                "Get-DarlingRollbackBackupFiles");
+
+            Assert.Contains("copied=darling.json|PerformanceMonitor.Darling.Service.dll|upgrade-run.json.note", output, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(install, "upgrade-run.json")), "the record stays in the install root");
+        }
+        finally
+        {
+            Cleanup(folder);
+        }
+    }
 }
