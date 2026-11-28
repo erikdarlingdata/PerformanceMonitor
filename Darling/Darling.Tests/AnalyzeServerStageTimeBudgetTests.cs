@@ -701,7 +701,7 @@ VALUES ($1, $2, $2, TRUE, 15, $3, $3)", connection))
                 FactKey: "MISSING_INDEX",
                 Action: "set",
                 Targets: [],
-                MissingIndexTargets: [new MissingIndexTarget("dbo.Posts", 83.2, "CREATE NONCLUSTERED INDEX [ix_fb9879n] ON [dbo].[Posts] ([OwnerUserId]);")])));
+                MissingIndexTargets: [new MissingIndexTarget("dbo.Posts", 83.2, "CREATE NONCLUSTERED INDEX [ix_fb9879n] ON [dbo].[Posts] ([OwnerUserId]);")]))!);
             Assert.True(await detail.ExecuteNonQueryAsync(ct) > 0);
         }
 
