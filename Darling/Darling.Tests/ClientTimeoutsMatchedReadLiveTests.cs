@@ -215,6 +215,35 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
         });
     }
 
+    /* The three reads that join every under-floor sample in the range to the calls plan that join with no CTE Scan (#9881). A CTE scan is parallel restricted,
+       so with one the scan of the samples runs in a single process; a busy server holds millions of samples a week. The sample list is not among them: it
+       keeps its materialized calls, which its per-listed-sample lateral reads once. */
+    [Fact]
+    public async Task TheReadsThatJoinEverySample_PlanTheJoinToTheCalls_WithNoCteScan()
+    {
+        await RunAsync(async (connection, t0, ct) =>
+        {
+            var start = t0.AddDays(-7);
+            var end = t0.AddDays(1);
+            var reads = new (string Name, string Sql)[]
+            {
+                ("sample groups (window)", AttentionWindowSql.SampleGroups("attention_events", bounded: true)),
+                ("sample groups (alert)", AttentionWindowSql.SampleGroups("attention_events")),
+                ("baseline minutes", AttentionWindowSql.BaselineMinutes("collection_log", "attention_events")),
+                ("matched calls", AttentionWindowSql.MatchedCalls("attention_events", 500)),
+            };
+
+            foreach (var (name, sql) in reads)
+            {
+                var parameterized = name == "sample groups (alert)" ? (DateTime?)null : end;
+                var plan = string.Join("\n", await ReadAsync(connection, "EXPLAIN (FORMAT JSON) " + sql, start, parameterized, ct));
+                Assert.True(plan.Contains("\"Node Type\": \"Hash Join\"", StringComparison.Ordinal) || plan.Contains("\"Node Type\": \"Merge Join\"", StringComparison.Ordinal)
+                    || plan.Contains("\"Node Type\": \"Nested Loop\"", StringComparison.Ordinal), $"{name}: the plan must hold the join to the calls");
+                Assert.False(plan.Contains("\"Node Type\": \"CTE Scan\"", StringComparison.Ordinal), $"{name}: the join to the calls must not read a CTE scan:\n{plan}");
+            }
+        });
+    }
+
     private static async Task<Dictionary<string, string>> GroupsByDatabaseAsync(NpgsqlConnection connection, DateTime t0, CancellationToken ct)
     {
         var rows = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true), t0.AddMinutes(-1), t0.AddMinutes(12), ct);
