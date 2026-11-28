@@ -205,14 +205,100 @@ SELECT
 """;
 
     /// <summary>
+    /// The captured calls of a window as one statement (#9881), for a caller that reads them first and hands them to the reads below as
+    /// arrays (<c>callsAt</c>). Columns: id (bigint), session_id (integer), database_name, event_time, azdata_metadata, dbatools_metadata.
+    /// <c>$1</c> = server_id, <c>$2</c> = the inclusive floor, and with <paramref name="bounded"/> <c>$3</c> = the inclusive ceiling: the
+    /// range the reads give their own calls, so the rows are the ones their <c>calls</c> CTE holds.
+    /// </summary>
+    public static string Calls(string eventsRelation, bool bounded = false) => CallsSelect(eventsRelation, "collection_time >= $2" + Ceiling(bounded));
+
+    /// <summary>The captured calls of the baseline range (<c>$2</c> inclusive, <c>$3</c> exclusive), the calls <see cref="BaselineMinutes"/> matches. Same columns as <see cref="Calls"/>.</summary>
+    public static string BaselineCalls(string eventsRelation) => CallsSelect(eventsRelation, BaselineRange);
+
+    /// <summary>How many array parameters a read takes from <c>callsAt</c> on: one per column of <see cref="Calls"/>, in that order.</summary>
+    public const int CallArrayCount = 6;
+
+    /// <summary>
+    /// The calls a caller read with <see cref="Calls"/>, as a relation over <see cref="CallArrayCount"/> array parameters starting at
+    /// <paramref name="at"/> (PostgreSQL). The planner counts the elements of a bound array, so it knows how many calls there are; read from
+    /// the compressed table inside the statement it guesses thousands for a few dozen and sorts every sample to meet them (#9881).
+    /// </summary>
+    private static string CallsUnnest(int at) =>
+        $"unnest(${at}::bigint[], ${at + 1}::integer[], ${at + 2}::text[], ${at + 3}::timestamp[], ${at + 4}::boolean[], ${at + 5}::boolean[])"
+        + " AS u(id, session_id, database_name, event_time, azdata_metadata, dbatools_metadata)";
+
+    private static int WholeSecondsUp(long microseconds) => (int)((microseconds + 999_999) / 1_000_000);
+
+    /// <summary>
+    /// The whole-second shifts that put a call in the second of every sample it can match (#9881): a call ends at most
+    /// <see cref="CapturedCallMatchAfterUs"/> after the sample and at most <see cref="CapturedCallMatchBeforeUs"/> before it, so the sample's
+    /// second is the call's second moved by no more than those tolerances rounded up to whole seconds. Generated from the two constants, so a
+    /// wider tolerance widens the list with it.
+    /// </summary>
+    private static readonly string MatchSecondShifts = string.Join(", ",
+        Enumerable.Range(-WholeSecondsUp(CapturedCallMatchAfterUs), WholeSecondsUp(CapturedCallMatchAfterUs) + WholeSecondsUp(CapturedCallMatchBeforeUs) + 1)
+            .Select(seconds => $"(INTERVAL '{seconds} seconds')"));
+
+    /// <summary>
     /// The captured calls as a CTE named <c>calls</c>. MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline,
     /// the sample list (<see cref="Samples"/>) runs the whole call scan again for every listed sample (#9507: 72 ms against 4 ms for a page of
-    /// samples on a week at 60 samples a minute).
+    /// samples on a week at 60 samples a minute). With <paramref name="callsAt"/> the rows come from the caller's arrays, not the table.
     /// </summary>
-    private static string CallsCte(string eventsRelation, string range) => $"""
+    private static string CallsCte(string eventsRelation, string range, int? callsAt = null) => callsAt is int at
+        ? $"""
+calls AS MATERIALIZED (
+    SELECT
+        u.id,
+        u.session_id,
+        u.database_name,
+        u.event_time,
+        u.azdata_metadata,
+        u.dbatools_metadata
+    FROM {CallsUnnest(at)}
+)
+"""
+        : $"""
 calls AS MATERIALIZED (
     {CallsSelect(eventsRelation, range)}
 )
+""";
+
+    /// <summary>The <c>calls</c> CTE and its comma, for a read that joins every sample to the calls. Empty with <paramref name="callsAt"/>: that join reads the arrays itself (<see cref="JoinCalls"/>).</summary>
+    private static string CallsLead(string eventsRelation, string range, int? callsAt) => callsAt is null
+        ? $"""
+{CallsCte(eventsRelation, range)},
+
+"""
+        : "";
+
+    /// <summary>
+    /// The join of every under-floor sample (alias <paramref name="sample"/>) to the calls, alias <c>c</c>, on <see cref="MatchOn"/>.
+    /// Without <paramref name="callsAt"/> it joins the <c>calls</c> CTE. With it (#9881) it joins the caller's arrays, each call once per
+    /// second a matching sample can sit in (<see cref="MatchSecondShifts"/>), and adds that second to the join key. A matching pair meets on
+    /// exactly one shift, the sample's second minus the call's, so the rows are the same; the key lets the join hash on (session, second),
+    /// where the session alone makes every sample meet every call of its session, and with no CTE scan in it the pass over the samples can
+    /// run in parallel workers.
+    /// </summary>
+    private static string JoinCalls(string sample, int? callsAt) => callsAt is int at
+        ? $"""
+INNER JOIN (
+        SELECT
+            u.id,
+            u.session_id,
+            u.database_name,
+            u.event_time,
+            u.azdata_metadata,
+            u.dbatools_metadata,
+            date_trunc('second', u.event_time) + o.shift AS matched_second
+        FROM {CallsUnnest(at)}
+        CROSS JOIN (VALUES {MatchSecondShifts}) AS o(shift)
+    ) AS c
+        ON c.matched_second = date_trunc('second', {sample}.event_time)
+    AND   {MatchOn("c", sample)}
+"""
+        : $"""
+INNER JOIN calls AS c
+        ON {MatchOn("c", sample)}
 """;
 
     /// <summary>
@@ -240,7 +326,7 @@ calls AS MATERIALIZED (
     /* The id is unique in the table, so grouping by the sample's own columns beside it adds no group. The relation is read inside a derived
        table before it takes an alias: the Darling legacy-table read passes a derived table that already ends in "AS attention_events"
        (AttentionReadRelation.DerivedRelation), and a second alias on it is a syntax error (42601). */
-    private static string MatchedCte(string eventsRelation, string range) => $"""
+    private static string MatchedCte(string eventsRelation, string range, int? callsAt = null) => $"""
 matched AS (
     SELECT
         s.attention_event_id AS id,
@@ -265,8 +351,7 @@ matched AS (
         AND   event_kind = '{KindSample}'
         AND   interrupt_duration_us < {MinInterruptDurationUs}
     ) AS s
-    INNER JOIN calls AS c
-        ON {MatchOn("c", "s")}
+    {JoinCalls("s", callsAt)}
     GROUP BY s.attention_event_id, s.collection_time, s.database_name, s.client_app_name
 )
 """;
@@ -322,9 +407,10 @@ ORDER BY collection_time DESC
     /// <c>(server_id, collection_time)</c> indexes of <c>collection_log</c> and <c>attention_events</c>, so the 7-day read is a bounded range scan
     /// of this one server.
     /// </summary>
-    public static string BaselineMinutes(string logRelation, string eventsRelation) => $"""
-WITH {CallsCte(eventsRelation, BaselineRange)},
-{MatchedCte(eventsRelation, BaselineRange)},
+    /// <remarks><paramref name="callsAt"/> is for a caller that read the calls first with <see cref="BaselineCalls"/> (#9881, PostgreSQL): the number of the
+    /// first of the <see cref="CallArrayCount"/> array parameters that hold them. Left out, the statement reads the calls itself. The rows are the same either way.</remarks>
+    public static string BaselineMinutes(string logRelation, string eventsRelation, int? callsAt = null) => $"""
+WITH {CallsLead(eventsRelation, BaselineRange, callsAt)}{MatchedCte(eventsRelation, BaselineRange, callsAt)},
 runs AS (
     SELECT date_trunc('minute', collection_time) AS minute
     FROM {logRelation}
@@ -410,9 +496,10 @@ ORDER BY collection_time DESC
     /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/> or the matched call's own statement), dbatools_metadata_samples (bigint: the part that is
     /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/> or the matched call's own statement; the three parts never overlap), matched_samples (bigint, #9507: the part under the floor
     /// that matches a captured call, <see cref="MatchOn"/>, and is not Azure Data Studio or dbatools metadata work. Such a sample is judged, not left out: the attention event timed the cancel, the call is what ran).</summary>
-    public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
-WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
-{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
+    /// <remarks><paramref name="callsAt"/> is for a caller that read the calls first with <see cref="Calls"/> (#9881, PostgreSQL): the number of the
+    /// first of the <see cref="CallArrayCount"/> array parameters that hold them. Left out, the statement reads the calls itself. The rows are the same either way.</remarks>
+    public static string SampleGroups(string eventsRelation, bool bounded = false, int? callsAt = null) => $"""
+WITH {CallsLead(eventsRelation, "collection_time >= $2" + Ceiling(bounded), callsAt)}{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded), callsAt)},
 matched_groups AS (
     SELECT
         collection_time,
@@ -518,8 +605,10 @@ LIMIT {TopCount}
     /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
     /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean), dbatools_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
-    public static string Samples(string eventsRelation, int limit) => $"""
-WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
+    /// <remarks><paramref name="callsAt"/> is for a caller that read the calls first with <see cref="Calls"/> (#9881, PostgreSQL): the number of the
+    /// first of the <see cref="CallArrayCount"/> array parameters that hold them. Left out, the statement reads the calls itself. The rows are the same either way.</remarks>
+    public static string Samples(string eventsRelation, int limit, int? callsAt = null) => $"""
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true), callsAt)},
 newest AS (
     SELECT
         attention_event_id,
@@ -576,13 +665,13 @@ ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event
     /// A call that is Azure Data Studio or dbatools metadata work is left out, as its sample is not judged. Always bounded, the way <see cref="Samples"/>
     /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling.
     /// </summary>
-    public static string MatchedCalls(string eventsRelation, int limit) => $"""
-WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
-hit AS (
+    /// <remarks><paramref name="callsAt"/> is for a caller that read the calls first with <see cref="Calls"/> (#9881, PostgreSQL): the number of the
+    /// first of the <see cref="CallArrayCount"/> array parameters that hold them. Left out, the statement reads the calls itself. The rows are the same either way.</remarks>
+    public static string MatchedCalls(string eventsRelation, int limit, int? callsAt = null) => $"""
+WITH {CallsLead(eventsRelation, "collection_time >= $2" + Ceiling(true), callsAt)}hit AS (
     SELECT DISTINCT c.id
     FROM (SELECT * FROM {eventsRelation}) AS s
-    INNER JOIN calls AS c
-        ON {MatchOn("c", "s")}
+    {JoinCalls("s", callsAt)}
     WHERE s.server_id = $1
     AND   s.collection_time > $2
     AND   s.collection_time <= $3

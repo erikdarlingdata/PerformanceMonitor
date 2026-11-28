@@ -121,7 +121,7 @@ public sealed class DarlingMcpClientTimeoutTools
     }
 
     /// <summary>
-    /// The seven reads on ONE connection, in two steps. Step one reads the runs, the counts and the sample groups with the ceiling on
+    /// The reads on ONE connection, in two steps. Step one reads the runs, the counts and the sample groups with the ceiling on
     /// ($3 = the window end plus the row skew) and the evaluator cuts them to the span. Step two reads the top lists and the newest
     /// <paramref name="sampleLimit"/> + 1 sampled events over exactly that span (<see cref="ClientTimeoutsRead.DetailSpan"/>: $2 = the
     /// exclusive span boundary, $3 = the newest run plus the skew), so they never hold the base run's samples from before the span or
@@ -141,13 +141,18 @@ public sealed class DarlingMcpClientTimeoutTools
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map)
+        /* The reads that match the captured calls take them as arrays after $1 to $3 (#9881): the calls of the range are read once, as
+           their own small statement, and the planner then knows how many there are. */
+        const int CallsAt = 4;
+
+        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, AttentionCallArrays? calls = null)
         {
             await using var command = new NpgsqlCommand(sql, connection);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
+            calls?.AddTo(command);
 
             var rows = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -165,7 +170,9 @@ public sealed class DarlingMcpClientTimeoutTools
         {
             var counts = await Query(AttentionWindowSql.Counts(events, bounded: true), floor, rowCeiling,
                 r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-            var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true), floor, rowCeiling,
+            var windowCalls = await AttentionCallArrays.ReadAsync(
+                connection, AttentionWindowSql.Calls(events, bounded: true), serverId, floor, rowCeiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true, callsAt: CallsAt), floor, rowCeiling,
                 r => new AttentionSampleGroup(
                     r.GetDateTime(0),
                     r.IsDBNull(1) ? null : r.GetString(1),
@@ -174,7 +181,7 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetInt64(4),
                     r.GetInt64(5),
                     r.GetInt64(6),
-                    r.GetInt64(7)));
+                    r.GetInt64(7)), windowCalls);
 
             /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
             var span = ClientTimeoutsRead.DetailSpan(runs);
@@ -194,7 +201,10 @@ public sealed class DarlingMcpClientTimeoutTools
                 r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
             var hosts = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), spanFloor, spanCeiling,
                 r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-            var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1), spanFloor, spanCeiling,
+            /* The samples and the matched calls read the calls of the span, the range their own calls CTE reads. */
+            var spanCalls = await AttentionCallArrays.ReadAsync(
+                connection, AttentionWindowSql.Calls(events, bounded: true), serverId, spanFloor, spanCeiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1, callsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutSample(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
                     r.GetDateTime(1),
@@ -208,8 +218,8 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetBoolean(9),
                     r.GetBoolean(10),
                     r.GetBoolean(11),
-                    r.GetBoolean(12)));
-            var matchedCalls = await Query(AttentionWindowSql.MatchedCalls(events, sampleLimit + 1), spanFloor, spanCeiling,
+                    r.GetBoolean(12)), spanCalls);
+            var matchedCalls = await Query(AttentionWindowSql.MatchedCalls(events, sampleLimit + 1, callsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutMatchedCall(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
                     r.GetDateTime(1),
@@ -218,7 +228,7 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.IsDBNull(4) ? null : r.GetString(4),
                     r.IsDBNull(5) ? null : r.GetInt32(5),
                     r.IsDBNull(6) ? null : r.GetInt64(6),
-                    r.IsDBNull(7) ? null : r.GetString(7)));
+                    r.IsDBNull(7) ? null : r.GetString(7)), spanCalls);
 
             return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts, MatchedCallList: matchedCalls), samples);
         }, cancellationToken);
