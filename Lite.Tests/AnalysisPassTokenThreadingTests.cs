@@ -222,8 +222,10 @@ public sealed class AnalysisPassTokenThreadingTests
            32 since #7675: the QUERY_STORE_ERROR read of the newest query_store_health capture is one more; it lets the
            abandonment through and reports any other fault as a collection failure, as the DB_CONFIG read beside it does.
            33 since #8883: the TEMPDB_FILE_SETUP read of the newest tempdb file list is one more; it lets the
-           abandonment through and reports any other fault as a collection failure. */
-        Assert.Equal(33, AnalysisSources()
+           abandonment through and reports any other fault as a collection failure.
+           34 since #9957: the plan regression cost window read is one more; it lets the abandonment through and
+           reports any other fault without marking the family unread, since the read keeps its exact window. */
+        Assert.Equal(34, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));

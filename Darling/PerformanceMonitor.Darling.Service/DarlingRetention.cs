@@ -983,14 +983,17 @@ public static class DarlingRetention
                INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's pacing and time budget and no
                sighting is deleted without its slim row. A probe finds each slice and the move takes its bounds as parameters
                (ExecuteSightingsMoveSliceAsync), and the DELETE inside the move runs under #9796's scan setting so it plans as a bitmap heap
-               scan. */
+               scan. #9956: a drain starts where the last slice moved through while that bound holds (ReadSightingsDrainStartAsync), caps
+               its slices by rows over a backlog, and stops at its share of the pass's budget (SightingsDrainBudgetShare). */
             var sightingsRetentionDays = QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor);
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
                 QueryTagSlimSightings.MoveSliceSql,
                 utcNow.AddDays(-sightingsRetentionDays), logger, cancellationToken,
                 pacer: walPacer,
-                sliceStatement: ExecuteSightingsMoveSliceAsync);
+                sliceStatement: ExecuteSightingsMoveSliceAsync,
+                sliceDrainStart: ReadSightingsDrainStartAsync,
+                sliceDrainBudgetShare: SightingsDrainBudgetShare);
             if (sightingsDeleted is not null)
             {
                 tablesPurged++;
@@ -2797,27 +2800,32 @@ WHERE NOT EXISTS
     /// <summary>
     /// One slice of the sightings purge (#9705): the probe finds the oldest expired <c>last_seen</c> and the slice's end, and
     /// <see cref="QueryTagSlimSightings.MoveSliceSql"/> deletes the expired sightings of that range and appends their slim rows.
-    /// Returns the rows moved and the slice's end, which the drain passes back as <paramref name="lowerBound"/> of its next slice.
-    /// A probe that finds no expired row moves nothing, and the drain ends. The move runs through
-    /// <see cref="WithSliceDeleteScanSettingAsync"/> (#9796), the same transaction and scan setting the plain time-sliced
+    /// Returns the rows moved and a cursor with the point the slice moved through, its end clamped to the cutoff, which the drain
+    /// passes back as <paramref name="lowerBound"/> of its next slice. A probe that finds no expired row moves nothing, and the
+    /// drain ends. The move runs through <see cref="WithSliceDeleteScanSettingAsync"/> (#9796), the same transaction and scan setting the plain time-sliced
     /// DELETE of a table with scattered expired rows runs under: the DELETE inside the move plans as a Bitmap Heap Scan,
     /// and the setting ends with the commit or with the rollback of a failed move, so it reaches neither the probe nor any
     /// other statement of the purge. The setting's comment has the lab medians: a day that lies all over the heap moves 9.6
-    /// times faster with it, a day in heap order 1.29 times slower. After the first slice the probe starts from
-    /// the end of the slice before (<paramref name="lowerBound"/>), because nothing vacuums the table between two
-    /// slices and a probe from the bottom of the index would visit the dead entry of every row the slices before deleted. The
+    /// times faster with it, a day in heap order 1.29 times slower. A probe with a lower bound starts at it
+    /// (<see cref="QueryTagSlimSightings.NextSliceProbeSql"/>), because nothing vacuums the table between two slices and a probe
+    /// from the bottom of the index would visit the dead entry of every row the slices before deleted. A drain whose oldest
+    /// expired sighting is more than <see cref="QueryTagSlimSightings.BacklogHours"/> below the cutoff caps each of its slices at
+    /// <see cref="QueryTagSlimSightings.MoveSliceRowCap"/> rows (#9956), and the cursor carries that to the later probes. The
     /// probe and the move read two snapshots, so a slice whose every row the sighting writer moves past the cutoff between
-    /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A row written below the bound later
-    /// is left for the next drain, whose first probe has no bound.
+    /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A slice that moved rows stores that
+    /// point once the move has committed (<see cref="QueryTagSlimSightings.RecordMovedThroughSql"/>), where the next pass's
+    /// first probe starts (<see cref="ReadSightingsDrainStartAsync"/>). A row written below a bound is moved by a probe with no
+    /// bound: the first slice of a drain that has no stored bound it can trust.
     /// </summary>
-    /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
-    internal static async Task<(int Rows, object? SliceEnd)> ExecuteSightingsMoveSliceAsync(
+    /// <param name="lowerBound">Null for a probe from the bottom of the index, else the cursor of the slice before.</param>
+    internal static async Task<(int Rows, SightingsSliceCursor? SliceEnd)> ExecuteSightingsMoveSliceAsync(
         NpgsqlConnection connection,
         DateTime cutoff,
-        object? lowerBound,
+        SightingsSliceCursor? lowerBound,
         CancellationToken cancellationToken)
     {
-        (DateTime Start, DateTime End) slice;
+        DateTime start, end;
+        bool backlog;
         using (var probe = new NpgsqlCommand(
             lowerBound is null ? QueryTagSlimSightings.FirstSliceProbeSql : QueryTagSlimSightings.NextSliceProbeSql,
             connection) { CommandTimeout = DeleteTimeoutSeconds })
@@ -2825,15 +2833,19 @@ WHERE NOT EXISTS
             probe.Parameters.AddWithValue(cutoff);
             if (lowerBound is not null)
             {
-                probe.Parameters.AddWithValue(lowerBound);
+                probe.Parameters.AddWithValue(lowerBound.Bound);
+                probe.Parameters.AddWithValue(lowerBound.Backlog);
             }
 
-            if (await ReadSliceBoundsAsync(probe, cancellationToken) is not { } found)
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(0, cancellationToken))
             {
                 return (0, null);
             }
 
-            slice = found;
+            start = reader.GetDateTime(0);
+            end = reader.GetDateTime(1);
+            backlog = reader.GetBoolean(2);
         }
 
         var rows = await WithSliceDeleteScanSettingAsync(
@@ -2842,13 +2854,52 @@ WHERE NOT EXISTS
             {
                 using var move = new NpgsqlCommand(QueryTagSlimSightings.MoveSliceSql, connection, transaction) { CommandTimeout = DeleteTimeoutSeconds };
                 move.Parameters.AddWithValue(cutoff);
-                move.Parameters.AddWithValue(slice.Start);
-                move.Parameters.AddWithValue(slice.End);
+                move.Parameters.AddWithValue(start);
+                move.Parameters.AddWithValue(end);
                 return await move.ExecuteNonQueryAsync(token);
             },
             cancellationToken);
-        return (rows, slice.End);
+
+        /* The slice moved every row below its end whose last_seen is under the cutoff, and no row at or past the cutoff. A one-day
+           slice, or a backlog slice with fewer rows left than the cap, ends a day after its start, which can lie past the cutoff:
+           the rows between the cutoff and that end have not expired and stay. So the point the slice moved through is its end
+           clamped to the cutoff, and that is the bound the next probe and the next pass start from. The cutoff is a UTC time of
+           kind Unspecified (PurgeWithPacerAsync), sent as timestamptz like the end the probe returned. */
+        var movedThrough = end < cutoff ? end : DateTime.SpecifyKind(cutoff, DateTimeKind.Utc);
+        if (rows > 0)
+        {
+            using var record = new NpgsqlCommand(QueryTagSlimSightings.RecordMovedThroughSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+            record.Parameters.AddWithValue(DarlingObservability.FleetServerId);
+            record.Parameters.AddWithValue(movedThrough);
+            await record.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        return (rows, new SightingsSliceCursor(movedThrough, backlog));
     }
+
+    /// <summary>
+    /// Where a sightings drain starts (#9956): the stored point the last slice moved through while it is a bound the probe can
+    /// trust (<see cref="QueryTagSlimSightings.DrainStartBoundSql"/>), as a cursor that has not decided the backlog yet, or null
+    /// for a probe from the bottom of the index. After a pass that moved a backlog the dead entries of its rows lie below that point
+    /// until the table is vacuumed, and a probe from the bottom visits every one of them.
+    /// </summary>
+    internal static async Task<SightingsSliceCursor?> ReadSightingsDrainStartAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using var read = new NpgsqlCommand(QueryTagSlimSightings.DrainStartBoundSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+        read.Parameters.AddWithValue(DarlingObservability.FleetServerId);
+        var value = await read.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime bound ? new SightingsSliceCursor(bound, false) : null;
+    }
+
+    /// <summary>
+    /// The share of a pass's wall budget the sightings drain may use (#9956), counted from its first slice, its waits for
+    /// collection and its WAL pacing included. A backlog paced at the WAL rate otherwise takes the rest of the pass: in a lab,
+    /// one 500,000-row slice wrote 2,930 MB and was paced 1,213 s at 2.4 MB/s, and 36 tables after it waited for the next pass.
+    /// At the share the drain stops at a slice boundary and counts as a table left, so the worker schedules the continuation
+    /// pass, and the pass goes on to the tables after it. A third of the 30-minute budget is about 8 to 10 slices of
+    /// <see cref="QueryTagSlimSightings.MoveSliceRowCap"/> rows at that lab's rate (130 MB and 55 s of pacing a slice).
+    /// </summary>
+    internal const double SightingsDrainBudgetShare = 1.0 / 3;
 
     /// <summary>
     /// The days the purge keeps a <c>collect.query_tag_sightings_slim</c> row after its <c>last_seen</c> (#9705): as long as the
@@ -3574,7 +3625,9 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     ///
     /// <para><paramref name="sliceStatement"/> (#9705, collect.query_tag_sightings only) ignores <paramref name="deleteSql"/> and
     /// runs each slice as the caller's probe and statement (<see cref="ExecuteSightingsMoveSliceAsync"/>), handing each slice's
-    /// end to the next as its lower bound. The statement's DELETE already runs under <see cref="WithSliceDeleteScanSettingAsync"/>.</para>
+    /// cursor to the next as its lower bound. The statement's DELETE already runs under <see cref="WithSliceDeleteScanSettingAsync"/>.
+    /// <paramref name="sliceDrainStart"/> gives the first slice's lower bound, and <paramref name="sliceDrainBudgetShare"/>, above
+    /// zero, is the share of the pass's wall budget the drain may use (#9956).</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -3588,7 +3641,9 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         RetentionWalPacer? pacer = null,
         Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
         Func<int, bool, string>? cursoredSql = null,
-        Func<NpgsqlConnection, DateTime, object?, CancellationToken, Task<(int Rows, object? SliceEnd)>>? sliceStatement = null)
+        Func<NpgsqlConnection, DateTime, SightingsSliceCursor?, CancellationToken, Task<(int Rows, SightingsSliceCursor? SliceEnd)>>? sliceStatement = null,
+        Func<NpgsqlConnection, CancellationToken, Task<SightingsSliceCursor?>>? sliceDrainStart = null,
+        double sliceDrainBudgetShare = 0)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -3643,22 +3698,67 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
 
             if (adaptiveRowCapTimeColumn is null && sliceStatement is not null)
             {
-                /* #9705: a slice the caller runs as a probe and a statement. Each slice hands its end to the next one as the probe's
-                   lower bound. The first slice of a drain has none. deleteSql is not run here. */
-                object? lowerBound = null;
+                /* #9705: a slice the caller runs as a probe and a statement. Each slice hands its cursor to the next one as the probe's
+                   lower bound. The first slice starts where sliceDrainStart says (#9956), or from the bottom of the index. deleteSql
+                   is not run here. */
+                var lowerBound = sliceDrainStart is null ? null : await sliceDrainStart(connection, cancellationToken);
+                var startedAtStoredBound = lowerBound is not null;
+                var slicesMoved = 0;
+                var backlog = false;
+                var shareYield = sliceDrainBudgetShare > 0 ? pacer?.Yield : null;
+                shareYield?.BeginTableShare(sliceDrainBudgetShare);
+                try
+                {
+                    drained = await DrainBatchesAsync(
+                        async ct =>
+                        {
+                            batches++;
+                            var walBefore = await ReadWalAsync(ct);
+                            var sliceClock = Stopwatch.StartNew();
+                            var (rows, sliceEnd) = await sliceStatement(connection, cutoff, lowerBound, ct);
+                            deleted += rows;
+                            if (rows > 0)
+                            {
+                                slicesMoved++;
+                                backlog |= sliceEnd?.Backlog ?? false;
+                                logger?.LogDebug(
+                                    "Retention purge moved {Rows} row(s) of {Table} in {Seconds:F1} s, a slice up to {End:yyyy-MM-dd HH:mm:ss}Z",
+                                    rows, tableName, sliceClock.Elapsed.TotalSeconds, sliceEnd?.Bound);
+                            }
 
-                drained = await DrainBatchesAsync(
-                    async ct =>
+                            lowerBound = sliceEnd ?? lowerBound;
+                            return (rows, batchSize, await WalSinceAsync(walBefore, ct));
+                        },
+                        pacer,
+                        cancellationToken);
+
+                    /* #9956: one line for a drain that moved rows or stopped before it was drained: the rows, the slices, their
+                       kind and why it stopped. Read before FinishTable below takes the stop off the yield. */
+                    var stopReason = shareYield is { ShareStopPending: true } share
+                        ? string.Create(
+                            CultureInfo.InvariantCulture,
+                            $"it stopped at its {share.ShareSeconds / 60:F0}-minute share of the pass's time budget, and the next pass goes on from {lowerBound?.Bound:yyyy-MM-dd HH:mm:ss}Z")
+                        : pacer?.Yield?.BudgetStopPending == true
+                            ? string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"the pass's time budget ran out, and the next pass goes on from {lowerBound?.Bound:yyyy-MM-dd HH:mm:ss}Z")
+                            : null;
+                    if (deleted > 0 || stopReason is not null)
                     {
-                        batches++;
-                        var walBefore = await ReadWalAsync(ct);
-                        var (rows, sliceEnd) = await sliceStatement(connection, cutoff, lowerBound, ct);
-                        deleted += rows;
-                        lowerBound = sliceEnd ?? lowerBound;
-                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
-                    },
-                    pacer,
-                    cancellationToken);
+                        logger?.LogInformation(
+                            "Retention purge moved {Rows} row(s) of {Table} in {Slices} slice(s) of {SliceKind}, starting {Start}; {Reason}",
+                            deleted, tableName, slicesMoved,
+                            backlog
+                                ? string.Create(CultureInfo.InvariantCulture, $"at most {QueryTagSlimSightings.MoveSliceRowCap:N0} rows (a backlog of more than {QueryTagSlimSightings.BacklogHours} hours)")
+                                : "one day",
+                            startedAtStoredBound ? "at the end of the last slice moved" : "at the oldest expired row",
+                            stopReason ?? "no expired row is left");
+                    }
+                }
+                finally
+                {
+                    shareYield?.EndTableShare();
+                }
             }
             else if (adaptiveRowCapTimeColumn is null)
             {
@@ -4090,3 +4190,9 @@ public sealed class QueryTextPruneGate
     /// <summary>Records that a prune finished now.</summary>
     public void MarkRan() => _lastRanUtc = _utcNow();
 }
+
+/// <summary>
+/// Where a slice of the sightings move ended (#9956): its end, the next probe's lower bound, and whether the drain counts as a
+/// backlog, so each later probe caps its slice by rows too.
+/// </summary>
+internal sealed record SightingsSliceCursor(DateTime Bound, bool Backlog);

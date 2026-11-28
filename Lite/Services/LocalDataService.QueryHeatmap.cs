@@ -68,14 +68,31 @@ public partial class LocalDataService
     public async Task<List<QueryHeatmapCellRow>> GetQueryHeatmapCellsAsync(
         int serverId, HeatmapMetric metric, int hoursBack = 24,
         int bucketMinutes = ViewerHeatmapBucketMinutes, int maxRows = 500,
-        IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int previewLength = 120)
+        IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int previewLength = 120,
+        bool boundTheRead = true, Action<DateTime>? readStartedFrom = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
-        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+        /* #9965: the cap keeps the newest cells and every cell is built from the rows of its own bin, so the read covers the newest maxRows bins first.
+           A slice that answers maxRows cells holds exactly the first maxRows cells of the whole-window read. A shorter slice (empty bins, a database
+           filter, a metric that is null on some rows, a quiet server) is read again over the whole window. */
+        if (boundTheRead && NewestHeatmapBinsFloor(startTime, endTime, bucketMinutes, maxRows) is DateTime floor)
+        {
+            var sliceStart = floor.AddTicks(-MicrosecondTicks);
+            readStartedFrom?.Invoke(sliceStart);
+            var slice = await ReadWindowSkippingEmptyArchiveAsync(
+                "query_stats", "collection_time", sliceStart, relation => ReadAsync(relation, sliceStart), CancellationToken.None);
+            if (slice.Count >= maxRows)
+            {
+                return slice;
+            }
+        }
 
-        async Task<List<QueryHeatmapCellRow>> ReadAsync(string relation)
+        readStartedFrom?.Invoke(startTime);
+        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, relation => ReadAsync(relation, startTime), CancellationToken.None);
+
+        async Task<List<QueryHeatmapCellRow>> ReadAsync(string relation, DateTime readFrom)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -133,7 +150,7 @@ LIMIT ${limitIndex}";
         command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = readFrom });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
@@ -161,6 +178,34 @@ LIMIT ${limitIndex}";
 
         return rows;
         }
+    }
+
+    private static readonly DateTime HeatmapEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>One microsecond, the resolution of a DuckDB TIMESTAMP.</summary>
+    private const long MicrosecondTicks = 10;
+
+    /// <summary>
+    /// #9965: the start of the newest <paramref name="cap"/> bins, on the epoch origin the read bins on, or null when the window starts inside them
+    /// (the read is then the whole window). The slice reads from <c>boundary - 1 microsecond</c>, so <c>collection_time &gt; start</c> means
+    /// <c>collection_time &gt;= boundary</c>. Darling twin: <c>DarlingQueryHeatmapReader.NewestBinsFloor</c>.
+    /// </summary>
+    internal static DateTime? NewestHeatmapBinsFloor(DateTime startUtc, DateTime endUtc, int bucketMinutes, int cap)
+    {
+        if (cap < 1 || bucketMinutes < 1 || endUtc < HeatmapEpoch)
+        {
+            return null;
+        }
+
+        var width = TimeSpan.FromMinutes(bucketMinutes).Ticks;
+        var firstBin = (endUtc - HeatmapEpoch).Ticks / width - (cap - 1);
+        if (firstBin <= 0)
+        {
+            return null;
+        }
+
+        var floor = DateTime.SpecifyKind(HeatmapEpoch.AddTicks(firstBin * width), DateTimeKind.Unspecified);
+        return floor > startUtc ? floor : null;
     }
 
     /// <summary>

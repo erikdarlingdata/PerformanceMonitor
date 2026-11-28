@@ -552,7 +552,7 @@ public sealed class McpAnalysisTools
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd,
-                cancellationToken, interactive: true);
+                cancellationToken, interactive: true, windowsEndAtClock: string.IsNullOrWhiteSpace(as_of));
 
             /* #5558: per window, because each window uses the role at its own end and the two can straddle a
                failover. Built from the sets the windows' contexts filtered with (returned beside the coverages), not

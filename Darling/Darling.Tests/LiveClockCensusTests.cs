@@ -44,6 +44,7 @@ public sealed class LiveClockCensusTests
     {
         // Empty on purpose: every file that counts blocks anchors through LiveClock. Add an entry only with a reason that
         // says why the count cannot depend on where a chunk boundary falls.
+        ["QueryTagSightingsBacklogLiveTests.cs"] = "collect.query_tag_sightings is a plain table with no chunks. The blocks counted are the btree and heap pages one probe reads, and the bounds compared are far apart, so no boundary of any kind is crossed at any hour.",
     };
 
     /// <summary>
@@ -52,6 +53,7 @@ public sealed class LiveClockCensusTests
     /// </summary>
     private static readonly Dictionary<string, string> s_allowedPlanShape = new(StringComparer.Ordinal)
     {
+        ["QueryTagSightingsBacklogLiveTests.cs"] = "collect.query_tag_sightings is a plain table with no chunks, so the plans it reads have no chunk to scan or skip at any hour. The cutoff follows the wall clock the same way the purge does.",
         ["AnomalyObjectStatsLatestSnapshotsLiveTests.cs"] = "The read has no time predicate and the plan assertion names an index, not a chunk. The two snapshots are two days apart, so they sit in different chunks at any hour, and nothing passes the seeded time to the product.",
         ["CaggGroupIndexDropUpgradeLiveTests.cs"] = "The only clock reads time a stopwatch around an upgrade. No row is seeded from the wall clock.",
         ["CollectionGapAtStartTests.cs"] = "Seeds 35 days of hourly rows ending now, so 'at least four chunks' holds at any hour. The read takes no time, and the plan assertion is the access path (an index scan, no sequential scan), which a boundary does not change.",

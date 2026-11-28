@@ -198,42 +198,19 @@ public sealed partial class PgFactCollector
             }
         }
 
-        /* #9879: runs one family through a token that ends at the deadline as well as at the pass's own token. Only a stop
-           the deadline caused is taken here: the pass's token is checked first, so an abandoned pass still unwinds. */
+        /* #9879: runs one family under the family deadline through StageDeadline.RunAsync, the same helper the detector and
+           drill-down stages use. It answers false for a family the deadline had already passed, which is not started, and
+           for one the deadline stopped. A stop from the pass's own token gets out of it and unwinds the pass. A family the
+           budget cut is not a failed read: it is named in the left-out record and records no collection failure. */
         async Task RunUnderDeadline(int index, List<Fact> familyFacts)
         {
-            if (deadline.IsCancellationRequested)
-            {
+            if (!await StageDeadline.RunAsync(context, () => families[index](context, familyFacts), deadline))
                 RecordBudgetCut(index);
-                return;
-            }
-
-            var passToken = context.PassToken;
-            using var both = CancellationTokenSource.CreateLinkedTokenSource(passToken, deadline);
-            context.UseTokenForThisFlow(both.Token);
-            try
-            {
-                await families[index](context, familyFacts);
-            }
-            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, passToken) && deadline.IsCancellationRequested
-                                       && AnalysisShutdown.IsShutdownResidue(ex))
-            {
-                /* The same shapes a family's own catch lets through once the token it reads is signalled, so nothing the
-                   deadline caused reaches the pass as a failure. The filter opens as every other catch in this file family
-                   does: an abandonment of the pass itself is never taken here, so it unwinds the pass whether or not the
-                   deadline has also fired. A family the budget stopped is not a failed read, so the catch names it in the
-                   left-out record (RecordBudgetCut) and records no collection failure (#9879). */
-                RecordBudgetCut(index);
-            }
-            finally
-            {
-                context.UseTokenForThisFlow(null);
-            }
         }
 
         /* #9879: the one writer of the left-out record. The reply's families_left_out is built from it, in family order, once
-           the families settle, so a family the deadline cut is named there and adds no fact and no failure. The only callers
-           are the two places the deadline decides a family is cut: one not yet started when it fires, and one it stops. */
+           the families settle, so a family the deadline cut is named there and adds no fact and no failure. Its one caller
+           is RunUnderDeadline, for a family not yet started when the deadline fires and for one the deadline stops. */
         void RecordBudgetCut(int index) => leftOut[index] = true;
     }
 

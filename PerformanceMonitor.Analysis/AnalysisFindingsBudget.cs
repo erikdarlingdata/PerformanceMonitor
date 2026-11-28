@@ -252,8 +252,10 @@ public static class AnalysisFindingsBudget
     }
 
     /// <summary>Null when every finding rides whole (<paramref name="packed"/> left none out and trimmed none).
-    /// <paramref name="persisted"/> is the reply's own <c>persisted</c> flag: true on an unanchored run.</summary>
-    public static string? TruncationNote(int findingCount, PackedFindings packed, bool persisted)
+    /// <paramref name="persisted"/> is the reply's own <c>persisted</c> flag: true on an unanchored run that stored its
+    /// findings. <paramref name="leftOutForTime"/> is true when an unanchored run stored none because it left something
+    /// out for time (#9879), which only a Darling on-demand pass can.</summary>
+    public static string? TruncationNote(int findingCount, PackedFindings packed, bool persisted, bool leftOutForTime = false)
     {
         ArgumentNullException.ThrowIfNull(packed);
         if (packed.LeftOut.Count == 0 && packed.TrimmedCount == 0)
@@ -279,11 +281,15 @@ public static class AnalysisFindingsBudget
             /* Trimmed only: every finding is here, but its cut parts are not. Say where to read them. */
             return persisted
                 ? note + " This run persisted them all: get_analysis_findings returns each finding's drill-down rows (include_drilldown true), or narrow hours_back so fewer findings share the budget."
+                : leftOutForTime
+                ? note + " This run left something out for time, so its findings were not persisted and the cut parts are not in the store: narrow hours_back so fewer findings share the budget."
                 : note + " This run was anchored with as_of, so its findings were not persisted and the cut parts are not in the store: narrow hours_back (as_of still ends the window) so fewer findings share the budget, or run without as_of to analyze and persist the present.";
         }
 
         return persisted
             ? note + " This run persisted them all: read the rest with get_analysis_findings (limit pages the persisted findings, still-firing first then by severity; start at 5), or narrow hours_back."
+            : leftOutForTime
+            ? note + " This run left something out for time, so its findings were not persisted and the ones left off are not in the store: narrow hours_back to see them."
             : note + " This run was anchored with as_of, so its findings were not persisted and the ones left off are not in the store: narrow hours_back (as_of still ends the window) to see them, or run without as_of to analyze and persist the present.";
     }
 }

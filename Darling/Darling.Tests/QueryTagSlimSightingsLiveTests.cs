@@ -233,7 +233,7 @@ public sealed class QueryTagSlimSightingsLiveTests
             Assert.Equal("0xD1A,0xD1B", await SlimKeysAsync(env));
 
             /* A sighting older than the first slice's end is written late. The later slices of this drain start at that end, so
-               they leave it for the next drain. */
+               they leave it for a probe with no lower bound. */
             await SightAtAsync(env, "0xLATE", oldest.AddHours(3));
 
             var (second, secondEnd) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, firstEnd, env.Ct);
@@ -259,7 +259,7 @@ public sealed class QueryTagSlimSightingsLiveTests
                 $"SELECT count(*) FROM collect.query_tag_sightings_slim AS s JOIN (VALUES {moved}) AS v(key, seen) ON v.key = s.key AND v.seen = s.last_seen "
                 + "WHERE s.database_name = 'Sales' AND s.application_name = 'App' AND s.login_name = 'svc' AND s.host_name = 'H1'"));
 
-            /* The next drain starts with no lower bound and takes the late sighting. */
+            /* A probe with no lower bound, the first of a drain with no stored end it can trust, takes the late sighting. */
             var (next, _) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, null, env.Ct);
             Assert.Equal(1, next);
             Assert.Equal("0xNEW1,0xNEW2", await SightedKeysAsync(env));

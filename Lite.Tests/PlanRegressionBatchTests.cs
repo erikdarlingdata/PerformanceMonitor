@@ -136,6 +136,7 @@ WHERE r.q <= d.n";
         var reads = 1;
         var collector = new DuckDbFactCollector(_duckDb)
         {
+            CostKeep = new PlanRegressionCostKeep(),
             PlanRegressionHoldTargetForTests = TimeSpan.FromSeconds(targetSeconds),
             AfterPlanRegressionDatabaseReadForTests = () => reads++,
         };
@@ -184,7 +185,7 @@ WHERE r.q <= d.n";
     {
         Seed();
         var writes = 0;
-        var collector = new DuckDbFactCollector(_duckDb) { PlanRegressionHoldTargetForTests = TimeSpan.Zero };
+        var collector = new DuckDbFactCollector(_duckDb) { CostKeep = new PlanRegressionCostKeep(), PlanRegressionHoldTargetForTests = TimeSpan.Zero };
         collector.AfterPlanRegressionDatabaseReadForTests = () =>
         {
             /* A long wait, as ArchiveSpanReadTests uses (#9564): the write lock is one lock for the whole test process, so another
