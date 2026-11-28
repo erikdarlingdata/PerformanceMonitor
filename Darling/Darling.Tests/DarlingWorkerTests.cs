@@ -165,12 +165,12 @@ public sealed class DarlingWorkerTests
     }
 
     /// <summary>
-    /// D-BYO: managed=false with any network.* set warns per section that the fields are ignored (the
-    /// operator's own PostgreSQL governs exposure). Asserted against the pure function's returned strings,
-    /// NOT a live logger and NOT Validate().
+    /// D-BYO: managed=false with postgres.network.* set warns that the fields are ignored (the operator's own
+    /// PostgreSQL governs exposure). Asserted against the pure function's returned strings, NOT a live logger and
+    /// NOT Validate().
     /// </summary>
     [Fact]
-    public void GetNetworkStartupWarnings_ByoWithNetwork_WarnsBothSectionsIgnored()
+    public void GetNetworkStartupWarnings_ByoWithStoreNetwork_WarnsItIgnored()
     {
         var config = new DarlingConfig
         {
@@ -183,80 +183,33 @@ public sealed class DarlingWorkerTests
             Mcp = new McpConfig { Network = new McpNetworkConfig { Listen = "192.168.1.205" } },
         };
 
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(config, inContainer: false);
+        var warnings = DarlingWorker.GetNetworkStartupWarnings(config);
         Assert.Contains(warnings, w => w.Contains("postgres.network", StringComparison.Ordinal) && w.Contains("bring-your-own", StringComparison.Ordinal));
-        /* #1804: the mcp notice names the container path now — in a container the block is HONORED, so
-           the notice is suppressed there (see the bind ladder's container gate); outside one (this test
-           process) it still fires. The postgres.network notice is container-independent: the bundled
-           store never runs in BYO mode. */
-        Assert.Contains(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal) && w.Contains("available only with the bundled store", StringComparison.Ordinal));
+        /* #9894: the mcp network block is honored with a dedicated login, so it never lands in this list. */
+        Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
         /* BYO never emits the admin-pivot warning — the network config is ignored anyway. */
         Assert.DoesNotContain(warnings, w => w.Contains("pivot", StringComparison.OrdinalIgnoreCase) || w.Contains("config_command", StringComparison.Ordinal));
     }
 
-    private static DarlingConfig ByoWithMcpNetwork(McpNetworkConfig network) => new()
-    {
-        Postgres = new PostgresConfig { Managed = false, ConnectionString = "Host=pg;Database=darling" },
-        Mcp = new McpConfig { Network = network },
-    };
-
     /// <summary>
-    /// #9571: a bring-your-own config that sets only the MCP token is the documented setup, because the token
-    /// gates the loopback server and the write tools need it. It must not log the "ignored" warning.
+    /// #9894: an own-store config's mcp network block is honored, not ignored: with a dedicated login it exposes, and without one the
+    /// host start says so at Critical. The startup warnings list never calls it ignored, whatever the block holds.
     /// </summary>
     [Theory]
-    [InlineData("a-long-token-value-0123456789", null)]
-    [InlineData(null, "encrypted-token-blob")]
-    public void GetNetworkStartupWarnings_ByoWithOnlyAToken_HasNoMcpNetworkWarning(string? token, string? encryptedToken)
+    [InlineData("a-long-token-value-0123456789", null, null, null)]
+    [InlineData(null, "encrypted-token-blob", null, null)]
+    [InlineData("a-long-token-value-0123456789", null, "192.168.1.205", "192.168.1.0/24")]
+    [InlineData(null, null, "0.0.0.0", "10.0.0.0/8")]
+    public void GetNetworkStartupWarnings_ByoWithMcpNetworkBlock_HasNoMcpNetworkWarning(
+        string? token, string? encryptedToken, string? listen, string? allowFrom)
     {
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(
-            ByoWithMcpNetwork(new McpNetworkConfig { Token = token, EncryptedToken = encryptedToken }),
-            inContainer: false);
-
-        Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
-    }
-
-    /// <summary>#9571: the warning still fires for a field that mode ignores, and names every such field and nothing else.</summary>
-    [Fact]
-    public void GetNetworkStartupWarnings_ByoWithListenAndAToken_NamesListenOnly()
-    {
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(
-            ByoWithMcpNetwork(new McpNetworkConfig { Listen = "192.168.1.205", Token = "a-long-token-value-0123456789" }),
-            inContainer: false);
-
-        var warning = Assert.Single(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
-        Assert.Contains("mcp.network.listen", warning, StringComparison.Ordinal);
-        Assert.DoesNotContain("mcp.network.token", warning, StringComparison.Ordinal);
-        Assert.DoesNotContain("allowFrom", warning, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void GetNetworkStartupWarnings_ByoWithSeveralIgnoredFields_NamesEachOne()
-    {
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(ByoWithMcpNetwork(new McpNetworkConfig
+        var config = new DarlingConfig
         {
-            Listen = "192.168.1.205",
-            AllowFrom = "192.168.1.0/24",
-            HostName = "mcp.corp.example",
-            Tls = new WebTlsConfig { PfxPath = "/certs/mcp.pfx" },
-        }), inContainer: false);
+            Postgres = new PostgresConfig { Managed = false, ConnectionString = "Host=pg;Database=darling" },
+            Mcp = new McpConfig { Network = new McpNetworkConfig { Token = token, EncryptedToken = encryptedToken, Listen = listen, AllowFrom = allowFrom } },
+        };
 
-        var warning = Assert.Single(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
-        foreach (var field in new[] { "listen", "allowFrom", "hostName", "tls" })
-        {
-            Assert.Contains("mcp.network." + field, warning, StringComparison.Ordinal);
-        }
-    }
-
-    /// <summary>#9571: in a container the mcp network block IS honored, so there is nothing to warn about.</summary>
-    [Fact]
-    public void GetNetworkStartupWarnings_ByoInAContainer_HasNoMcpNetworkWarning()
-    {
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(
-            ByoWithMcpNetwork(new McpNetworkConfig { Listen = "0.0.0.0", AllowFrom = "10.0.0.0/8" }),
-            inContainer: true);
-
-        Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
+        Assert.DoesNotContain(DarlingWorker.GetNetworkStartupWarnings(config), w => w.Contains("mcp.network", StringComparison.Ordinal));
     }
 
     /// <summary>

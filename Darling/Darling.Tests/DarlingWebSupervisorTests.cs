@@ -53,20 +53,29 @@ public sealed class DarlingWebSupervisorTests
     }
 
     [Fact]
-    public void ResolveWebBind_Byo_IsLoopbackOnly_ManagedModeRequired()
+    public void ResolveWebBind_Byo_WithoutDedicatedLogin_IsLoopbackOnly_DedicatedLoginRequired()
     {
+        /* #9894: a fully-formed exposure on an own store with no login of the dashboard's own stays on loopback. */
         var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: false, inContainer: false);
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
+        Assert.Equal(DarlingHostBinding.BindReason.DedicatedLoginRequired, decision.Reason);
     }
 
-    /* #9571: the tokens gate the loopback dashboard in bring-your-own mode, so a block that holds only them has
-       nothing the mode ignores and must not produce the "ignored" notice. */
+    [Fact]
+    public void ResolveWebBind_Byo_WithDedicatedLogin_IsNetworkExposed()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(
+            Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: false, inContainer: false, dedicatedLogin: true);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
+    }
+
+    /* The tokens gate the loopback dashboard in bring-your-own mode (#9571), so a block that holds only them is loopback by default. */
     [Theory]
     [InlineData("""{ "enabled": true, "network": { "token": "s3cr3t-token-value-1234567890" } }""")]
     [InlineData("""{ "enabled": true, "network": { "encryptedToken": "BLOB" } }""")]
     [InlineData("""{ "enabled": true, "network": { "tokens": [ { "name": "ops", "role": "operator", "token": "another-token-value-1234567890" } ] } }""")]
-    public void ResolveWebBind_Byo_TokenOnly_IsLoopbackByDefault_NotManagedModeRequired(string json)
+    public void ResolveWebBind_Byo_TokenOnly_IsLoopbackByDefault(string json)
     {
         var web = JsonSerializer.Deserialize<WebConfig>(json)!;
 
@@ -74,26 +83,24 @@ public sealed class DarlingWebSupervisorTests
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
-        Assert.Empty(web.Network!.ByoIgnoredFields);
     }
 
-    /* The dashboard reads tls, oidc and trustedProxies only on an exposed start, which BYO never reaches, so they are
-       ignored there and the notice names them (with the token beside them, which is not named). */
+    /* #9894: a block that is not exposed (a loopback listen, or fields with no listen) is the default for an own store too: there is no
+       "ignored" notice for it, whatever the block holds. */
     [Theory]
-    [InlineData("""{ "network": { "listen": "127.0.0.1", "token": "s3cr3t-token-value-1234567890" } }""", "listen")]
-    [InlineData("""{ "network": { "trustedProxies": [ "10.0.0.5" ], "token": "s3cr3t-token-value-1234567890" } }""", "trustedProxies")]
-    [InlineData("""{ "network": { "oidc": { "authority": "https://login.example.com", "clientId": "client-1" }, "token": "s3cr3t-token-value-1234567890" } }""", "oidc (the sign-in provider)")]
-    [InlineData("""{ "network": { "tls": { "certPath": "/certs/web.pfx" }, "token": "s3cr3t-token-value-1234567890" } }""", "tls")]
-    [InlineData("""{ "network": { "allowFrom": "10.0.0.0/8", "listen": "10.0.0.5" } }""", "listen,allowFrom")]
-    public void ResolveWebBind_Byo_IgnoredField_IsManagedModeRequired_AndNamed(string json, string expectedFields)
+    [InlineData("""{ "network": { "listen": "127.0.0.1", "token": "s3cr3t-token-value-1234567890" } }""")]
+    [InlineData("""{ "network": { "trustedProxies": [ "10.0.0.5" ], "token": "s3cr3t-token-value-1234567890" } }""")]
+    [InlineData("""{ "network": { "oidc": { "authority": "https://login.example.com", "clientId": "client-1" }, "token": "s3cr3t-token-value-1234567890" } }""")]
+    [InlineData("""{ "network": { "tls": { "certPath": "/certs/web.pfx" }, "token": "s3cr3t-token-value-1234567890" } }""")]
+    [InlineData("""{ "network": { "allowFrom": "10.0.0.0/8" } }""")]
+    public void ResolveWebBind_Byo_NotExposedBlock_IsLoopbackByDefault(string json)
     {
         var web = JsonSerializer.Deserialize<WebConfig>(json)!;
 
         var decision = DarlingWebHostService.ResolveWebBind(web, managed: false, inContainer: false);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
-        Assert.Equal(expectedFields, string.Join(",", web.Network!.ByoIgnoredFields));
+        Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
     }
 
     [Fact]

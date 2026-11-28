@@ -66,11 +66,11 @@ internal static class DarlingHostBinding
         /// <summary>All preconditions met: non-loopback listen + managed + token present + valid allowFrom CIDR.</summary>
         NetworkExposed,
 
-        /// <summary>network.* is set but postgres.managed = false and the process is not containerized —
-        /// network exposure is managed-mode-or-container only (a warning). In a container (#1804) the
-        /// compose port mapping is the boundary the BYO reverse-proxy rule was standing in for, and a
-        /// loopback bind would be unreachable through it, so exposure is honored there.</summary>
-        ManagedModeRequired,
+        /// <summary>#9894: a non-loopback listen with postgres.managed = false outside a container, and no login of the surface's own:
+        /// postgres.webConnectionString / postgres.mcpConnectionString is unset, or names the store owner's login. Network exposure
+        /// there needs the dedicated login, so the surface stays on loopback (Critical). In a container (#1804) the compose port
+        /// mapping is the boundary and exposure is honored, with the same line logged.</summary>
+        DedicatedLoginRequired,
 
         /// <summary>Exposed + managed but the listen value is not a parseable IP — fail-closed to loopback.</summary>
         ListenInvalid,
@@ -80,6 +80,19 @@ internal static class DarlingHostBinding
 
         /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback.</summary>
         AllowFromInvalid,
+
+        /// <summary>#9894: the surface's own login passed the name check, but the probe found it holds something the probe refuses (a superuser, a member of the store owner role, and so on:
+        /// see <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/>) - fail-closed to loopback (Critical). Only <see cref="ApplyLoginProbe"/> sets it.</summary>
+        LoginPrivileged,
+
+        /// <summary>#9894: the probe of the surface's own login could not run (no connection, or its query failed) - fail-closed to loopback
+        /// (Critical). Only <see cref="ApplyLoginProbe"/> sets it.</summary>
+        LoginProbeFailed,
+
+        /// <summary>#9894: the surface's own connection string names a user, but postgres.connectionString (the owner's) names none, so the
+        /// names cannot prove the two logins differ - fail-closed to loopback (Critical), the same answer the name check gives everywhere. Set by
+        /// <see cref="RefuseUnknownOwner"/> in place of <see cref="DedicatedLoginRequired"/>, so the line can say what to fix.</summary>
+        OwnerUserUnknown,
     }
 
     /// <summary>The (mode, reason) pair returned by <see cref="ResolveBind"/>.</summary>
@@ -102,43 +115,34 @@ internal static class DarlingHostBinding
     /// PURE resolution of an effective host bind from the surface-agnostic inputs. Returns
     /// <see cref="BindMode.NetworkAndLoopback"/> ONLY when <paramref name="listen"/> is a genuine network
     /// (non-loopback) address (via <see cref="DarlingNetwork.IsExposedListenAddress"/> — so <c>127.0.0.1</c>
-    /// stays loopback, never a network bind/collision) that ALSO parses as an IP, AND <paramref name="managed"/>
-    /// is true, AND a bearer token is present (<paramref name="tokenPresent"/> — presence only; the host
+    /// stays loopback, never a network bind/collision) that ALSO parses as an IP, AND the store allows it
+    /// (<paramref name="managed"/> is true, or the process is in a container, or <paramref name="dedicatedLogin"/> is true: #9894, an own
+    /// store outside a container, whose surface has a connection string of its own naming a login other than the owner's), AND a bearer token is present (<paramref name="tokenPresent"/> — presence only; the host
     /// decrypts later), AND <paramref name="allowFrom"/> is a valid CIDR list (#5288: one CIDR, or CIDRs separated
     /// by commas — see <see cref="CidrAllowList"/>) whose EVERY entry is of the SAME address family as the
     /// listen. Otherwise loopback-only with the specific reason. Never throws; never consults a logger.
-    /// <paramref name="networkConfigured"/> is "the surface's network block has any field set" — used only for
-    /// the BYO "network.* is ignored" notice (the network path never runs in BYO).
     /// </summary>
     internal static BindDecision ResolveBind(
-        string? listen, string? allowFrom, bool tokenPresent, bool networkConfigured, bool managed,
-        bool inContainer = false)
+        string? listen, string? allowFrom, bool tokenPresent, bool managed,
+        bool inContainer = false, bool dedicatedLogin = false)
     {
         var exposed = DarlingNetwork.IsExposedListenAddress(listen);
 
-        /* #1804: a containerized BYO deployment (compose) is exposure-capable — the port mapping is the
-           boundary the BYO reverse-proxy rule was standing in for, and a loopback bind would be dead
-           through it. The token/CIDR preconditions below apply identically either way. */
-        var exposureCapable = managed || inContainer;
-
+        /* Not exposed = the secure default. */
         if (!exposed)
         {
-            /* Not exposed = the secure default. The one exception worth a word: a BYO store with a network
-               block set at all (even a loopback/partial one) is ignored -> the managed-mode notice. */
-            if (!exposureCapable && networkConfigured)
-            {
-                return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
-            }
-
             return new BindDecision(BindMode.LoopbackOnly, BindReason.LoopbackByDefault);
         }
 
-        /* Exposed. Managed-or-container only: uncontained BYO never binds the network path, and this
-           dominates a missing/invalid listen/token/allowFrom so the operator sees the actionable
-           "managed only" notice first. */
-        if (!exposureCapable)
+        /* Exposed. The bundled store and a container (#1804: the compose port mapping is the boundary, and a loopback bind
+           would be dead through it) expose under the token and CIDR preconditions below. A store the service does not
+           manage, outside a container (#9894), exposes the same way only when the surface has a login of its own, one
+           other than the owner's: the owner login holds more than a network-facing surface should hold. Without it the
+           surface stays on loopback, and this dominates a missing/invalid listen/token/allowFrom so the operator sees
+           the actionable "set the dedicated login" line first. */
+        if (!managed && !inContainer && !dedicatedLogin)
         {
-            return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
+            return new BindDecision(BindMode.LoopbackOnly, BindReason.DedicatedLoginRequired);
         }
 
         /* The listen must be a parseable IP. IsExposedListenAddress treats a non-IP value (localhost, a
@@ -178,9 +182,8 @@ internal static class DarlingHostBinding
     /// <summary>
     /// PURE severity map for a <see cref="ResolveBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="BindReason.ListenInvalid"/>/<see cref="BindReason.TokenMissing"/>/
-    /// <see cref="BindReason.AllowFromInvalid"/>) are <see cref="LogLevel.Critical"/>, the BYO "ignored"
-    /// notice (<see cref="BindReason.ManagedModeRequired"/>) is <see cref="LogLevel.Warning"/>, and the
-    /// non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
+    /// <see cref="BindReason.AllowFromInvalid"/>/<see cref="BindReason.DedicatedLoginRequired"/>/<see cref="BindReason.LoginPrivileged"/>/
+    /// <see cref="BindReason.LoginProbeFailed"/>/<see cref="BindReason.OwnerUserUnknown"/>) are <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="BindReason.NetworkExposed"/>/<see cref="BindReason.LoopbackByDefault"/>)
     /// are silent (null).
     /// </summary>
     internal static LogLevel? MapBindReasonSeverity(BindReason reason) => reason switch
@@ -188,9 +191,83 @@ internal static class DarlingHostBinding
         BindReason.ListenInvalid => LogLevel.Critical,
         BindReason.TokenMissing => LogLevel.Critical,
         BindReason.AllowFromInvalid => LogLevel.Critical,
-        BindReason.ManagedModeRequired => LogLevel.Warning,
+        BindReason.DedicatedLoginRequired => LogLevel.Critical,
+        BindReason.LoginPrivileged => LogLevel.Critical,
+        BindReason.LoginProbeFailed => LogLevel.Critical,
+        BindReason.OwnerUserUnknown => LogLevel.Critical,
         _ => null,
     };
+
+    /// <summary>
+    /// PURE (#9894): the probe of a surface's own login applied to a bind that would expose it. A decision that is not an exposure is
+    /// returned as it is, and so is an exposure whose login the probe found unprivileged. Only an explicit
+    /// <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/> passes: a privileged login (one that holds anything the probe refuses: a superuser, a member of the store owner
+    /// role, and so on), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Failed, the enum's first member, so a result that was
+    /// never filled in refuses too, and is still told apart from a real answer by its verdict, never by default) turn the
+    /// exposure into loopback-only. A privileged login gets the reason that says so, every other refusal the probe-failed reason.
+    /// </summary>
+    internal static BindDecision ApplyLoginProbe(BindDecision bind, DarlingStoreLogins.LoginProbeResult probe)
+    {
+        if (bind.Mode != BindMode.NetworkAndLoopback || probe.Verdict == DarlingStoreLogins.LoginProbeVerdict.Unprivileged)
+        {
+            return bind;
+        }
+
+        return new BindDecision(
+            BindMode.LoopbackOnly,
+            probe.Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged ? BindReason.LoginPrivileged : BindReason.LoginProbeFailed);
+    }
+
+    /// <summary>
+    /// PURE (#9894): the name check's answer for a login whose owner string names no user, applied to a decision. When the resolver refused
+    /// for want of a dedicated login (<see cref="BindReason.DedicatedLoginRequired"/>) and the cause is that postgres.connectionString names
+    /// no user (<see cref="DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown"/>), the reason becomes <see cref="BindReason.OwnerUserUnknown"/>,
+    /// still loopback-only, so the line can say to name the owner's user. Any other decision is returned as it is. The host start and every
+    /// caller of the <see cref="PostgresConfig"/> overloads apply it, so a refusal for this case is the same everywhere.
+    /// </summary>
+    internal static BindDecision RefuseUnknownOwner(BindDecision bind, DarlingStoreLogins.LoginNameCheck names) =>
+        bind.Reason == BindReason.DedicatedLoginRequired && names == DarlingStoreLogins.LoginNameCheck.OwnerUserUnknown
+            ? new BindDecision(BindMode.LoopbackOnly, BindReason.OwnerUserUnknown)
+            : bind;
+
+    /// <summary>
+    /// #9894: the bind a host start takes for one surface, with the probe of its login. Outside a container on a store the service does not
+    /// manage, a surface that would listen on the network connects once with its own login before the listener starts, and is exposed only if
+    /// that login holds nothing the probe refuses (a superuser, a member of the store owner role, and so on). The names decide first: no login of its own is refused without a
+    /// connection (<see cref="BindReason.DedicatedLoginRequired"/>), and so is an owner string that names no user
+    /// (<see cref="BindReason.OwnerUserUnknown"/>, through <see cref="RefuseUnknownOwner"/>), because the names then cannot prove the two
+    /// logins differ. The only difference left between this answer and the name-level answer of the <see cref="PostgresConfig"/> overloads is the
+    /// probe refusing a login whose names passed. A managed store and a container never probe
+    /// (the managed roles are the service's own, and the compose port mapping is the boundary).
+    /// <paramref name="resolve"/> is the surface's resolver with its login flag (<c>ResolveWebBind</c> / <c>ResolveMcpBind</c> mapped to the
+    /// shared decision). <paramref name="probe"/> is the connection, injectable so the decision is testable without a store; its default is
+    /// <see cref="DarlingStoreLogins.ProbeSurfaceLoginAsync"/>. Returns the probe's result too, for the line that names its error class.
+    /// </summary>
+    internal static async Task<(BindDecision Bind, DarlingStoreLogins.LoginProbeResult? Probe)> ResolveBindWithLoginProbeAsync(
+        DarlingStoreLogins.Surface surface, PostgresConfig postgres, bool inContainer, Func<bool, BindDecision> resolve,
+        CancellationToken cancellationToken,
+        Func<DarlingStoreLogins.Surface, PostgresConfig, CancellationToken, Task<DarlingStoreLogins.LoginProbeResult>>? probe = null)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(resolve);
+
+        if (postgres.Managed || inContainer)
+        {
+            return (resolve(false), null);
+        }
+
+        var names = DarlingStoreLogins.CheckLoginNames(surface, postgres);
+        var candidate = RefuseUnknownOwner(resolve(names == DarlingStoreLogins.LoginNameCheck.Dedicated), names);
+        if (candidate.Mode != BindMode.NetworkAndLoopback)
+        {
+            return (candidate, null);
+        }
+
+        var result = probe is null
+            ? await DarlingStoreLogins.ProbeSurfaceLoginAsync(surface, postgres, cancellationToken)
+            : await probe(surface, postgres, cancellationToken);
+        return (ApplyLoginProbe(candidate, result), result);
+    }
 
     /// <summary>
     /// Whether to ALSO bind the two loopback families beside the network listener. Skipped when the listen

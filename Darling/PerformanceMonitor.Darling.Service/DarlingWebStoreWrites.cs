@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// unless <c>postgres.webConnectionString</c> names another login, and the service already knows which kind of store it runs on. On the managed
 /// store that setting is a validation error, so naming it (or "the admin login") sends the user to an option the store refuses. The sentence
 /// therefore depends on <see cref="PostgresConfig.Managed"/>: a managed store says the dashboard lists only and the Viewer app makes the change,
-/// a store the operator brought keeps the advice to give the web an admin store login. On the managed store with <c>web.allowAdminWrites</c>
+/// a store the operator brought points <c>postgres.webConnectionString</c> at the web role the roles script creates, never an admin or owner login (#9894). On the managed store with <c>web.allowAdminWrites</c>
 /// off (#6600) the sentence says changes are turned off and names that switch, and with it on the refusal is about the store login's privilege and names no switch (#7402).
 /// </summary>
 internal static class DarlingWebStoreWrites
@@ -71,8 +71,9 @@ internal static class DarlingWebStoreWrites
             : webLoginWrite
                 ? $"This dashboard's store login cannot {cannot}. Point postgres.webConnectionString at the web role "
                   + DarlingManagedRoles.ProvisionRolesScriptPath + " creates." + bringYourOwnExtra
-                : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
-                  + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
+                // #9894: never an admin or owner login for the web. On this store the dashboard is exposed to the network only on a login that is not the owner's, a superuser or a member of the owner role.
+                : $"This dashboard's store login cannot {cannot}. {instead}. postgres.webConnectionString should name the web role "
+                  + DarlingManagedRoles.ProvisionRolesScriptPath + " creates, not an admin or owner login." + bringYourOwnExtra;
 
     /// <summary>Whether the managed store's dashboard has no admin pool, so its Admin writes are list-only until <c>web.allowAdminWrites</c> is on.</summary>
     internal static bool AdminWritesOff(bool managedStore, WebAdminArm? arm) => managedStore && arm is null;

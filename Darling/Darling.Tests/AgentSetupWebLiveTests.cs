@@ -493,12 +493,12 @@ public sealed class AgentSetupWebLiveTests
     }
 
     /// <summary>#6445: the same viewer-role 403, but the web host runs on the managed store. That store refuses <c>postgres.webConnectionString</c>,
-    /// so the sentence must not send the user to it or to "the admin login"; a store you bring yourself keeps that advice. Both are real
-    /// refusals from the store's own grants, and nothing is written.</summary>
+    /// so the sentence must not send the user to it; a store you bring yourself names it (the web role, never an admin login, #9894). Both
+    /// are real refusals from the store's own grants, and nothing is written.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task TheViewerRoles403_NamesTheAdminLoginOption_OnlyOnAStoreYouBringYourself(bool managedStore)
+    public async Task TheViewerRoles403_NamesTheLoginSetting_OnlyOnAStoreYouBringYourself(bool managedStore)
     {
         await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
@@ -517,7 +517,6 @@ public sealed class AgentSetupWebLiveTests
                 Assert.Equal(managedStore, said.Contains("web.allowAdminWrites", StringComparison.Ordinal));
                 Assert.Contains("Viewer app", said, StringComparison.Ordinal);
                 Assert.Equal(!managedStore, said.Contains("webConnectionString", StringComparison.Ordinal));
-                Assert.Equal(!managedStore, said.Contains("admin store login", StringComparison.OrdinalIgnoreCase));
             }
 
             Assert.Equal(managedStore, (bool)(await Send("GET", "/api/session", null)).Body!["managed_store"]!);

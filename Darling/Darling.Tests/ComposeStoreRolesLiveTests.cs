@@ -1216,6 +1216,146 @@ public sealed class ComposeStoreRolesLiveTests
     }
 
     /// <summary>
+    /// #9894: the exposure probe (<see cref="DarlingStoreLogins.ProbeSurfaceLoginAsync"/>) and <c>tools/provision-roles.sql</c> both refuse a login
+    /// that holds a role outranking the surface's grants, and the two lists must not drift. For every predefined role the server has, and for
+    /// each kind the script's guard names that a login can join (a BYPASSRLS role, a superuser role and the database owner), the <c>viewer</c> login is put in
+    /// the role, then the probe is asked about that login and the script is run by an owner that cannot revoke the membership. The script stops at its
+    /// guard (exit 3) exactly where the probe says privileged, and the two agree on a harmless role too (<c>pg_monitor</c>, a plain role): both pass.
+    /// Starting from the probe's own list, each name on it must also be one the script stops for, so a role added to one list only fails here.
+    /// </summary>
+    [Fact]
+    public async Task TheLoginProbeAndTheRolesScript_RefuseTheSameMemberships_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-roles-drift-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            Assert.SkipUnless(await OwnerScalarAsync<int>(owner, "SELECT current_setting('server_version_num')::int", ct) >= 160000,
+                "The script's guard stops a membership the owner cannot revoke from PostgreSQL 16, where ADMIN OPTION decides it.");
+            var database = new NpgsqlConnectionStringBuilder(owner).Database!;
+
+            var byo = await MakeNonSuperuserOwnerAsync(owner, ct);
+            await ExecAsync(owner, "ALTER ROLE byo SET pg_stat_statements.track_utility = off", ct);
+            var viewerPassword = "ViewerPwDriftR4a";
+            var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, ["AdminPwDriftR4a", viewerPassword, "McpPwDriftR4a"], ct);
+            Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's first run.{Environment.NewLine}{created.Error}");
+            await ExecAsync(owner,
+                "CREATE ROLE g_drift_bypassrls NOLOGIN BYPASSRLS; CREATE ROLE g_drift_super NOLOGIN SUPERUSER;"
+                + " CREATE ROLE g_drift_dbowner NOLOGIN; CREATE ROLE g_drift_plain NOLOGIN;", ct);
+
+            var predefined = new List<string>();
+            await using (var connection = await OpenAsync(owner, ct))
+            await using (var command = new NpgsqlCommand("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname LIKE 'pg\\_%' ORDER BY rolname", connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    predefined.Add(reader.GetString(0));
+                }
+            }
+
+            foreach (var name in DarlingStoreLogins.LoginProbeOutrankingRoles)
+            {
+                Assert.Contains(name, predefined);
+            }
+
+            /* (role the login joins, whether either list should refuse it). The owner itself (byo) is not tried: it created the four roles, so it is a member of each, and a role cannot join one that is its own member.
+               The database owner is, as a group role that takes the database over for the case. */
+            var cases = predefined
+                .Select(name => (Role: name, Outranks: DarlingStoreLogins.LoginProbeOutrankingRoles.Contains(name, StringComparer.Ordinal)))
+                .Concat(new (string Role, bool Outranks)[] { ("g_drift_bypassrls", true), ("g_drift_super", true), ("g_drift_dbowner", true), ("g_drift_plain", false) })
+                .ToList();
+
+            var run = 0;
+            var refusedBoth = new List<string>();
+            foreach (var (role, outranks) in cases)
+            {
+                var isDatabaseOwnerCase = role == "g_drift_dbowner";
+                if (isDatabaseOwnerCase)
+                {
+                    /* byo held CONNECT as the database's owner: the store revokes it from PUBLIC, so it keeps it by a grant once it is not the owner. */
+                    await ExecAsync(owner, $"ALTER DATABASE \"{database}\" OWNER TO g_drift_dbowner; GRANT CONNECT ON DATABASE \"{database}\" TO byo", ct);
+                }
+
+                try
+                {
+                    await ExecAsync(owner, $"GRANT \"{role}\" TO viewer", ct);
+                }
+                catch (PostgresException)
+                {
+                    /* A role that cannot have explicit members (pg_database_owner) is no membership a login can hold. */
+                    continue;
+                }
+
+                try
+                {
+                    Assert.True(await OwnerScalarAsync<bool>(owner, $"SELECT pg_catalog.pg_has_role('viewer', '{role}', 'MEMBER')", ct),
+                        $"viewer is not a member of {role}, so the verdicts below prove nothing.");
+
+                    var probe = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+                        DarlingStoreLogins.Surface.Web,
+                        new PostgresConfig { WebConnectionString = Login(owner, "viewer", viewerPassword) }, ct);
+                    Assert.NotEqual(DarlingStoreLogins.LoginProbeVerdict.Failed, probe.Verdict);
+                    var probeRefuses = probe.Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged;
+
+                    run++;
+                    var passwords = new[] { $"AdminPwDriftR4_{run}", $"ViewerPwDriftR4_{run}", $"McpPwDriftR4_{run}" };
+                    var script = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, passwords, ct);
+                    Assert.True(script.ExitCode is 0 or 3, $"psql exited {script.ExitCode} for a membership in {role}.{Environment.NewLine}{script.Error}");
+                    var scriptStops = script.ExitCode == 3;
+                    if (scriptStops)
+                    {
+                        Assert.Contains("These roles are members of roles whose privileges outrank the grants below", script.Error, StringComparison.Ordinal);
+                    }
+                    else
+                    {
+                        viewerPassword = passwords[1];
+                    }
+
+                    Assert.True(scriptStops == probeRefuses,
+                        $"The probe says {(probeRefuses ? "refuse" : "pass")} and provision-roles.sql says {(scriptStops ? "stop" : "go on")} for a login in {role}.");
+                    Assert.True(scriptStops == outranks, $"A login in {role} should {(outranks ? "be refused" : "pass")} in both, and the script {(scriptStops ? "stops" : "goes on")}.");
+                    if (scriptStops)
+                    {
+                        refusedBoth.Add(role);
+                    }
+                }
+                finally
+                {
+                    await ExecAsync(owner, $"REVOKE \"{role}\" FROM viewer", ct);
+                    if (isDatabaseOwnerCase)
+                    {
+                        await ExecAsync(owner, $"ALTER DATABASE \"{database}\" OWNER TO byo", ct);
+                    }
+                }
+            }
+
+            foreach (var name in DarlingStoreLogins.LoginProbeOutrankingRoles)
+            {
+                Assert.Contains(name, refusedBoth);
+            }
+
+            Assert.Contains("g_drift_bypassrls", refusedBoth);
+            Assert.Contains("g_drift_super", refusedBoth);
+            Assert.Contains("g_drift_dbowner", refusedBoth);
+            Assert.DoesNotContain("g_drift_plain", refusedBoth);
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The other reasons a role that is not a superuser cannot change the roles, on any PostgreSQL version: it has no
     /// <c>CREATEROLE</c>, or one of the three roles is a superuser. Each used to fail at the <c>ALTER ROLE ... PASSWORD</c>
     /// lines and write the passwords to the server log while psql exited 0. Each now stops at the guard (exit 3), changes

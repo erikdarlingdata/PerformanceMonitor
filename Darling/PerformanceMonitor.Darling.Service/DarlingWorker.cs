@@ -917,39 +917,26 @@ public sealed partial class DarlingWorker : BackgroundService
     /// passes (darling-network-endpoints) — NEVER inside Validate(), which is all-fatal, so an optional,
     /// default-off endpoint note can never abort collection (D-BYO / D-validate):
     /// <list type="bullet">
-    /// <item>BYO mode (<c>managed=false</c>) with any <c>postgres.network.*</c> or <c>mcp.network.*</c>
-    /// set — the fields are IGNORED; the operator's own PostgreSQL governs exposure.</item>
+    /// <item>BYO mode (<c>managed=false</c>) with any <c>postgres.network.*</c> set — the fields are IGNORED; the operator's own
+    /// PostgreSQL governs exposure. (The mcp and web network blocks are not in this list: since #9894 they are honored with a dedicated
+    /// login, and the host start says what is missing.)</item>
     /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> admits <c>admin</c> — names the
     /// <c>config_command</c> / <c>config_monitored_servers</c> / <c>config_notification</c>
     /// service-credential pivot a remote admin connection can reach (D7 — the operator's informed opt-in).</item>
     /// </list>
     /// Pure so a unit test asserts the returned strings without driving the loop or a live logger.
     /// </summary>
-    internal static IReadOnlyList<string> GetNetworkStartupWarnings(DarlingConfig config, bool? inContainer = null)
+    internal static IReadOnlyList<string> GetNetworkStartupWarnings(DarlingConfig config)
     {
         var warnings = new List<string>();
 
         if (!config.Postgres.Managed)
         {
-            /* BYO: network.* is managed-mode only. Warn per section that is set (D-BYO). */
+            /* BYO: postgres.network.* is managed-mode only (D-BYO). */
             if (config.Postgres.Network?.IsConfigured == true)
             {
                 warnings.Add(
                     "postgres.network.* is set but postgres.managed is false. It is IGNORED in bring-your-own mode; your own PostgreSQL governs its network exposure (pg_hba / listen_addresses / TLS).");
-            }
-
-            /* #1804: in a container the mcp/web network blocks ARE honored (the bind ladder's container
-               gate), so this notice would be a lie there — the smoke test caught it warning IGNORED in
-               the same breath as 'Starting MCP server on 0.0.0.0'. The postgres.network notice above
-               stays: the bundled store never runs in BYO mode, container or not. */
-            /* #9571: only the fields this mode ignores count. A token alone is honored (loopback MCP and the
-               write tools use it), so it must not trip a warning that says the setup does not work. */
-            var ignoredMcpFields = config.Mcp.Network?.ByoIgnoredFields ?? [];
-            if (ignoredMcpFields.Count > 0 && !(inContainer ?? Hosting.DarlingHostBinding.IsRunningInContainer))
-            {
-                var named = string.Join(", ", ignoredMcpFields.Select(f => "mcp.network." + f));
-                warnings.Add(
-                    $"{named} {(ignoredMcpFields.Count == 1 ? "is" : "are")} set but postgres.managed is false. The MCP network endpoint is available only with the bundled store (postgres.managed = true) or the container distribution, so {(ignoredMcpFields.Count == 1 ? "it is" : "they are")} ignored and the MCP server stays on loopback.");
             }
 
             return warnings;

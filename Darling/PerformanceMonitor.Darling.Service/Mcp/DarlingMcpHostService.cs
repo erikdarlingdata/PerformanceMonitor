@@ -563,8 +563,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* Decide the effective bind PURELY, then map the reason -> severity here (Round-4 #7: the caller,
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
-        var bind = ResolveMcpBind(config.Mcp, config.Postgres.Managed);
-        LogBindReason(config.Mcp, bind.Reason);
+        var (shared, loginProbe) = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+            DarlingStoreLogins.Surface.Mcp, config.Postgres, DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin => ToShared(ResolveMcpBind(config.Mcp, config.Postgres.Managed, DarlingHostBinding.IsRunningInContainer, dedicatedLogin)),
+            stoppingToken);
+        var bind = new McpBindDecision((McpBindMode)(int)shared.Mode, (McpBindReason)(int)shared.Reason);
+        LogBindReason(config.Mcp, bind.Reason, loginProbe);
 
         try
         {
@@ -862,7 +866,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
+                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken, exposed: networkMode, probed: loginProbe);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();
@@ -2424,7 +2428,8 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>WHY the bind resolved as it did — the caller maps this to a severity (Round-4 #7):
     /// <see cref="LoopbackByDefault"/>/<see cref="NetworkExposed"/> are non-degrade (no critical log),
     /// <see cref="TokenMissing"/>/<see cref="AllowFromInvalid"/> are fail-closed degrades (LogCritical),
-    /// and <see cref="ManagedModeRequired"/> is the BYO "ignored" notice (LogWarning, D-BYO).</summary>
+    /// and <see cref="DedicatedLoginRequired"/> is an own store (outside a container) asked to listen on the network without a login of its
+    /// own (LogCritical, #9894).</summary>
     internal enum McpBindReason
     {
         /// <summary>No network block, or a loopback/absent listen — the byte-for-byte-today loopback server.</summary>
@@ -2433,8 +2438,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         /// <summary>All preconditions met: non-loopback listen + managed + token present + valid allowFrom CIDR.</summary>
         NetworkExposed,
 
-        /// <summary>network.* is set but postgres.managed = false — network exposure is managed-mode only (D-BYO warning).</summary>
-        ManagedModeRequired,
+        /// <summary>#9894: a non-loopback listen with postgres.managed = false outside a container and no postgres.mcpConnectionString that
+        /// names a login other than the owner's — fail-closed to loopback (LogCritical).</summary>
+        DedicatedLoginRequired,
 
         /// <summary>Exposed + managed but the listen value is not a parseable IP (localhost/hostname/"*") — fail-closed to loopback (LogCritical).</summary>
         ListenInvalid,
@@ -2444,6 +2450,16 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback (LogCritical).</summary>
         AllowFromInvalid,
+
+        /// <summary>#9894: the MCP login passed the name check, but the probe found it holds something that outranks the surface's grants (a superuser, a member of the store owner role, and so on) — fail-closed to loopback (LogCritical).</summary>
+        LoginPrivileged,
+
+        /// <summary>#9894: the probe of the MCP login could not run — fail-closed to loopback (LogCritical).</summary>
+        LoginProbeFailed,
+
+        /// <summary>#9894: postgres.mcpConnectionString names a user but postgres.connectionString names none, so the names cannot prove the two
+        /// logins differ — fail-closed to loopback (LogCritical), before any probe.</summary>
+        OwnerUserUnknown,
     }
 
     /// <summary>The (mode, reason) pair returned by <see cref="ResolveMcpBind"/>.</summary>
@@ -2456,7 +2472,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// LADDER itself (exposed classifier, managed gate, listen/token/allowFrom validation, family match) now
     /// lives ONCE in <see cref="DarlingHostBinding"/>; this method's contract is byte-for-byte what it was.
     /// </summary>
-    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed, bool? inContainer = null)
+    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed, bool? inContainer = null, bool dedicatedLogin = false)
     {
         var network = mcp.Network;
         var decision = DarlingHostBinding.ResolveBind(
@@ -2464,15 +2480,33 @@ public sealed class DarlingMcpHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: mcp.HasNamedTokens || (network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token))),
-            /* #9571: a token alone is honored in bring-your-own mode, so only the fields that mode ignores count here. */
-            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
-            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
+            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin: dedicatedLogin);
 
         /* The nested McpBind* enums mirror DarlingHostBinding's BindMode/BindReason 1:1 (same member order,
            pinned equal by DarlingHostBindingTests), so a numeric cast maps them without a per-value switch. */
         return new McpBindDecision((McpBindMode)(int)decision.Mode, (McpBindReason)(int)decision.Reason);
+    }
+
+    /// <summary>
+    /// The effective MCP bind for a config's store (#9894): <see cref="ResolveMcpBind(McpConfig, bool, bool?, bool)"/> with the store's
+    /// mode and, for a store the service does not manage, whether <c>postgres.mcpConnectionString</c> names a login other than the owner's
+    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>), and a login whose owner string names no user refused as
+    /// <see cref="McpBindReason.OwnerUserUnknown"/>. Every caller that has the store's config calls this one. The host start applies the same
+    /// name rules (<see cref="DarlingHostBinding.ResolveBindWithLoginProbeAsync"/>), so the answer it gives and the answer a wizard or a report
+    /// gives for the same file differ only by the probe: the host also refuses a login the probe finds privileged or cannot check, which this
+    /// overload never connects to learn.
+    /// </summary>
+    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, PostgresConfig postgres, bool? inContainer = null)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        var names = postgres.Managed ? DarlingStoreLogins.LoginNameCheck.NotDedicated : DarlingStoreLogins.CheckLoginNames(DarlingStoreLogins.Surface.Mcp, postgres);
+        var decision = ToShared(ResolveMcpBind(
+            mcp, postgres.Managed, inContainer, dedicatedLogin: names == DarlingStoreLogins.LoginNameCheck.Dedicated));
+        var refined = DarlingHostBinding.RefuseUnknownOwner(decision, names);
+        return new McpBindDecision((McpBindMode)(int)refined.Mode, (McpBindReason)(int)refined.Reason);
     }
 
     /// <summary>
@@ -2569,18 +2603,21 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// PURE severity map for a <see cref="ResolveMcpBind"/> reason (Round-4 #7): the fail-closed degrades
     /// (<see cref="McpBindReason.ListenInvalid"/>/<see cref="McpBindReason.TokenMissing"/>/
-    /// <see cref="McpBindReason.AllowFromInvalid"/>) are <see cref="LogLevel.Critical"/>, the BYO "ignored"
-    /// notice (<see cref="McpBindReason.ManagedModeRequired"/>) is <see cref="LogLevel.Warning"/>, and the
-    /// non-degrade reasons (<see cref="McpBindReason.NetworkExposed"/>/<see cref="McpBindReason.LoopbackByDefault"/>)
+    /// <see cref="McpBindReason.AllowFromInvalid"/>/<see cref="McpBindReason.DedicatedLoginRequired"/>/<see cref="McpBindReason.OwnerUserUnknown"/>) are
+    /// <see cref="LogLevel.Critical"/>, and the non-degrade reasons (<see cref="McpBindReason.NetworkExposed"/>/<see cref="McpBindReason.LoopbackByDefault"/>)
     /// are silent (null). <see cref="LogBindReason"/> drives its emit level off this, so the level and the
     /// message can never diverge.
     /// </summary>
     internal static LogLevel? MapBindReasonSeverity(McpBindReason reason)
         => DarlingHostBinding.MapBindReasonSeverity((DarlingHostBinding.BindReason)(int)reason);
 
+    /// <summary>The MCP decision as the shared one (the enums mirror 1:1, see <see cref="ResolveMcpBind(McpConfig, bool, bool?, bool)"/>).</summary>
+    private static DarlingHostBinding.BindDecision ToShared(McpBindDecision decision) =>
+        new((DarlingHostBinding.BindMode)(int)decision.Mode, (DarlingHostBinding.BindReason)(int)decision.Reason);
+
     /// <summary>Emits the <see cref="ResolveMcpBind"/> reason at its mapped severity (Round-4 #7). Silent for
     /// the non-degrade reasons (the network-exposed line is logged at start with the real bind).</summary>
-    private void LogBindReason(McpConfig mcp, McpBindReason reason)
+    private void LogBindReason(McpConfig mcp, McpBindReason reason, DarlingStoreLogins.LoginProbeResult? loginProbe = null)
     {
         var level = MapBindReasonSeverity(reason);
         if (level is null)
@@ -2616,14 +2653,24 @@ public sealed class DarlingMcpHostService : BackgroundService
                     mcp.Network?.AllowFrom);
                 break;
 
-            case McpBindReason.ManagedModeRequired:
-                /* #9571: name the fields that are ignored. A token alone never lands here. */
-                var ignored = mcp.Network?.ByoIgnoredFields ?? [];
-                _logger.Log(level.Value,
-                    "{Fields} set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.",
-                    string.Join(", ", ignored.Select(f => "mcp.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
+            case McpBindReason.DedicatedLoginRequired:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Mcp, refusing: true));
+                break;
+
+            case McpBindReason.OwnerUserUnknown:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Mcp));
+                break;
+
+            case McpBindReason.LoginPrivileged:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.PrivilegedLoginText(DarlingStoreLogins.Surface.Mcp));
+                break;
+
+            case McpBindReason.LoginProbeFailed:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.LoginProbeFailedText(DarlingStoreLogins.Surface.Mcp, loginProbe?.ErrorClass));
                 break;
 
             default:

@@ -124,40 +124,49 @@ public sealed class DarlingMcpHostTests
     }
 
     [Fact]
-    public void ResolveMcpBind_Exposed_Byo_IsLoopbackOnly_ManagedModeRequired()
+    public void ResolveMcpBind_Exposed_Byo_WithoutDedicatedLogin_IsLoopbackOnly_DedicatedLoginRequired()
     {
-        /* A fully-formed exposure but managed=false: the network path never runs in BYO (D-BYO). */
-        var decision = Host.ResolveMcpBind(Mcp("192.168.1.205", "192.168.1.0/24", token: "s3cr3t"), managed: false);
+        /* #9894: a fully-formed exposure on an own store with no login of the MCP server's own stays on loopback. */
+        var decision = Host.ResolveMcpBind(Mcp("192.168.1.205", "192.168.1.0/24", token: "s3cr3t"), managed: false, inContainer: false);
 
         Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(Host.McpBindReason.ManagedModeRequired, decision.Reason);
+        Assert.Equal(Host.McpBindReason.DedicatedLoginRequired, decision.Reason);
     }
 
     [Fact]
-    public void ResolveMcpBind_Exposed_Byo_MissingToken_StillManagedModeRequired_NotTokenMissing()
+    public void ResolveMcpBind_Exposed_Byo_WithDedicatedLogin_IsNetworkExposed()
     {
-        /* BYO dominates a missing token/allowFrom so the operator sees the actionable "managed only" notice. */
-        var decision = Host.ResolveMcpBind(Mcp("192.168.1.205" /* no token, no allowFrom */), managed: false);
+        var decision = Host.ResolveMcpBind(
+            Mcp("192.168.1.205", "192.168.1.0/24", token: "s3cr3t"), managed: false, inContainer: false, dedicatedLogin: true);
 
-        Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(Host.McpBindReason.ManagedModeRequired, decision.Reason);
+        Assert.Equal(Host.McpBindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(Host.McpBindReason.NetworkExposed, decision.Reason);
     }
 
     [Fact]
-    public void ResolveMcpBind_Byo_ConfiguredButNotExposed_IsManagedModeRequired()
+    public void ResolveMcpBind_Exposed_Byo_MissingToken_WithoutDedicatedLogin_IsDedicatedLoginRequired_NotTokenMissing()
     {
-        /* Any network.* set in BYO is ignored -> the warning fires even when the listen is not exposed. */
-        var decision = Host.ResolveMcpBind(Mcp(allowFrom: "192.168.1.0/24"), managed: false);
+        /* The missing login dominates a missing token/allowFrom so the operator sees the actionable line first. */
+        var decision = Host.ResolveMcpBind(Mcp("192.168.1.205" /* no token, no allowFrom */), managed: false, inContainer: false);
 
         Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
-        Assert.Equal(Host.McpBindReason.ManagedModeRequired, decision.Reason);
+        Assert.Equal(Host.McpBindReason.DedicatedLoginRequired, decision.Reason);
     }
 
     [Fact]
-    public void ResolveMcpBind_Byo_TokenOnly_IsLoopbackByDefault_NotManagedModeRequired()
+    public void ResolveMcpBind_Byo_AllowFromOnly_IsLoopbackByDefault()
     {
-        /* #9571: the token is honored in BYO (loopback MCP and the write tools use it), so a block holding only
-           a token has nothing the mode ignores and must not produce the "ignored" notice. */
+        /* Nothing is ignored in an own store any more: a block that is not exposed is just the default. */
+        var decision = Host.ResolveMcpBind(Mcp(allowFrom: "192.168.1.0/24"), managed: false, inContainer: false);
+
+        Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(Host.McpBindReason.LoopbackByDefault, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveMcpBind_Byo_TokenOnly_IsLoopbackByDefault()
+    {
+        /* #9571: the token is honored in BYO (loopback MCP and the write tools use it). */
         var decision = Host.ResolveMcpBind(Mcp(token: "s3cr3t-token-value"), managed: false, inContainer: false);
 
         Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
@@ -276,12 +285,12 @@ public sealed class DarlingMcpHostTests
        method's SIGNATURE (CS0051), so the cases live in the body (InternalsVisibleTo makes them reachable). */
 
     [Fact]
-    public void MapBindReasonSeverity_DegradesAreCritical_ByoIsWarning()
+    public void MapBindReasonSeverity_DegradesAreCritical()
     {
         Assert.Equal(LogLevel.Critical, Host.MapBindReasonSeverity(Host.McpBindReason.ListenInvalid));
         Assert.Equal(LogLevel.Critical, Host.MapBindReasonSeverity(Host.McpBindReason.TokenMissing));
         Assert.Equal(LogLevel.Critical, Host.MapBindReasonSeverity(Host.McpBindReason.AllowFromInvalid));
-        Assert.Equal(LogLevel.Warning, Host.MapBindReasonSeverity(Host.McpBindReason.ManagedModeRequired));
+        Assert.Equal(LogLevel.Critical, Host.MapBindReasonSeverity(Host.McpBindReason.DedicatedLoginRequired));
     }
 
     [Fact]

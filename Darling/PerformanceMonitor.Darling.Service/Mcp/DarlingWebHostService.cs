@@ -591,7 +591,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// the --configure-network wizard validates candidate web blocks through the SAME resolver the host
     /// fail-closes on (#1617), exactly as the wizard's MCP path calls ResolveMcpBind.
     /// </summary>
-    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed, bool? inContainer = null)
+    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed, bool? inContainer = null, bool dedicatedLogin = false)
     {
         var network = web.Network;
 
@@ -605,11 +605,27 @@ public sealed class DarlingWebHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token) || oidcOnlySignIn),
-            /* #9571: the tokens are honored in bring-your-own mode, so only the fields that mode ignores count here. */
-            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
-            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
+            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin: dedicatedLogin);
+    }
+
+    /// <summary>
+    /// The effective web bind for a config's store (#9894): <see cref="ResolveWebBind(WebConfig, bool, bool?, bool)"/> with the store's
+    /// mode and, for a store the service does not manage, whether <c>postgres.webConnectionString</c> names a login other than the owner's
+    /// (<see cref="DarlingStoreLogins.HasDedicatedLogin"/>), and a login whose owner string names no user refused as
+    /// <see cref="DarlingHostBinding.BindReason.OwnerUserUnknown"/>. Every caller that has the store's config calls this one. The host start
+    /// applies the same name rules (<see cref="DarlingHostBinding.ResolveBindWithLoginProbeAsync"/>), so the answer it gives and the answer a
+    /// wizard or a report gives for the same file differ only by the probe: the host also refuses a login the probe finds privileged or cannot
+    /// check, which this overload never connects to learn.
+    /// </summary>
+    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, PostgresConfig postgres, bool? inContainer = null)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        var names = postgres.Managed ? DarlingStoreLogins.LoginNameCheck.NotDedicated : DarlingStoreLogins.CheckLoginNames(DarlingStoreLogins.Surface.Web, postgres);
+        return DarlingHostBinding.RefuseUnknownOwner(
+            ResolveWebBind(web, postgres.Managed, inContainer, dedicatedLogin: names == DarlingStoreLogins.LoginNameCheck.Dedicated), names);
     }
 
     /// <summary>
@@ -833,8 +849,13 @@ public sealed class DarlingWebHostService : BackgroundService
         var network = web.Network;
 
         /* Decide the effective bind PURELY (shared ladder), then map the reason -> severity here. */
-        var bind = ResolveWebBind(web, config.Postgres.Managed);
-        LogBindReason(web, bind.Reason);
+        /* #9894: on a store the service does not manage, outside a container, a surface that would listen on the network connects once with its own
+           login before the listener starts, and is exposed only if that login holds nothing the probe refuses (a superuser, a member of the store owner role, and so on). */
+        var (bind, loginProbe) = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+            DarlingStoreLogins.Surface.Web, config.Postgres, DarlingHostBinding.IsRunningInContainer,
+            dedicatedLogin => ResolveWebBind(web, config.Postgres.Managed, DarlingHostBinding.IsRunningInContainer, dedicatedLogin),
+            stoppingToken);
+        LogBindReason(web, bind.Reason, loginProbe);
 
         try
         {
@@ -1189,7 +1210,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
                        service provisioned on the compose store, or the owner with a warning, in that order. */
                     storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
+                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken, exposed: networkMode, probed: loginProbe);
                     if (storeConnectionString is null)
                     {
                         await DisposeFailedStartAsync();
@@ -3587,7 +3608,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 
     /// <summary>Emits the <see cref="DarlingHostBinding.ResolveBind"/> reason at its mapped severity. Silent for
     /// the non-degrade reasons (the network-exposed line is logged at start with the real bind).</summary>
-    private void LogBindReason(WebConfig web, DarlingHostBinding.BindReason reason)
+    private void LogBindReason(WebConfig web, DarlingHostBinding.BindReason reason, DarlingStoreLogins.LoginProbeResult? loginProbe = null)
     {
         var level = DarlingHostBinding.MapBindReasonSeverity(reason);
         if (level is null)
@@ -3621,14 +3642,24 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
                     web.Network?.AllowFrom);
                 break;
 
-            case DarlingHostBinding.BindReason.ManagedModeRequired:
-                /* #9571: name the fields that are ignored. A token alone never lands here. */
-                var ignored = web.Network?.ByoIgnoredFields ?? [];
-                _logger.Log(level.Value,
-                    "{Fields} set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token / tokens) still gates the loopback dashboard.",
-                    string.Join(", ", ignored.Select(f => "web.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
+            case DarlingHostBinding.BindReason.DedicatedLoginRequired:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.DedicatedLoginRequiredText(DarlingStoreLogins.Surface.Web, refusing: true));
+                break;
+
+            case DarlingHostBinding.BindReason.OwnerUserUnknown:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.OwnerUserUnknownText(DarlingStoreLogins.Surface.Web));
+                break;
+
+            case DarlingHostBinding.BindReason.LoginPrivileged:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.PrivilegedLoginText(DarlingStoreLogins.Surface.Web));
+                break;
+
+            case DarlingHostBinding.BindReason.LoginProbeFailed:
+                /* #9894 */
+                _logger.Log(level.Value, "{Message}", DarlingStoreLogins.LoginProbeFailedText(DarlingStoreLogins.Surface.Web, loginProbe?.ErrorClass));
                 break;
 
             default:

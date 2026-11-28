@@ -359,7 +359,7 @@ public sealed class DarlingCidrAllowListTests
         Assert.False(CidrAllowList.TryParse(joined, out _));
         Assert.Equal(
             DarlingHostBinding.BindReason.AllowFromInvalid,
-            DarlingHostBinding.ResolveBind("192.168.1.205", joined, tokenPresent: true, networkConfigured: true, managed: true).Reason);
+            DarlingHostBinding.ResolveBind("192.168.1.205", joined, tokenPresent: true, managed: true).Reason);
     }
 
     [Fact]

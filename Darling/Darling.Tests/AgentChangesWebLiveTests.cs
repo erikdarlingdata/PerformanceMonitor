@@ -68,9 +68,6 @@ public sealed class AgentChangesWebLiveTests
             var undone = await Send("PUT", "/api/agent-changes/" + await CalledIdAsync(owner, "m-web", ct) + "/undo", "application/json");
             Assert.Equal(403, undone.Status);
             Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage(false), (string)undone.Body!["error"]!);
-            Assert.Equal(
-                "This dashboard's store login cannot undo or switch off agent changes. Use the Viewer app to make the change, or give the web an admin store login (set postgres.webConnectionString to an admin login).",
-                (string)undone.Body["error"]!);
 
             var off = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
             Assert.Equal(403, off.Status);
