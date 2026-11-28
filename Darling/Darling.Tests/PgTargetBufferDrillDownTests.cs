@@ -397,7 +397,7 @@ public sealed class PgTargetBufferDrillDownTests
             /* The no-capture server: pg_buffercache offered, not installed. */
             await PlantExtensionAvailabilityAsync(connection, NoCaptureServerId, NoCaptureServerName, windowEnd.AddMinutes(-20), "available", ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 1, as_of: asOf);
@@ -582,6 +582,120 @@ public sealed class PgTargetBufferDrillDownTests
         fact.Metadata["arms_graded"] = 1;
         fact.BaseSeverity = 1.0;
         return fact;
+    }
+
+    /// <summary>The reply's cut list for <paramref name="field"/>, wherever the reply keeps it.</summary>
+    private static List<JsonElement> LeftOutOf(JsonElement reply, string field)
+    {
+        if (reply.TryGetProperty(field, out var top))
+            return top.EnumerateArray().ToList();
+        if (reply.TryGetProperty("hints", out var hints) && hints.ValueKind == JsonValueKind.Object
+            && hints.TryGetProperty(field, out var nested))
+            return nested.EnumerateArray().ToList();
+        return [];
+    }
+
+    private static bool CarriesADrillDown(JsonElement card) =>
+        card.TryGetProperty("drill_down", out var drillDown) && drillDown.ValueKind == JsonValueKind.Object;
+
+    /// <summary>
+    /// A buffer-composition drill-down held past the drill-down budget of an on-demand pass (#9966), through the whole
+    /// reply. The capture table is locked by another session, so the drill-down read waits behind it and never finishes by
+    /// itself. The budget counts from the start of the pass, so it ends either while the walk waits on the read or before
+    /// the walk reaches it; the lock keeps the read from finishing first, and the outcome is the same both ways: the
+    /// deadline stops the read the walk started, or the walk never starts it. The reply still carries every finding the
+    /// whole pass returns, in the same order with the same stories and severities. The held finding, and the findings the
+    /// walk had not reached, have no drill-down and are named in <c>drill_downs_left_out</c> by root fact key. The findings
+    /// before it keep the drill-down state the whole pass gave them. The same pass with no budget carries the drill-down
+    /// and names nothing.
+    /// </summary>
+    [Fact]
+    public async Task ADrillDownHeldPastItsBudget_LeavesTheFindingInTheReplyWithoutIt_NamesIt_AndTheRestOfTheReplyIsWhole()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live drill-down budget reply test (it mints its own scratch database).");
+
+        var limit = TimeSpan.FromSeconds(60);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+        var windowStart = windowEnd.AddHours(-1);
+        await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 18, ct);
+        await PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), blksRead: 1000, blksHit: 1000, ct);
+        for (var m = -1; m <= 60; m++)
+        {
+            var mm = Math.Max(m, 0);
+            await PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(m), blksRead: 1_000_000 + 3000L * mm, blksHit: 1_000_000 + 3000L * mm, ct);
+        }
+        await PgTargetKnobsTests.PlantConfigSnapshotAsync(connection, ServerId, ServerName, windowEnd.AddMinutes(-30), ct);
+        await PlantCaptureAsync(connection, windowEnd.AddMinutes(-30), poolUsed: 15400, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+        /* No budget: the buffer finding carries its composition and nothing is left out. */
+        var whole = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = null
+        };
+        var wholeReply = await DarlingMcpTools.AnalyzeServer(whole, postgres, ServerName, 1, as_of: asOf).WaitAsync(limit, ct);
+        using var wholeDocument = JsonDocument.Parse(wholeReply);
+        var wholeCards = wholeDocument.RootElement.GetProperty("findings").EnumerateArray().ToList();
+        string RootKeyOf(JsonElement card) => card.GetProperty("root_fact").GetProperty("key").GetString()!;
+        var wholeBuffer = Assert.Single(wholeCards, card => RootKeyOf(card) == PgTargetFactKeys.BufferCachePressure);
+        Assert.True(CarriesADrillDown(wholeBuffer));
+        Assert.Empty(LeftOutOf(wholeDocument.RootElement, "drill_downs_left_out"));
+
+        /* A drill-down budget with the capture table locked. Eight seconds is long enough for the walk to reach the read on
+           an ordinary runner; on a slower one the budget ends before the walk starts it. The lock keeps the read from
+           finishing in either case, so the assertions below do not depend on which happened. */
+        var budget = TimeSpan.FromSeconds(8);
+        var cut = new DarlingAnalysisService(postgres)
+        {
+            OnDemandFamilyBudget = null,
+            OnDemandDetectorBudget = null,
+            OnDemandDrillDownBudget = budget
+        };
+        string cutReply;
+        await using (var locker = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await locker.OpenAsync(ct);
+            await using var held = await PgTargetStageBudgetLiveTests.HoldReadsOfAsync(locker, "pg_buffer_usage", ct);
+            cutReply = await DarlingMcpTools.AnalyzeServer(cut, postgres, ServerName, 1, as_of: asOf).WaitAsync(limit, ct);
+            await held.RollbackAsync(ct);
+        }
+
+        using var cutDocument = JsonDocument.Parse(cutReply);
+        var cutCards = cutDocument.RootElement.GetProperty("findings").EnumerateArray().ToList();
+        Assert.Equal(wholeCards.Select(RootKeyOf), cutCards.Select(RootKeyOf));
+        Assert.Equal(wholeCards.Select(card => card.GetProperty("story_path").GetString()), cutCards.Select(card => card.GetProperty("story_path").GetString()));
+        Assert.Equal(wholeCards.Select(card => card.GetProperty("severity").GetDouble()), cutCards.Select(card => card.GetProperty("severity").GetDouble()));
+        /* The walk stops at the budget: the held finding and every finding after it are named, and each of them is in
+           the reply with no drill-down. The findings before the held one keep the drill-down state the whole pass gave them. */
+        var named = LeftOutOf(cutDocument.RootElement, "drill_downs_left_out");
+        Assert.Contains(named, entry => entry.GetProperty("finding").GetString() == PgTargetFactKeys.BufferCachePressure);
+        Assert.All(named, entry =>
+        {
+            Assert.Equal(StageTimeBudget.Reason, entry.GetProperty("reason").GetString());
+            Assert.Equal(budget.TotalSeconds, entry.GetProperty("budget_seconds").GetDouble());
+        });
+        var namedKeys = named.SelectMany(entry => Enumerable.Repeat(entry.GetProperty("finding").GetString()!, entry.GetProperty("findings").GetInt32())).ToList();
+        Assert.Equal(namedKeys.Order(StringComparer.Ordinal), cut.LastStageCuts.DrillDowns.Order(StringComparer.Ordinal));
+        for (var i = 0; i < cutCards.Count; i++)
+        {
+            var isNamed = namedKeys.Contains(RootKeyOf(cutCards[i]));
+            Assert.Equal(!isNamed && CarriesADrillDown(wholeCards[i]), CarriesADrillDown(cutCards[i]));
+        }
+
+        Assert.Empty(cut.LastStageCuts.Detectors);
+        Assert.Empty(cut.LastFamiliesLeftOutForTime);
     }
 
     private static int CountOf(string text, string needle) => (text.Length - text.Replace(needle, string.Empty, StringComparison.Ordinal).Length) / needle.Length;

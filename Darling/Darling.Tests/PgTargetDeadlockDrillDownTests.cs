@@ -392,7 +392,7 @@ public sealed class PgTargetDeadlockDrillDownTests
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(20), "hash-b1", 3, "ShareLock", "transaction", longStatement, thirtyLineGraph, ct);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(25), "hash-b1", 3, "ShareLock", "transaction", longStatement, thirtyLineGraph, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 1, as_of: asOf);
             using (var doc = JsonDocument.Parse(analysis))

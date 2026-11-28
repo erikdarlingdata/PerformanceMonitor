@@ -658,7 +658,7 @@ public sealed class PgTargetMemoryTests
             Assert.Equal(1, pressure.Metadata[PgTargetScorer.HostMemoryReasonNoSourceKey]);
             Assert.Equal(4 * GiB, pressure.Metadata[PgTargetScorer.MemorySharedBuffersBytesKey]);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, StockServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))
@@ -723,7 +723,7 @@ public sealed class PgTargetMemoryTests
                 }
             }
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var worst = 4.0 * GiB + 500.0 * 64 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
 
@@ -844,7 +844,7 @@ public sealed class PgTargetMemoryTests
             }
 
             /* ── Through the REAL analyze_server: the sum fits the box, so nothing roots on it; get_analysis_facts carries the stamps. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             using (var doc = JsonDocument.Parse(await DarlingMcpTools.AnalyzeServer(service, postgres, PeakServerName, 4, as_of: asOf)))
             {

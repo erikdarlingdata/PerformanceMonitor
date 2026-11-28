@@ -676,7 +676,7 @@ public sealed class PgTargetReplicationTests
                red on a re-run that then passed. With as_of = windowEnd the tool's window IS [windowStart, windowEnd],
                the same rows the collector context above read, and every planted timestamp is inside it by
                construction; the slot's inactive_since (windowEnd − 30 h) reads exactly 30 hours from the same end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(analysis))

@@ -737,7 +737,7 @@ public sealed class EngineCapabilityMissLivePostgresTests
 
             /* audit_config's empty answer asks the same engine question get_server_config does, for the same
                collector: "the config collector may not have run yet" is false on an engine that never runs it. */
-            var analysisService = new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(postgres);
+            var analysisService = new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(postgres).WithNoStageBudgets();
             var azureAudit = await DarlingMcpTools.AuditConfig(analysisService, postgres, AzureServerName);
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureAudit));
             Assert.Contains("server_config", azureAudit, StringComparison.Ordinal);

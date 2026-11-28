@@ -29,6 +29,12 @@ public sealed partial class PgTargetFactCollector
     internal const int TopStatementCount = 5;
 
     /// <summary>
+    /// The name a reply gives this family when the on-demand time budget leaves it out (#9966): <c>queries</c>, the
+    /// label its collection failures carry.
+    /// </summary>
+    internal static readonly string QueriesFamily = FamilyOfThisFile();
+
+    /// <summary>
     /// The top statements of the window from <c>pg_statement_stats</c> — the read behind
     /// <c>PG_BAD_ACTOR_&lt;queryid&gt;</c>. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC),
     /// <c>$4</c> the row cap (<see cref="TopStatementCount"/>), <c>$5</c> <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (bound: a const string cannot interpolate an int).

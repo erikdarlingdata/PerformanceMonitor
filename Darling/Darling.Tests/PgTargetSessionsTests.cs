@@ -1696,7 +1696,7 @@ public sealed class PgTargetSessionsTests
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, anchored at the planted window's end (as_of) so
                every number is arithmetic, not timing. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
             var busy = await DarlingMcpTools.AnalyzeServer(service, postgres, BusyServerName, 4, as_of: asOf);
@@ -2187,7 +2187,7 @@ FROM generate_series(0, $6) AS n");
                 surgeAnomalies.Select(a => a.Key).Order(StringComparer.Ordinal));
 
             /* ── THE EXIT CRITERION, through the real analyze_server anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
             var queued = await DarlingMcpTools.AnalyzeServer(service, postgres, QueuedServerName, 4, as_of: asOf);

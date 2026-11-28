@@ -222,7 +222,7 @@ public sealed class PgTargetVacuumLiveTests
                highest amplified severity: backlog 0.72 × (1 + 0.3 rising-while-running + 0.3 hold) = 1.16 leads
                the wraparound 0.55 × 1.8 = 0.99 and the hold 0.53 × 1.8 = 0.96, so the walk is
                backlog → wraparound → hold; the unit tests pin the wraparound-led order. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {
@@ -433,7 +433,7 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Contains("ALTER TABLE public.frozen SET (autovacuum_enabled = true);", cardAdvice.Remediation, StringComparison.Ordinal);
 
             /* ── THE EXIT CRITERION: the real analyze_server, one story, backlog → disabled card, no second root. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 6);
             using (var doc = JsonDocument.Parse(analysis))
             {

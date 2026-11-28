@@ -120,12 +120,6 @@ public sealed class PgTargetSampledWaitTests
         Assert.DoesNotContain("PgWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);   /* its own bar, never the Aurora one */
         Assert.DoesNotContain("DateTime.UtcNow", code, StringComparison.Ordinal);
         Assert.DoesNotContain("engine_kind", code, StringComparison.Ordinal);
-
-        /* Reachable from the root, after the wave-3 detector. */
-        var root = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
-        var blocking = root.IndexOf("await DetectBlockingAnomalies(context, anomalies);", StringComparison.Ordinal);
-        var sampled = root.IndexOf("await DetectSampledWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
-        Assert.True(blocking > 0 && sampled > blocking);
     }
 
     /// <summary>

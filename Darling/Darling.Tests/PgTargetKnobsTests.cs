@@ -768,7 +768,7 @@ public sealed class PgTargetKnobsTests
                     requested: 1000 + minute, timed: 500, walBytes: 1_000_000_000_000L + minute * 64L * 1024 * 1024, ct);
             }
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             /* Anchored at the planted window's end (as_of), so the window is exactly the 241 planted rows — 240
                deltas, 14 400 observed seconds — and every number below is arithmetic, not timing. */
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);

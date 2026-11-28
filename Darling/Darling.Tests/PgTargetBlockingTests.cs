@@ -813,7 +813,7 @@ public sealed class PgTargetBlockingTests
             Assert.True(anomaly.Metadata["mean_sigma"] >= 2.0);
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))
@@ -991,7 +991,7 @@ public sealed class PgTargetBlockingTests
             Assert.True(anomaly.BaseSeverity > 0.5, $"92 blocked sessions against a clean month scored {anomaly.BaseSeverity}");
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, and the advice's third shape. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))

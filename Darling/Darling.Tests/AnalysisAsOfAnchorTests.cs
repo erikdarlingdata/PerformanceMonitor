@@ -127,7 +127,7 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
         try
         {
             await RegisterServerAsync(connection, ct);
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
 
             /* ── the fixture, DarlingAnalysisPipelineTests' recipe verbatim ──
                >24h of wait_stats history in ONE hour-of-day x day-of-week bucket (a past Monday 10:00
