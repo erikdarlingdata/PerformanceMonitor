@@ -210,7 +210,7 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
             /* Stamp it, as a connect would, and the same pass measures the right series and says nothing
                about stamps. */
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, serverId, serverName, MonitoredEngineKind.Postgres, postgresMajor: 18, ct);
-            var stamped = new DarlingAnalysisService(postgres);
+            var stamped = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             await stamped.AnalyzeAsync(serverId, serverName, 4, cancellationToken: ct);
             /* Two rows 25 hours apart clear the span gate; the WINDOW holds one row and no interval, so the
                honest answer is the unobserved-window envelope — not insufficient data, and not the stamp caveat. */

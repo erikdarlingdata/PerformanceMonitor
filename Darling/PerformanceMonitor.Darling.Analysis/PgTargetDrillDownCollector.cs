@@ -45,59 +45,67 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
     /// Enriches each finding's DrillDown dictionary based on its story path — <see cref="PgDrillDownCollector"/>'s
     /// walk with the PostgreSQL keys. The 0.5 display gate is the same: below it only a drill-down a content lane
     /// has marked cheap-and-required (the way the SQL Server config drill-down is) may run.
+    ///
+    /// <para>#9966: the walk is <see cref="PgDrillDownCollector.EnrichEachAsync"/>, the SQL Server collector's. It checks
+    /// the pass's token between findings (#2299), and when the context carries a
+    /// <see cref="AnalysisContext.DrillDownDeadline"/> (an on-demand pass) it runs each drill-down through a token that
+    /// also ends at the deadline. A finding whose drill-down has not finished when it fires, or is not reached by then,
+    /// keeps no drill-down and is named in <see cref="AnalysisContext.DrillDownsLeftOutForTime"/> by its root fact key.
+    /// The finding itself stays. With no deadline (the scheduled pass) every drill-down runs to its end.</para>
     /// </summary>
-    public async Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context)
+    public Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context)
     {
         ArgumentNullException.ThrowIfNull(findings);
         ArgumentNullException.ThrowIfNull(context);
 
-        foreach (var finding in findings)
+        return PgDrillDownCollector.EnrichEachAsync(findings, context, EnrichFindingAsync);
+    }
+
+    /// <summary>
+    /// The drill-down of one finding. Its catch does not swallow a stop from the token the flow reads, so a stop of the
+    /// pass (#2299) or of the drill-down deadline (#9966) reaches <see cref="PgDrillDownCollector.EnrichEachAsync"/>.
+    /// </summary>
+    private async Task EnrichFindingAsync(AnalysisFinding finding, AnalysisContext context)
+    {
+        try
         {
-            /* #2299: between findings is the natural abandon point — the per-finding catch below deliberately
-               does NOT swallow shutdown residue, so this throw (and any residue from a drill-down mid-read)
-               unwinds the pass to the service's single Information line. */
-            context.CancellationToken.ThrowIfCancellationRequested();
+            finding.DrillDown = new Dictionary<string, object>();
+            /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
+               AnalysisFinding.PathKeys. The PostgreSQL keys are the ones with prefixes long enough that a
+               half-split key would still have looked plausible in a debugger. Same keys, same order. */
+            var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
-            try
+            if (finding.Severity >= 0.5)
             {
-                finding.DrillDown = new Dictionary<string, object>();
-                /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
-                   AnalysisFinding.PathKeys. The PostgreSQL keys are the ones with prefixes long enough that a
-                   half-split key would still have looked plausible in a debugger. Same keys, same order. */
-                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
+                /* Lane 16 of #3691: the deadlock exemplars, on EITHER deadlock root. On the measured population
+                   the regular rate never reached 5 per hour (2 in the worst hour → 0.2), so PG_DEADLOCK_RATE
+                   never roots a card there; what roots is the first-occurrence anomaly at the 1-per-hour bar,
+                   and a drill-down keyed on the regular fact alone would run for nobody who has the problem.
+                   Both facts are emitted only with a non-zero counter, so "on the path" is "deadlocks > 0". */
+                if (pathKeys.Contains(PgTargetFactKeys.DeadlockRate) || pathKeys.Contains(PgTargetFactKeys.AnomalyDeadlockRate))
+                    await CollectDeadlockExemplarsAsync(finding, context);
 
-                if (finding.Severity >= 0.5)
+                /* Lane 29 of #3691: what the buffer cache HOLDS, beside the composite that said it is short. On the
+                   pressure key only — the composite scores 0 below its concerning line and ≥ 0.5 at it, so "on the
+                   path" is "fired"; the shared_buffers advisory rooting alone on a quiet server is not enriched. */
+                if (pathKeys.Contains(PgTargetFactKeys.BufferCachePressure))
+                    await CollectBufferCompositionAsync(finding, context);
+
+                if (pathKeys.Any(k => k.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
+                    || pathKeys.Contains(PgTargetFactKeys.TempSpill))
                 {
-                    /* Lane 16 of #3691: the deadlock exemplars, on EITHER deadlock root. On the measured population
-                       the regular rate never reached 5 per hour (2 in the worst hour → 0.2), so PG_DEADLOCK_RATE
-                       never roots a card there; what roots is the first-occurrence anomaly at the 1-per-hour bar,
-                       and a drill-down keyed on the regular fact alone would run for nobody who has the problem.
-                       Both facts are emitted only with a non-zero counter, so "on the path" is "deadlocks > 0". */
-                    if (pathKeys.Contains(PgTargetFactKeys.DeadlockRate) || pathKeys.Contains(PgTargetFactKeys.AnomalyDeadlockRate))
-                        await CollectDeadlockExemplarsAsync(finding, context);
-
-                    /* Lane 29 of #3691: what the buffer cache HOLDS, beside the composite that said it is short. On the
-                       pressure key only — the composite scores 0 below its concerning line and ≥ 0.5 at it, so "on the
-                       path" is "fired"; the shared_buffers advisory rooting alone on a quiet server is not enriched. */
-                    if (pathKeys.Contains(PgTargetFactKeys.BufferCachePressure))
-                        await CollectBufferCompositionAsync(finding, context);
-
-                    if (pathKeys.Any(k => k.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
-                        || pathKeys.Contains(PgTargetFactKeys.TempSpill))
-                    {
-                        await CollectTopStatementsAsync(finding, context, pathKeys);
-                    }
+                    await CollectTopStatementsAsync(finding, context, pathKeys);
                 }
+            }
 
-                if (finding.DrillDown.Count == 0)
-                    finding.DrillDown = null;
-            }
-            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
-            {
-                _logger?.LogError("[PgTargetDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
-                    finding.StoryPath, ex.GetType().Name, ex.Message);
-                /* Don't null out — keep whatever was collected before the error. */
-            }
+            if (finding.DrillDown.Count == 0)
+                finding.DrillDown = null;
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            _logger?.LogError("[PgTargetDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
+                finding.StoryPath, ex.GetType().Name, ex.Message);
+            /* Don't null out — keep whatever was collected before the error. */
         }
     }
 

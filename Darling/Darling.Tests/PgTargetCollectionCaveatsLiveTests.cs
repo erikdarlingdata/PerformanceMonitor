@@ -84,7 +84,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 await plant.ExecuteNonQueryAsync(ct);
             }
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
 
             /* ── clean: no collection_caveats anywhere in the payload, the family total stamped. */
             var clean = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName);

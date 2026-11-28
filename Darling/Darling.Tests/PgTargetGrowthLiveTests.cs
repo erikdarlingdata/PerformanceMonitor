@@ -150,7 +150,7 @@ public sealed class PgTargetGrowthLiveTests
             Assert.DoesNotContain(await detector.DetectAnomaliesAsync(context), a => a.Key == PgTargetFactKeys.AnomalyDatabaseGrowth);
 
             /* ── THE EXIT CRITERION: the real analyze_server returns PG_DATABASE_GROWTH naming appdb with the days-to-double estimate. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {
@@ -215,6 +215,71 @@ public sealed class PgTargetGrowthLiveTests
             Assert.InRange(withTotal.Mean, perDay * 0.9, perDay * 1.1);
             var anomalies = await new PgTargetAnomalyDetector(postgres, new PgTargetBaselineProvider(postgres)).DetectAnomaliesAsync(context);
             Assert.DoesNotContain(anomalies, a => a.Key == PgTargetFactKeys.AnomalyDatabaseGrowth);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The growth detector fires through the root. A month of hourly instance totals that never grow gives the detector a
+    /// baseline of zero growth, and four hourly totals that each grow a gibibyte put the window past the fallback bar on
+    /// both its peak and its mean, so <see cref="PgTargetAnomalyDetector.DetectAnomaliesAsync"/> returns the growth
+    /// anomaly with the window's own peak and mean. A pass whose detector list omits the growth detector returns none.
+    /// </summary>
+    [Fact]
+    public async Task AMonthOfFlatTotals_ThenFourHoursGrowingAGibibyteAnHour_FiresTheGrowthAnomalyThroughTheRoot()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the growth anomaly e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 18, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+
+            /* The baseline-data gate: one database stats row inside the thirty days before the window. */
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+
+            /* Hourly instance totals, the last at the window end: flat at 100 GiB until the window starts, then a
+               gibibyte more each hour. Every row carries the total, as the collector writes it when every database is sized. */
+            for (var hoursBack = 30 * 24; hoursBack >= 0; hoursBack--)
+            {
+                var grown = Math.Max(0, 4 - hoursBack);
+                await PlantHourAsync(connection, windowEnd.AddHours(-hoursBack), 100 * GiB + grown * GiB, ct, vendorSized: true);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var detector = new PgTargetAnomalyDetector(postgres, new PgTargetBaselineProvider(postgres));
+            var anomalies = await detector.DetectAnomaliesAsync(context);
+
+            var growth = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyDatabaseGrowth);
+            var perDay = 86400.0 / 3600.0 * GiB;
+            Assert.Equal(perDay, growth.Value, precision: 3);
+            Assert.Equal(perDay, growth.Metadata["peak_bytes_per_day"], precision: 3);
+            Assert.Equal(perDay * 4 / 5, growth.Metadata["mean_bytes_per_day"], precision: 3);
 
             bodySucceeded = true;
         }

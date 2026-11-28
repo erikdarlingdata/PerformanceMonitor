@@ -449,7 +449,7 @@ public sealed class PgTargetKernelTests
             var anomalies = await new PgTargetAnomalyDetector(postgres, baselines).DetectAnomaliesAsync(context);
             Assert.DoesNotContain(anomalies, a => a.Key == PgTargetFactKeys.AnomalyCpuBurn);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, AuroraServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))
@@ -578,7 +578,7 @@ public sealed class PgTargetKernelTests
             Assert.Equal(7001, anomaly.Metadata[PgTargetScorer.KernelTopQueryIdKey]);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, StockServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))

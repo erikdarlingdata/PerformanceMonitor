@@ -334,7 +334,7 @@ public sealed class PgTargetPostureTests
             Assert.All(posture.Values, f => Assert.Equal(0, f.Metadata["requires_restart"]));
 
             /* ── THE EXIT CRITERION: the real analyze_server tool on the stock server. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, StockServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {

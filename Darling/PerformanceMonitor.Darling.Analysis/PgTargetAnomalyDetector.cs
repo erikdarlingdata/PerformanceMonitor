@@ -381,6 +381,14 @@ LIMIT 6";
     /// The detectors, in order, behind the gate. Each is fenced in its own try so one metric's failure costs the
     /// pass that metric and nothing else (<see cref="PgAnomalyDetector"/>'s per-detector tolerance), and each
     /// reaches the shared bucket machinery through <see cref="Baselines"/>.
+    ///
+    /// <para>#9966: the detectors run one after another through <see cref="StageDeadline.RunDetectorsInTurnAsync"/>,
+    /// the loop the SQL Server detector runs one at a time. When the context carries a
+    /// <see cref="AnalysisContext.DetectorDeadline"/> (an on-demand pass), a detector that has not finished when it
+    /// fires, with the baseline read it was in, is stopped, adds no fact and no failure line, and is named in
+    /// <see cref="AnalysisContext.DetectorsLeftOutForTime"/>. One not started by then is not started and is named the
+    /// same way. The gate read stays on the pass's token: it is one count, and it decides whether any detector runs.
+    /// With no deadline (the scheduled pass) every detector runs to its end.</para>
     /// </summary>
     public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context)
     {
@@ -390,36 +398,45 @@ LIMIT 6";
         if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
-        await DetectTpsAnomalies(context, anomalies);
-        await DetectSessionAnomalies(context, anomalies);
-        await DetectCpuAnomalies(context, anomalies);
-        await DetectDeadlockRateAnomalies(context, anomalies);
-        await DetectWaitProfileAnomalies(context, anomalies);
+        await StageDeadline.RunDetectorsInTurnAsync(context, anomalies, Detectors());
+        return anomalies;
+    }
+
+    /// <summary>
+    /// The detectors in the order a pass runs them. A reply names one the time budget left out by the words of its
+    /// method between <c>Detect</c> and <c>Anomalies</c> (<see cref="PgAnomalyDetector.DetectorName"/>):
+    /// <c>bad_actor_share</c> for <see cref="DetectBadActorShareAnomalies"/>.
+    /// </summary>
+    internal Func<AnalysisContext, List<Fact>, Task>[] Detectors() =>
+    [
+        DetectTpsAnomalies,
+        DetectSessionAnomalies,
+        DetectCpuAnomalies,
+        DetectDeadlockRateAnomalies,
+        DetectWaitProfileAnomalies,
         /* v2 (#3691): the three new detectors, each in its own partial file (PgTargetAnomalyDetector.{Io,
            Replication,Wal}.cs) so the lanes that fill them (11 / 12 / 15) never edit this one. Reachable and
            inert until then: each stub returns without a read or a fact. */
-        await DetectIoAnomalies(context, anomalies);
-        await DetectReplicationAnomalies(context, anomalies);
-        await DetectWalVolumeAnomalies(context, anomalies);
+        DetectIoAnomalies,
+        DetectReplicationAnomalies,
+        DetectWalVolumeAnomalies,
         /* wave 3 (#3691, between waves): the blocking detector (PgTargetAnomalyDetector.Blocking.cs), inert until lane 17. */
-        await DetectBlockingAnomalies(context, anomalies);
+        DetectBlockingAnomalies,
         /* lane 24 (#3691): stock's SAMPLED wait profile over sampled_ms (PgTargetAnomalyDetector.WaitsSampled.cs); sits
            out on Aurora and wherever pg_wait_stats also wrote the window. */
-        await DetectSampledWaitProfileAnomalies(context, anomalies);
+        DetectSampledWaitProfileAnomalies,
         /* v3 (#3691 plumbing): the plan-regression and CPU-burn detectors (PgTargetAnomalyDetector.Plans.cs / .Kernel.cs),
            inert until lanes 27 / 28. */
-        await DetectPlanRegressionAnomalies(context, anomalies);
-        await DetectCpuBurnAnomalies(context, anomalies);
+        DetectPlanRegressionAnomalies,
+        DetectCpuBurnAnomalies,
         /* lane 34 (#3691, ruled 2026-09-20): one statement's share against its OWN hour-of-week share bucket
            (PgTargetAnomalyDetector.Queries.cs) — the bad actor's grade since the ruling; after the plan detector because
            it reads the same table and its candidates are the queries family's own. */
-        await DetectBadActorShareAnomalies(context, anomalies);
+        DetectBadActorShareAnomalies,
         /* lane 38 (#3691): the instance total's growth rate against its own baseline (PgTargetAnomalyDetector.Growth.cs);
            silent wherever total_bytes is NULL (a database the role may not size). */
-        await DetectDatabaseGrowthAnomalies(context, anomalies);
-
-        return anomalies;
-    }
+        DetectDatabaseGrowthAnomalies,
+    ];
 
     /* v2 (#3691) detector partials — declared here in emission order, stubbed in their own files. A filled
        body copies the five above: its own try / catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(

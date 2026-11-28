@@ -19,6 +19,12 @@ namespace PerformanceMonitor.Darling.Analysis;
 public sealed partial class PgTargetFactCollector
 {
     /// <summary>
+    /// The name a reply gives this family when the on-demand time budget leaves it out (#9966): <c>io</c>, the label
+    /// its collection failures carry.
+    /// </summary>
+    internal static readonly string IoFamily = FamilyOfThisFile();
+
+    /// <summary>
     /// The data-file I/O counters of <c>pg_io_stats</c> (<c>pg_stat_io</c>, PG 16+, one-minute cadence) differenced
     /// over the window, per identity, then summed: reads and their time, writes and their time. <c>$1</c>
     /// server_id, <c>$2</c>/<c>$3</c> window, <c>$4</c> <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>

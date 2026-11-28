@@ -185,7 +185,7 @@ public sealed class PgTargetWaitLiveTests
                  ROLLUPS, whose named standouts fired, score 0 and root nothing (one wait is graded once); nothing
                  in this planting fires a cause for either standout to lead to, so both are one-fact stories.
                  The relation card's advice states the measured seconds and never calls itself an estimate. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var aurora = await DarlingMcpTools.AnalyzeServer(service, postgres, AuroraName, 4);
             using (var doc = JsonDocument.Parse(aurora))
             {
