@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -67,8 +68,49 @@ public class AnalysisContext
     /// per-pass budget — so it now fires on an ordinary timeout against a perfectly healthy service,
     /// not only at shutdown. That is why <see cref="ShutdownToken"/> exists: something has to still know
     /// which of the two happened, and this token can no longer answer it.</para>
+    ///
+    /// <para>#9879: a family read that runs under the on-demand time budget sees a token that also ends at
+    /// <see cref="FamilyDeadline"/> (<see cref="UseTokenForThisFlow"/>), for its own async flow only. Every other
+    /// reader gets the pass's token.</para>
     /// </summary>
-    public CancellationToken CancellationToken { get; set; }
+    public CancellationToken CancellationToken
+    {
+        get => _flowToken.Value ?? _passToken;
+        set => _passToken = value;
+    }
+
+    private CancellationToken _passToken;
+    private readonly AsyncLocal<CancellationToken?> _flowToken = new();
+
+    /// <summary>The pass's own token, whatever the current flow reads through (#9879).</summary>
+    public CancellationToken PassToken => _passToken;
+
+    /// <summary>
+    /// Makes <see cref="CancellationToken"/> return <paramref name="token"/> on the current async flow, or the pass's
+    /// token again when null (#9879). The family stage sets it around one family read that runs under
+    /// <see cref="FamilyDeadline"/>, so the read's own statements stop at the deadline without a second token
+    /// on every family signature.
+    /// </summary>
+    public void UseTokenForThisFlow(CancellationToken? token) => _flowToken.Value = token;
+
+    /// <summary>
+    /// When the time the pass gives its heavy family reads is over (#9879). Default
+    /// <see cref="CancellationToken.None"/>: no budget, which is the scheduled pass and every read that does not set
+    /// one. An on-demand <c>analyze_server</c> pass arms it for <see cref="FamilyBudget"/>. A family read under the
+    /// deadline that has not finished when it fires is stopped and named in <see cref="FamiliesLeftOutForTime"/>.
+    /// The other families and the anomaly detector do not observe it.
+    /// </summary>
+    public CancellationToken FamilyDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="FamilyDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? FamilyBudget { get; set; }
+
+    /// <summary>
+    /// The families the pass left out because <see cref="FamilyDeadline"/> fired before their read finished (#9879), in
+    /// family order. Not a collection failure: the read was working and was stopped on purpose, so it is reported under
+    /// its own name and never counted as a family that could not be read.
+    /// </summary>
+    public List<string> FamiliesLeftOutForTime { get; } = [];
 
     /// <summary>
     /// The host's stopping token, and ONLY that (#2430). Default <see cref="CancellationToken.None"/>,
@@ -389,6 +431,43 @@ public class AnalysisContext
         _failureBuffer.Value = buffer;
         return buffer;
     }
+
+    /// <summary>Sends the current flow's failures to <see cref="CollectionFailures"/> again (#9879), for a caller that
+    /// buffered one family on the pass's own flow and goes on to run the next on it.</summary>
+    public void StopBufferingCollectionFailuresForThisFlow() => _failureBuffer.Value = null;
+
+    /// <summary>
+    /// The anomaly read a collector may start beside its family reads (#9879). Null, the default, is every pass that
+    /// runs the anomaly detector after collection ends: the scheduled pass and every read that does not set one. An
+    /// on-demand <c>analyze_server</c> pass sets it, so the detector's store reads overlap the family reads and do not
+    /// add their whole length to the reply's wait. A collector that never starts it leaves
+    /// <see cref="AnomalyReadBesideFamilies.Run"/> null, and the pass then runs the detector after collection.
+    /// </summary>
+    public AnomalyReadBesideFamilies? AnomalyReadBesideFamilies { get; set; }
+}
+
+/// <summary>
+/// The anomaly detector's read of one pass, for a collector to start beside its family reads (#9879). The detector reads
+/// the server id, the window and the pass's token from the context and no family's facts, so it does not need the
+/// families to finish first. The pass still places what it produced: the facts go after the family facts and the
+/// failures after the family failures, where both land when the detector runs after collection.
+/// </summary>
+public sealed class AnomalyReadBesideFamilies(Func<AnalysisContext, Task<List<Fact>>> read)
+{
+    /// <summary>The detector's read.</summary>
+    public Func<AnalysisContext, Task<List<Fact>>> Read { get; } = read ?? throw new ArgumentNullException(nameof(read));
+
+    /// <summary>
+    /// The read once a collector has started it, and null until then. A collector that starts it waits for it to settle
+    /// before its own stage ends and does not rethrow its failure: the pass awaits this task where it runs the detector.
+    /// </summary>
+    public Task<List<Fact>>? Run { get; set; }
+
+    /// <summary>
+    /// The collection failures the read recorded, kept out of <see cref="AnalysisContext.CollectionFailures"/> while the
+    /// families run. The pass appends them itself, after it has counted the families that were not read.
+    /// </summary>
+    public List<CollectionFailure> Failures { get; set; } = [];
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>

@@ -241,6 +241,19 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public string? LastSecondaryReplicaNote { get; private set; }
 
+    /// <summary>The families the last pass left out because its time budget ended before their read did (#9879), in
+    /// family order. Empty for a pass with no budget (the scheduled pass) and for one whose reads all finished.</summary>
+    public IReadOnlyList<string> LastFamiliesLeftOutForTime { get; private set; } = [];
+
+    /// <summary>The budget the last pass gave its heavy family reads (#9879), null when it had none.</summary>
+    public TimeSpan? LastFamilyBudget { get; private set; }
+
+    /// <summary>
+    /// The time an on-demand pass gives its heavy family reads (#9879), from the start of the pass. Null runs them
+    /// without one. The scheduled pass never has one, whatever this holds.
+    /// </summary>
+    public TimeSpan? OnDemandFamilyBudget { get; set; } = FamilyTimeBudget.OnDemand;
+
     /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
@@ -319,13 +332,16 @@ public sealed class DarlingAnalysisService
     /// — today's behavior, byte-for-byte.</param>
     /// <param name="sqlServerCollectorWrapper">#9149 test seam: wraps the SQL Server set's fact collector so a test can watch the
     /// context a pass hands it (how many family reads it lets run at once). Null (every production caller) keeps the collector as is.</param>
+    /// <param name="sqlServerDetectorWrapper">#9879 test seam: wraps the SQL Server set's anomaly detector so a test can watch when a
+    /// pass starts it. Null (every production caller) keeps the detector as is.</param>
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
         ILogger? logger = null,
         BaselineCache? baselineCache = null,
         PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
-        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null)
+        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null,
+        Func<IAnomalyDetector, IAnomalyDetector>? sqlServerDetectorWrapper = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -339,7 +355,9 @@ public sealed class DarlingAnalysisService
             sqlServerCollectorWrapper is null
                 ? new PgFactCollector(postgres, logger, analyzerConfig)
                 : sqlServerCollectorWrapper(new PgFactCollector(postgres, logger, analyzerConfig)),
-            new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
+            sqlServerDetectorWrapper is null
+                ? new PgAnomalyDetector(postgres, sqlServerBaselines, logger)
+                : sqlServerDetectorWrapper(new PgAnomalyDetector(postgres, sqlServerBaselines, logger)),
             new InferenceEngine(new RelationshipGraph()),
             new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
             sqlServerBaselines,
@@ -388,6 +406,20 @@ public sealed class DarlingAnalysisService
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
+        /* #9879: an on-demand pass gives its heavy family reads a stated time, counted from here so the reads ahead of the
+           family stage come out of it too. The scheduled pass (the one caller that persists caveats) has no budget: its
+           findings are what a reply points to for a family this one left out. A budget of zero or less has ended before
+           the pass starts, so it is fired here and now, not left to a timer that fires a moment later. */
+        var familyBudget = persistCollectionCaveats ? null : OnDemandFamilyBudget;
+        using var familyDeadline = new CancellationTokenSource();
+        if (familyBudget is { } budget)
+        {
+            if (budget <= TimeSpan.Zero)
+                familyDeadline.Cancel();
+            else
+                familyDeadline.CancelAfter(budget);
+        }
+
         var context = new AnalysisContext
         {
             ServerId = serverId,
@@ -397,6 +429,8 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            FamilyDeadline = familyBudget is null ? CancellationToken.None : familyDeadline.Token,
+            FamilyBudget = familyBudget,
             /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
@@ -439,6 +473,8 @@ public sealed class DarlingAnalysisService
         LastFactsScored = null;
         EndedEarlyAs = null;
         LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
+        LastFamiliesLeftOutForTime = context.FamiliesLeftOutForTime; /* #9879: the pass's own list, filled by the family stage */
+        LastFamilyBudget = context.FamilyBudget;
 
         try
         {
@@ -509,6 +545,13 @@ public sealed class DarlingAnalysisService
                then the expensive work is done, and finishing preserves it when the store is
                still up, while a store already gone classifies quietly. */
             context.CancellationToken.ThrowIfCancellationRequested();
+
+            /* #9879: an on-demand pass lets the collector start the anomaly detector beside its family reads, so the
+               detector's store reads overlap them and do not add their whole length to the reply's wait. The scheduled pass
+               (the one caller that persists caveats) runs the detector after collection, as it always has. */
+            context.AnomalyReadBesideFamilies = persistCollectionCaveats
+                ? null
+                : new AnomalyReadBesideFamilies(engine.Detector.DetectAnomaliesAsync);
 
             // 1. Collect facts from the Postgres store
             var facts = await engine.Collector.CollectFactsAsync(context);
@@ -651,7 +694,21 @@ public sealed class DarlingAnalysisService
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
-            var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+            List<Fact> anomalies;
+            if (context.AnomalyReadBesideFamilies is { Run: { } anomalyRead } beside)
+            {
+                /* #9879: the collector started the detector beside its family reads and waited for it to settle. Its
+                   failures join the pass's list here, after the ledger and the unread families above were computed from
+                   the family failures alone, and its facts follow the family facts. Both are where a detector that runs
+                   after collection puts them. */
+                context.CollectionFailures.AddRange(beside.Failures);
+                anomalies = await anomalyRead;
+            }
+            else
+            {
+                anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+            }
+
             facts.AddRange(anomalies);
 
             // 2. Score facts (base severity + amplifiers)

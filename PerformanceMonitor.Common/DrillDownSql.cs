@@ -110,7 +110,8 @@ ORDER BY t.total_cpu_us DESC";
     /// <c>collection_time</c>. <c>$1</c> server_id, <c>$2</c> and <c>$3</c> the window, <c>$4</c> the hash. #8317: <c>$5</c>
     /// is the finding's database, so when one hash runs in several databases the row described is the one the fact was
     /// scored on; a finding with no database sends an empty <c>$5</c> and gets the database that spent the most CPU on the
-    /// hash. Ordinals: 0 database_name, 1 query_hash, 2 query_text, 3 exec_count, 4 avg_cpu_ms, 5 avg_elapsed_ms,
+    /// hash. #9879: a database whose CPU deltas are all NULL (an unknowable counter, #4394) sums to NULL, which PostgreSQL
+    /// sorts first under DESC, so <c>NULLS LAST</c> keeps it behind every database with a known sum. Ordinals: 0 database_name, 1 query_hash, 2 query_text, 3 exec_count, 4 avg_cpu_ms, 5 avg_elapsed_ms,
     /// 6 avg_reads, 7 total_cpu_us, 8 total_reads, 9 total_spills, 10 max_dop, 11 plan_count, 12 max_dop_any_plan,
     /// 13 max_dop_any_plan_last_seen.
     /// </summary>
@@ -155,6 +156,6 @@ SELECT database_name, query_hash,
        MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
 FROM windowed
 GROUP BY database_name, query_hash
-ORDER BY total_cpu_us DESC
+ORDER BY total_cpu_us DESC NULLS LAST
 LIMIT 1";
 }
