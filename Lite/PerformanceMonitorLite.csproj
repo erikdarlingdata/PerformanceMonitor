@@ -45,6 +45,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Lite.Tests" />
+    <!-- The WPF smoke harness compiles Lite.Tests/TestDataSeeder.cs in by link, and the seeder clears internal Lite state. -->
+    <InternalsVisibleTo Include="UiSmokeWpf" />
   </ItemGroup>
 
   <ItemGroup>
