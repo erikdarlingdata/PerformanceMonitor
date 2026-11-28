@@ -126,7 +126,7 @@ public sealed class AnalysisCoverageLivePostgresTests
 
             /* ── the tools. The window inside them ends at "now", a minute past windowEnd, so the
                figures are a hair under the collector-level ones; the claims are the same. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
 
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
