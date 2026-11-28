@@ -104,6 +104,13 @@ public sealed class DarlingMcpTools
                 ? null
                 : "as_of was supplied, so this analysis ran over a PAST window and is exploratory: the findings below are complete but were NOT written to the store. A finding row carries the time the analysis RAN, and the reads that consume those rows (get_analysis_findings, the viewer's Recommendations tab) treat the newest analysis_time as this server's CURRENT state, so persisting a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Re-run without as_of to analyze and persist the present.";
 
+            /* #9879: a family the pass's time budget stopped is not a failed read, so it is said beside the collection
+               caveat and listed in families_left_out, never counted in collection_caveats. The collector runs every family on
+               every on-demand pass, an unobserved window included, so the unavailable reply below names a cut family too.
+               Null and absent when every read finished, so such a reply keeps its bytes. */
+            var familiesLeftOut = analysisService.LastFamiliesLeftOutForTime;
+            var familyBudget = analysisService.LastFamilyBudget;
+
             if (analysisService.WindowEmptyMessage != null)
             {
                 /* #3524: an UNOBSERVED window is a DEAD-COLLECTOR shape, not a clean bill of
@@ -119,20 +126,20 @@ public sealed class DarlingMcpTools
                    too — a dead window AND a family that could not be read are two different holes. Clean
                    pass: same message, same object, same bytes. */
                 var unobservedCollection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-                var unobservedCaveat = unobservedCollection.Describe();
+                var unobservedCaveat = CollectionCaveats.Compose(unobservedCollection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
                     /* #8910: a window retention removed has nothing for collection health to say. */
                     WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
-                    unobservedCollection.Attach(new
+                    FamilyTimeBudget.Attach(unobservedCollection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote
-                    }, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
             }
 
             /* #3538 A2: how much of the window the collector actually observed. Every rate in this pass
@@ -151,7 +158,7 @@ public sealed class DarlingMcpTools
                the sentence joins the caveat and the structured block is appended to the payload, because
                "no finding from the write family" and "the write family was not read" must not look alike. */
             var collection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-            var collectionCaveat = collection.Describe();
+            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
 
             if (findings.Count == 0)
             {
@@ -175,7 +182,7 @@ public sealed class DarlingMcpTools
                     "empty",
                     (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
                         + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
-                    collection.Attach(new
+                    FamilyTimeBudget.Attach(collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
@@ -184,7 +191,7 @@ public sealed class DarlingMcpTools
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
-                    }, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -299,7 +306,7 @@ public sealed class DarlingMcpTools
                the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
                truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
                unanchored run persisted them all before this cut. */
-            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(collection.Attach(new
+            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(FamilyTimeBudget.Attach(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 status = "findings",
@@ -323,7 +330,7 @@ public sealed class DarlingMcpTools
                     end = findings[0].TimeRangeEnd?.ToString("o")
                 },
                 findings = packed.FindingsArray()
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
+            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {
