@@ -494,7 +494,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |
 | `--enable-web`, `--disable-web`, `--enable-mcp`, `--disable-mcp` | Windows only. See [The web dashboard and MCP](#the-web-dashboard-and-mcp) |
 | `--print-web-token`, `--print-mcp-token` | Windows only. On Linux the token is in the file that your `file:` reference names |
-| `--configure-network`, `--configure-firewall`, `--grant-cert-key-access` | Windows only. Edit the `network` blocks in `darling.json` by hand, and open ports with the host's own firewall |
+| `--configure-network`, `--configure-firewall`, `--grant-cert-key-access` | Windows only. Edit the `network` blocks in `darling.json` by hand, and open ports with the host's own firewall, for example [with `ufw`](#open-the-port-with-ufw) |
 | `--print-viewer-connection`, `--export-viewer-config` | Windows only, for the managed store. Write the Viewer's `darling.json` by hand, as [Manual configuration](viewer.md#manual-configuration-fallback) says |
 | `Start-Service`, `Stop-Service` or `Restart-Service 'PerformanceMonitor Darling'` | `sudo systemctl start darling`, `stop` or `restart` |
 | `Get-Service 'PerformanceMonitor Darling'` | `systemctl status darling` |
@@ -529,6 +529,26 @@ Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only,
 The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
 
 A Linux install with its own PostgreSQL can expose either surface to the network. Set the surface's `network` block (`listen`, `allowFrom` and a token). Then set the surface's connection string to the login that `provision-roles.sql` creates for it: `postgres.webConnectionString` for the web dashboard, or `postgres.mcpConnectionString` for MCP. That login must not be the owner login that `postgres.connectionString` uses, and `postgres.connectionString` must name its user (`Username=...`) so the service can tell them apart. Before it binds the network, the service connects once with the surface's login, and keeps the surface on loopback if that login, or the login the session started as, is a superuser, a member of a role that is a superuser or has `BYPASSRLS`, a member of the database owner or the store owner role (the role that owns the `config` schema or any table in it, or the user that `postgres.connectionString` names), a member of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_write_server_files` or `pg_execute_server_program` (the roles that read or write every table or the server's files), a login that can read the stored connection secrets (the `admin` role can, and so can any login with SELECT on a secret column of the `config` tables), a login with `REPLICATION`, or, before PostgreSQL 16, a login with `CREATEROLE`, or if the session runs as a different user than the login it connected with (for example a session switched at connect, or a connection pooler that maps the user name). A surface with no login of its own stays on loopback, and so does one whose owner string names no user, and the service logs a critical line that names the connection string to set. The `web` and `mcp` roles the script creates hold none of those. The two surfaces are judged separately, so you can expose one and keep the other on loopback. TLS is optional. Without a `tls` block the listener is plain HTTP, and the service warns about it at every start. The service runs this check once, at start, so a grant made after the start (for example `GRANT pg_read_all_data TO web`) is not seen until the next start. Do not set `DOTNET_RUNNING_IN_CONTAINER=true` outside a container, for example in an `Environment=` line of a systemd unit: the service then takes the container rules, which skip this check.
+
+### Open the port with ufw
+
+The web dashboard listens on port 5153 and MCP on port 5152, unless you set `web.port` or `mcp.port`. The service checks the client's address itself with `allowFrom`, and the host's firewall is a second gate. If `ufw` is active on the box, allow your network to reach the port. Use the same range as `allowFrom`:
+
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 5153 proto tcp
+sudo ufw allow from 192.168.1.0/24 to any port 5152 proto tcp
+```
+
+The first line is for the web dashboard and the second is for MCP. Run only the line for the surface you expose, and put your own range in place of `192.168.1.0/24`. If `ufw` is not active, there is nothing to open.
+
+A new token file belongs to the `darling` user, and only that user can read it. Make it the way step 6 makes the other secret files, then write the token into it. This example is for the web token, and the MCP token works the same way:
+
+```bash
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/web_token
+openssl rand -hex 24 | sudo tee /etc/darling/web_token > /dev/null
+```
+
+Then point `web.network.token` at it with `"token": "file:/etc/darling/web_token"`. The full `network` blocks are in [Opt-in Network Endpoints](network-endpoints.md#mcp-endpoint-assistant-over-the-lan) and [The web dashboard](web-dashboard.md#reach-it-from-a-browser-on-another-machine).
 
 ## Upgrade by hand
 

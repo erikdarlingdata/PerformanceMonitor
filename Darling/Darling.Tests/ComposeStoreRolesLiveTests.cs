@@ -111,7 +111,7 @@ public sealed class ComposeStoreRolesLiveTests
 
             var foreign = await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, NullLogger.Instance, ct, credentials);
             Assert.False(foreign.Provisioned);
-            Assert.Contains("'viewer' (created by tools/provision-roles.sql)", foreign.NotProvisionedReason, StringComparison.Ordinal);
+            Assert.Contains("'viewer' (created by provision-roles.sql)", foreign.NotProvisionedReason, StringComparison.Ordinal);
             Assert.False(await RoleExistsAsync(owner, "admin", ct));
             Assert.False(await RoleExistsAsync(owner, "mcp", ct));
             Assert.False(Directory.Exists(credentials) && Directory.EnumerateFileSystemEntries(credentials).Any());

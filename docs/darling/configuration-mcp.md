@@ -107,7 +107,7 @@ Register with Claude Code, sending the token as a header:
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-`mcp.enabled` and `mcp.port` in `darling.json` are first-start values only. After the store holds them, change them in the Viewer's settings, or run `--enable-mcp` or `--disable-mcp`. The Viewer shows the live port.
+`mcp.enabled` and `mcp.port` in `darling.json` are first-start values only. After the store holds them, change them in the Viewer's settings, or run `--enable-mcp` or `--disable-mcp`. On Linux those two verbs do not exist, so set the switch in the store, as [the Linux page](linux.md#the-web-dashboard-and-mcp) shows. The Viewer shows the live port.
 
 In a project's `.mcp.json`, read the token from an environment variable, because project files get committed:
 

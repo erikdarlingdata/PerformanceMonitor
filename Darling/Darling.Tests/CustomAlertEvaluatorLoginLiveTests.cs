@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -95,6 +96,101 @@ public sealed class CustomAlertEvaluatorLoginLiveTests
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }
+    }
+
+    /// <summary>#9937: the evaluator runs user rules as the login <c>postgres.webConnectionString</c> names, and the owner-by-name warning
+    /// cannot see a login that holds the <c>admin</c> role's grants. The sign-in is accepted and the login is still returned, so the
+    /// evaluator runs, with one Warning that names the setting and the web role. The provisioned <c>web</c> login logs nothing, and a login
+    /// that is the owner by name gets the owner warning alone, not a second one.</summary>
+    [Fact]
+    public async Task ConfiguredCustomAlertLoginAsync_WarnsOnceForALoginHoldingTheAdminGrants_AndNotForTheWebRole()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live custom alert evaluator sign-in test (it mints its own scratch database and login).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var adminLike = "alert_admin_" + suffix;
+        var webLike = "alert_webrole_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {adminLike} LOGIN NOSUPERUSER PASSWORD '{password}'; CREATE ROLE {webLike} LOGIN NOSUPERUSER PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            foreach (var statement in ViewerGrantReplay.StatementsFor(adminLike, scratch.DatabaseName, "admin")
+                .Concat(ViewerGrantReplay.StatementsFor(webLike, scratch.DatabaseName, "web")))
+            {
+                await using var grant = owner.CreateCommand(statement);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            string As(string user) => new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = user,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+
+            /* The owner string names a different user, so neither login is the owner by name. */
+            var ownerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = "someone_else_" + suffix }.ConnectionString;
+
+            var adminLog = new CapturingTestLogger();
+            var adminString = As(adminLike);
+            Assert.Equal(adminString, await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(
+                new PostgresConfig { ConnectionString = ownerString, WebConnectionString = adminString }, adminLog, ct));
+            Assert.Equal(1, adminLog.CountAtLevel(LogLevel.Warning));
+            Assert.Contains("custom alert evaluator", adminLog.Joined, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(adminLike + " login", adminLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("postgres.webConnectionString", adminLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain(password, adminLog.Joined, StringComparison.Ordinal);
+
+            var webLog = new CapturingTestLogger();
+            var webString = As(webLike);
+            Assert.Equal(webString, await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(
+                new PostgresConfig { ConnectionString = ownerString, WebConnectionString = webString }, webLog, ct));
+            Assert.Equal(0, webLog.CountAtLevel(LogLevel.Warning));
+
+            /* The owner by name: the owner warning is the one Warning, and the probe's is not added to it. */
+            var ownerLog = new CapturingTestLogger();
+            var ownerAsWeb = As(adminLike);
+            Assert.Equal(ownerAsWeb, await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(
+                new PostgresConfig { ConnectionString = ownerAsWeb, WebConnectionString = ownerAsWeb }, ownerLog, ct));
+            Assert.Equal(1, ownerLog.CountAtLevel(LogLevel.Warning));
+            Assert.Contains("the owner login", ownerLog.Joined, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand(
+                    $"DROP OWNED BY {adminLike}; DROP ROLE IF EXISTS {adminLike}; DROP OWNED BY {webLike}; DROP ROLE IF EXISTS {webLike}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>#9937: a probe that could not run is a Warning that says so with its error class, and the Unprivileged verdict is none.</summary>
+    [Fact]
+    public void CustomAlertLoginProbeWarning_SaysAFailedProbeCouldNotConfirm_AndIsSilentForAnUnprivilegedLogin()
+    {
+        Assert.Null(DarlingStoreLogins.CustomAlertLoginProbeWarning(
+            "web", new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Unprivileged)));
+
+        var failed = DarlingStoreLogins.CustomAlertLoginProbeWarning(
+            "web", new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Failed, "TimeoutException"));
+        Assert.NotNull(failed);
+        Assert.Contains("TimeoutException", failed, StringComparison.Ordinal);
+        Assert.Contains("could not confirm", failed, StringComparison.Ordinal);
     }
 
     /// <summary>Whether the store checks the password for this address. A store with trust authentication (CI's
