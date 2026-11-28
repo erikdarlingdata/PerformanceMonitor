@@ -92,7 +92,7 @@ public sealed class DarlingMcpWriteConfirmationTests
         var answer = await CallAsync(server, "purge_now", arguments, negotiate: true);
 
         var question = QuestionOf(answer);
-        Assert.NotNull(question);
+        Assert.True(question is not null, answer);
         Assert.Contains(named, question, StringComparison.Ordinal);
     }
 
@@ -105,7 +105,7 @@ public sealed class DarlingMcpWriteConfirmationTests
         var answer = await CallAsync(server, tool, arguments, negotiate: true);
 
         var question = QuestionOf(answer);
-        Assert.NotNull(question);
+        Assert.True(question is not null, answer);
         Assert.Contains(named, question, StringComparison.Ordinal);
         Assert.Equal("elicitation/create", MethodOf(answer));
     }
