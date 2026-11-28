@@ -37,7 +37,7 @@ sudo /opt/darling-new/install-darling.sh --source PerformanceMonitorDarling-linu
 ```
 
 - The first run creates the `darling` user and the folders of step 5, puts the build in `/opt/darling`, installs the unit, and creates `/etc/darling/darling.json` from `darling.linux.sample.json` with two empty secret files beside it. It does not start the service, and it exits with code `2`.
-- Edit the three files as [step 6](#step-6-write-darlingjson-and-the-secret-files) says, then run the script again. The second run runs the pre-flight of step 7 as the `darling` user, enables and starts the unit, and runs the health check.
+- Edit `darling.json` and `store_connection` as [step 6](#step-6-write-darlingjson-and-the-secret-files) says, then run the script again. `sql_password` needs a password only when a monitored server signs in with one, such as a SQL login, and it stays empty otherwise. The second run runs the pre-flight of step 7 as the `darling` user, enables and starts the unit, and runs the health check.
 - A config that is already in `/etc/darling` is kept, and so is a unit that is already installed. `--replace-unit` installs the tarball's unit over yours and keeps yours as `darling.service.previous`.
 - `--check` runs the checks and changes nothing. `--source <tarball>` installs the build from the tarball, not from the folder the script runs from. The script copies the tarball first and checks the copy that it installs, against `--sha256`, or without it against the `SHA256SUMS-linux.txt` beside the tarball. Run the script again with the same arguments.
 - A `SHA256SUMS-linux.txt` beside the tarball shows that the tarball is whole. It does not show where the tarball came from, because whoever can replace the tarball can replace the file beside it. `--sha256 <hash>`, with a hash that you took from the release page yourself, is the check that does. Both arguments are for a tarball: with a folder as the source the scripts refuse `--sha256` and `--skip-hash-check`. Without `--source` the source is the folder the script runs from, so that form has no hash check at all, and the blocks on this page pass `--source`.
@@ -290,7 +290,7 @@ Only `logs` goes to `darling`. Its parent, `/usr/share/PerformanceMonitorDarling
 
 The `darling.sample.json` in the tarball is shaped for Windows: it starts with `"managed": true` and uses `encryptedPassword`. Do not copy it on Linux ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). Write a file like the one below, or copy `darling.linux.sample.json` from the tarball, which is the same file with comments.
 
-Create the three files empty, with the right owner and mode, before anything secret goes in them:
+Create the files empty, with the right owner and mode, before anything secret goes in them. `sql_password` holds the password of a monitored server that signs in with one, such as a SQL login. The example below uses one. With integrated or managed identity authentication, or no servers yet, leave `sql_password` empty and take `password` out of the server entry:
 
 ```bash
 sudo install -o darling -g darling -m 600 /dev/null /etc/darling/darling.json
@@ -338,7 +338,7 @@ Notes on the file:
 - **A PostgreSQL target** sets `"engine": "postgres"` on its entry. See [PostgreSQL Targets](postgresql-targets.md#postgresql-targets).
 - The file is JSONC, so `//` comments are allowed. Every field is in the [Configuration Reference](configuration.md).
 
-**Proof:** `sudo ls -l /etc/darling` shows the three files as `-rw-------` and owned by `darling`.
+**Proof:** `sudo ls -l /etc/darling` shows each file you created as `-rw-------` and owned by `darling`.
 
 ## Step 7: Pre-flight
 
@@ -585,12 +585,12 @@ The uninstall does not touch the monitored servers. To remove this install's Ext
 
 ```bash
 sudo systemctl disable --now darling
-sudo rm /etc/systemd/system/darling.service
+sudo rm -f /etc/systemd/system/darling.service /etc/systemd/system/darling.service.previous
 sudo systemctl daemon-reload
-sudo rm -rf /opt/darling /opt/darling.previous
+sudo rm -rf /opt/darling /opt/darling.previous /opt/darling.failed /opt/darling-new
 ```
 
-That leaves the store, the config, the keys and the logs. To remove them too:
+`/opt/darling.failed`, `/opt/darling-new` and `darling.service.previous` exist only after an upgrade, a `--rollback` or `--replace-unit`, and the block runs without an error on an install that never did any of those. It leaves the store, the config, the keys and the logs. To remove them too:
 
 ```bash
 sudo rm -rf /etc/darling /usr/share/PerformanceMonitorDarling
@@ -614,6 +614,9 @@ sudo -u postgres dropuser darling
 | Store | Your PostgreSQL server's data directory, database `darling` |
 | Store settings | `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install |
 | Rollback copy | `/opt/darling.previous`, after an upgrade |
+| Set-aside build | `/opt/darling.failed`, after a failed upgrade or a `--rollback`. Nothing uses it |
+| Extract folder | `/opt/darling-new`, where you extract each tarball and run the scripts from. `--rollback` runs from it |
+| Kept unit | `/etc/systemd/system/darling.service.previous`, after `--replace-unit` replaces a unit that differs from the tarball's |
 
 Back up `/etc/darling`, with its keys, and the store.
 

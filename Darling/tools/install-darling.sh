@@ -159,7 +159,8 @@ systemctl daemon-reload
 if [ "${config_created}" = 1 ]; then
     note ""
     note "Created ${CONFIG_FILE} from the Linux sample, with empty ${CONFIG_DIR}/store_connection and ${CONFIG_DIR}/sql_password (mode 600, owned by ${SERVICE_USER})."
-    note "The service is NOT started. Edit the three files as root (docs/darling/linux.md, step 6), then run this script again."
+    note "The service is NOT started. Edit ${CONFIG_FILE} and ${CONFIG_DIR}/store_connection as root (docs/darling/linux.md, step 6), then run this script again."
+    note "${CONFIG_DIR}/sql_password holds a password only for a monitored server that signs in with one (a SQL or PostgreSQL login, or a service principal secret). With integrated or managed identity authentication, or no servers yet, it stays empty."
     exit 2
 fi
 
