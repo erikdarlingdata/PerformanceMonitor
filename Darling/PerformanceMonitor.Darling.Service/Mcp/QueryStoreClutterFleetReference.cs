@@ -179,8 +179,8 @@ internal static class QueryStoreClutterFleetReference
         }
     }
 
-    /// <summary>Records that a call is answering without the computation, so it is kept when it ends. False when the computation has
-    /// already made its keep decision: the call takes the outcome, which is a moment away.</summary>
+    /// <summary>Records that a call is answering without the computation, so it is kept when it ends, and returns false. Returns true
+    /// when the computation has already made its keep decision: the call takes the outcome, which is a moment away.</summary>
     private static bool Abandon(Dictionary<Key, Flight> flights, Flight flight)
     {
         lock (flights)
