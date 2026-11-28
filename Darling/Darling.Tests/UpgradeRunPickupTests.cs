@@ -623,6 +623,78 @@ public sealed class UpgradeRunPickupTests
         Assert.Single(logger.Informations);
     }
 
+    /* An exit_code that is present and is not a JSON number makes the file malformed, with the problem named. A string, an object, a
+       boolean and a number too large for an integer are all refused the same way, and none of them throws. A JSON null is an exit code
+       that is not given, as it is for a run in progress. */
+    [Theory]
+    [InlineData("\"1\"")]
+    [InlineData("{}")]
+    [InlineData("true")]
+    [InlineData("[1]")]
+    [InlineData("1.5")]
+    [InlineData("4294967296")]
+    public void AnExitCodeThatIsNotANumber_IsAMalformedFile_AndDoesNotThrow(string exitCodeJson)
+    {
+        var text = RunJson(Guid.NewGuid(), "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":" + exitCodeJson + ",", StringComparison.Ordinal);
+        Assert.Contains("\"exit_code\":" + exitCodeJson + ",", text, StringComparison.Ordinal);
+
+        Assert.False(UpgradeRunPickup.TryParse(text, out var run, out var problem));
+
+        Assert.Null(run);
+        Assert.Equal("exit_code is not a number", problem);
+    }
+
+    [Fact]
+    public void AnExitCodeOfNull_IsARunWithNoExitCode()
+    {
+        var id = Guid.NewGuid();
+        var text = RunJson(id, "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":null,", StringComparison.Ordinal);
+        Assert.Contains("\"exit_code\":null,", text, StringComparison.Ordinal);
+
+        Assert.True(UpgradeRunPickup.TryParse(text, out var run, out var problem), problem);
+
+        Assert.Equal(id, run!.RunId);
+        Assert.Equal(UpgradeRuns.Succeeded, run.State);
+        Assert.Null(run.ExitCode);
+    }
+
+    /* A pickup of a file whose exit_code is not a number does what it does for any malformed file: the outcome is Malformed, the file
+       stays where it is, one warning is logged for the content however many passes read it, and the store is not reached. The connection
+       here is never opened, so a pickup that went on to the store would fail. */
+    [Theory]
+    [InlineData("\"1\"")]
+    [InlineData("{}")]
+    [InlineData("true")]
+    public async Task APickupOfAFileWhoseExitCodeIsNotANumber_IsMalformed_WarnsOnce_KeepsTheFile_AndNeverReachesTheStore(string exitCodeJson)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var folder = Directory.CreateTempSubdirectory("darling-9940-").FullName;
+        try
+        {
+            var logger = new CountingLogger();
+            var pickup = new UpgradeRunPickup(logger);
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var text = RunJson(Guid.NewGuid(), "succeeded").Replace("\"exit_code\":0,", "\"exit_code\":" + exitCodeJson + ",", StringComparison.Ordinal);
+            File.WriteAllText(file, text);
+            await using var connection = new NpgsqlConnection();
+
+            for (var i = 0; i < 3; i++)
+            {
+                var result = await pickup.PickUpAsync(connection, folder, DateTime.UtcNow, ct);
+                Assert.Equal(UpgradeRunPickupOutcome.Malformed, result.Outcome);
+                Assert.Null(result.RunId);
+            }
+
+            Assert.Equal(1, logger.Warnings);
+            Assert.Equal(text, File.ReadAllText(file));
+            Assert.Equal(System.Data.ConnectionState.Closed, connection.State);
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+        }
+    }
+
     /* #9940: the file upgrade-darling.sh --rollback writes when it could read the record of the run it steps back from, in the script's
        own layout: the rollback's run, then the four fields that name the other run. A null argument writes JSON null. */
     private static string SteppingBackRunJson(

@@ -534,10 +534,13 @@ public sealed class UpgradeRunPickup
                 }
             }
 
+            /* An exit code that is there and is not null has to be a JSON number that fits an integer. The kind is tested first, because
+               TryGetInt32 throws for an element that is not a number, and a file with "1", {} or true there is a malformed file, not a failed pass. */
             int? exitCode = null;
             if (Has(root, "exit_code"))
             {
-                if (!root.GetProperty("exit_code").TryGetInt32(out var code))
+                var exitElement = root.GetProperty("exit_code");
+                if (exitElement.ValueKind != JsonValueKind.Number || !exitElement.TryGetInt32(out var code))
                 {
                     problem = "exit_code is not a number";
                     return false;
