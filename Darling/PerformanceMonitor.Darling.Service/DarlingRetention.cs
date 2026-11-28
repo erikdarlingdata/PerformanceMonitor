@@ -983,7 +983,7 @@ public static class DarlingRetention
                INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's pacing and time budget and no
                sighting is deleted without its slim row. A probe finds each slice and the move takes its bounds as parameters
                (ExecuteSightingsMoveSliceAsync), and the DELETE inside the move runs under #9796's scan setting so it plans as a bitmap heap
-               scan. #9956: a drain starts at the end of the last slice moved while that bound holds (ReadSightingsDrainStartAsync), caps
+               scan. #9956: a drain starts where the last slice moved through while that bound holds (ReadSightingsDrainStartAsync), caps
                its slices by rows over a backlog, and stops at its share of the pass's budget (SightingsDrainBudgetShare). */
             var sightingsRetentionDays = QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor);
             var sightingsDeleted = await PurgeOneAsync(
@@ -2800,9 +2800,9 @@ WHERE NOT EXISTS
     /// <summary>
     /// One slice of the sightings purge (#9705): the probe finds the oldest expired <c>last_seen</c> and the slice's end, and
     /// <see cref="QueryTagSlimSightings.MoveSliceSql"/> deletes the expired sightings of that range and appends their slim rows.
-    /// Returns the rows moved and a cursor with the slice's end, which the drain passes back as <paramref name="lowerBound"/> of
-    /// its next slice. A probe that finds no expired row moves nothing, and the drain ends. The move runs through
-    /// <see cref="WithSliceDeleteScanSettingAsync"/> (#9796), the same transaction and scan setting the plain time-sliced
+    /// Returns the rows moved and a cursor with the point the slice moved through, its end clamped to the cutoff, which the drain
+    /// passes back as <paramref name="lowerBound"/> of its next slice. A probe that finds no expired row moves nothing, and the
+    /// drain ends. The move runs through <see cref="WithSliceDeleteScanSettingAsync"/> (#9796), the same transaction and scan setting the plain time-sliced
     /// DELETE of a table with scattered expired rows runs under: the DELETE inside the move plans as a Bitmap Heap Scan,
     /// and the setting ends with the commit or with the rollback of a failed move, so it reaches neither the probe nor any
     /// other statement of the purge. The setting's comment has the lab medians: a day that lies all over the heap moves 9.6
@@ -2812,8 +2812,8 @@ WHERE NOT EXISTS
     /// expired sighting is more than <see cref="QueryTagSlimSightings.BacklogHours"/> below the cutoff caps each of its slices at
     /// <see cref="QueryTagSlimSightings.MoveSliceRowCap"/> rows (#9956), and the cursor carries that to the later probes. The
     /// probe and the move read two snapshots, so a slice whose every row the sighting writer moves past the cutoff between
-    /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A slice that moved rows stores its
-    /// end once the move has committed (<see cref="QueryTagSlimSightings.RecordMovedThroughSql"/>), where the next pass's
+    /// them moves 0 rows and ends the drain early, and the next sweep goes on from there. A slice that moved rows stores that
+    /// point once the move has committed (<see cref="QueryTagSlimSightings.RecordMovedThroughSql"/>), where the next pass's
     /// first probe starts (<see cref="ReadSightingsDrainStartAsync"/>). A row written below a bound is moved by a probe with no
     /// bound: the first slice of a drain that has no stored bound it can trust.
     /// </summary>
@@ -2860,21 +2860,27 @@ WHERE NOT EXISTS
             },
             cancellationToken);
 
+        /* The slice moved every row below its end whose last_seen is under the cutoff, and no row at or past the cutoff. A one-day
+           slice, or a backlog slice with fewer rows left than the cap, ends a day after its start, which can lie past the cutoff:
+           the rows between the cutoff and that end have not expired and stay. So the point the slice moved through is its end
+           clamped to the cutoff, and that is the bound the next probe and the next pass start from. The cutoff is a UTC time of
+           kind Unspecified (PurgeWithPacerAsync), sent as timestamptz like the end the probe returned. */
+        var movedThrough = end < cutoff ? end : DateTime.SpecifyKind(cutoff, DateTimeKind.Utc);
         if (rows > 0)
         {
             using var record = new NpgsqlCommand(QueryTagSlimSightings.RecordMovedThroughSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
             record.Parameters.AddWithValue(DarlingObservability.FleetServerId);
-            record.Parameters.AddWithValue(end);
+            record.Parameters.AddWithValue(movedThrough);
             await record.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        return (rows, new SightingsSliceCursor(end, backlog));
+        return (rows, new SightingsSliceCursor(movedThrough, backlog));
     }
 
     /// <summary>
-    /// Where a sightings drain starts (#9956): the stored end of the last slice moved while it is a bound the probe can trust
-    /// (<see cref="QueryTagSlimSightings.DrainStartBoundSql"/>), as a cursor that has not decided the backlog yet, or null for a
-    /// probe from the bottom of the index. After a pass that moved a backlog the dead entries of its rows lie below that end
+    /// Where a sightings drain starts (#9956): the stored point the last slice moved through while it is a bound the probe can
+    /// trust (<see cref="QueryTagSlimSightings.DrainStartBoundSql"/>), as a cursor that has not decided the backlog yet, or null
+    /// for a probe from the bottom of the index. After a pass that moved a backlog the dead entries of its rows lie below that point
     /// until the table is vacuumed, and a probe from the bottom visits every one of them.
     /// </summary>
     internal static async Task<SightingsSliceCursor?> ReadSightingsDrainStartAsync(NpgsqlConnection connection, CancellationToken cancellationToken)

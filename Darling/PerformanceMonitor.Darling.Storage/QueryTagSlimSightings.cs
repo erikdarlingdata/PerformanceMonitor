@@ -99,8 +99,8 @@ COMMENT ON TABLE collect.query_tag_sightings_slim IS 'A query-tag sighting past 
     public static readonly string FirstSliceProbeSql = SliceProbeSql(string.Empty, string.Empty);
 
     /// <summary>
-    /// The same probe from a lower bound: <c>$2</c> is the end of the slice before it, or the end of the last slice an earlier
-    /// pass moved, and <c>$3</c> is true when the drain already counts as a backlog. Nothing vacuums the table between two
+    /// The same probe from a lower bound: <c>$2</c> is the point the slice before it moved through, or the point the last slice
+    /// of an earlier pass moved through, and <c>$3</c> is true when the drain already counts as a backlog. Nothing vacuums the table between two
     /// slices or between two passes a few hours apart, and a probe from the bottom of the index would visit the dead entry of
     /// every row the slices before deleted: after a pass that moved 1.23 million rows, the next pass's probe from the bottom
     /// ran past the purge's 300 s command timeout.
@@ -135,16 +135,18 @@ FROM (
     /// <summary>The <c>collect.collector_state</c> owner of the move's stored bound (#9956), under the fleet's server id.</summary>
     public const string MoveStateOwner = "retention";
 
-    /// <summary>The state key of the end of the last slice a move took.</summary>
+    /// <summary>The state key of the point the last slice moved through: its end, or the cutoff when the end lies past it.</summary>
     public const string MovedThroughKey = "query_tag_sightings_moved_through";
 
     /// <summary>The state key of the sightings table's vacuum count, read after that move committed.</summary>
     public const string VacuumsAtMoveKey = "query_tag_sightings_vacuums_at_move";
 
     /// <summary>
-    /// Stores the end of a slice that moved rows (#9956), <c>$2</c>, and the sightings table's count of finished vacuums, under
-    /// server <c>$1</c>. The purge runs it after the move commits, so a stored end is never ahead of the rows moved, and a write
-    /// that fails leaves an older end, which only costs the next probe the dead entries in between.
+    /// Stores the point a slice that moved rows moved through (#9956), <c>$2</c>, and the sightings table's count of finished
+    /// vacuums, under server <c>$1</c>. That point is the slice's end clamped to the pass's cutoff: a slice that ends past the
+    /// cutoff leaves the rows between the two, which have not expired, and a bound at its end would skip them once they do. The
+    /// purge runs it after the move commits, so a stored point is never ahead of the rows moved, and a write that fails leaves an
+    /// older point, which only costs the next probe the dead entries in between.
     /// </summary>
     public const string RecordMovedThroughSql = $"""
 INSERT INTO collect.collector_state AS s (server_id, collector_name, state_key, state_value, updated_at)
@@ -158,10 +160,10 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = E
 """;
 
     /// <summary>
-    /// The lower bound of a pass's first probe (#9956): the stored end of the last slice moved, while fewer than two vacuums of
-    /// the sightings table have finished since that move. No row when there is no stored end, or two vacuums have finished (the
-    /// first may have started before the move committed and kept its dead tuples, the second started after it), or the count is
-    /// below the stored one (the statistics were reset). Then the probe starts from the bottom of the index: the dead entries
+    /// The lower bound of a pass's first probe (#9956): the stored point the last slice moved through, while fewer than two
+    /// vacuums of the sightings table have finished since that move. No row when there is no stored point, or two vacuums have
+    /// finished (the first may have started before the move committed and kept its dead tuples, the second started after it), or
+    /// the count is below the stored one (the statistics were reset). Then the probe starts from the bottom of the index: the dead entries
     /// of the moves are gone, and it finds any sighting with a <c>last_seen</c> below the old bound. The sighting writer never
     /// writes one (it stamps the store's <c>now()</c>, or that less <see cref="QueryTagSightingWriter.ReSightingBackdate"/>), so
     /// such a row comes only from outside the service, such as a restore. <c>$1</c> is the server id the bound is stored under.

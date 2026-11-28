@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// <summary>
 /// The sightings move over a backlog (#9956) on a real store: a drain with more than two days of expired sightings caps each slice
 /// at <see cref="QueryTagSlimSightings.MoveSliceRowCap"/> rows, a kept-up day stays one slice, the next pass's first probe starts at
-/// the end of the last slice moved until two vacuums have removed the dead entries below it, a sighting upsert waits only for the
+/// the point the last slice moved through (its end, or the cutoff when the end lies past it) until two vacuums have removed the
+/// dead entries below it, a sighting upsert waits only for the
 /// rows of one capped slice, and the drain stops at its share of the pass's budget and the next pass finishes it.
 /// </summary>
 public sealed class QueryTagSightingsBacklogLiveTests
@@ -189,6 +190,60 @@ public sealed class QueryTagSightingsBacklogLiveTests
             Assert.Equal(70_000L, await SlimRowsAsync(env));
             Assert.Equal(0L, await ExpiredRowsAsync(env, cutoff));
             Assert.Equal(100L, await CountAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+        });
+    }
+
+    /* One pass the way PurgeOneAsync drains the table: the first probe starts at the stored bound, or from the bottom of the index
+       when there is none, and slices follow until one moves nothing. Returns the rows moved. */
+    private static async Task<int> DrainAsync(Env env, DateTime cutoff)
+    {
+        var moved = 0;
+        var cursor = await DarlingRetention.ReadSightingsDrainStartAsync(env.Store, env.Ct);
+        while (true)
+        {
+            var (rows, end) = await DarlingRetention.ExecuteSightingsMoveSliceAsync(env.Store, cutoff, cursor, env.Ct);
+            if (rows == 0)
+            {
+                return moved;
+            }
+
+            moved += rows;
+            cursor = end;
+        }
+    }
+
+    [Fact]
+    public async Task ASliceThatEndsPastTheCutoff_StoresTheCutoffAsItsBound_AndTheNextPassMovesTheRowsThatExpiredSince()
+    {
+        await WithStoreAsync(async env =>
+        {
+            /* Pass one runs at cutoff c1. Its only slice starts at the oldest expired row, 20 hours below c1, and ends a day later,
+               4 hours past c1. The MID rows lie between c1 and that end: not expired at c1, so the slice leaves them. Pass two runs
+               at c2, 3.5 hours past c1 and still below that end, when MID has expired. No vacuum runs between the passes, so the
+               stored bound holds. */
+            var c1 = DateTime.UtcNow.AddDays(-SightingsDays);
+            var c2 = c1.AddHours(3.5);
+            await SeedAsync(env, "OLD", 500, c1.AddHours(-20), TimeSpan.FromHours(12));
+            await SeedAsync(env, "MID", 300, c1.AddHours(1), TimeSpan.FromHours(2));
+            await SeedAsync(env, "LIVE", 100, c1.AddHours(30), TimeSpan.FromHours(12));
+
+            Assert.Equal(500, await DrainAsync(env, c1));
+            Assert.Equal(0L, await ExpiredRowsAsync(env, c1));
+            Assert.Equal(300L, await CountAsync(env, "SELECT count(*) FROM collect.query_tag_sightings WHERE key LIKE 'MID%'"));
+
+            /* The bound pass one stored is c1, not the slice's end: every expired row below c1 moved, and the MID rows above it did not. */
+            var afterOne = await DarlingRetention.ReadSightingsDrainStartAsync(env.Store, env.Ct);
+            Assert.NotNull(afterOne);
+            Assert.Equal(c1, afterOne.Bound.ToUniversalTime(), TimeSpan.FromMilliseconds(1));
+
+            Assert.Equal(300, await DrainAsync(env, c2));
+            Assert.Equal(0L, await ExpiredRowsAsync(env, c2));
+            Assert.Equal(800L, await CountAsync(env, "SELECT count(*) FROM collect.query_tag_sightings_slim"));
+            Assert.Equal(100L, await CountAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            var afterTwo = await DarlingRetention.ReadSightingsDrainStartAsync(env.Store, env.Ct);
+            Assert.NotNull(afterTwo);
+            Assert.Equal(c2, afterTwo.Bound.ToUniversalTime(), TimeSpan.FromMilliseconds(1));
         });
     }
 
