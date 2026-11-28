@@ -224,7 +224,7 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
         {
             var start = t0.AddDays(-7);
             var end = t0.AddDays(1);
-            var calls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), ServerId, start, end, 60, ct);
+            var calls = await CallsAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), start, end, ct);
             Assert.True(calls.Count > 40, "the planted week must hold calls beyond the named cases");
 
             var groups = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true), start, end, ct);
@@ -240,7 +240,7 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
             Assert.Contains(samples, row => row.EndsWith("|True", StringComparison.Ordinal));
             Assert.Equal(samples, await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500, callsAt: 4), start, end, ct, calls.AddTo));
 
-            var baselineCalls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.BaselineCalls("attention_events"), ServerId, start, end, 60, ct);
+            var baselineCalls = await CallsAsync(connection, AttentionWindowSql.BaselineCalls("attention_events"), start, end, ct);
             Assert.Equal(calls.Count, baselineCalls.Count);
             var minutes = await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), start, end, ct);
             Assert.Equal(minutes, await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events", callsAt: 4), start, end, ct, baselineCalls.AddTo));
@@ -273,7 +273,7 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
 
             var start = run.AddMinutes(-1);
             var end = run.AddMinutes(1);
-            var calls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), ServerId, start, end, 60, ct);
+            var calls = await CallsAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), start, end, ct);
             Assert.Equal(7, calls.Count);
 
             var groups = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true, callsAt: 4), start, end, ct, calls.AddTo);
@@ -298,6 +298,24 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
             Assert.Equal(4, samples.Count(row => row.EndsWith("|True", StringComparison.Ordinal)));
             Assert.Equal(await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500), start, end, ct), samples);
         });
+    }
+
+    /* The calls of a range as the arrays the matched reads take. */
+    private static async Task<AttentionCallArrays> CallsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue(NpgsqlDbType.Integer, ServerId);
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+
+        var calls = new AttentionCallArrays();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            _ = calls.Add(reader);
+        }
+
+        return calls;
     }
 
     /* The matched calls the way Darling reads them: the ids of the calls a sample matches, then those calls by id. */

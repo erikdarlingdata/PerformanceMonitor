@@ -170,8 +170,8 @@ public sealed class DarlingMcpClientTimeoutTools
         {
             var counts = await Query(AttentionWindowSql.Counts(events, bounded: true), floor, rowCeiling,
                 r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-            var windowCalls = await AttentionCallArrays.ReadAsync(
-                connection, AttentionWindowSql.Calls(events, bounded: true), serverId, floor, rowCeiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var windowCalls = new AttentionCallArrays();
+            await Query<long>(AttentionWindowSql.Calls(events, bounded: true), floor, rowCeiling, windowCalls.Add);
             var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true, callsAt: CallsAt), floor, rowCeiling,
                 r => new AttentionSampleGroup(
                     r.GetDateTime(0),
@@ -202,8 +202,8 @@ public sealed class DarlingMcpClientTimeoutTools
             var hosts = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), spanFloor, spanCeiling,
                 r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
             /* The samples and the matched calls read the calls of the span, the range their own calls CTE reads. */
-            var spanCalls = await AttentionCallArrays.ReadAsync(
-                connection, AttentionWindowSql.Calls(events, bounded: true), serverId, spanFloor, spanCeiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var spanCalls = new AttentionCallArrays();
+            await Query<long>(AttentionWindowSql.Calls(events, bounded: true), spanFloor, spanCeiling, spanCalls.Add);
             var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1, callsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutSample(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
