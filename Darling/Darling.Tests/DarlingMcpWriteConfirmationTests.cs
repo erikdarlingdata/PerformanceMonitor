@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.TestHost;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
