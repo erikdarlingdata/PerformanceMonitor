@@ -466,9 +466,9 @@ public sealed class StoreStopNoticeTests
                     _ = AnswerAsync(client);
                 }
             }
-            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException or InvalidOperationException)
             {
-                /* The test is over. */
+                /* The test is over. InvalidOperationException is Stop() landing between two accepts (#9950). */
             }
         }
 
