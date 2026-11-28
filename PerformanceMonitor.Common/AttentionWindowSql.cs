@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Globalization;
 using System.Linq;
 
 namespace PerformanceMonitor.Common;
@@ -237,7 +238,7 @@ SELECT
     /// </summary>
     private static readonly string MatchSecondShifts = string.Join(", ",
         Enumerable.Range(-WholeSecondsUp(CapturedCallMatchAfterUs), WholeSecondsUp(CapturedCallMatchAfterUs) + WholeSecondsUp(CapturedCallMatchBeforeUs) + 1)
-            .Select(seconds => $"(INTERVAL '{seconds} seconds')"));
+            .Select(seconds => $"(INTERVAL '{seconds.ToString(CultureInfo.InvariantCulture)} seconds')"));
 
     /// <summary>
     /// The captured calls as a CTE named <c>calls</c>. MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline,
