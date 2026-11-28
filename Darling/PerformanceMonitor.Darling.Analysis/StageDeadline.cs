@@ -14,9 +14,10 @@ using PerformanceMonitor.Analysis;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// #9879: runs one read of an on-demand pass under a stage's time budget. The anomaly detector dispatch
+/// #9879: runs one read of an on-demand pass under a stage's time budget. The family stage
+/// (<see cref="AnalysisContext.FamilyDeadline"/>), the anomaly detector dispatch
 /// (<see cref="AnalysisContext.DetectorDeadline"/>) and the drill-down stage
-/// (<see cref="AnalysisContext.DrillDownDeadline"/>) each give every read they start to this.
+/// (<see cref="AnalysisContext.DrillDownDeadline"/>) each give every read they run under a deadline to this.
 /// </summary>
 internal static class StageDeadline
 {
