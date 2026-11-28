@@ -162,6 +162,7 @@ public sealed class AlertFailedSendReportTests
             catch (OperationCanceledException) { /* Dispose */ }
             catch (SocketException) { /* listener stopped */ }
             catch (ObjectDisposedException) { /* listener stopped */ }
+            catch (InvalidOperationException) { /* Stop() landed between two accepts (#9950) */ }
         }
 
         private async Task AnswerAsync(TcpClient client)
