@@ -347,6 +347,13 @@ public class AnalysisContext
     public IReadOnlyList<PlanRegressionFailureRule.Failure>? PlanRegressionFailures { get; set; }
 
     /// <summary>
+    /// #9888: Lite's note that the plan regression cost read found no candidate and what its scan cost. The pass raises no fact then, so the
+    /// reply has nothing else to carry the time. Null when the read priced a candidate, was answered from an earlier read, or did not run, and
+    /// always null on Darling, which has no such scan.
+    /// </summary>
+    public string? PlanRegressionCostNote { get; set; }
+
+    /// <summary>
     /// Which source the PLAN_REGRESSION fact read this pass on Darling (#3953): true for the latest-snapshot interval
     /// table, false for the raw Query Store slice, null when the fact did not decide (it did not run, or this is
     /// Lite, which has no such table). The regressed-queries drill-down reads the SAME source, so it can always
@@ -588,17 +595,20 @@ public sealed record CollectionFailure(string Family, string Read, CollectionFai
 /// that path has no <c>IsAnalyzing</c> guard, two on-demand callers can overlap, and a shared property would
 /// let one read the other's failures.
 ///
+/// <para>#9888: <c>PlanRegressionCostNote</c> is Lite's note on a plan regression cost read that found no candidate (null on Darling and when owed nothing).</para>
+///
 /// <para>#8570: <c>SourcesNarrowed</c> is true when the collector read only the families the requested sources need
 /// (<see cref="AnalysisContext.RequestedFactSources"/>), so the facts read are not the server's whole fact set.</para>
 /// </summary>
 public sealed record CollectionCaveatState(
-    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null, bool SourcesNarrowed = false)
+    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null, bool SourcesNarrowed = false,
+    string? PlanRegressionCostNote = null)
 {
     /// <summary>The state the context carries after its collector ran (or threw before recording anything).</summary>
     public static CollectionCaveatState From(AnalysisContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases, context.FactSourcesNarrowed);
+        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases, context.FactSourcesNarrowed, context.PlanRegressionCostNote);
     }
 
     /// <summary>True when at least one family failed — the only case in which anything is emitted.</summary>

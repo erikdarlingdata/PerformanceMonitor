@@ -110,6 +110,134 @@ public sealed class AnalyzeServerFamilyBudgetLiveTests
         }
     }
 
+    private const double FourHoursMs = 4 * 3_600_000.0;
+    private static readonly TimeSpan Limit = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Stands in for the fact collector over a window with no observed collection. It runs one family that reads until the
+    /// token it is handed ends, and one that does not, through the real family stage with the context the service built.
+    /// </summary>
+    private sealed class UnobservedWindowCollector(bool withHeldFamily) : IFactCollector
+    {
+        public TaskCompletionSource HeldReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>The held read: waits on the token its context hands it, which ends at the family deadline or at the pass's own stop.</summary>
+        private async Task CollectSlowThingFactsAsync(AnalysisContext context, List<Fact> facts)
+        {
+            HeldReadStarted.TrySetResult();
+            await Task.Delay(Timeout.Infinite, context.CancellationToken);
+        }
+
+        public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
+        {
+            Func<AnalysisContext, List<Fact>, Task> quick = (_, facts) =>
+            {
+                facts.Add(new Fact { Source = "test", Key = "FB9879_QUICK" });
+                return Task.CompletedTask;
+            };
+            var families = new List<Func<AnalysisContext, List<Fact>, Task>> { quick };
+            if (withHeldFamily)
+                families.Add(CollectSlowThingFactsAsync);
+
+            context.CollectionFamilyCount = families.Count;
+            context.Coverage = WindowCoverage.Unobserved(FourHoursMs);
+            var collected = new List<Fact>();
+            await PgFactCollector.RunFamiliesAsync(context, collected, families, family => ReferenceEquals(family.Target, this));
+            return collected;
+        }
+    }
+
+    /// <summary>
+    /// A family the budget stops over a window with no observed collection is named in the unavailable reply. The collector
+    /// runs every family on such a pass, so the budget can cut one there as it does on an observed window, and a reply that
+    /// named it only on the other branches would leave that hole unsaid. The held read waits on its deadline token and
+    /// never finishes by itself, so the reply can only come from a read the deadline stopped, and no assert here depends on
+    /// how long anything takes.
+    /// </summary>
+    [Fact]
+    public async Task AnUnobservedWindow_NamesAFamilyTheBudgetStopped_InItsUnavailableReply()
+    {
+        await OnAnUnobservedWindowAsync(async (postgres, ct) =>
+        {
+            var collector = new UnobservedWindowCollector(withHeldFamily: true);
+            var budget = TimeSpan.FromMilliseconds(100);
+            var service = new DarlingAnalysisService(postgres, sqlServerCollectorWrapper: _ => collector) { OnDemandFamilyBudget = budget };
+
+            var reply = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName).WaitAsync(Limit, ct);
+
+            using var doc = JsonDocument.Parse(reply);
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            Assert.NotNull(service.WindowEmptyMessage);
+
+            var entries = FamiliesLeftOut(doc.RootElement);
+            var entry = Assert.Single(entries);
+            Assert.Equal("slow_thing", entry.GetProperty("family").GetString());
+            Assert.Equal(FamilyTimeBudget.Reason, entry.GetProperty("reason").GetString());
+            Assert.Equal(0.1, entry.GetProperty("budget_seconds").GetDouble());
+            Assert.Contains(
+                FamilyTimeBudget.Describe(["slow_thing"], budget)!,
+                doc.RootElement.GetProperty("message").GetString()!,
+                StringComparison.Ordinal);
+
+            /* A budget cut is not a failed read. */
+            Assert.Empty(service.LastCollectionFailures);
+        });
+    }
+
+    /// <summary>The unavailable reply of a pass with no family left out carries no families_left_out and no sentence about one.</summary>
+    [Fact]
+    public async Task AnUnobservedWindow_WithNoFamilyStopped_CarriesNoFamiliesLeftOut()
+    {
+        await OnAnUnobservedWindowAsync(async (postgres, ct) =>
+        {
+            var service = new DarlingAnalysisService(postgres, sqlServerCollectorWrapper: _ => new UnobservedWindowCollector(withHeldFamily: false));
+
+            var reply = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName).WaitAsync(Limit, ct);
+
+            using var doc = JsonDocument.Parse(reply);
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            Assert.Empty(FamiliesLeftOut(doc.RootElement));
+            Assert.Empty(service.LastFamiliesLeftOutForTime);
+            Assert.DoesNotContain("left out for time", doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// Registers the test's server with more than a day of wait history and no reading across the last four hours, so a pass
+    /// gets past its history gate onto an unobserved window, runs the body, and removes the rows again.
+    /// </summary>
+    private static async Task OnAnUnobservedWindowAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live family-budget test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            /* Rows 40 and 6 hours back span more than the history gate asks for, and none falls in the pass's four-hour window. */
+            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddHours(-40)), ct);
+            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddHours(-6)), ct);
+
+            await body(postgres, ct);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>The reply's <c>families_left_out</c> entries, from the top level or from <c>hints</c>, and none when the reply has no such field.</summary>
     private static List<JsonElement> FamiliesLeftOut(JsonElement reply)
     {

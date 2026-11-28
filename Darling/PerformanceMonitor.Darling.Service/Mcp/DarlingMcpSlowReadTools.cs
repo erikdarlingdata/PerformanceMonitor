@@ -57,7 +57,9 @@ public sealed class DarlingMcpSlowReadTools
         + "where the read noted one, error_class (a type name or SQLSTATE, never message text), and statements: the "
         + "slowest 5 by ms, with statements_omitted saying how many more were left out; full_detail=true returns all stored "
         + "statements in the order they ran. A read keeps its 50 SLOWEST statements by ms, not its first 50, so a gap in the "
-        + "ordinals is where faster statements were left out; statement_count is every statement the read ran and "
+        + "ordinals is where faster statements were left out; statement_count is every statement the read ran, and a physical connection open is not a statement, so it is not in the count "
+        + "or in the stored statements; connection_opens is how many physical connection opens the read waited on and connection_open_ms is their total time in "
+        + "milliseconds, both null on rows stored before they existed and on a read that did not capture statements; "
         + "statements_truncated says more ran than are stored. A statement's ms runs until "
         + "its reader CLOSES, so it includes row streaming and the caller's time between rows, not only server time; a "
         + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
@@ -204,6 +206,8 @@ public sealed class DarlingMcpSlowReadTools
             caller = r.Caller,
             reply_bytes = r.ReplyBytes,
             statement_count = r.StatementCount,
+            connection_opens = r.ConnectionOpens,
+            connection_open_ms = r.ConnectionOpenMs,
             statements_truncated = r.StatementsTruncated,
             statements_omitted = omitted,
             statement_summary = StatementSummary(r.Statements),

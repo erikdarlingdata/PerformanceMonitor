@@ -4145,6 +4145,10 @@ END $$;";
            sighting ages out, so the tag map rebuild still tags usage rows kept longer than the sightings. One plain table created empty: no data moves, and the
            retention purge fills it. An older build ignores it. */
         new Migration(QueryTagSlimSightings.Version, "query-tag-sightings-slim", QueryTagSlimSightings.CreateSql),
+        /* V321 (#9923): collect.slow_reads gains the nullable connection_opens and connection_open_ms, the physical connection opens a read waited on and their
+           total milliseconds, counted beside statement_count and no longer inside it. Two nullable integer columns, no default, no rewrite: old rows keep NULL.
+           An older build ignores them. */
+        new Migration(SlowReadConnectionOpens.Version, "slow-read-connection-opens", SlowReadConnectionOpens.AddColumnsSql),
     };
 
     /// <summary>

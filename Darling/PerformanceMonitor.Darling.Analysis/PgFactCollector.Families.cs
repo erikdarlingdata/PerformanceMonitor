@@ -212,8 +212,8 @@ public sealed partial class PgFactCollector
                 /* The same shapes a family's own catch lets through once the token it reads is signalled, so nothing the
                    deadline caused reaches the pass as a failure. The filter opens as every other catch in this file family
                    does: an abandonment of the pass itself is never taken here, so it unwinds the pass whether or not the
-                   deadline has also fired. A budget cut is reported through the left-out record, not as a collection failure,
-                   so the catch records it by RecordBudgetCut and the reporting census (#2826) accepts that call as its report. */
+                   deadline has also fired. A family the budget stopped is not a failed read, so the catch names it in the
+                   left-out record (RecordBudgetCut) and records no collection failure (#9879). */
                 RecordBudgetCut(index);
             }
             finally

@@ -45,7 +45,9 @@ internal sealed record SlowReadRecord(
     int? InFlight = null,
     long? WaitMs = null,
     string? Caller = null,
-    long? ReplyBytes = null);
+    long? ReplyBytes = null,
+    int? ConnectionOpens = null,
+    int? ConnectionOpenMs = null);
 
 /// <summary>
 /// The slow-read record's write path (#5097). The three recorders (the MCP tool filter, the <c>/api/read/*</c> loop
@@ -81,8 +83,8 @@ public sealed class SlowReadLog
     internal const string InsertSql = @"
 INSERT INTO collect.slow_reads
 (read_time, surface, route, outcome, total_ms, server_id, window_start, window_end, arguments, arguments_truncated,
- source, source_reason, statements, statement_count, statements_truncated, error_class, row_count, in_flight, wait_ms, caller, reply_bytes)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);";
+ source, source_reason, statements, statement_count, statements_truncated, error_class, row_count, in_flight, wait_ms, caller, reply_bytes, connection_opens, connection_open_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23);";
 
     internal const string PurgeSql = @"
 DELETE FROM collect.slow_reads WHERE read_time < $1;";
@@ -252,7 +254,11 @@ WHERE slow_read_id IN
             scope.InFlightAtStart,
             scope.WaitMs,
             caller,
-            replyBytes is { } bytes ? Math.Max(bytes, 0) : null);
+            replyBytes is { } bytes ? Math.Max(bytes, 0) : null,
+            /* #9923: a physical connection open is not a statement, so the opens a read waited on are counted beside the statements. NULL where the scope
+               did not capture, so a read that captured and opened nothing (0) differs from one that never looked. */
+            scope.CaptureStatements ? scope.ConnectionOpens : null,
+            scope.CaptureStatements ? (int)Math.Min(int.MaxValue, Math.Round(scope.ConnectionOpenMs, MidpointRounding.AwayFromZero)) : null);
     }
 
     /// <summary>The arguments as stored, one policy for every surface: the server name replaced by its id, the window
@@ -553,6 +559,8 @@ WHERE slow_read_id IN
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.WaitMs ?? DBNull.Value });
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.Caller ?? DBNull.Value });
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.ReplyBytes ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)record.ConnectionOpens ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)record.ConnectionOpenMs ?? DBNull.Value });
                 await insert.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
             }
 

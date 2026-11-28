@@ -1053,6 +1053,8 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS held_w
         // V320 (#9705): the slim query-tag sightings table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V320 makes it again, empty. Safe on a
         // store that never had it.
         new(320, "hasQueryTagSlimSightings", "DROP TABLE IF EXISTS collect.query_tag_sightings_slim;"),
+        // V321 (#9923): the connection open count and time on the slow read record. The slow read column is the probe's newest sentinel. The rewind drops both columns, so a re-run of V321 adds them again, empty. Safe on a store that never had them.
+        new(321, "hasSlowReadConnectionOpens", "ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS connection_opens, DROP COLUMN IF EXISTS connection_open_ms;"),
     ];
 
     /// <summary>

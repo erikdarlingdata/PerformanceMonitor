@@ -129,6 +129,72 @@ internal static class ReadStatementCapture
         }
     }
 
+    /// <summary>The Npgsql display-name prefix of the activity a physical connection open emits (Npgsql 11
+    /// <c>NpgsqlActivitySource.PhysicalConnectionOpen</c>: <c>"CONNECT " + database</c>).</summary>
+    internal const string ConnectionOpenNamePrefix = "CONNECT ";
+
+    /// <summary>What an Npgsql activity inside a capturing scope is (#9923).</summary>
+    internal enum ActivityKindSeen
+    {
+        /// <summary>Neither a command nor a connection open: never counted as a statement.</summary>
+        Other,
+
+        /// <summary>A command or COPY: Npgsql sets <c>db.query.text</c> on every one of them.</summary>
+        Statement,
+
+        /// <summary>A physical connection open: no <c>db.query.text</c>, display name <c>CONNECT &lt;database&gt;</c>.</summary>
+        ConnectionOpen,
+    }
+
+    /// <summary>
+    /// Tells a statement from a physical connection open by what Npgsql puts on each (#9923). A statement carries the
+    /// <c>db.query.text</c> tag, present even when its text is empty. A connection open has no such tag and is named
+    /// <c>CONNECT &lt;database&gt;</c>. An activity that is neither is <see cref="ActivityKindSeen.Other"/>, so a missing text
+    /// alone never makes a statement.
+    /// </summary>
+    internal static ActivityKindSeen Classify(Activity activity, out string? sql, out long? rows)
+    {
+        sql = null;
+        rows = null;
+        var hasText = false;
+        foreach (var tag in activity.TagObjects)
+        {
+            if (tag.Key == "db.query.text")
+            {
+                hasText = true;
+                sql = tag.Value as string;
+            }
+            else if (tag.Key == "db.response.returned_rows" && tag.Value is not null)
+            {
+                rows = Convert.ToInt64(tag.Value, System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        if (hasText)
+        {
+            return ActivityKindSeen.Statement;
+        }
+
+        return activity.DisplayName.StartsWith(ConnectionOpenNamePrefix, StringComparison.Ordinal)
+            ? ActivityKindSeen.ConnectionOpen
+            : ActivityKindSeen.Other;
+    }
+
+    /// <summary>Hands one stopped activity to the scope: a statement to <see cref="ReadScope.AddStatement"/>, a connection
+    /// open to <see cref="ReadScope.AddConnectionOpen"/>, anything else nowhere. Split out so a test can run it without a store.</summary>
+    internal static void Observe(ReadScope scope, Activity activity)
+    {
+        switch (Classify(activity, out var sql, out var rows))
+        {
+            case ActivityKindSeen.Statement:
+                scope.AddStatement(sql, activity.Duration.TotalMilliseconds, rows);
+                break;
+            case ActivityKindSeen.ConnectionOpen:
+                scope.AddConnectionOpen(activity.Duration.TotalMilliseconds);
+                break;
+        }
+    }
+
     private static void Stopped(Activity activity)
     {
         try
@@ -138,21 +204,7 @@ internal static class ReadStatementCapture
                 return;
             }
 
-            string? sql = null;
-            long? rows = null;
-            foreach (var tag in activity.TagObjects)
-            {
-                if (tag.Key == "db.query.text")
-                {
-                    sql = tag.Value as string;
-                }
-                else if (tag.Key == "db.response.returned_rows" && tag.Value is not null)
-                {
-                    rows = Convert.ToInt64(tag.Value, System.Globalization.CultureInfo.InvariantCulture);
-                }
-            }
-
-            scope.AddStatement(sql, activity.Duration.TotalMilliseconds, rows);
+            Observe(scope, activity);
         }
         catch
         {
