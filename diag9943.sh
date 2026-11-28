@@ -2,7 +2,4 @@ dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Debug --nologo -v q >
 cd Darling/Darling.Tests/bin/Debug/net10.0-windows
 ./Darling.Tests.exe -class "*ComposeFleetRawWindowLiveTests*" -class "*DailySummaryCreditedPairsLiveTests*" > o.log 2>&1
 grep -E "Total:|\[FAIL\]" o.log | head -4
-grep -A1 -E "pages, the statement" o.log | cut -c1-200 | sed 's/^ */Total: /' | head -3
-grep -E "DIAG9943 Fleet" diag9943.txt | cut -c1-200 | sed 's/^ */Total: /'
-awk '/DIAG9943 Fleet pages/{f=1} /DIAG9943 Daily/{f=0} f' diag9943.txt | grep -E "Scan|Workers|Join|Execution Time|Buffers: shared hit=[0-9]+$" | cut -c1-200 | sed 's/^ */Total: /' | head -24
-awk '/DIAG9943 Daily noindexscan/{f=1} f' diag9943.txt | grep -E "Scan|Execution Time|Join" | cut -c1-200 | sed 's/^ */Total: /' | head -24
+grep -A4 "Fleet.*\[FAIL\]" o.log | cut -c1-250 | sed "s/^ */Total: /"
