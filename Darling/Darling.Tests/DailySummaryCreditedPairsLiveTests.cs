@@ -95,9 +95,7 @@ public sealed class DailySummaryCreditedPairsLiveTests
             var lines = new System.Text.StringBuilder();
             await using var dr = await dc.ExecuteReaderAsync(ct);
             while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
-            Console.WriteLine("DIAG9943 Daily text
-" + sql + "
-" + lines);
+            Console.WriteLine("DIAG9943 Daily text\n" + sql + "\n" + lines);
         }
         var nodes = new List<(string Type, string Index, double Loops, double Rows)>();
         Collect(plan.RootElement[0].GetProperty("Plan"), nodes);
