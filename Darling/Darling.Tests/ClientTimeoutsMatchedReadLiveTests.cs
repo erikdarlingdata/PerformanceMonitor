@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -215,13 +216,98 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
         });
     }
 
+    /* #9881: Darling reads the calls first and binds them as arrays. Each read must give the rows it gives when it reads the calls itself. */
+    [Fact]
+    public async Task ThePlantedWeekReads_GivenTheCallsAsArrays_ReadTheSameRows_AsReadingTheCallsThemselves()
+    {
+        await RunAsync(async (connection, t0, ct) =>
+        {
+            var start = t0.AddDays(-7);
+            var end = t0.AddDays(1);
+            var calls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), ServerId, start, end, 60, ct);
+            Assert.True(calls.Count > 40, "the planted week must hold calls beyond the named cases");
+
+            var groups = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true), start, end, ct);
+            Assert.Contains(groups, row => !row.EndsWith("|0", StringComparison.Ordinal));
+            Assert.Equal(groups, await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true, callsAt: 4), start, end, ct, calls));
+            Assert.Equal(groups, await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", callsAt: 3), start, null, ct, calls));
+
+            var matchedCalls = await ReadAsync(connection, AttentionWindowSql.MatchedCalls("attention_events", 500), start, end, ct);
+            Assert.True(matchedCalls.Count > 40, "the planted week must hold matched calls beyond the named cases");
+            Assert.Equal(matchedCalls, await ReadAsync(connection, AttentionWindowSql.MatchedCalls("attention_events", 500, callsAt: 4), start, end, ct, calls));
+
+            var samples = await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500), start, end, ct);
+            Assert.Contains(samples, row => row.EndsWith("|True", StringComparison.Ordinal));
+            Assert.Equal(samples, await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500, callsAt: 4), start, end, ct, calls));
+
+            var baselineCalls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.BaselineCalls("attention_events"), ServerId, start, end, 60, ct);
+            Assert.Equal(calls.Count, baselineCalls.Count);
+            var minutes = await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), start, end, ct);
+            Assert.Equal(minutes, await ReadAsync(connection, AttentionWindowSql.BaselineMinutes("collection_log", "attention_events", callsAt: 4), start, end, ct, baselineCalls));
+        });
+    }
+
+    /* #9881: with the calls as arrays the join also keys on the second, each call offered to the seconds beside its own. A pair whose two
+       times sit in different seconds must still meet, up to and including 100 ms apart, and not one millisecond further. */
+    [Fact]
+    public async Task APairAcrossASecondBoundary_IsMatchedUpTo100Ms_WithTheCallsAsArrays()
+    {
+        await RunAsync(async (connection, t0, ct) =>
+        {
+            var run = t0.AddMinutes(30);
+            var boundary = run.AddSeconds(-10);
+            long id = 98812000000;
+            async Task PairAsync(string db, int session, int sampleMs, int callMs)
+            {
+                await RowAsync(connection, id++, run, "sample", 0, db, "app", null, 4_000, boundary.AddMilliseconds(sampleMs), session, ct);
+                await RowAsync(connection, id++, run, "aborted", 0, db, "app", "dbo.P: EXEC dbo.P", 30_000_000, boundary.AddMilliseconds(callMs), session, ct);
+            }
+
+            await PairAsync("call_in_next_second", 901, -50, 40);
+            await PairAsync("call_in_previous_second", 902, 40, -50);
+            await PairAsync("exactly_100ms_after", 903, -50, 50);
+            await PairAsync("exactly_100ms_before", 904, 50, -50);
+            await PairAsync("101ms_after", 905, -50, 51);
+            await PairAsync("101ms_before", 906, 51, -50);
+            await PairAsync("one_second_after", 907, -500, 500);
+
+            var start = run.AddMinutes(-1);
+            var end = run.AddMinutes(1);
+            var calls = await AttentionCallArrays.ReadAsync(connection, AttentionWindowSql.Calls("attention_events", bounded: true), ServerId, start, end, 60, ct);
+            Assert.Equal(7, calls.Count);
+
+            var groups = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true, callsAt: 4), start, end, ct, calls);
+            var parts = groups.Select(r => r.Split('|')).ToDictionary(f => f[1], f => string.Join(",", f.Skip(3)));
+            const string Matched = "1,0,0,0,1";
+            const string Short = "1,1,0,0,0";
+            Assert.Equal(Matched, parts["call_in_next_second"]);
+            Assert.Equal(Matched, parts["call_in_previous_second"]);
+            Assert.Equal(Matched, parts["exactly_100ms_after"]);
+            Assert.Equal(Matched, parts["exactly_100ms_before"]);
+            Assert.Equal(Short, parts["101ms_after"]);
+            Assert.Equal(Short, parts["101ms_before"]);
+            Assert.Equal(Short, parts["one_second_after"]);
+            Assert.Equal(await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true), start, end, ct), groups);
+
+            var matchedCalls = await ReadAsync(connection, AttentionWindowSql.MatchedCalls("attention_events", 500, callsAt: 4), start, end, ct, calls);
+            string[] matchedNames = ["call_in_next_second", "call_in_previous_second", "exactly_100ms_after", "exactly_100ms_before"];
+            Assert.Equal(matchedNames, matchedCalls.Select(r => r.Split('|')[2]).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+            Assert.Equal(await ReadAsync(connection, AttentionWindowSql.MatchedCalls("attention_events", 500), start, end, ct), matchedCalls);
+
+            var samples = await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500, callsAt: 4), start, end, ct, calls);
+            Assert.Equal(4, samples.Count(row => row.EndsWith("|True", StringComparison.Ordinal)));
+            Assert.Equal(await ReadAsync(connection, AttentionWindowSql.Samples("attention_events", 500), start, end, ct), samples);
+        });
+    }
+
     private static async Task<Dictionary<string, string>> GroupsByDatabaseAsync(NpgsqlConnection connection, DateTime t0, CancellationToken ct)
     {
         var rows = await ReadAsync(connection, AttentionWindowSql.SampleGroups("attention_events", bounded: true), t0.AddMinutes(-1), t0.AddMinutes(12), ct);
         return rows.Select(r => r.Split('|')).ToDictionary(f => f[1] == "(null)" ? "(null)/" + f[2] : f[1], f => string.Join(",", f.Skip(3)));
     }
 
-    private static async Task<List<string>> ReadAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime? end, CancellationToken ct)
+    private static async Task<List<string>> ReadAsync(
+        NpgsqlConnection connection, string sql, DateTime start, DateTime? end, CancellationToken ct, AttentionCallArrays? calls = null)
     {
         using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue(NpgsqlDbType.Integer, ServerId);
@@ -230,6 +316,8 @@ ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event
         {
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end.Value, DateTimeKind.Unspecified));
         }
+
+        calls?.AddTo(command);
 
         var rows = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct);
