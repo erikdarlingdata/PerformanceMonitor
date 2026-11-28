@@ -448,11 +448,57 @@ internal static class DarlingStoreLogins
         if (failure is not null)
         {
             logger.LogWarning(
-                "Custom alert evaluator not started: the store did not accept the {Login} login that postgres.webConnectionString names ({Message}). It stays down until the next start. Run tools/provision-roles.sql to create the web login, or fix the login and password in postgres.webConnectionString.",
+                "Custom alert evaluator not started: the store did not accept the {Login} login that postgres.webConnectionString names ({Message}). It stays down until the next start. Run provision-roles.sql (in the install folder, see docs/darling/linux.md) to create the web login, or fix the login and password in postgres.webConnectionString.",
                 CustomAlertLoginName(resolved), failure.Message);
         }
 
-        return accepted ? resolved : null;
+        if (!accepted)
+        {
+            return null;
+        }
+
+        /* #9937: the owner-by-name warning above is by name only, so the admin login, or any login that holds the admin role's grants, got
+           none. Ask the store the question the web dashboard asks before it listens on the network. The evaluator still runs as this login
+           either way, as it does for the owner login. A login that is the owner by name has been warned about already, so it is not
+           warned twice. */
+        if (!(TryReadLoginUsers(resolved, postgres.ConnectionString, out var configuredUser, out var ownerUser)
+                && !string.IsNullOrEmpty(configuredUser)
+                && string.Equals(configuredUser, ownerUser, StringComparison.Ordinal)))
+        {
+            var probe = await ProbeSurfaceLoginAsync(Surface.Web, postgres, cancellationToken);
+            if (CustomAlertLoginProbeWarning(CustomAlertLoginName(resolved), probe) is { } warning)
+            {
+                logger.LogWarning("{Warning}", warning);
+            }
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// #9937: the Warning for a custom-alert evaluator login the exposure check does not call <see cref="LoginProbeVerdict.Unprivileged"/>,
+    /// or null when it does. The evaluator runs the operator's rules (SQL they wrote) as this login, so a login that outranks the web role's
+    /// grants is named, with the same list the web dashboard's refusal gives, and the fix. A probe that could not run says so with its error
+    /// class. Neither stops the evaluator. Constant text and the login's user name only: never the connection string.
+    /// </summary>
+    internal static string? CustomAlertLoginProbeWarning(string login, LoginProbeResult probe)
+    {
+        var role = DarlingManagedPostgres.WebRoleName;
+        return probe.Verdict switch
+        {
+            LoginProbeVerdict.Unprivileged => null,
+            LoginProbeVerdict.Privileged =>
+                $"The custom alert evaluator runs user rules as the {login} login from postgres.webConnectionString, a login the exposure check refuses: "
+                + $"it is {LoginProbeRefusesText}, any of which outranks the grants a user rule should be held to. "
+                + "The evaluator still runs as that login. "
+                + $"Set postgres.webConnectionString to the {role} role that provision-roles.sql creates "
+                + "(the script that ships with the install, described in docs/darling/linux.md), then restart the service.",
+            _ =>
+                $"The custom alert evaluator runs user rules as the {login} login from postgres.webConnectionString, and could not confirm that login is "
+                + $"limited ({probe.ErrorClass ?? "no error class"}). The evaluator still runs as that login. "
+                + $"Make sure postgres.webConnectionString names the {role} role that provision-roles.sql creates "
+                + "(the script that ships with the install, described in docs/darling/linux.md) and connects, then restart the service.",
+        };
     }
 
     /// <summary>
@@ -792,7 +838,7 @@ internal static class DarlingStoreLogins
             + $"That gives up what the least-privilege {role} role holds it to: the secret-column carve (the SMTP password, "
             + "the webhook URLs, the PagerDuty routing key and the monitored servers' stored passwords are readable to it), "
             + "the narrow write grants (every table in the store is writable to it) and the statement_timeout backstop "
-            + $"(nothing stops a runaway query at the store). Set {setting} to the {role} role tools/provision-roles.sql creates.";
+            + $"(nothing stops a runaway query at the store). Set {setting} to the {role} role that provision-roles.sql (in the install folder, see docs/darling/linux.md) creates.";
 
         return reason is null ? warning : warning + " " + reason;
     }
@@ -1251,7 +1297,7 @@ internal static class DarlingStoreLogins
         {
             return $"{setting} logs in as {(string.IsNullOrEmpty(configuredUser) ? "the default user" : $"'{configuredUser}'")}, the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "
                 + $"what the least-privilege {role} role holds it to: the secret-column carve, the narrow write grants and the "
-                + $"statement_timeout backstop. Point {setting} at the {role} role tools/provision-roles.sql creates.";
+                + $"statement_timeout backstop. Point {setting} at the {role} role that provision-roles.sql (in the install folder, see docs/darling/linux.md) creates.";
         }
 
         if (verdict?.Provisioned == true
@@ -1275,7 +1321,7 @@ internal static class DarlingStoreLogins
         {
             return $"{setting} logs in as '{configuredUser}', the read-only login meant for remote and locked-down Viewer seats. "
                 + $"The web dashboard has its own '{role}' login that holds the writes its pages make (mute rules, dismissals, custom alerts, "
-                + $"server changes and the run-now buttons). Set a password for the {role} role in tools/provision-roles.sql, run the script again, "
+                + $"server changes and the run-now buttons). Set a password for the {role} role in provision-roles.sql (in the install folder, see docs/darling/linux.md), run the script again, "
                 + $"and point {setting} at the {role} login. Until then, once the script has been run again, those writes are refused.";
         }
 

@@ -353,7 +353,7 @@ public sealed class DarlingStoreLoginsTests
         Assert.Contains("the secret-column carve", warning, StringComparison.Ordinal);
         Assert.Contains("the narrow write grants", warning, StringComparison.Ordinal);
         Assert.Contains("the statement_timeout backstop", warning, StringComparison.Ordinal);
-        Assert.Contains($"Set {setting} to the {role} role tools/provision-roles.sql creates.", warning, StringComparison.Ordinal);
+        Assert.Contains($"Set {setting} to the {role} role that provision-roles.sql (in the install folder, see docs/darling/linux.md) creates.", warning, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -397,7 +397,7 @@ public sealed class DarlingStoreLoginsTests
         Assert.Equal(ViewerLogin, web.ConnectionString);
         Assert.NotNull(web.Warning);
         Assert.Contains("postgres.webConnectionString logs in as 'viewer', the read-only login meant for remote and locked-down Viewer seats.", web.Warning, StringComparison.Ordinal);
-        Assert.Contains("Set a password for the web role in tools/provision-roles.sql, run the script again, and point postgres.webConnectionString at the web login.", web.Warning, StringComparison.Ordinal);
+        Assert.Contains("Set a password for the web role in provision-roles.sql (in the install folder, see docs/darling/linux.md), run the script again, and point postgres.webConnectionString at the web login.", web.Warning, StringComparison.Ordinal);
 
         /* The user name is read from the string, so a spelling that differs only in the other keys is still viewer. */
         Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(
@@ -918,7 +918,7 @@ public sealed class DarlingStoreLoginsTests
             ("mcp", DarlingManagedRoles.ComposeStoreRoleMarker)));
 
         Assert.NotNull(refusal);
-        Assert.Contains("'admin' (not created by Darling) and 'viewer' (created by tools/provision-roles.sql)", refusal, StringComparison.Ordinal);
+        Assert.Contains("'admin' (not created by Darling) and 'viewer' (created by provision-roles.sql)", refusal, StringComparison.Ordinal);
         Assert.DoesNotContain("'mcp'", refusal, StringComparison.Ordinal);
         Assert.Contains("rather than re-key their passwords", refusal, StringComparison.Ordinal);
     }
