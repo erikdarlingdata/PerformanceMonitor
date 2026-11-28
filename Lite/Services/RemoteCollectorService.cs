@@ -459,6 +459,8 @@ public partial class RemoteCollectorService
                 _collectorHealth.Remove(key);
             _refusedBackoffs.TryRemove(serverId, out _);
         }
+
+        _skipNotice.Forget(serverId);
     }
 
     /// <summary>
@@ -477,6 +479,8 @@ public partial class RemoteCollectorService
             foreach (var backedOffServer in _refusedBackoffs.Keys.Where(k => !activeServerIds.Contains(k)).ToList())
                 _refusedBackoffs.TryRemove(backedOffServer, out _);
         }
+
+        _skipNotice.ForgetExcept(activeServerIds);
     }
 
     /// <summary>
@@ -556,6 +560,11 @@ public partial class RemoteCollectorService
     /* #6186: per server, the collectors the server keeps refusing with the same answer, or whose statement keeps timing out
        (#8891), and when each is tried next. In memory: a restart tries every collector once at its normal interval. */
     private readonly ConcurrentDictionary<int, RefusedCollectorBackoff> _refusedBackoffs = new();
+
+    /* #9938: the target facts behind each gated collector's last skip line, so the line is written at INFO once and not every cycle. */
+    private readonly CollectorSkipNotice _skipNotice = new();
+
+    internal CollectorSkipNotice SkipNotice => _skipNotice;
 
     internal RefusedCollectorBackoff GetRefusedBackoff(int serverId) =>
         _refusedBackoffs.GetOrAdd(serverId, static _ => new RefusedCollectorBackoff());
@@ -890,7 +899,19 @@ public partial class RemoteCollectorService
 
             if (!CollectorCatalog.AppliesTo(collectorName, target))
             {
-                AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED (edition {engineEdition}, version {serverStatus.SqlMajorVersion})");
+                /* #9938: the line describes the target (the gate's own condition stays in the definition); it is written at INFO
+                   once per server and collector, and again when the target's facts change, and at DEBUG on every other cycle. */
+                var skipLine = CollectorSkipNotice.Describe(collectorName, target, engineEdition);
+                var serverId = GetServerId(server);
+                if (_skipNotice.ShouldLogAtInfo(serverId, collectorName, skipLine))
+                {
+                    AppLogger.Info("Collector", $"  [{server.DisplayName}] {skipLine}");
+                }
+                else
+                {
+                    AppLogger.Debug("Collector", $"  [{server.DisplayName}] {skipLine}");
+                }
+
                 return;
             }
 
