@@ -289,7 +289,7 @@ public sealed class CollectorSkipNoticeTests : IClassFixture<SharedDuckDbFixture
     public async Task AChangeInMsdbAccessAlone_WritesNoSecondInfoLine()
     {
         AppLogger.SetMinimumLevel(LogLevel.Debug);
-        const string name = "skip-msdb-9938";
+        const string name = "skip-access-change-9938";
         var (service, server, status) = RdsServer(name);
 
         AppLogger.DrainBufferedLines();
