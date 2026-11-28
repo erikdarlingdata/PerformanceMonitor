@@ -227,15 +227,6 @@ LIMIT 5";
         };
         AddWindowParameters(cmd, windowStart, windowEnd);
 
-        await using (var diag = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + sql, connection) { CommandTimeout = LiveTimeoutSeconds })
-        {
-            AddWindowParameters(diag, windowStart, windowEnd);
-            var lines = new System.Text.StringBuilder();
-            await using var dr = await diag.ExecuteReaderAsync(ct);
-            while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
-            Diag9943.W("DIAG9943 TopCpu " + (sql.Length > 300 ? sql[..60].Replace(' ', ' ') : "oracle") + "\n" + lines);
-        }
-
         return ExplainJoinProbe.RowsResolvedAgainst((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable);
     }
 

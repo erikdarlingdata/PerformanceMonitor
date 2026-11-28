@@ -204,10 +204,6 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
             Assert.Contains(rows, r => r.StartsWith("usp_OrderEdge|14", StringComparison.Ordinal));
             Assert.DoesNotContain(rows, r => r.StartsWith("usp_OrderOutside|", StringComparison.Ordinal));
 
-            Diag9943.W("DIAG9943 Fleet server_version=" + connection.PostgreSqlVersion + " chunks=" + chunks
-                + " windowRows=" + await ScalarAsync(connection, $"SELECT count(*) FROM collect.procedure_stats WHERE collection_time >= '{end.AddHours(-4):yyyy-MM-dd HH:mm:ss}' AND collection_time <= '{end:yyyy-MM-dd HH:mm:ss}'", ct)
-                + " allRows=" + await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct)
-                + " heapPages=" + await ScalarAsync(connection, "SELECT sum(pg_relation_size(ch)/8192) FROM show_chunks('collect.procedure_stats') ch", ct));
             var pages = await DataPagesAsync(connection, compiled.Sql, compiled, ct);
             var devPages = await DataPagesAsync(connection, devSql, compiled, ct);
             Assert.True(pages < devPages, $"the panel with the bounded server list read {pages} pages, the statement without the list read {devPages}");
@@ -297,14 +293,6 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
         {
             await using var command = Command(connection, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, compiled);
             pages = ExplainBuffers.DataPages(await command.ExecuteScalarAsync(ct));
-        }
-
-        await using (var diag = Command(connection, "EXPLAIN (ANALYZE, BUFFERS) " + sql, compiled))
-        {
-            var lines = new System.Text.StringBuilder();
-            await using var dr = await diag.ExecuteReaderAsync(ct);
-            while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
-            Diag9943.W("DIAG9943 Fleet pages=" + pages + "\n" + sql + "\n" + lines);
         }
 
         return pages;
