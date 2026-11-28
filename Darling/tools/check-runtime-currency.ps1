@@ -64,6 +64,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# A thrown message is printed whole, on one line. PowerShell's own error view wraps it at the console width, which
+# splits the path and the sentence at a host-dependent column (a Linux runner broke the name across three lines), so a
+# reader or a test searching the output for "<file> no longer names ..." found nothing (#9942).
+trap {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+
 if ([string]::IsNullOrWhiteSpace($FetchScript)) {
     $FetchScript = Join-Path $PSScriptRoot 'fetch-pg-runtime.ps1'
 }

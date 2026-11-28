@@ -364,6 +364,16 @@ public sealed class StoreCheckpoints9414ClockLiveTests
     public Task ALogOnANonUtcClock_IsKeptAsUtc_EachCompleteLineOnItsOwnCheckpoint_AndOnlyACheckpointAnotherFollowedIsNotCompleted() => StoreCheckpoints9414LiveTests.WithStoreAsync(false, async (connection, postgres, ct) =>
     {
         const string Zone = "Asia/Kolkata";
+        /* ALTER SYSTEM writes postgresql.auto.conf, which a setting fixed on the server's command line outranks: the compose store and the Linux
+           test container start with log_timezone=UTC there, so the reload never moves the clock. The product reads whatever the server reports,
+           so a store whose clock cannot move has nothing for this test to prove. */
+        await using (var sourceCommand = new NpgsqlCommand("SELECT source FROM pg_settings WHERE name = 'log_timezone'", connection))
+        {
+            var clockSource = (string?)await sourceCommand.ExecuteScalarAsync(ct);
+            Assert.SkipWhen(clockSource is "command line" or "environment variable" or "override",
+                $"The store's log_timezone is fixed by its {clockSource}, which ALTER SYSTEM cannot override, so the log clock cannot be moved off UTC here.");
+        }
+
         try
         {
             try

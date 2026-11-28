@@ -1,6 +1,8 @@
 using System;
 using System.Globalization;
 
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
@@ -69,13 +71,13 @@ public static class ConfigAuditGuidance
         if (ratio > 0.95)
         {
             return new MaxMemoryAudit(cap, "review",
-                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is {ratio.ToString("P0", culture)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
+                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is {PercentText.Of(ratio)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
                 $"Consider reducing to ~{cap.ToString("N0", culture)} MB to leave room for the OS.");
         }
         if (ratio < 0.50 && totalMb > 8192)
         {
             return new MaxMemoryAudit(cap, "review",
-                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is only {ratio.ToString("P0", culture)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
+                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is only {PercentText.Of(ratio)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
                 $"SQL Server may be under-utilizing available memory. Consider raising to ~{cap.ToString("N0", culture)} MB unless other " +
                 "applications need the remaining RAM.");
         }

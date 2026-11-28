@@ -904,7 +904,7 @@ internal sealed class ObjectUsageChainBuilder
         }
 
         var note = new StringBuilder(
-            $"The object usage chain is over its cap of {capRows * EstimatedBytesPerRow / 1048576.0:F1} MB ({CapShareOfResetPoint:P0} of the hot store reset point, hot_store_reset_mb).");
+            $"The object usage chain is over its cap of {capRows * EstimatedBytesPerRow / 1048576.0:F1} MB ({PercentText.Of(CapShareOfResetPoint)} of the hot store reset point, hot_store_reset_mb).");
         if (dropped.Count > 0)
         {
             note.Append(CultureInfo.InvariantCulture,

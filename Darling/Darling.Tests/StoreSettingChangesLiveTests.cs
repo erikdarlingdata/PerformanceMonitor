@@ -203,16 +203,28 @@ public sealed class StoreSettingChangesLiveTests
         try
         {
             await StoreSettingChanges.CaptureAsync(capture, ct);
-            var original = (string)(await ScalarAsync(capture, "SELECT setting FROM pg_settings WHERE name = 'work_mem'", ct))!;
-            var originalSource = (string)(await ScalarAsync(capture, "SELECT source FROM pg_settings WHERE name = 'work_mem'", ct))!;
+
+            /* The first reload a store sees after it starts can flip pending_restart on a setting the server's command line fixes whose file value
+               differs (the TimescaleDB image tunes max_worker_processes and others into postgresql.conf, and the Linux test container and the compose
+               store pass their own on the command line). That is a real row, and it arrives once per start, so a store that has not reloaded yet
+               would put it on this test's first pass. A reload and a capture first settle it, and the reads below name lock_timeout. */
+            await ReloadAsync(source, capture, ct);
+            await StoreSettingChanges.CaptureAsync(capture, ct);
+            var original = (string)(await ScalarAsync(capture, "SELECT setting FROM pg_settings WHERE name = 'lock_timeout'", ct))!;
+            var originalSource = (string)(await ScalarAsync(capture, "SELECT source FROM pg_settings WHERE name = 'lock_timeout'", ct))!;
+
+            /* A setting still at its built-in default, so writing it to the file moves its source from "default" to "configuration file". The
+               TimescaleDB image tunes work_mem into postgresql.conf, where the source is already "configuration file" (only the file differs),
+               so work_mem has no source to move on that store. */
+            Assert.SkipWhen(originalSource != "default", $"lock_timeout comes from '{originalSource}' on this store, so writing it to the file moves no source.");
 
             /* The same value as the one in force, written to the file: the value does not move, only where it comes from. */
-            await ExecAsync(source, $"ALTER SYSTEM SET work_mem = {original}", ct);
+            await ExecAsync(source, $"ALTER SYSTEM SET lock_timeout = {original}", ct);
             try
             {
                 await ReloadAsync(source, capture, ct);
                 Assert.Equal(1, (await StoreSettingChanges.CaptureAsync(capture, ct)).Changes);
-                var row = Assert.Single((await ReadAsync(source, null, ct)).GetProperty("changes").EnumerateArray().ToArray());
+                var row = Assert.Single((await ReadAsync(source, "lock_timeout", ct)).GetProperty("changes").EnumerateArray().ToArray());
                 Assert.Equal(original, row.GetProperty("old_value").GetString());
                 Assert.Equal(original, row.GetProperty("new_value").GetString());
                 Assert.Equal(originalSource, row.GetProperty("old_source").GetString());
@@ -220,11 +232,11 @@ public sealed class StoreSettingChangesLiveTests
             }
             finally
             {
-                await ResetAsync(source, capture, "work_mem", CancellationToken.None);
+                await ResetAsync(source, capture, "lock_timeout", CancellationToken.None);
             }
 
             Assert.Equal(1, (await StoreSettingChanges.CaptureAsync(capture, ct)).Changes);
-            var page = await ReadAsync(source, null, ct, limit: 1);
+            var page = await ReadAsync(source, "lock_timeout", ct, limit: 1);
             Assert.True(page.GetProperty("truncated").GetBoolean());
             var newest = Assert.Single(page.GetProperty("changes").EnumerateArray().ToArray());
             Assert.Equal("configuration file", newest.GetProperty("old_source").GetString());

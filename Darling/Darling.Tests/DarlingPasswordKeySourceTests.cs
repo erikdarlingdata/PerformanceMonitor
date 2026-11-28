@@ -702,6 +702,15 @@ public sealed class DarlingPasswordKeySourceTests
             var secret = Convert.ToBase64String(pkcs8);
             File.WriteAllText(outside, secret);
             File.WriteAllText(inside, secret);
+            if (!OperatingSystem.IsWindows())
+            {
+                /* The key must be private for the fingerprint line to be the only line: a default 644 key file or a 755
+                   folder is the product's (correct) read-access and open-directory warning on Linux, which would
+                   replace the fingerprint this test reads back. */
+                File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                File.SetUnixFileMode(inside, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                File.SetUnixFileMode(keys, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
 
             foreach (var setting in new[] { "", ",\"passwordKey\":\"\"", ",\"passwordKey\":\"  \"" })
             {

@@ -728,7 +728,10 @@ INSERT INTO collect.zz_sz_plain SELECT g, repeat('x', 200) FROM generate_series(
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var reference = new System.Collections.Generic.Dictionary<string, (long Total, long Heap, long Index, long Toast, int Chunks)>(StringComparer.Ordinal);
-        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(true), connection) { CommandTimeout = 300 })
+        /* The statement reads relallfrozen only from 18, so the oracle is built for the version this connection reports. */
+        await using var versionCommand = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection);
+        var serverVersion = (int)(await versionCommand.ExecuteScalarAsync(ct))!;
+        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(true, serverVersion), connection) { CommandTimeout = 300 })
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))

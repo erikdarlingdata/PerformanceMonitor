@@ -53,6 +53,50 @@ public sealed class FinOpsRecommendationFiguresTests
         });
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("de-DE")]
+    public void Memory_PercentHasNoSpaceBeforeTheSign_WhateverTheHostCulture(string cultureName)
+    {
+        // #9942: P0 follows the host's percent pattern ("25 %" on the invariant culture a Linux host without a locale
+        // runs under, and in de-DE), so the same advice read differently per host. The text is read by people and agents
+        // on other machines, so it always prints "25%".
+        InCulture(cultureName, () =>
+        {
+            var memory = FinOpsRecommendationFigures.MemoryRightSizing(Util(16384), 4096, 16, "w", 0m)!;
+            Assert.Contains("uses 25% of 16GB RAM", memory.Finding, StringComparison.Ordinal);
+            Assert.Contains("(25% utilization)", memory.Detail, StringComparison.Ordinal);
+        });
+    }
+
+    [Theory]
+    [InlineData(0.015, 0)]
+    [InlineData(0.015, 1)]
+    [InlineData(0.0045, 0)]
+    [InlineData(0.0045, 1)]
+    [InlineData(-0.25, 0)]
+    [InlineData(-0.25, 1)]
+    [InlineData(1.1, 0)]
+    [InlineData(1.1, 1)]
+    [InlineData(12.3456, 0)]
+    [InlineData(12.3456, 1)]
+    public void PercentText_PrintsExactlyTheDigitsEnUsPercentFormatPrints_OnEveryHostCulture(double value, int decimals)
+    {
+        // #9942: a custom pattern over fraction * 100 moved decimal midpoints (0.015 gave "2%" where P0 gave "1%", and
+        // 0.0045 gave "0.5%" where P1 gave "0.4%"). The text keeps the standard P format, so only the space before the
+        // sign differs from the host's own pattern.
+        var expected = value.ToString("P" + decimals, CultureInfo.GetCultureInfo("en-US"));
+        var expectedDecimal = ((decimal)value).ToString("P" + decimals, CultureInfo.GetCultureInfo("en-US"));
+        foreach (var cultureName in new[] { "", "de-DE", "en-US" })
+        {
+            InCulture(cultureName, () =>
+            {
+                Assert.Equal(expected, PercentText.Of(value, decimals));
+                Assert.Equal(expectedDecimal, PercentText.Of((decimal)value, decimals));
+            });
+        }
+    }
+
     // ── Memory right-sizing (original :269 sampleCount >= 16, :272-276 ratio, target and GB compare, :282 severity, :288 savings) ──
 
     [Fact]
