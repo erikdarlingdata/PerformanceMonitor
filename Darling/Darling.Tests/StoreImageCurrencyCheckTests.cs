@@ -122,7 +122,7 @@ public sealed class StoreImageCurrencyCheckTests
         if (run is null) { return; }
 
         Assert.NotEqual(0, run.ExitCode);
-        Assert.True(run.Output.Contains(PinFiles[1] + " no longer names a timescale/timescaledb image", StringComparison.Ordinal), "OUTPUT[[" + run.Output + "]]");
+        Assert.Contains(PinFiles[1] + " no longer names a timescale/timescaledb image", run.Output, StringComparison.Ordinal);
     }
 
     /* Runs the script under pwsh with the image check only. Null when pwsh is missing. The script prints GitHub
