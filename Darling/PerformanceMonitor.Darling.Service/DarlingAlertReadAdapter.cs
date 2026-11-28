@@ -1001,21 +1001,47 @@ ORDER BY collection_time DESC
         /* #9024: the baseline is a 7-day read, so during the store 277 copy it must see the rows still waiting in the legacy table. */
         var minutes = await AttentionReadRelation.ReadAsync(connection, async events =>
         {
-            await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", events), connection)
+            /* #9881: the captured calls of the range are read first and bound to the minutes read as arrays, so the planner knows how many there
+               are. Both statements run in one REPEATABLE READ transaction, so a collection that commits between them cannot bring samples whose
+               calls the arrays do not hold. The transaction starts inside the relation read, so the second attempt AttentionReadRelation makes
+               after an undefined table runs in a transaction of its own: a failed statement leaves its transaction aborted. */
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            var calls = new AttentionCallArrays();
+            await using var callsCommand = new NpgsqlCommand(AttentionWindowSql.BaselineCalls(events), connection, transaction)
+            {
+                CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
+            };
+            callsCommand.Parameters.AddWithValue(serverId);
+            callsCommand.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
+            callsCommand.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
+            await using (var callsReader = await callsCommand.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await callsReader.ReadAsync(cancellationToken))
+                {
+                    _ = calls.Add(callsReader);
+                }
+            }
+
+            await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", events, callsAt: 4), connection, transaction)
             {
                 CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
             };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
+            calls.AddTo(command);
 
             var rows = new List<AttentionMinute>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
-                rows.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    rows.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
+                }
             }
 
+            await transaction.CommitAsync(cancellationToken);
             return rows;
         }, cancellationToken);
 

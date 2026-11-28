@@ -92,7 +92,13 @@ public sealed record ComposeRunContext(
 /// compiler actually took (<see cref="ComposeRoute.Raw"/> for annotation queries, whose event tables have no
 /// rollups) — the runner reads the route to tell the user when a raw/hourly fallback cannot retain the whole
 /// requested window on a retention-active store (#1665).</summary>
-public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route);
+public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route)
+{
+    /// <summary>#9960: the statement folds the ad hoc handles of its module pre-aggregate, an uncorrelated IN over m's keys that
+    /// PostgreSQL hashes only when it estimates the key set fits <c>work_mem</c> times <c>hash_mem_multiplier</c>. The panel runner
+    /// raises that limit for this statement alone (<c>ComposePanelRunner.RaiseModuleKeyHashLimitAsync</c>).</summary>
+    public bool FoldsAdHocHandles { get; init; }
+}
 
 /// <summary>
 /// Compiles a validated <see cref="PanelPlan"/> into a parameterized Postgres query. IRON RULES, all
@@ -130,6 +136,9 @@ public static class ComposeCompiler
     private const char FactAlias = 'f';
 
     private const char ModuleAlias = 'm';
+
+    /// <summary>The alias of the module CTE where the pre-aggregate reads only its keys (#9960, the ad hoc fold).</summary>
+    private const string ModuleKeyAlias = "mk";
 
     /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
     private const string QueryStoreTable = "query_store_stats";
@@ -593,10 +602,12 @@ public static class ComposeCompiler
     /// live exactness oracle in <c>ComposeQueryStoreRankedSingleScanLiveTests</c> and the plan test's two-scan baseline;
     /// no product path passes <c>false</c>. <paramref name="sharedQueryStoreDedupe"/> is the same kind of switch for #9151: <c>false</c>
     /// compiles the all-raw Query Store RankedTimeSeries statement that builds the deduped rows twice, the live oracle's baseline.
+    /// <paramref name="moduleJoinPreAggregate"/> is the switch for #9960: <c>false</c> compiles the module-join statement that joins
+    /// every fact row to the module rows before it aggregates, the live oracle's baseline in <c>ComposeModulePreAggregateLiveTests</c>.
     /// </summary>
     internal static (ComposeCompiled? Compiled, string? Error) CompileCore(
         PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null,
-        bool sharedQueryStoreDedupe = true)
+        bool sharedQueryStoreDedupe = true, bool moduleJoinPreAggregate = true)
     {
         if (plan is null)
         {
@@ -722,11 +733,14 @@ public static class ComposeCompiler
         var filterClauses = new List<string>(plan.Filters.Count);
         var pushableFilterClauses = new List<string>();
         var partitionFilterClauses = new List<string>();
+        var factFilterClauses = new List<string>();
+        var moduleFilterClauses = new List<string>();
         var restrictDedupe = false;
         foreach (var filter in plan.Filters)
         {
             var clause = BuildFilterClause(filter, context, p);
             filterClauses.Add(clause);
+            (filter.Dimension.ViaModuleJoin ? moduleFilterClauses : factFilterClauses).Add(clause);
             if (!filter.Dimension.ViaModuleJoin
                 && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
             {
@@ -779,8 +793,69 @@ public static class ComposeCompiler
                 AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null, authorizedParam) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"),
                 ReadsFleetRollup(plan, context, hasServerScope, splitRawParam is not null));
 
-        /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
-        string PrimaryValue() => singleScan
+        /* #9960: the module pre-aggregate, on every raw route that joins modules (raw and hourly-raw-edges, with either module CTE).
+           m holds each (server_name, sql_handle) once, so every fact row of one pair joins the same module row (or none). The fact
+           rows are therefore aggregated first, to one row per (server_name, sql_handle, the other fact columns the statement names,
+           and the bucket of a series), holding the partials of the panel's aggregate (a handle with no row in m folds into one
+           NULL-handle row per remaining key, see AppendPreAggregatedFactBody); the join runs over those rows and the outer
+           aggregate combines the partials (TryBuildPartialValueExpr). On a field-size fleet the fact rows outnumber the module rows
+           by far, and joining them row by row sorts every fact row by the join key. An aggregate that does not decompose
+           (percentile_cont, the weighted and gauge ratios) compiles the join over the fact rows. The overlay shares the fact rows,
+           so both values decompose or neither is rewritten. Binds no parameter. */
+        PartialColumns? modulePartials = null;
+        string? modulePrimaryValue = null;
+        string? moduleOverlayValue = null;
+        if (moduleJoinPreAggregate && plan.UsesModuleJoin && !route.IsCagg && !singleScan && stampPlan is null)
+        {
+            var candidatePartials = new PartialColumns(FactAlias);
+            var primary = TryBuildPartialValueExprOver(plan.Measure, plan.Aggregate, plan.Unit, candidatePartials, beforeModuleJoin: true);
+            var second = plan.Overlay is ComposeOverlay moduleOverlay
+                ? TryBuildPartialValueExprOver(moduleOverlay.Measure, moduleOverlay.Aggregate, moduleOverlay.Unit, candidatePartials, beforeModuleJoin: true)
+                : null;
+            if (primary is not null && (plan.Overlay is null || second is not null))
+            {
+                modulePartials = candidatePartials;
+                modulePrimaryValue = primary;
+                moduleOverlayValue = second;
+            }
+        }
+
+        /* The fact columns the pre-aggregated rows keep for the statement outside the join: the join key, each group's fact column
+           (a module dimension's fallback column, when it has one), and the fallback column of a module filter. A filter on a fact
+           column runs inside the pre-aggregate and needs no column outside. */
+        var moduleKeyColumns = new List<string> { "server_name", "sql_handle" };
+        var handleReadOutsideJoin = false;
+        var adHocFold = false;
+        if (modulePartials is not null)
+        {
+            void Keep(string? column)
+            {
+                handleReadOutsideJoin |= string.Equals(column, "sql_handle", StringComparison.Ordinal);
+                if (column is not null && !moduleKeyColumns.Contains(column, StringComparer.Ordinal))
+                {
+                    moduleKeyColumns.Add(column);
+                }
+            }
+
+            foreach (var dim in plan.GroupBy)
+            {
+                Keep(dim.ViaModuleJoin ? dim.FallbackColumn : dim.Column);
+            }
+
+            foreach (var filter in plan.Filters)
+            {
+                if (filter.Dimension.ViaModuleJoin)
+                {
+                    Keep(filter.Dimension.FallbackColumn);
+                }
+            }
+        }
+
+        /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's);
+           a pre-aggregated module join combines its own partials. */
+        string PrimaryValue() => modulePrimaryValue is not null
+            ? modulePrimaryValue
+            : singleScan
             ? partialValue!
             : stampPlan is not null ? stampPlan.PrimaryValue : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route);
 
@@ -790,8 +865,16 @@ public static class ComposeCompiler
            single-scan RankedTimeSeries calls it once, into the base CTE, and the rank and the series both read that
            CTE: they still aggregate the same fact rows, by construction. `indent` nests the text
            inside the CTE without changing the outer query's byte-for-byte shape. */
-        void AppendFactBody(string indent)
+        var factBodyHasWhere = true;
+        void AppendFactBody(string indent, bool bucketed = false)
         {
+            if (modulePartials is not null)
+            {
+                AppendPreAggregatedFactBody(indent, bucketed);
+                return;
+            }
+
+            factBodyHasWhere = true;
             sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null,
                 sharedQsDedupe ? QueryStoreSharedCte : null));
 
@@ -844,6 +927,83 @@ public static class ComposeCompiler
             foreach (var clause in filterClauses)
             {
                 sql.Append(indent).Append("  AND ").Append(clause).Append('\n');
+            }
+        }
+
+        /* #9960: the same fact rows as AppendFactBody, aggregated before the module join. The inner query is the fact relation
+           under the fact alias with the window, the server scope and the fact-column filters, grouped by the kept columns (and
+           the bucket of a series, named as the time column so the outer date_trunc reads it unchanged: date_trunc of a truncated
+           value is that value). The outer alias is the fact alias too, so the join, the group references and the module filters
+           read it by the same names. A module filter stays outside the join: it compares the joined name, which is the same for
+           every fact row of one pre-aggregated row because the join key and the fallback column are both kept. */
+        void AppendPreAggregatedFactBody(string indent, bool bucketed)
+        {
+            var inner = indent + "    ";
+            var keys = moduleKeyColumns.Select(column => FactAlias + "." + column).ToList();
+            var selects = new List<string>(keys);
+            if (!handleReadOutsideJoin)
+            {
+                /* The ad hoc fold. A handle with no row in m joins nothing, so its rows need no group of their own: the handle key
+                   is the fact's handle only when m holds its (server_name, sql_handle), and NULL otherwise. The join then matches
+                   the kept handles exactly as before, and a NULL handle matches no m row, as an unmatched handle does, so every
+                   folded row reads the same '(ad hoc)' name and the same fallback columns (each is a kept column of its own). On a
+                   field-size fleet nearly every handle is ad hoc, so the pre-aggregated rows drop from one per handle to about one
+                   per module handle plus one per (server, other kept columns).
+
+                   The membership test is an uncorrelated IN over m's keys, which the planner runs as a hashed SubPlan (one hash
+                   probe per fact row) only when it estimates the key set fits its hash limit (work_mem times hash_mem_multiplier),
+                   and otherwise as a per-row scan of the materialized keys for every fact row. No statement shape makes the planner
+                   hash; only that size test decides. m holds one row per (server_name, module handle) with a procedure_stats row in
+                   the window: it grows with servers times stored modules, never with ad hoc traffic, and on a field-size fleet the
+                   key set can pass the limit of a small work_mem. The compiled statement says it carries the fold
+                   (ComposeCompiled.FoldsAdHocHandles), and the panel runner raises hash_mem_multiplier for that statement alone so
+                   the limit is at least 64 MB, never lowering it. m is read twice (here and by the join), so the planner
+                   materializes it and computes it once.
+
+                   A statement that reads the fact's handle outside the join (a group, a filter or a fallback column on
+                   sql_handle) keeps the raw handle; no catalog dimension does. */
+                var folded = $"CASE WHEN ({FactAlias}.server_name, {FactAlias}.sql_handle) IN (SELECT {ModuleKeyAlias}.server_name, {ModuleKeyAlias}.sql_handle FROM {ModuleAlias} AS {ModuleKeyAlias}) THEN {FactAlias}.sql_handle END";
+                keys[1] = folded;
+                selects[1] = folded + " AS sql_handle";
+                adHocFold = true;
+            }
+
+            if (bucketed)
+            {
+                keys.Add(BucketOfFact());
+                selects.Add(BucketOfFact() + " AS " + timeColumn);
+            }
+
+            selects.AddRange(modulePartials!.Columns.Select(column => column.Expression + " AS " + column.Name));
+            sql.Append(indent).Append("FROM (\n");
+            sql.Append(inner).Append("SELECT ").Append(string.Join(", ", selects)).Append('\n');
+            sql.Append(inner).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null,
+                null)).Append(" AS ").Append(FactAlias).Append('\n');
+            sql.Append(inner).Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
+            sql.Append(inner).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(" <= ").Append(endParam).Append('\n');
+            if (hasServerScope)
+            {
+                sql.Append(inner).Append("  AND ").Append(FactScope()).Append('\n');
+            }
+            else if (route.Tier == ComposeSourceTier.Raw && s_noTimeOnlyIndexSources.Contains(plan.Measure.SourceTable))
+            {
+                sql.Append(inner).Append("  AND ").Append(FactAlias).Append(".server_id = ANY(").Append(DistinctServerIdsSql(plan.Measure.SourceTable, timeColumn, startParam, endParam)).Append(")\n");
+            }
+
+            foreach (var clause in factFilterClauses)
+            {
+                sql.Append(inner).Append("  AND ").Append(clause).Append('\n');
+            }
+
+            sql.Append(inner).Append("GROUP BY ").Append(string.Join(", ", keys)).Append('\n');
+            sql.Append(indent).Append(") AS ").Append(FactAlias).Append('\n');
+            sql.Append(indent).Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
+                .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
+                .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            factBodyHasWhere = moduleFilterClauses.Count > 0;
+            for (var i = 0; i < moduleFilterClauses.Count; i++)
+            {
+                sql.Append(indent).Append(i == 0 ? "WHERE " : "  AND ").Append(moduleFilterClauses[i]).Append('\n');
             }
         }
 
@@ -1013,7 +1173,7 @@ public static class ComposeCompiler
         {
             /* The second measure (#1606): one more select expression over the SAME fact rows — never a join,
                never a parameter, never a second query. Same route as the primary (the AND-gate above). */
-            selectExprs.Add((stampPlan is not null ? stampPlan.OverlayValue! : BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route)) + " AS value2");
+            selectExprs.Add((moduleOverlayValue ?? (stampPlan is not null ? stampPlan.OverlayValue! : BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route))) + " AS value2");
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
@@ -1023,7 +1183,7 @@ public static class ComposeCompiler
         }
         else
         {
-            AppendFactBody(string.Empty);
+            AppendFactBody(string.Empty, bucketed: plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries);
         }
 
         if (plan.Mode == PanelMode.RankedTimeSeries && !plan.IncludeOther)
@@ -1031,7 +1191,7 @@ public static class ComposeCompiler
             /* No residual requested: non-top-N rows are filtered out entirely (the chart under-reports the
                window total by exactly what they did — the includeOther fold is the honest-total option). The
                single-scan statement has no WHERE of its own (the window, scope and filters are in the base CTE). */
-            sql.Append(singleScan ? "WHERE " : "  AND ").Append(memberOfTopN).Append('\n');
+            sql.Append(singleScan || !factBodyHasWhere ? "WHERE " : "  AND ").Append(memberOfTopN).Append('\n');
         }
 
         if (groupExprs.Count > 0)
@@ -1073,7 +1233,7 @@ public static class ComposeCompiler
                 break;
         }
 
-        return (new ComposeCompiled(sql.ToString(), p.Parameters, route), null);
+        return (new ComposeCompiled(sql.ToString(), p.Parameters, route) { FoldsAdHocHandles = adHocFold }, null);
     }
 
     /// <summary>
@@ -1975,6 +2135,12 @@ public static class ComposeCompiler
             Alias = RankBaseAlias;
         }
 
+        /// <summary>Partials read through <paramref name="alias"/> (the pre-aggregated module join reads them through the fact alias, #9960).</summary>
+        public PartialColumns(char alias)
+        {
+            Alias = alias;
+        }
+
         public PartialColumns(Func<string, string?> stampColumns, bool direct)
         {
             _stampColumns = stampColumns;
@@ -1992,8 +2158,9 @@ public static class ComposeCompiler
 
         public bool Unmapped { get; private set; }
 
-        /// <summary>The name <paramref name="kind"/> over <paramref name="operand"/> is read under, registered on first use.</summary>
-        public string Add(PartialKind kind, Func<char, string>? operand)
+        /// <summary>The name <paramref name="kind"/> over <paramref name="operand"/> is read under, registered on first use.
+        /// <paramref name="filter"/> is the aggregate's own <c>FILTER (WHERE ...)</c> clause (with its leading space), or empty.</summary>
+        public string Add(PartialKind kind, Func<char, string>? operand, string filter = "")
         {
             var expression = kind switch
             {
@@ -2002,7 +2169,7 @@ public static class ComposeCompiler
                 PartialKind.Count => $"COUNT({operand!(FactAlias)})",
                 PartialKind.Min => $"MIN({operand!(FactAlias)})",
                 _ => $"MAX({operand!(FactAlias)})",
-            };
+            } + filter;
 
             if (_stampColumns is null)
             {
@@ -2139,12 +2306,37 @@ public static class ComposeCompiler
     /// <item><c>COUNT(*)</c> is summed. <c>percentile_cont</c> has no partial: null.</item>
     /// </list>
     /// </summary>
-    private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials)
+    private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials) =>
+        TryBuildPartialValueExprOver(measure, aggregate, unit, partials, beforeModuleJoin: false);
+
+    /// <summary>The body of <see cref="TryBuildPartialValueExpr"/>. With <paramref name="beforeModuleJoin"/> the partials are
+    /// computed over the fact rows of one (server_name, sql_handle) and its kept group columns, before the module join
+    /// (#9960): the measured-delta filter rides on each partial, a Sum-mode ratio combines two SUM partials, and
+    /// <c>COUNT(*)</c> combines to 0, not NULL, over no rows.</summary>
+    private static string? TryBuildPartialValueExprOver(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials, bool beforeModuleJoin)
     {
         string P(string name) => $"{partials.Alias}.{name}";
 
         if (measure.Kind == MeasureKind.Ratio)
         {
+            if (beforeModuleJoin)
+            {
+                /* The Sum-mode ratio of two delta columns: both sums are partials, summed again, and the cast and the division
+                   are where BuildValueExpr has them. The weighted and gauge ratios are not query_stats measures and keep the join
+                   over the fact rows. */
+                if (measure.RatioMode != MeasureRatioMode.Sum)
+                {
+                    return null;
+                }
+
+                var numeratorColumn = MeasureCatalog.Measure(measure.NumeratorKey)!.AggregationColumn;
+                var denominatorColumn = MeasureCatalog.Measure(measure.DenominatorKey)!.AggregationColumn;
+                var numerator = partials.Add(PartialKind.Sum, a => $"{a}.{numeratorColumn}");
+                var denominator = partials.Add(PartialKind.Sum, a => $"{a}.{denominatorColumn}");
+                return ApplyUnitConversion(
+                    $"(CAST(SUM({P(numerator)}) AS double precision) / NULLIF(SUM({P(denominator)}), 0))", measure.UnitFamily, measure.NativeUnit, unit);
+            }
+
             if (measure.RatioMode is not (MeasureRatioMode.Weighted or MeasureRatioMode.WeightedSum))
             {
                 return null;
@@ -2167,12 +2359,18 @@ public static class ComposeCompiler
 
         if (aggregate == ComposeAggregate.Count)
         {
-            return $"CAST(SUM({P(partials.Add(PartialKind.CountStar, null))}) AS double precision)";
+            /* Before the module join a statement with no group (Scalar) can combine zero pre-aggregated rows, where COUNT(*)
+               over the fact rows is 0 and a SUM is NULL, so the sum falls back to 0. A grouped row always has a partial.
+               No module-join source has a count measure today; the arm serves a future one. */
+            var counted = $"SUM({P(partials.Add(PartialKind.CountStar, null))})";
+            return beforeModuleJoin ? $"CAST(COALESCE({counted}, 0) AS double precision)" : $"CAST({counted} AS double precision)";
         }
 
-        /* A delta-family filter would have to ride on the partial; Query Store has none, so refuse the shape rather than
-           guess (MeasuredDeltaFilter is empty for it). */
-        if (MeasuredDeltaFilter(measure).Length > 0)
+        /* The measured-delta filter rides on each partial before the module join, so a partial holds measured rows only and the
+           combine needs none. The single-scan base CTE serves Query Store alone, which has no such filter (MeasuredDeltaFilter is
+           empty for it), so it refuses a filtered measure rather than guess. */
+        var measured = MeasuredDeltaFilter(measure);
+        if (measured.Length > 0 && !beforeModuleJoin)
         {
             return null;
         }
@@ -2183,21 +2381,21 @@ public static class ComposeCompiler
         switch (aggregate)
         {
             case ComposeAggregate.Sum:
-                native = $"CAST(SUM({P(partials.Add(PartialKind.Sum, Column))}) AS double precision)";
+                native = $"CAST(SUM({P(partials.Add(PartialKind.Sum, Column, measured))}) AS double precision)";
                 break;
             case ComposeAggregate.Avg:
                 {
-                    var sum = partials.Add(PartialKind.Sum, Column);
-                    var count = partials.Add(PartialKind.Count, Column);
+                    var sum = partials.Add(PartialKind.Sum, Column, measured);
+                    var count = partials.Add(PartialKind.Count, Column, measured);
                     native = $"CAST(SUM({P(sum)}) / NULLIF(SUM({P(count)}), 0) AS double precision)";
                     break;
                 }
 
             case ComposeAggregate.Min:
-                native = $"CAST(MIN({P(partials.Add(PartialKind.Min, Column))}) AS double precision)";
+                native = $"CAST(MIN({P(partials.Add(PartialKind.Min, Column, measured))}) AS double precision)";
                 break;
             case ComposeAggregate.Max:
-                native = $"CAST(MAX({P(partials.Add(PartialKind.Max, Column))}) AS double precision)";
+                native = $"CAST(MAX({P(partials.Add(PartialKind.Max, Column, measured))}) AS double precision)";
                 break;
             default:
                 return null;

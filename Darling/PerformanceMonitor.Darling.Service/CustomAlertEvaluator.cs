@@ -519,15 +519,43 @@ public sealed class CustomAlertEvaluator
             return null;
         }
 
-        await using var command = pool.CreateCommand(compiled.Sql);
-        command.CommandTimeout = composedQuerySeconds;
-        foreach (var parameter in compiled.Parameters)
-        {
-            command.Parameters.Add(parameter);
-        }
-
-        var scalar = await command.ExecuteScalarAsync(cancellationToken);
+        var scalar = compiled.FoldsAdHocHandles
+            ? await ReadFoldedScalarAsync(pool, compiled, composedQuerySeconds, cancellationToken)
+            : await ReadScalarAsync(pool.CreateCommand(compiled.Sql), compiled, composedQuerySeconds, cancellationToken);
         return scalar is null or DBNull ? null : Convert.ToDouble(scalar, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Runs <paramref name="command"/> (the compiled statement, in autocommit or in the transaction it was built on) with the
+    /// compose deadline and the compiled parameters, and disposes it.</summary>
+    private static async Task<object?> ReadScalarAsync(
+        NpgsqlCommand command, ComposeCompiled compiled, int composedQuerySeconds, CancellationToken cancellationToken)
+    {
+        await using (command)
+        {
+            command.CommandTimeout = composedQuerySeconds;
+            foreach (var parameter in compiled.Parameters)
+            {
+                command.Parameters.Add(parameter);
+            }
+
+            return await command.ExecuteScalarAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// #9960: a compiled statement that folds the ad hoc handles of its module pre-aggregate (<see cref="ComposeCompiled.FoldsAdHocHandles"/>)
+    /// runs as the panel runner runs it: on one connection of <paramref name="pool"/>, in a read only transaction, after the runner's own
+    /// <see cref="ComposePanelRunner.RaiseModuleKeyHashLimitAsync"/> has raised <c>hash_mem_multiplier</c> for the transaction. Without the
+    /// raise, a store at a small <c>work_mem</c> scans the module keys once per fact row, the command times out, and the rule reads no
+    /// value, which is never a breach. The transaction is read only and ends with a rollback, which also drops the raised setting.
+    /// </summary>
+    private static async Task<object?> ReadFoldedScalarAsync(
+        NpgsqlDataSource pool, ComposeCompiled compiled, int composedQuerySeconds, CancellationToken cancellationToken)
+    {
+        await using var connection = await pool.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await ComposePanelRunner.BeginComposeReadOnlyTransactionAsync(connection, cancellationToken);
+        await ComposePanelRunner.RaiseModuleKeyHashLimitAsync(connection, compiled, cancellationToken);
+        return await ReadScalarAsync(new NpgsqlCommand(compiled.Sql, connection, transaction), compiled, composedQuerySeconds, cancellationToken);
     }
 
     /// <summary>
