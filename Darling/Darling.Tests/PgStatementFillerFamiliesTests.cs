@@ -29,7 +29,7 @@ public sealed class PgStatementFillerFamiliesTests
     [InlineData(20000)]
     public void TheOneFreeSlotFill_SharesNoShapeWithTheForcingFill_OrWithEitherHeadroomFamily(int max)
     {
-        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
+        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 6.0)) + 1;
         /* A fill that carries on past five eviction passes, each freeing five percent, runs up to a quarter more shapes than the table is wide. */
         var count = max + max / 4;
         var forcing = Enumerable.Range(0, count).Select(n => PgStatementTable.Shape(n, side)).ToArray();
