@@ -444,8 +444,11 @@ VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, $7, 50, 20, 5, 100, 10, 0, 0, $6, $8, 5
         var bodySucceeded = false;
         try
         {
-            /* The Aurora flavor sends the NULL WAL projections a pre-14 server does, on a major this server has. */
-            var rows = await RunAsync(PgWriteStatsCollector.Instance, Context(serverId, serverName, Anchor, 18, aurora: true), source, store, ct);
+            /* The Aurora flavor sends the NULL WAL projections a pre-14 server does, on a major this server has. The major is the
+               server's own: the statement names num_done only on 18, so a major the server is not would send it a column it lacks. */
+            await using var versionCommand = new NpgsqlCommand("SELECT current_setting('server_version_num')::int / 10000", source);
+            var serverMajor = (int)(await versionCommand.ExecuteScalarAsync(ct))!;
+            var rows = await RunAsync(PgWriteStatsCollector.Instance, Context(serverId, serverName, Anchor, serverMajor, aurora: true), source, store, ct);
 
             var row = Assert.Single(rows);
             Assert.Null(row.WalRecords);
