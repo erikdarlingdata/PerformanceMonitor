@@ -3,4 +3,4 @@ cd Darling/Darling.Tests/bin/Debug/net10.0-windows
 ./Darling.Tests.exe -class "*ComposeFleetRawWindowLiveTests*" > o.log 2>&1
 grep -E "Total:|\[FAIL\]" o.log | head -4
 grep -E "DIAG9943 Fleet (server|pages)" diag9943.txt | cut -c1-250 | sed 's/^ */Total: /'
-grep -E "Scan|Workers (Planned|Launched)|Execution Time|^Limit|Gather|ChunkAppend" diag9943.txt | cut -c1-200 | sed 's/^ */Total: /' | head -40
+awk '/DIAG9943 Fleet pages=7975/{f=1} /DIAG9943 Fleet pages=10474/{f=0} f' diag9943.txt | grep -v "^ *Buffers" | grep -E "Scan|Workers|Execution|Index Cond|Filter|Heap|Aggregate" | cut -c1-210 | sed "s/^ */Total: /" | head -40
