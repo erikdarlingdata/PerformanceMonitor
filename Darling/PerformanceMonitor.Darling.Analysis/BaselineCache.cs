@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
@@ -156,15 +157,18 @@ public sealed class BaselineCache
 }
 
 /// <summary>
-/// #9972: the baseline computes that run on a provider's own token (<see cref="PgBaselineProvider.GetOrComputeKeptAsync"/>),
-/// so the detector deadline of an on-demand pass stops the detector's wait and not the compute. One compute runs at a time
-/// per <see cref="FlightKey"/>: a later caller of the same key joins it.
+/// #9972: the baseline computes that run on a provider's own token (<see cref="PgBaselineProvider.GetOrComputeKeptAsync"/>
+/// for an unkeyed series, <see cref="PgBaselineProvider.GetKeyedChunkKeptAsync"/> for a set of keyed ones), so the detector
+/// deadline of an on-demand pass stops the detector's wait and not the compute. One compute runs at a time per
+/// <see cref="FlightKey"/>: a later caller of the same key joins it. A compute answers the entries it built, in the order of
+/// its keys: one for an unkeyed series.
 ///
 /// <para><b>The limit.</b> A compute that outlives its pass holds one pooled store connection until it ends, for at most
 /// <see cref="PgBaselineProvider.SharedComputeTimeout"/>. One pass can leave one per detector it was running
-/// (<see cref="PgAnomalyDetector.MaxDetectorParallelism"/>), and each call for another hour starts new keys, so without a
-/// limit a run of calls could hold more connections than the pool has. <see cref="MaxInFlight"/> computes run at once
-/// across every provider that shares this object. A caller past it gets null and computes on its own token.</para>
+/// (<see cref="PgAnomalyDetector.MaxDetectorParallelism"/> on a SQL Server target, one on a PostgreSQL target, whose
+/// detectors run one after another), and each call for another hour starts new keys, so without a limit a run of calls
+/// could hold more connections than the pool has. <see cref="MaxInFlight"/> computes run at once across every provider
+/// that shares this object, of both engines. A caller past it gets null and computes on its own token.</para>
 /// </summary>
 internal sealed class KeptBaselineComputes
 {
@@ -172,10 +176,11 @@ internal sealed class KeptBaselineComputes
     internal const int MaxInFlight = PgAnomalyDetector.MaxDetectorParallelism;
 
     /// <summary>A compute's identity: the store it reads (the data source, so two roles never join each other's compute),
-    /// the provider kind, the provider's cache key and the key time.</summary>
+    /// the provider kind, the provider's cache key (for a keyed set, <see cref="PgBaselineProvider.KeyedFlightKeyFor"/>) and
+    /// the key time.</summary>
     internal readonly record struct FlightKey(object Store, string Kind, string CacheKey, DateTime KeyTime);
 
-    private readonly ConcurrentDictionary<FlightKey, Lazy<Task<PgBaselineProvider.CachedBaseline?>>> _flights = new();
+    private readonly ConcurrentDictionary<FlightKey, Lazy<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>>> _flights = new();
     private int _inFlight;
 
     /// <summary>How many computes hold a slot right now.</summary>
@@ -189,7 +194,8 @@ internal sealed class KeptBaselineComputes
     /// is free. Null when <see cref="MaxInFlight"/> computes are running and none of them is this key's. The slot is given
     /// back when the compute ends, whatever its outcome.
     /// </summary>
-    internal Task<PgBaselineProvider.CachedBaseline?>? JoinOrStart(FlightKey key, Func<Task<PgBaselineProvider.CachedBaseline?>> compute)
+    internal Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>? JoinOrStart(
+        FlightKey key, Func<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>> compute)
     {
         if (_flights.TryGetValue(key, out var running))
         {
@@ -202,7 +208,7 @@ internal sealed class KeptBaselineComputes
             return null;
         }
 
-        var mine = new Lazy<Task<PgBaselineProvider.CachedBaseline?>>(() => Task.Run(async () =>
+        var mine = new Lazy<Task<IReadOnlyList<PgBaselineProvider.CachedBaseline>?>>(() => Task.Run(async () =>
         {
             try
             {

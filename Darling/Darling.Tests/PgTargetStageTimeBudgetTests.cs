@@ -392,7 +392,8 @@ public sealed class PgTargetStageBudgetLiveTests
         Assert.Equal(detectors.Length, unread.DetectorsLeftOutForTime.Count);
 
         /* The growth detector is the last of the fourteen. Its baseline read of the database size table is held by a
-           lock, the thirteen before it finish, and the deadline fires while it waits. */
+           lock, the thirteen before it finish, and the deadline fires while it waits. The compute it was waiting for
+           goes on (#9972), so the test waits for it once the lock is gone. */
         using var deadline = new CancellationTokenSource();
         var cut = Pass(windowEnd, ct);
         cut.DetectorDeadline = deadline.Token;
@@ -401,11 +402,13 @@ public sealed class PgTargetStageBudgetLiveTests
         {
             await locker.OpenAsync(ct);
             await using var held = await HoldReadsOfAsync(locker, "pg_database_size_stats", ct);
-            var run = Detector(logger).DetectAnomaliesAsync(cut);
+            var detector = Detector(logger);
+            var run = detector.DetectAnomaliesAsync(cut);
             await AReadWaitsForAsync(connection, "pg_database_size_stats", ct);
             deadline.Cancel();
             await run.WaitAsync(Limit, ct);
             await held.RollbackAsync(ct);
+            await Task.WhenAll(detector.Baselines.KeptComputes.Running()).WaitAsync(Limit, ct);
         }
 
         Assert.Equal(new[] { "database_growth" }, cut.DetectorsLeftOutForTime);
