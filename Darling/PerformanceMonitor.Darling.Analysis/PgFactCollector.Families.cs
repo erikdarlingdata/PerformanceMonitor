@@ -116,9 +116,7 @@ public sealed partial class PgFactCollector
 
         /* #9879: the anomaly read goes first. Every slot is free here, so it takes one before any family asks, where a
            read queued behind the families would start only as the last of them finished. */
-        Task anomalyRead = Task.CompletedTask;
-        if (context.ObservedDurationMs > 0 && context.AnomalyReadBesideFamilies is { } beside)
-            anomalyRead = beside.Run = RunAnomalyRead(beside);
+        Task anomalyRead = (Task?)StageDeadline.StartAnomalyReadBeside(context, gate) ?? Task.CompletedTask;
 
         for (var i = 0; i < families.Count; i++)
             tasks[i] = RunOne(i);
@@ -174,26 +172,6 @@ public sealed partial class PgFactCollector
             {
                 if (!finished)
                     Volatile.Write(ref stopStarting, 1);
-                gate.Release();
-            }
-        }
-
-        /* #9879: the anomaly read on a gate slot of its own. Its failures go to its own list, so the pass's list holds only
-           family failures until the pass has counted the families it could not read. The flow it starts on is the stage's
-           own, which no family's deadline token reaches. The read carries the gate while it runs, so a detector that runs
-           several of its reads at once takes their slots from this gate and not from one of its own. */
-        async Task<List<Fact>> RunAnomalyRead(AnomalyReadBesideFamilies read)
-        {
-            await gate.WaitAsync(CancellationToken.None);
-            try
-            {
-                read.Failures = context.BufferCollectionFailuresForThisFlow();
-                read.FamilyGate = gate;
-                return await read.Read(context);
-            }
-            finally
-            {
-                read.FamilyGate = null;
                 gate.Release();
             }
         }

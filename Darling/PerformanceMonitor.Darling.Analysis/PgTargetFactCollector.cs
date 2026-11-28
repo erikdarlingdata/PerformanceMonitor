@@ -155,6 +155,36 @@ public sealed partial class PgTargetFactCollector : IFactCollector
            it. Nothing may run ahead of it — and for a PostgreSQL target the witness is pg_database_stats,
            the one universal one-minute series every flavour writes (D3), not the wait table. */
         await CollectObservedCoverageAsync(context, facts);
+
+        /* #9966: an on-demand pass starts its anomaly read here, beside the families below, through the starter the SQL
+           Server collector uses (StageDeadline.StartAnomalyReadBeside). The families run one after another and the
+           detectors after them would start when the last family ended, which on a long window is past the detector
+           deadline: every detector would be named as left out and the pass would store nothing. Started here, the
+           detectors read while the families read. Nothing the detectors read is written by a family below: they read
+           the pass's identity and window, set before the pass starts, and the coverage stamp, set by the read above.
+           The two stages share no list: the detectors add to their own, their collection failures go to the read's own
+           buffer, and each stage writes only its own left-out record. Each read opens its own connection. The scheduled
+           pass carries no read to start, so its detectors run after this method returns, as they always have. The read
+           is waited for here, failed or not, and the pass takes its result and its failure where it runs the detector. */
+        var anomalyRead = StageDeadline.StartAnomalyReadBeside(context, gate: null);
+        try
+        {
+            await CollectFamiliesAfterCoverageAsync(context, facts);
+        }
+        finally
+        {
+            await StageDeadline.SettleAsync(anomalyRead);
+        }
+
+        return facts;
+    }
+
+    /// <summary>
+    /// Every family after the coverage stamp, one after another against the pass's one fact list, in the order the
+    /// later ones need: a family reads the facts the ones ahead of it added.
+    /// </summary>
+    private async Task CollectFamiliesAfterCoverageAsync(AnalysisContext context, List<Fact> facts)
+    {
         await CollectServerMetadataFactsAsync(context, facts);
         await CollectConfigFactsAsync(context, facts);
         await ReadStatementsEvictionFactAsync(context, facts);
@@ -188,8 +218,6 @@ public sealed partial class PgTargetFactCollector : IFactCollector
            (a growing database whose bloat trend also grew) is decided in the scorer and the graph over the bloat family's
            fact already in the list; declared and filled by the content lane in one PR (P3 declared no stub). */
         await CollectGrowthFactsAsync(context, facts);
-
-        return facts;
     }
 
     /// <summary>

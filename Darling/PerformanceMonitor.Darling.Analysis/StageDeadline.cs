@@ -95,4 +95,53 @@ internal static class StageDeadline
             context.UseTokenForThisFlow(null);
         }
     }
+
+    /// <summary>
+    /// Starts the anomaly read of an on-demand pass beside a collector's family reads (#9879, #9966), or returns null
+    /// when the pass carries none or its window was not observed. The read runs on a flow of its own: its collection
+    /// failures go to <see cref="AnomalyReadBesideFamilies.Failures"/>, so the pass's list holds only family failures
+    /// until the pass has counted the families it could not read, and no family's deadline token reaches it. With a
+    /// <paramref name="gate"/> the read holds one of its slots and carries the gate while it runs, so a detector that
+    /// runs several of its reads at once takes their slots from it and not from a gate of its own. A collector whose
+    /// families run one after another passes none. The collector waits for the task to settle
+    /// (<see cref="SettleAsync"/>) before its own stage ends and does not rethrow its failure: the pass awaits the task
+    /// where it runs the detector.
+    /// </summary>
+    internal static Task<List<Fact>>? StartAnomalyReadBeside(AnalysisContext context, SemaphoreSlim? gate)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (context.ObservedDurationMs <= 0 || context.AnomalyReadBesideFamilies is not { } beside)
+            return null;
+
+        return beside.Run = RunAnomalyReadBesideAsync(context, beside, gate);
+    }
+
+    private static async Task<List<Fact>> RunAnomalyReadBesideAsync(
+        AnalysisContext context, AnomalyReadBesideFamilies read, SemaphoreSlim? gate)
+    {
+        if (gate is not null)
+            await gate.WaitAsync(CancellationToken.None);
+        try
+        {
+            read.Failures = context.BufferCollectionFailuresForThisFlow();
+            read.FamilyGate = gate;
+            return await read.Read(context);
+        }
+        finally
+        {
+            read.FamilyGate = null;
+            gate?.Release();
+        }
+    }
+
+    /// <summary>
+    /// Waits for a started anomaly read to settle, failed or not, and completes at once for none. The read's failure
+    /// stays in its task for the pass, which rethrows it where it awaits the task. It is looked at here, so a pass that
+    /// a family's failure ends before that await leaves no fault unobserved. (A continuation, not a catch: this is not
+    /// a read.)
+    /// </summary>
+    internal static Task SettleAsync(Task? anomalyRead) =>
+        anomalyRead is null
+            ? Task.CompletedTask
+            : anomalyRead.ContinueWith(static settled => { _ = settled.Exception; }, TaskScheduler.Default);
 }

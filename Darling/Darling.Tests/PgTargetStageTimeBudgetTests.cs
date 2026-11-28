@@ -614,4 +614,90 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, NULL, FALSE, TRUE)", connection);
         Assert.Equal(storedByTheWholePass, await StoredFindingsAsync(connection, ct));
         Assert.Equal(wholeBatch, await LatestStoredBatchAsync(connection, ct));
     }
+
+    /// <summary>
+    /// An on-demand pass starts its detectors beside the families (#9966). With the queries family held on its store
+    /// read, every detector reads to its end before the deadline, so none is named when the deadline then fires for
+    /// both stages at once, and the held family is. With the detectors after the families they would start past their
+    /// deadline and all fourteen would be named. With no deadline the pass holds the same facts in the same order
+    /// whether the detectors run after the families (the scheduled pass) or beside them.
+    /// </summary>
+    [Fact]
+    public async Task WithAFamilyHeldToTheDeadline_TheDetectorsBesideTheFamiliesReadToTheirEnd_AndNoneIsNamed()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live PostgreSQL-target detectors beside families test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        var windowEnd = await PlantTargetAsync(connection, ct);
+        await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var collector = new PgTargetFactCollector(postgres);
+
+        /* Each run has its own provider, so no run finds a baseline another one computed. */
+        PgTargetAnomalyDetector Detector() => new(postgres, new PgTargetBaselineProvider(postgres));
+        static string Named(Fact fact) => $"{fact.Source}|{fact.Key}|{fact.ObjectName}";
+
+        /* No deadline, the detectors after the families: the scheduled pass. It carries no read to start. */
+        var after = Pass(windowEnd, ct);
+        var afterFacts = await collector.CollectFactsAsync(after).WaitAsync(Limit, ct);
+        Assert.Null(after.AnomalyReadBesideFamilies);
+        afterFacts.AddRange(await Detector().DetectAnomaliesAsync(after).WaitAsync(Limit, ct));
+
+        /* No deadline, the detectors beside the families: the collector starts the read and waits for it. */
+        var beside = Pass(windowEnd, ct);
+        var besideRead = new AnomalyReadBesideFamilies(Detector().DetectAnomaliesAsync);
+        beside.AnomalyReadBesideFamilies = besideRead;
+        var besideFacts = await collector.CollectFactsAsync(beside).WaitAsync(Limit, ct);
+        var besideRun = besideRead.Run;
+        Assert.NotNull(besideRun);
+        Assert.True(besideRun.IsCompleted, "The collector waits for the read it started.");
+        besideFacts.AddRange(await besideRun);
+        Assert.Equal(afterFacts.Select(Named), besideFacts.Select(Named));
+        Assert.Empty(beside.FamiliesLeftOutForTime);
+        Assert.Empty(beside.DetectorsLeftOutForTime);
+        Assert.Equal(after.CollectionFailures.Count, beside.CollectionFailures.Count + besideRead.Failures.Count);
+
+        /* One deadline for both stages, as the service arms them. The queries family is held on the statement text
+           table, which no detector reads. */
+        using var deadline = new CancellationTokenSource();
+        var detector = Detector();
+        var detectorsRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cut = Pass(windowEnd, ct);
+        cut.FamilyDeadline = deadline.Token;
+        cut.DetectorDeadline = deadline.Token;
+        var cutRead = new AnomalyReadBesideFamilies(async context =>
+        {
+            var found = await detector.DetectAnomaliesAsync(context);
+            detectorsRead.TrySetResult();
+            return found;
+        });
+        cut.AnomalyReadBesideFamilies = cutRead;
+        await using (var locker = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await locker.OpenAsync(ct);
+            await using var held = await HoldReadsOfAsync(locker, "pg_statement_text", ct);
+            var families = collector.CollectFactsAsync(cut);
+            await AReadWaitsForAsync(connection, "pg_statement_text", ct);
+
+            /* The family is held and the deadline has not fired: the detectors read to their end beside it. */
+            await detectorsRead.Task.WaitAsync(Limit, ct);
+            Assert.False(families.IsCompleted);
+            Assert.Empty(cut.DetectorsLeftOutForTime);
+
+            deadline.Cancel();
+            await families.WaitAsync(Limit, ct);
+            await held.RollbackAsync(ct);
+        }
+
+        Assert.Equal(new[] { "queries", "io" }, cut.FamiliesLeftOutForTime);
+        var cutRun = cutRead.Run;
+        Assert.NotNull(cutRun);
+        await cutRun.WaitAsync(Limit, ct);
+        Assert.Empty(cut.DetectorsLeftOutForTime);
+    }
 }
