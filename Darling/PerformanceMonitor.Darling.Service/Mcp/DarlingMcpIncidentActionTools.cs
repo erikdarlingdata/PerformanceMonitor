@@ -81,7 +81,7 @@ public sealed class DarlingMcpIncidentActionTools
         PurgeNowAsync(postgres, confirm, retention_days, McpConfirmTokens.Shared, cancellationToken);
 
     /// <summary>The scope a purge's confirm value is issued for: the purge is store-wide, so one scope.</summary>
-    private const string PurgeScope = "store";
+    internal const string PurgeScope = "store";
 
     /// <summary><see cref="PurgeNow"/> with the confirm values it issues and redeems passed in, so a test can hold the clock.</summary>
     internal static async Task<string> PurgeNowAsync(
