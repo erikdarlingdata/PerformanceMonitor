@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -430,7 +431,7 @@ public static class PostgresAlertEvaluator
                 holder,
                 $"{xmin.XminAge:N0} transactions held by {holder}",
                 $"{XminAgeWarningThreshold:N0} transactions, held in at least "
-                    + $"{XminPersistenceFraction:P0} of observations",
+                    + $"{PercentText.Of(XminPersistenceFraction)} of observations",
                 $"Vacuum is reclaiming nothing cluster-wide: {holder} is holding the xmin horizon "
                     + $"{xmin.XminAge:N0} transactions back, in {xmin.ObservationsHeld} of "
                     + $"{xmin.ObservationsTotal} observations. {RemedyFor(xmin.Source)}"
@@ -460,7 +461,7 @@ public static class PostgresAlertEvaluator
             subject,
             $"{xmin.XminAge:N0} transactions held by {subject}",
             $"{XminAgeWarningThreshold:N0} transactions, behind in at least "
-                + $"{XminPersistenceFraction:P0} of the window's captures",
+                + $"{PercentText.Of(XminPersistenceFraction)} of the window's captures",
             $"Vacuum is reclaiming nothing cluster-wide: the xmin horizon has been at least "
                 + $"{XminAgeWarningThreshold:N0} transactions behind in {xmin.ObservationsAboveThreshold} of "
                 + $"the window's {xmin.CapturesInWindow} collections, held {holderClause}; it currently "

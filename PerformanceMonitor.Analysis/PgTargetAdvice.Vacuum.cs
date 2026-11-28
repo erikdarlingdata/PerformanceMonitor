@@ -136,7 +136,7 @@ public static partial class PgTargetAdvice
         {
             inv.Append($"{Fmt(dead)} dead tuples against this table's own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured)");
             if (live > 0 && threshold > 0)
-                inv.Append($": the line sits at {threshold / live:P1} of the table");
+                inv.Append($": the line sits at {PercentText.Of(threshold / live, 1)} of the table");
             inv.Append(". ");
         }
 
@@ -222,7 +222,7 @@ public static partial class PgTargetAdvice
         {
             rem.Append($"autovacuum is reaching this table and losing, so let it work unthrottled HERE rather than server-wide: ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 0);, 0 is the engine's own 'no throttling' value (the server default is a 2 ms delay per 200 cost units); a per-table reloption applies at the next run without a restart. Counter-objective: more read and write I/O from autovacuum while it runs on this table. ");
             if (!insertArm && live > 0 && threshold > 0)
-                rem.Append($"If the line itself is the problem, {Fmt(threshold)} dead rows before a run starts, lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###});, that halves the trigger line from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+                rem.Append($"If the line itself is the problem, {Fmt(threshold)} dead rows before a run starts, lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###});, that halves the trigger line from its current {PercentText.Of(threshold / live, 1)} of the table. Counter-objective: more frequent, smaller vacuums. ");
         }
         else
         {
@@ -230,7 +230,7 @@ public static partial class PgTargetAdvice
         }
 
         if (insertArm && live > 0 && insertThreshold > 0)
-            rem.Append($"For an append-only table the point is freezing: its insert line sits at {insertThreshold / live:P1} of the table; ALTER TABLE {table} SET (autovacuum_vacuum_insert_scale_factor = {SuggestedScaleFactor(insertThreshold, live):#,##0.###}); halves it so autovacuum visits after fewer inserts and freezes the new pages in smaller batches. Counter-objective: a vacuum pass on the table twice as often. ");
+            rem.Append($"For an append-only table the point is freezing: its insert line sits at {PercentText.Of(insertThreshold / live, 1)} of the table; ALTER TABLE {table} SET (autovacuum_vacuum_insert_scale_factor = {SuggestedScaleFactor(insertThreshold, live):#,##0.###}); halves it so autovacuum visits after fewer inserts and freezes the new pages in smaller batches. Counter-objective: a vacuum pass on the table twice as often. ");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
@@ -294,19 +294,19 @@ public static partial class PgTargetAdvice
             ? $"{counter} age in {db} was {Fmt(age)} when last seen {sinceLastSeen} before the window ended: no longer reported (dropped?); not graded"
             : arm switch
         {
-            4 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space: past vacuum_failsafe_age; EMERGENCY",
+            4 => $"{counter} age {Fmt(age)} in {db} is {PercentText.Of(pctOfCeiling, 1)} of the wraparound space: past vacuum_failsafe_age; EMERGENCY",
             3 => $"{counter} age {Fmt(age)} in {db} is past twice {settingName} ({Fmt(setting)}): autovacuum's own defence is losing; EMERGENCY",
-            2 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space: far past this cluster's routine freeze point",
+            2 => $"{counter} age {Fmt(age)} in {db} is {PercentText.Of(pctOfCeiling, 1)} of the wraparound space: far past this cluster's routine freeze point",
             1 => $"{counter} age {Fmt(age)} in {db} has reached {settingName} ({Fmt(setting)}) and has not come back down",
-            _ => $"{counter} age {Fmt(age)} in {db} is {fractionOfSetting:P0} of {settingName}, under the engine's freeze line",
+            _ => $"{counter} age {Fmt(age)} in {db} is {PercentText.Of(fractionOfSetting)} of {settingName}, under the engine's freeze line",
         };
 
         var inv = new StringBuilder();
         if (gone)
             inv.Append($"This database stopped being reported {sinceLastSeen} before the window ended (dropped, or the collector stopped reading it), so these figures are the state it was last seen in, not a reading of the counter now; it is not graded. ");
         inv.Append(gone
-            ? $"{db}: {counter} age was {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remained before the wall. "
-            : $"{db}: {counter} age {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remain before the wall. ");
+            ? $"{db}: {counter} age was {Fmt(age)}, {PercentText.Of(fractionOfSetting)} of its own {settingName} ({Fmt(setting)}) and {PercentText.Of(pctOfCeiling, 1)} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remained before the wall. "
+            : $"{db}: {counter} age {Fmt(age)}, {PercentText.Of(fractionOfSetting)} of its own {settingName} ({Fmt(setting)}) and {PercentText.Of(pctOfCeiling, 1)} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remain before the wall. ");
         if (keepingUp)
             inv.Append(gone
                 ? $"The counter had come DOWN from its window peak of {Fmt(peak)}: autovacuum's freeze cycle was winning (the routine sawtooth). "
@@ -426,7 +426,7 @@ public static partial class PgTargetAdvice
             : $"The xmin horizon reached {Fmt(age)} transactions back but did not stay there ({heldCaptures:0} of {total:0} captures): a transient hold, not a pinned horizon";
 
         var inv = new StringBuilder();
-        inv.Append($"Persistence is measured on the HORIZON: the winning age, whoever won, stayed at or above the shared warning bar ({Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}) for {heldCaptures:0} consecutive captures of the {total:0} in the window that recorded any holder ({(total > 0 ? heldCaptures / total : 0):P0}; the alert's majority standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
+        inv.Append($"Persistence is measured on the HORIZON: the winning age, whoever won, stayed at or above the shared warning bar ({Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}) for {heldCaptures:0} consecutive captures of the {total:0} in the window that recorded any holder ({PercentText.Of((total > 0 ? heldCaptures / total : 0))}; the alert's majority standard is {PercentText.Of(PostgresOutagePredictorThresholds.XminPersistenceFraction)} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
         if (heldCaptures > 0)
             inv.Append($"Across that run the horizon never came nearer than {Fmt(floor)} transactions and reached {Fmt(runPeak)}; the severity is graded on the floor, because that is the age it held for every capture of the run. ");
         inv.Append(persistenceArm
@@ -436,8 +436,8 @@ public static partial class PgTargetAdvice
         {
             inv.Append($"Attribution, separately: {CountText.Plural((long)distinctHolders, "distinct holder")} won captures of the run, client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
             inv.Append(attributed
-                ? $"{holder} won {modalShare:P0} of the run, at or past the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before it names a holder (a chosen line, not a measured one (threshold_lineage = 0), and it gates only the NAME, never the grade), so the remedy below is its kind's. "
-                : $"No holder reached the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before naming one (a chosen line, not a measured one (threshold_lineage = 0) gating only the name, never the grade); the largest won {modalShare:P0}, so the fact names none. ");
+                ? $"{holder} won {PercentText.Of(modalShare)} of the run, at or past the {PercentText.Of(PgTargetScorer.XminHolderDominanceShare)} share this finding needs before it names a holder (a chosen line, not a measured one (threshold_lineage = 0), and it gates only the NAME, never the grade), so the remedy below is its kind's. "
+                : $"No holder reached the {PercentText.Of(PgTargetScorer.XminHolderDominanceShare)} share this finding needs before naming one (a chosen line, not a measured one (threshold_lineage = 0) gating only the name, never the grade); the largest won {PercentText.Of(modalShare)}, so the fact names none. ");
         }
         inv.Append($"The latest capture's winner was {(latestSource == "unknown" ? "not attributable to a kind" : KindPhrase(latestSource))}, {Fmt(age)} transactions back, {sinceLast:0} min before the window end. ");
         if (freezeMaxAge > 0)
@@ -661,7 +661,7 @@ public static partial class PgTargetAdvice
         rem.Append($"(2) Keep it off and schedule the vacuum yourself: VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs (reads and writes continue, DDL and other vacuums wait), and a schedule that slips becomes this finding again. ");
         rem.Append("Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE, rewrites the whole table and blocks every reader and writer for the duration; it is for reclaiming space AFTER the backlog is under control, if ever. ");
         if (!insertArm && live > 0 && threshold > 0)
-            rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###}); halves the trigger from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+            rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###}); halves the trigger from its current {PercentText.Of(threshold / live, 1)} of the table. Counter-objective: more frequent, smaller vacuums. ");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }

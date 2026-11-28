@@ -140,20 +140,25 @@ public sealed class ServerClock
             return Shift(local, -_fixedOffsetMinutes);
         }
 
-        TimeSpan offset;
-        if (_zone.IsAmbiguousTime(local))
+        /* The offsets this wall-clock time can carry, read off the instants: an offset is valid for the local time when
+           the zone reports that same offset at the UTC instant it names. A repeated time passes under both offsets and
+           takes the one further ahead of UTC (the first occurrence). The zone's own IsAmbiguousTime is not asked:
+           .NET on Linux ends the repeated hour one tick early (01:59:59.9999999 is not ambiguous there), so the same
+           wall-clock tick landed an hour apart per host (#9942). Instants are exact on both. */
+        var found = false;
+        var offset = TimeSpan.MinValue;
+        foreach (var around in new[] { Shift(local, -24 * 60), Shift(local, 24 * 60) })
         {
-            /* Both offsets are valid; the first occurrence is the one further ahead of UTC. */
-            offset = TimeSpan.MinValue;
-            foreach (var candidate in _zone.GetAmbiguousTimeOffsets(local))
+            var candidate = _zone.GetUtcOffset(DateTime.SpecifyKind(around, DateTimeKind.Utc));
+            var utc = Shift(local, -(int)candidate.TotalMinutes);
+            if (_zone.GetUtcOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)) == candidate && candidate > offset)
             {
-                if (candidate > offset)
-                {
-                    offset = candidate;
-                }
+                found = true;
+                offset = candidate;
             }
         }
-        else
+
+        if (!found)
         {
             /* An invalid (skipped) local time answers with the standard offset: the one in force before the
                change, so subtracting it lands the time on the far side of the gap. */

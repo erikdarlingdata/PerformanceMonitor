@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -893,7 +894,7 @@ public sealed class WindowCoverage
         var gapHours = LargestGapMs / 3_600_000.0;
         return !IsObserved
             ? $"the collector observed NONE of this {nominalHours:0.#}h window: no collection interval landed inside it"
-            : $"the collector observed {Fraction:P0} of this {nominalHours:0.#}h window ({observedHours:0.##}h of collected time; " +
+            : $"the collector observed {PercentText.Of(Fraction)} of this {nominalHours:0.#}h window ({observedHours:0.##}h of collected time; " +
               $"largest unobserved stretch {gapHours:0.##}h)";
     }
 }

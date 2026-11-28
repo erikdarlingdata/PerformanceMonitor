@@ -345,7 +345,7 @@ public static partial class PgTargetAdvice
         if (gone)
             inv.Append($"This slot stopped being reported {sinceLastSeen} before the window ended (dropped, or the slot collector stopped), so the horizon below is the state it was last seen in, not one it pins now; it is not graded. ");
         inv.Append($"{slot}, {kind}, consumer {(active ? "active" : "INACTIVE")}{(inactiveKnown ? $" for {FmtHours(inactiveHours)}" : string.Empty)}: xmin_age {Fmt(xminAge)}, catalog_xmin_age {Fmt(catalogAge)}; the older horizon ({horizon}) is {Fmt(age)} transactions back against the shared warning bar of {Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}. ");
-        inv.Append($"Persistence: at or above the bar in {above:0} of the slot's {samples:0} five-minute samples ({(samples > 0 ? above / samples : 0):P0}; the alert's standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
+        inv.Append($"Persistence: at or above the bar in {above:0} of the slot's {samples:0} five-minute samples ({PercentText.Of((samples > 0 ? above / samples : 0))}; the alert's standard is {PercentText.Of(PostgresOutagePredictorThresholds.XminPersistenceFraction)} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
         inv.Append(identityArm
             ? "That is the chronic-holder shape the xmin alert pages on, read from the slot's own rows. "
             : "That does not meet the chronic-holder standard (a consumer that fell behind and caught up looks like this), so it is context, not a finding. ");

@@ -5852,7 +5852,7 @@ public static partial class DarlingCliCommands
 
         try
         {
-            return Directory.EnumerateFiles(directory, pattern).ToList();
+            return Directory.EnumerateFiles(directory, pattern, DarlingConfigBackup.ListingOptions).ToList();
         }
         catch (Exception)
         {

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -148,7 +149,7 @@ public static class ComparisonBanding
     public static object BandRulesPayload => new
     {
         baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric. A fact the scorer grades and rates negligible (severity 0) in BOTH windows gets no verdict (status stable), the same negligible-move rule the absolute band applies: delta_sigma and beyond_anomaly_cutoff stay on the row so the move is still visible, and the row is not counted in worse / better or in families_worse / families_better. A context fact the scorer never grades (SESSION_STATS, PG_TPS, PG_WAL_VOLUME_SHIFT) is banded on its baseline alone. A row banded on a reading other than the baseline_value / comparison_value it shows (PG_CONNECTION_SATURATION: peak sessions; PG_WAL_VOLUME_SHIFT: peak bytes per second) carries that reading for both windows in baseline_banded_value / comparison_banded_value, with banded_metric and banded_unit, and its verdict follows those readings, not the shown values.",
-        absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {MinimumRelativeMove:P0} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position): a move between two values the scorer grades as negligible is not a verdict.",
+        absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {PercentText.Of(MinimumRelativeMove)} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position): a move between two values the scorer grades as negligible is not a verdict.",
         presence = $"a key present in one window only is a new or resolved issue only when its base severity reaches {MinimumLadderPosition:0.##}; a noise-level appearance or disappearance is stable. BAD_ACTOR_* keys never take this path: their appearance is plan-cache identity churn, reported under plan_cache_churn and excluded from new_issues / resolved_issues."
     };
 

@@ -317,7 +317,7 @@ public static class ProvisioningVerdict
         if (maxWorkers > 0 && currentWorkers is int inUse && inUse / (double)maxWorkers > HighWorkerRatio)
         {
             return $"Worker threads are near the limit: {inUse} of {maxWorkers} in use "
-                + $"(threshold: {HighWorkerRatio:P0}). This server may need more CPU capacity.";
+                + $"(threshold: {PercentText.Of(HighWorkerRatio)}). This server may need more CPU capacity.";
         }
 
         if (StolenMemoryIsHigh(stolenMemoryPercent, engineEdition))

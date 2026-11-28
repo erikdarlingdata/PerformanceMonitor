@@ -50,11 +50,23 @@ internal static class DarlingConfigBackup
         !fileName.EndsWith('.') && !fileName.EndsWith(' ') &&
         fileName.StartsWith(configFileName + Tail, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>How the directory listing matches <see cref="GlobSuffix"/>: the same options the plain listing uses (so an
+    /// unreadable folder still throws), except the pattern ignores case on every file system. <see cref="IsBackupName"/>
+    /// ignores case, and a Linux listing that matched case would drop <c>PROD.JSON.BAK-x</c> for <c>prod.json</c> before the
+    /// name test ever saw it, so the same folder gave a different backup set per host (#9942).</summary>
+    public static readonly EnumerationOptions ListingOptions = new()
+    {
+        MatchType = MatchType.Win32,
+        MatchCasing = MatchCasing.CaseInsensitive,
+        AttributesToSkip = 0,
+        IgnoreInaccessible = false,
+    };
+
     /// <summary>The backups of the config file named <paramref name="configFileName"/> directly in
     /// <paramref name="directory"/>: the directory listing's own pattern narrows the list, and <see cref="IsBackupName"/>
     /// decides. Throws what the listing throws.</summary>
     public static string[] ListBackups(string directory, string configFileName) =>
-        Directory.GetFiles(directory, configFileName + GlobSuffix)
+        Directory.GetFiles(directory, configFileName + GlobSuffix, ListingOptions)
             .Where(file => IsBackupName(configFileName, Path.GetFileName(file)))
             .ToArray();
 }
