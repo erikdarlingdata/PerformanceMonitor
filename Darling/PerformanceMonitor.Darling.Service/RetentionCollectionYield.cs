@@ -300,8 +300,18 @@ internal sealed class RetentionCollectionYield
     /// <summary>True once this pass's waits have reached <see cref="WaitCapSeconds"/>: from then on it only pauses.</summary>
     internal bool WaitsCapped => TotalWaitSeconds >= WaitCapSeconds;
 
-    /// <summary>Tables whose drain was never started because the budget was already spent.</summary>
+    /// <summary>
+    /// Tables the budget kept from deleting a row: the ones whose drain was never started because the budget was already
+    /// spent, and one whose drain stopped on the budget before it deleted a row.
+    /// </summary>
     internal int TablesNotReached { get; private set; }
+
+    /// <summary>
+    /// The first table counted in <see cref="TablesNotReached"/> (#9980), in the pass's own order, or null when there is
+    /// none: a pass that stops in a table after deleting rows from it, with no table after it, has reached every table.
+    /// The stop line names it, so the log says where the unreached tables start.
+    /// </summary>
+    internal string? FirstTableNotReached { get; private set; }
 
     /// <summary>
     /// Tables that still have rows to drain because of the budget: the ones never started plus the ones stopped part-way
@@ -494,6 +504,7 @@ internal sealed class RetentionCollectionYield
         }
 
         TablesNotReached++;
+        FirstTableNotReached ??= tableName;
         TablesLeft++;
         return true;
     }
@@ -526,6 +537,7 @@ internal sealed class RetentionCollectionYield
         if (rowsDeleted <= 0)
         {
             TablesNotReached++;
+            FirstTableNotReached ??= tableName;
         }
     }
 

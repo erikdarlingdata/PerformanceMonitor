@@ -526,6 +526,40 @@ public sealed class RetentionCollectionYieldTests
         Assert.Equal(0, gate.TablesNotReached);
     }
 
+    [Fact]
+    public async Task FirstTableNotReached_IsTheFirstTableThatDeletedNoRow_NotTheTableThePassStoppedIn()
+    {
+        /* #9980: a pass that stops in a table after deleting rows from it, with no table after it, has no table not reached. */
+        var time = new FakeTime();
+        var last = GateOn(time, new ScriptedPressure(null), budgetSeconds: 20);
+        await PurgeLikeTheSweep(last, new FakeTable(time, rows: 1_000, batchSeconds: 25), "table_x", TestContext.Current.CancellationToken);
+        Assert.Equal("in table_x", last.StoppedPlace);
+        Assert.Equal(0, last.TablesNotReached);
+        Assert.Null(last.FirstTableNotReached);
+
+        /* The same stop with two tables after it: the first of them is the one named, and the stopped table is not. */
+        var time2 = new FakeTime();
+        var middle = GateOn(time2, new ScriptedPressure(null), budgetSeconds: 20);
+        await PurgeLikeTheSweep(middle, new FakeTable(time2, rows: 1_000, batchSeconds: 25), "table_x", TestContext.Current.CancellationToken);
+        await PurgeLikeTheSweep(middle, new FakeTable(time2, rows: 50), "table_y", TestContext.Current.CancellationToken);
+        await PurgeLikeTheSweep(middle, new FakeTable(time2, rows: 50), "table_z", TestContext.Current.CancellationToken);
+        Assert.Equal("in table_x", middle.StoppedPlace);
+        Assert.Equal(2, middle.TablesNotReached);
+        Assert.Equal("table_y", middle.FirstTableNotReached);
+
+        /* A drain the budget stops before it deletes a row counts as not reached, and is the first when nothing was skipped before it. */
+        var early = GateOn(new FakeTime(), new ScriptedPressure(null));
+        early.NoteBudgetStop();
+        early.FinishTable("stopped-empty", 0);
+        Assert.Equal(1, early.TablesNotReached);
+        Assert.Equal("stopped-empty", early.FirstTableNotReached);
+
+        /* A pass that did not stop has none. */
+        var calm = GateOn(new FakeTime(), new ScriptedPressure(null));
+        calm.FinishTable("finished", 10);
+        Assert.Null(calm.FirstTableNotReached);
+    }
+
     /* ---- cancellation ---- */
 
     [Fact]

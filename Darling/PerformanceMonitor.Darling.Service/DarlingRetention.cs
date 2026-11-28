@@ -666,306 +666,10 @@ public static class DarlingRetention
             totalChunksDropped += objectUsageChain.ChunksDropped;
             tablesFailed += objectUsageChain.TablesFailed;
 
-            /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
-               of each distinct query text / plan XML; the fact rows carry only a digest. They must be
-               bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
-               measured field instance is ~200 GB/year if nothing ever expires.
-
-               The obvious sweep (delete dim rows no live fact references) is an anti-join against two
-               hypertables per dim row and is not affordable at this size. Instead the write path stamps
-               last_seen on every cycle that references a digest, so last_seen is never older than the newest
-               fact row pointing at it, and the GC is an index range scan on the stamp table's last_seen (V298, #9304:
-               collect.{dim}_seen holds the stamp, the dimension row's own last_seen is no longer indexed) — run through a
-               row-capped, cursored DELETE rather than one unbounded statement. That matters
-               most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
-               expired content to clear: unsliced, that is a single transaction holding a lock and generating
-               WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
-
-               The horizon is the WIDEST effective fact retention of the two tables — resolved through the
-               same resolver the fact purge above uses, so a raised per-collector override can never outlive
-               the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
-               nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
-               one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
-               every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
-               dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
-               to 6 by #4503 to cut non-HOT WAL on the then-indexed dimension last_seen column — measured at ~42 KB of
-               WAL per touch on one production store; since V298 the touch writes the narrow stamp row instead), and the Query Store liveness touch at
-               QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
-               this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
-               already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
-               no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
-               a future guard change that outgrows it fails loudly rather than silently). */
+            /* The widest effective fact retention of the two dim-feeding tables, resolved once for the pass through the same
+               resolver the fact purge above uses. The sightings horizon below is never narrower than it, and the payload
+               dimension GC at the end of the pass builds its cutoffs from it. */
             var widestFactRetentionDays = WidestDimensionFactRetentionDays(retentionDaysFor);
-
-            /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
-               legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
-               coverage clamp above deliberately SKIPPED (#1784). The old response deferred the whole GC
-               whenever either happened, which was correct but blunt: on a coverage-lagging store the clamp
-               holds every sweep until a backfill lands, so the GC deferred every sweep and a 400-day-old
-               orphan survived with nothing failed anywhere (#1795).
-
-               The true safety boundary is MEASURED instead: content older than the oldest SURVIVING
-               digest-carrying fact row cannot be referenced by anything, whatever the reason those facts
-               are still there. Measure each dim-feeding table's floor once per sweep, take the MINIMUM
-               across tables (same reasoning as the widest retention above), and clamp the assumed cutoff
-               to it. The blunt guard becomes unnecessary rather than dormant: a store whose purges are
-               blocked for weeks still reclaims dimension content for queries that stopped running long
-               before, and held history bounds the GC instead of stopping it.
-
-               HOW the floor is measured differs by store shape (#1815, from the first field run):
-               - On a HYPERTABLE, the floor is the oldest surviving chunk's range_start, read from the
-                 chunk catalog — one instant metadata row, immune to compression. The exact per-row probe
-                 shipped first and timed out in the field: compressed chunks carry NO btree indexes, so
-                 the V39 partial index only serves uncompressed chunks and months of compressed history
-                 turned min() into a full decompress-scan. The chunk floor is CONSERVATIVE in the safe
-                 direction — every surviving fact row sits at or above its chunk's range_start, so the
-                 cutoff can only land older than strictly necessary: prunes less, never dangles. The
-                 ancient-orphan pathology #1795 targeted still dies (those sit far below any surviving
-                 chunk), and precision improves automatically as purges/backfill advance the chunk floor.
-               - On a PLAIN table (a plain-PostgreSQL store, or a table whose hypertable conversion
-                 failed — the catalog answers empty either way), the exact V39-indexed probe runs as
-                 designed — small, uncompressed, index-edge — now with the sweep's own generous command
-                 timeout instead of the driver's 30-second default that cancelled it in the field.
-
-               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is unchanged: the
-               safety boundary is then unknown, so the GC defers for the cycle — fail toward the
-               recoverable side, exactly as the old guard did. Bounded growth beats silently dangled
-               digests. */
-            DateTime? oldestSurvivingDigestFact = null;
-            var floorUnmeasurable = false;
-            foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
-            {
-                try
-                {
-                    await using var floorConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
-
-                    DateTime? floor = null;
-                    if (timescaleAvailable)
-                    {
-                        /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC
-                           discipline every stored timestamp follows (see PgCollectorRowWriter). */
-                        await using var chunkProbe = new NpgsqlCommand(
-                            "SELECT range_start AT TIME ZONE 'UTC' FROM timescaledb_information.chunks " +
-                            "WHERE hypertable_schema = 'collect' AND hypertable_name = $1 " +
-                            "ORDER BY range_start LIMIT 1", floorConnection)
-                        { CommandTimeout = DeleteTimeoutSeconds };
-                        chunkProbe.Parameters.AddWithValue(factTable);
-                        if (await chunkProbe.ExecuteScalarAsync(cancellationToken) is DateTime chunkFloor)
-                        {
-                            floor = chunkFloor;
-                        }
-                    }
-
-                    if (floor is null)
-                    {
-                        /* Plain table, failed conversion, or an empty hypertable (no chunks) — all of
-                           which the exact probe answers instantly or via the V39 partial index. */
-                        await using var probe = new NpgsqlCommand(
-                            $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection)
-                        { CommandTimeout = DeleteTimeoutSeconds };
-                        floor = await probe.ExecuteScalarAsync(cancellationToken) as DateTime?;
-                    }
-
-                    if (floor is DateTime floorTime
-                        && (oldestSurvivingDigestFact is null || floorTime < oldestSurvivingDigestFact.Value))
-                    {
-                        oldestSurvivingDigestFact = floorTime;
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    floorUnmeasurable = true;
-                    logger?.LogWarning("Retention purge: could not measure {Table}'s digest-carrying fact floor: {Message}",
-                        factTable, ex.Message);
-                }
-            }
-
-            if (floorUnmeasurable)
-            {
-                /* One line, deliberately a fixed string never interpolated: the field signature an operator
-                   greps for when the dimensions stop shrinking. The per-table warning above names which
-                   table and why. */
-                logger?.LogWarning("dimension GC deferred: a dim-feeding table's fact floor was unmeasurable this cycle; dimension content is retained until it can be measured");
-            }
-            else
-            {
-                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
-                var planDimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
-                if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
-                {
-                    /* Fixed string, same reasoning as the defer line: the greppable signature of a store
-                       whose GC is bounded by held history (clamped or failed purges) rather than by the
-                       nominal horizon. Informational — this state is the fix working, not a problem. */
-                    logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
-                }
-
-                /* #2210: the Query Store plan map goes FIRST, and its cutoff is deliberately LATER than the
-                   dimension's — it prunes more aggressively, so the dim always outlives the map it points into.
-                   The two bad end-states are not symmetric. A pruned map row whose dim row survives renders a
-                   plan as "not collected" and leaves bytes unreclaimed until the dim's own horizon passes:
-                   visible, self-correcting, no wrong answers. A pruned DIM row whose map row survives is a
-                   reader resolving a live fact to absent content, silently, weeks after the cause. Ordering the
-                   cutoffs makes the recoverable end-state the only reachable one, and
-                   QueryStorePlanMap.MarginOrderingHolds is pinned against ChunkIntervalDays so shrinking that
-                   constant cannot invert it unnoticed. */
-                /* #2219: PostgreSQL statement text, on the same principle as the plan map below but with the
-                   margin in the OPPOSITE direction, because the asymmetry is the other way round. Text is what a
-                   fact row points AT, so it must OUTLIVE the statistics that reference it: text kept past its
-                   facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
-                   reads as a list of integers — the exact failure this table was added to fix. Hence a margin
-                   ADDED to the fact horizon rather than subtracted from it. The horizon is the widest effective
-                   retention of the collectors whose facts carry a queryid this table resolves
-                   (PgStatementText.ReferencingCollectors): the dimension-feeding pair above holds no such facts, so its
-                   widest figure says nothing about how long these rows are pointed at. */
-                var textCutoff = ComputeStatementTextCutoff(
-                    utcNow, WidestEffectiveRetentionDays(PgStatementText.ReferencingCollectors, retentionDaysFor));
-                var textDeleted = await PurgeOneAsync(
-                    postgres, PgStatementText.TableName,
-                    PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    textCutoff, logger, cancellationToken,
-                    pacer: walPacer);
-                if (textDeleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += textDeleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
-
-                /* #2316 review catch: the map must learn the plan-content horizon too, or the dedicated
-                   dim cutoff overtakes this one and a live map row can point at deleted content — the
-                   silent-missing-plans failure the margin ordering exists to prevent. ComputeMapCutoff
-                   keeps the map's cutoff strictly NEWER than the plan dim's under every knob value, so
-                   the only reachable end-state stays the recoverable one (map row gone first, plan
-                   renders as not-collected). The visible consequence is deliberate: a Query Store plan
-                   fetch for an interval older than the knob misses, exactly like the dim itself. */
-                var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
-                var mapDeleted = await PurgeOneAsync(
-                    postgres, QueryStorePlanMap.TableName,
-                    UnorderedRowCappedDeleteSql(
-                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, livenessTouchedTablePruneRowCap),
-                    mapCutoff, logger, cancellationToken,
-                    batchSize: livenessTouchedTablePruneRowCap,
-                    pacer: walPacer);
-                if (mapDeleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += mapDeleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
-
-                /* #2150: query_store statement text, the same direction of margin as the two above — it must
-                   outlive the facts that reference it, because text retired early reads as a statement that
-                   never had text rather than as one whose text expired. #9043: the prune reads the liveness
-                   stamp from collect.query_store_text_seen and retires a text only when that stamp and the
-                   text row's own are both behind the cutoff (QueryStoreTextSeen.PruneSql). The cascade of the
-                   seen table's foreign key removes the seen row with the text row. */
-                var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
-                if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
-                {
-                    var queryTextCutoff = utcNow.AddDays(
-                        -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
-                    /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
-                       judges it by that stamp instead of never finding it. Keys against keys, a slice of the key at a time,
-                       no pass over the text heap (QueryStoreTextSeen.AdoptSlice). It inserts rows and deletes none, so it
-                       is not one of the pass's purged tables and its rows are not rows deleted: only its failure is
-                       counted. */
-                    if (!await AdoptMissingSeenRowsAsync(
-                            postgres, QueryStoreTextSeen.AdoptSlice, livenessAdopt, queryTextCutoff, logger, walPacer, cancellationToken))
-                    {
-                        tablesFailed++;
-                    }
-
-                    var queryTextDeleted = await PurgeOneAsync(
-                        postgres, QueryStoreTextStore.TableName,
-                        QueryStoreTextSeen.PruneSql(livenessTouchedTablePruneRowCap),
-                        queryTextCutoff, logger, cancellationToken,
-                        batchSize: livenessTouchedTablePruneRowCap,
-                        pacer: walPacer);
-                    if (queryTextDeleted is not null)
-                    {
-                        tablesPurged++;
-                        totalRowsDeleted += queryTextDeleted.Value;
-
-                        /* Counts as a run only when the pass's wall budget did not cut THIS table short (a spent budget skips
-                           the table with a clean 0, and a stop part-way leaves rows behind): the next pass tries again. A stop
-                           on a later table does not matter, this one had finished. */
-                        if ((walPacer?.Yield?.TablesLeft ?? 0) == tablesLeftBefore)
-                        {
-                            queryTextPruneGate?.MarkRan();
-                        }
-                    }
-                    else
-                    {
-                        tablesFailed++;
-                    }
-
-                    /* #6750 part 3: the self-statement keys whose text row the prune above retired. The key table is about 2% of
-                       the text rows, so one anti-join is the whole purge (single-shot), at most once a day with the text prune. Its cutoff parameter is unused. */
-                    var selfKeysDeleted = await PurgeOneAsync(
-                        postgres, QueryStoreSelfKeys.TableName, QueryStoreSelfKeys.PruneSql, queryTextCutoff, logger, cancellationToken,
-                        batchSize: SingleShotStatement, pacer: walPacer);
-                    if (selfKeysDeleted is not null)
-                    {
-                        tablesPurged++;
-                        totalRowsDeleted += selfKeysDeleted.Value;
-                    }
-                    else
-                    {
-                        tablesFailed++;
-                    }
-                }
-
-                foreach (var dimTable in PayloadDimensions.DimTables)
-                {
-                    /* #2316 review catch: the dedicated horizon applies to PLAN content only. query_text_dim
-                       is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
-                       break "text stays analyzable for the facts' full retention", which is half the knob's
-                       own justification. The router is pure so the scoping is pinned by tests. */
-                    /* #9304: both dimensions are capped by ROWS, ordered by the stamp table's own index
-                       (PayloadDimensions.CursoredDeleteSql), because the dimension row no longer carries an index on
-                       last_seen. The delete cascades to the stamp row. #2386 is why a row cap and not a one-day slice:
-                       the plan dim's TOAST payloads make a day that cannot be deleted inside the command timeout. */
-                    var dimCutoff = ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff);
-
-                    /* A dimension row with no stamp row gets one first, stamped with its own last_seen, so the delete below
-                       judges it by that stamp, a slice of the key at a time (PayloadDimensionSeen.AdoptSlice). */
-                    if (!await AdoptMissingSeenRowsAsync(
-                            postgres, PayloadDimensionSeen.AdoptSlice(dimTable), livenessAdopt,
-                            dimCutoff, logger, walPacer, cancellationToken))
-                    {
-                        tablesFailed++;
-                    }
-
-                    var dimDeleted = await PurgeOneAsync(
-                        postgres,
-                        dimTable,
-                        /* Illustrative at the CEILING cap: PurgeOneAsync rebuilds the statement per attempt at whatever cap
-                           #4130's adaptive sizing has chosen, so this exact string is never the one executed. */
-                        PayloadDimensions.CursoredDeleteSql(dimTable, PlanDimDeleteRowCap, hasCursor: false),
-                        dimCutoff,
-                        logger,
-                        cancellationToken,
-                        batchSize: PlanDimDeleteRowCap,
-                        adaptiveRowCapTimeColumn: PayloadDimensions.LastSeenColumn,
-                        pacer: walPacer,
-                        cursoredSql: (attemptCap, hasCursor) => PayloadDimensions.CursoredDeleteSql(dimTable, attemptCap, hasCursor));
-                    if (dimDeleted is not null)
-                    {
-                        tablesPurged++;
-                        totalRowsDeleted += dimDeleted.Value;
-                    }
-                    else
-                    {
-                        tablesFailed++;
-                    }
-                }
-            }
 
             /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the rows of a
                collector that writes sightings, so it is kept as long as the longest raw retention of any such collector and no
@@ -1580,7 +1284,7 @@ public static class DarlingRetention
                     ?? (CollectorScheduleDefaults.All.TryGetValue("procedure_stats", out var procedureSchedule) ? procedureSchedule.RetentionDays : DataRetentionBaseDays));
             /* The raw floor is measured ONCE, by PurgeOneAsync itself, and bound as $2 (review of #5706, #1815): the predicate used to
                carry an unbounded min() over procedure_stats that the slice statement expands three times, a whole-table scan each, and
-               the chunk-catalog form is how the digest floor above survives compressed chunks. The measurement is a callback that runs
+               the chunk-catalog form is how the payload dimension GC's digest floor below survives compressed chunks. The measurement is a callback that runs
                on the purge's own connection AFTER PurgeOneAsync's #5592 wall-budget gate (round 2, L4), so a pass whose budget is spent
                opens no connection and runs no probe for this table. A floor that cannot be measured throws out of the callback, so the
                table counts failed and its purge is skipped for the cycle: without the floor the guard against deleting totals the raw
@@ -1743,6 +1447,313 @@ public static class DarlingRetention
                 }
             }
 
+            /* #9980: the payload dimension GC (the fact floor measurement, the PostgreSQL statement text, the Query Store plan
+               map, the Query Store text with its self-statement keys, and the two dimensions, in that order) runs after every
+               other table of the pass. Its cursored deletes work through a standing load and take
+               whatever is left of the pass's wall budget, and each one goes on from the rows left on the next pass, so running
+               it last costs it only the time the other tables take, and a pass that stops in it leaves no other table unreached.
+               A pass that stops before it names its first statement not reached in the stop line below. */
+            /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
+               of each distinct query text / plan XML; the fact rows carry only a digest. They must be
+               bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
+               measured field instance is ~200 GB/year if nothing ever expires.
+
+               The obvious sweep (delete dim rows no live fact references) is an anti-join against two
+               hypertables per dim row and is not affordable at this size. Instead the write path stamps
+               last_seen on every cycle that references a digest, so last_seen is never older than the newest
+               fact row pointing at it, and the GC is an index range scan on the stamp table's last_seen (V298, #9304:
+               collect.{dim}_seen holds the stamp, the dimension row's own last_seen is no longer indexed) — run through a
+               row-capped, cursored DELETE rather than one unbounded statement. That matters
+               most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
+               expired content to clear: unsliced, that is a single transaction holding a lock and generating
+               WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
+
+               The horizon is the WIDEST effective fact retention of the two tables (widestFactRetentionDays, resolved
+               before the sightings purge above, which reads it too) — resolved through the
+               same resolver the fact purge above uses, so a raised per-collector override can never outlive
+               the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
+               nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
+               one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
+               every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
+               dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
+               to 6 by #4503 to cut non-HOT WAL on the then-indexed dimension last_seen column — measured at ~42 KB of
+               WAL per touch on one production store; since V298 the touch writes the narrow stamp row instead), and the Query Store liveness touch at
+               QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
+               this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
+               already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
+               no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
+               a future guard change that outgrows it fails loudly rather than silently). */
+
+            /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
+               legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
+               coverage clamp above deliberately SKIPPED (#1784). The old response deferred the whole GC
+               whenever either happened, which was correct but blunt: on a coverage-lagging store the clamp
+               holds every sweep until a backfill lands, so the GC deferred every sweep and a 400-day-old
+               orphan survived with nothing failed anywhere (#1795).
+
+               The true safety boundary is MEASURED instead: content older than the oldest SURVIVING
+               digest-carrying fact row cannot be referenced by anything, whatever the reason those facts
+               are still there. Measure each dim-feeding table's floor once per sweep, take the MINIMUM
+               across tables (same reasoning as the widest retention above), and clamp the assumed cutoff
+               to it. The blunt guard becomes unnecessary rather than dormant: a store whose purges are
+               blocked for weeks still reclaims dimension content for queries that stopped running long
+               before, and held history bounds the GC instead of stopping it.
+
+               HOW the floor is measured differs by store shape (#1815, from the first field run):
+               - On a HYPERTABLE, the floor is the oldest surviving chunk's range_start, read from the
+                 chunk catalog — one instant metadata row, immune to compression. The exact per-row probe
+                 shipped first and timed out in the field: compressed chunks carry NO btree indexes, so
+                 the V39 partial index only serves uncompressed chunks and months of compressed history
+                 turned min() into a full decompress-scan. The chunk floor is CONSERVATIVE in the safe
+                 direction — every surviving fact row sits at or above its chunk's range_start, so the
+                 cutoff can only land older than strictly necessary: prunes less, never dangles. The
+                 ancient-orphan pathology #1795 targeted still dies (those sit far below any surviving
+                 chunk), and precision improves automatically as purges/backfill advance the chunk floor.
+               - On a PLAIN table (a plain-PostgreSQL store, or a table whose hypertable conversion
+                 failed — the catalog answers empty either way), the exact V39-indexed probe runs as
+                 designed — small, uncompressed, index-edge — now with the sweep's own generous command
+                 timeout instead of the driver's 30-second default that cancelled it in the field.
+
+               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is unchanged: the
+               safety boundary is then unknown, so the GC defers for the cycle — fail toward the
+               recoverable side, exactly as the old guard did. Bounded growth beats silently dangled
+               digests. */
+            DateTime? oldestSurvivingDigestFact = null;
+            var floorUnmeasurable = false;
+            foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
+            {
+                try
+                {
+                    await using var floorConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+
+                    DateTime? floor = null;
+                    if (timescaleAvailable)
+                    {
+                        /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC
+                           discipline every stored timestamp follows (see PgCollectorRowWriter). */
+                        await using var chunkProbe = new NpgsqlCommand(
+                            "SELECT range_start AT TIME ZONE 'UTC' FROM timescaledb_information.chunks " +
+                            "WHERE hypertable_schema = 'collect' AND hypertable_name = $1 " +
+                            "ORDER BY range_start LIMIT 1", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        chunkProbe.Parameters.AddWithValue(factTable);
+                        if (await chunkProbe.ExecuteScalarAsync(cancellationToken) is DateTime chunkFloor)
+                        {
+                            floor = chunkFloor;
+                        }
+                    }
+
+                    if (floor is null)
+                    {
+                        /* Plain table, failed conversion, or an empty hypertable (no chunks) — all of
+                           which the exact probe answers instantly or via the V39 partial index. */
+                        await using var probe = new NpgsqlCommand(
+                            $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        floor = await probe.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                    }
+
+                    if (floor is DateTime floorTime
+                        && (oldestSurvivingDigestFact is null || floorTime < oldestSurvivingDigestFact.Value))
+                    {
+                        oldestSurvivingDigestFact = floorTime;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    floorUnmeasurable = true;
+                    logger?.LogWarning("Retention purge: could not measure {Table}'s digest-carrying fact floor: {Message}",
+                        factTable, ex.Message);
+                }
+            }
+
+            if (floorUnmeasurable)
+            {
+                /* One line, deliberately a fixed string never interpolated: the field signature an operator
+                   greps for when the dimensions stop shrinking. The per-table warning above names which
+                   table and why. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding table's fact floor was unmeasurable this cycle; dimension content is retained until it can be measured");
+            }
+            else
+            {
+                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                var planDimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
+                if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
+                {
+                    /* Fixed string, same reasoning as the defer line: the greppable signature of a store
+                       whose GC is bounded by held history (clamped or failed purges) rather than by the
+                       nominal horizon. Informational — this state is the fix working, not a problem. */
+                    logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
+                }
+
+                /* #2210: the Query Store plan map goes FIRST, and its cutoff is deliberately LATER than the
+                   dimension's — it prunes more aggressively, so the dim always outlives the map it points into.
+                   The two bad end-states are not symmetric. A pruned map row whose dim row survives renders a
+                   plan as "not collected" and leaves bytes unreclaimed until the dim's own horizon passes:
+                   visible, self-correcting, no wrong answers. A pruned DIM row whose map row survives is a
+                   reader resolving a live fact to absent content, silently, weeks after the cause. Ordering the
+                   cutoffs makes the recoverable end-state the only reachable one, and
+                   QueryStorePlanMap.MarginOrderingHolds is pinned against ChunkIntervalDays so shrinking that
+                   constant cannot invert it unnoticed. */
+                /* #2219: PostgreSQL statement text, on the same principle as the plan map below but with the
+                   margin in the OPPOSITE direction, because the asymmetry is the other way round. Text is what a
+                   fact row points AT, so it must OUTLIVE the statistics that reference it: text kept past its
+                   facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
+                   reads as a list of integers — the exact failure this table was added to fix. Hence a margin
+                   ADDED to the fact horizon rather than subtracted from it. The horizon is the widest effective
+                   retention of the collectors whose facts carry a queryid this table resolves
+                   (PgStatementText.ReferencingCollectors): the dimension-feeding pair above holds no such facts, so its
+                   widest figure says nothing about how long these rows are pointed at. */
+                var textCutoff = ComputeStatementTextCutoff(
+                    utcNow, WidestEffectiveRetentionDays(PgStatementText.ReferencingCollectors, retentionDaysFor));
+                var textDeleted = await PurgeOneAsync(
+                    postgres, PgStatementText.TableName,
+                    PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    textCutoff, logger, cancellationToken,
+                    pacer: walPacer);
+                if (textDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += textDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
+                /* #2316 review catch: the map must learn the plan-content horizon too, or the dedicated
+                   dim cutoff overtakes this one and a live map row can point at deleted content — the
+                   silent-missing-plans failure the margin ordering exists to prevent. ComputeMapCutoff
+                   keeps the map's cutoff strictly NEWER than the plan dim's under every knob value, so
+                   the only reachable end-state stays the recoverable one (map row gone first, plan
+                   renders as not-collected). The visible consequence is deliberate: a Query Store plan
+                   fetch for an interval older than the knob misses, exactly like the dim itself. */
+                var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
+                var mapDeleted = await PurgeOneAsync(
+                    postgres, QueryStorePlanMap.TableName,
+                    UnorderedRowCappedDeleteSql(
+                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                    mapCutoff, logger, cancellationToken,
+                    batchSize: livenessTouchedTablePruneRowCap,
+                    pacer: walPacer);
+                if (mapDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += mapDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
+                /* #2150: query_store statement text, the same direction of margin as the two above — it must
+                   outlive the facts that reference it, because text retired early reads as a statement that
+                   never had text rather than as one whose text expired. #9043: the prune reads the liveness
+                   stamp from collect.query_store_text_seen and retires a text only when that stamp and the
+                   text row's own are both behind the cutoff (QueryStoreTextSeen.PruneSql). The cascade of the
+                   seen table's foreign key removes the seen row with the text row. */
+                var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
+                if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
+                {
+                    var queryTextCutoff = utcNow.AddDays(
+                        -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
+                    /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
+                       judges it by that stamp instead of never finding it. Keys against keys, a slice of the key at a time,
+                       no pass over the text heap (QueryStoreTextSeen.AdoptSlice). It inserts rows and deletes none, so it
+                       is not one of the pass's purged tables and its rows are not rows deleted: only its failure is
+                       counted. */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, QueryStoreTextSeen.AdoptSlice, livenessAdopt, queryTextCutoff, logger, walPacer, cancellationToken))
+                    {
+                        tablesFailed++;
+                    }
+
+                    var queryTextDeleted = await PurgeOneAsync(
+                        postgres, QueryStoreTextStore.TableName,
+                        QueryStoreTextSeen.PruneSql(livenessTouchedTablePruneRowCap),
+                        queryTextCutoff, logger, cancellationToken,
+                        batchSize: livenessTouchedTablePruneRowCap,
+                        pacer: walPacer);
+                    if (queryTextDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += queryTextDeleted.Value;
+
+                        /* Counts as a run only when the pass's wall budget did not cut THIS table short (a spent budget skips
+                           the table with a clean 0, and a stop part-way leaves rows behind): the next pass tries again. A stop
+                           on a later table does not matter, this one had finished. */
+                        if ((walPacer?.Yield?.TablesLeft ?? 0) == tablesLeftBefore)
+                        {
+                            queryTextPruneGate?.MarkRan();
+                        }
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
+
+                    /* #6750 part 3: the self-statement keys whose text row the prune above retired. The key table is about 2% of
+                       the text rows, so one anti-join is the whole purge (single-shot), at most once a day with the text prune. Its cutoff parameter is unused. */
+                    var selfKeysDeleted = await PurgeOneAsync(
+                        postgres, QueryStoreSelfKeys.TableName, QueryStoreSelfKeys.PruneSql, queryTextCutoff, logger, cancellationToken,
+                        batchSize: SingleShotStatement, pacer: walPacer);
+                    if (selfKeysDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += selfKeysDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
+                }
+
+                foreach (var dimTable in PayloadDimensions.DimTables)
+                {
+                    /* #2316 review catch: the dedicated horizon applies to PLAN content only. query_text_dim
+                       is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
+                       break "text stays analyzable for the facts' full retention", which is half the knob's
+                       own justification. The router is pure so the scoping is pinned by tests. */
+                    /* #9304: both dimensions are capped by ROWS, ordered by the stamp table's own index
+                       (PayloadDimensions.CursoredDeleteSql), because the dimension row no longer carries an index on
+                       last_seen. The delete cascades to the stamp row. #2386 is why a row cap and not a one-day slice:
+                       the plan dim's TOAST payloads make a day that cannot be deleted inside the command timeout. */
+                    var dimCutoff = ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff);
+
+                    /* A dimension row with no stamp row gets one first, stamped with its own last_seen, so the delete below
+                       judges it by that stamp, a slice of the key at a time (PayloadDimensionSeen.AdoptSlice). */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, PayloadDimensionSeen.AdoptSlice(dimTable), livenessAdopt,
+                            dimCutoff, logger, walPacer, cancellationToken))
+                    {
+                        tablesFailed++;
+                    }
+
+                    var dimDeleted = await PurgeOneAsync(
+                        postgres,
+                        dimTable,
+                        /* Illustrative at the CEILING cap: PurgeOneAsync rebuilds the statement per attempt at whatever cap
+                           #4130's adaptive sizing has chosen, so this exact string is never the one executed. */
+                        PayloadDimensions.CursoredDeleteSql(dimTable, PlanDimDeleteRowCap, hasCursor: false),
+                        dimCutoff,
+                        logger,
+                        cancellationToken,
+                        batchSize: PlanDimDeleteRowCap,
+                        adaptiveRowCapTimeColumn: PayloadDimensions.LastSeenColumn,
+                        pacer: walPacer,
+                        cursoredSql: (attemptCap, hasCursor) => PayloadDimensions.CursoredDeleteSql(dimTable, attemptCap, hasCursor));
+                    if (dimDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += dimDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
+                }
+            }
+
             /* #5592: a table the spent budget kept from starting came back as "0 rows, fine" from PurgeOneAsync and was
                counted above; it was not purged, so it comes back out. A table stopped part-way did delete rows and stays. */
             var yieldGate = walPacer?.Yield;
@@ -1752,9 +1763,12 @@ public static class DarlingRetention
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped, yieldGate?.TablesLeft ?? 0);
             if (yieldGate is { StoppedOnBudget: true })
             {
+                /* The first table not reached is named when there is one, so the log says where the unreached set starts
+                   without the pass order at hand. A pass that stops in its last statement after deleting rows has none. */
                 logger?.LogInformation(
-                    "Retention purge stopped at its {Budget:F0}-minute time budget {Place} with {NotReached} table(s) not reached; the next pass continues from the rows left. Collection was waited for {WaitSeconds:F0} s and the drain paused {PauseSeconds:F0} s between batches",
+                    "Retention purge stopped at its {Budget:F0}-minute time budget {Place} with {NotReached} table(s) not reached{FirstNotReached}. The next pass continues from the rows left. Collection was waited for {WaitSeconds:F0} s and the drain paused {PauseSeconds:F0} s between batches",
                     yieldGate.WallBudget.TotalMinutes, yieldGate.StoppedPlace, yieldGate.TablesNotReached,
+                    yieldGate.FirstTableNotReached is { } firstNotReached ? ", the first of them " + firstNotReached : string.Empty,
                     yieldGate.TotalWaitSeconds, yieldGate.TotalPauseSeconds);
             }
 
@@ -2896,7 +2910,8 @@ WHERE NOT EXISTS
     /// collection and its WAL pacing included. A backlog paced at the WAL rate otherwise takes the rest of the pass: in a lab,
     /// one 500,000-row slice wrote 2,930 MB and was paced 1,213 s at 2.4 MB/s, and 36 tables after it waited for the next pass.
     /// At the share the drain stops at a slice boundary and counts as a table left, so the worker schedules the continuation
-    /// pass, and the pass goes on to the tables after it. A third of the 30-minute budget is about 8 to 10 slices of
+    /// pass, and the pass goes on to the tables after it. The payload dimension GC is the last of them and uses whatever
+    /// budget is left, so the share also bounds what the drain takes from the GC. A third of the 30-minute budget is about 8 to 10 slices of
     /// <see cref="QueryTagSlimSightings.MoveSliceRowCap"/> rows at that lab's rate (130 MB and 55 s of pacing a slice).
     /// </summary>
     internal const double SightingsDrainBudgetShare = 1.0 / 3;
