@@ -4149,6 +4149,13 @@ END $$;";
            total milliseconds, counted beside statement_count and no longer inside it. Two nullable integer columns, no default, no rewrite: old rows keep NULL.
            An older build ignores them. */
         new Migration(SlowReadConnectionOpens.Version, "slow-read-connection-opens", SlowReadConnectionOpens.AddColumnsSql),
+        /* V322 (#9863): drops idx_query_stats_host_hourly_hash on the hourly host rollup. The wide row joins the materialized units, so the only read by query_hash is the
+           query-tag filter, which also carries server_id and the bucket range, so ux_query_stats_host_hourly serves it and it reads a wider range of that index, slower
+           on a long window. The index's upkeep is most of the hourly build's block reads. V287's
+           text is unchanged, so a fresh store makes the empty index at V287 and drops it here. A plain DROP INDEX takes a short exclusive lock on the rollup while the
+           rung runs, and a build in flight makes the rung wait. No rows move. The service drops the index again on each start, after the ladder, when a store at V322 or
+           later holds it again (HostHourlyHashIndexDrop.ReassertAsync). An older build never names the index. */
+        new Migration(HostHourlyHashIndexDrop.Version, "host-hourly-hash-index-drop", HostHourlyHashIndexDrop.DropSql),
     };
 
     /// <summary>
@@ -11850,6 +11857,10 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// BYO login may lack; a failure is warned (via <paramref name="logger"/>) but never fails the
     /// migration, since the moves already committed and the managed connection strings carry Search
     /// Path anyway (see <see cref="TrySetDatabaseSearchPathAsync"/>).
+    ///
+    /// <para>Then, on every call, it drops <c>idx_query_stats_host_hourly_hash</c> if the store holds it again
+    /// (<see cref="HostHourlyHashIndexDrop.ReassertAsync"/>), because V322 runs once and the viewer reads the index's
+    /// absence as V322's mark. Best-effort and failure-isolated like the search path, and no lock while the index is absent.</para>
     /// </summary>
     public static async Task<int> MigrateAsync(
         NpgsqlConnection connection, ILogger? logger, IMigrationRungObserver? observer, CancellationToken cancellationToken = default)
@@ -11866,6 +11877,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                establish that. Nothing is applied, nothing is stamped, and the store-establishing half
                below never needed the lock in the first place. */
             await TrySetDatabaseSearchPathAsync(connection, logger, cancellationToken);
+            await HostHourlyHashIndexDrop.ReassertAsync(connection, logger, cancellationToken);
             return 0;
         }
 
@@ -11891,6 +11903,10 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         /* Outside the advisory lock and the per-migration transactions: establish the durable
            database-default search_path for all future connections. Idempotent, best-effort. */
         await TrySetDatabaseSearchPathAsync(connection, logger, cancellationToken);
+
+        /* The store is at this build's top rung here, V322 or later, so the hash index V322 drops is gone unless something put it back after the rung ran. The rung does
+           not run twice, and the viewer reads the index's absence as the V322 mark, so the drop is asserted again on every start (#9863). */
+        await HostHourlyHashIndexDrop.ReassertAsync(connection, logger, cancellationToken);
         return applied;
     }
 
