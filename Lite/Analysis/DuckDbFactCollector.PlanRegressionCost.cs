@@ -551,7 +551,8 @@ LIMIT 100";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            AppLogger.Warn("DuckDbFactCollector", $"The plan regression cost window read failed for server {context.ServerId}; the read keeps its exact window: {ex.Message}");
+            /* record: false logs the failure without marking the family unread: the read keeps its exact window, so its rows are whole. */
+            ReportCollectionFailure(ex, context, record: false);
             return exact;
         }
     }
