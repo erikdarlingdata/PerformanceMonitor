@@ -148,6 +148,20 @@ public class PgBaselineProvider
     /* #3941: the process's shared tier (see BaselineCache for the invalidation rule), or null for a private cache. */
     private readonly BaselineCache? _shared;
 
+    /* #9972: the computes that run on a provider's own token for a pass with a detector deadline (GetOrComputeKeptAsync).
+       The shared tier's set when there is one, so every provider of the process joins and counts the same computes. */
+    private readonly KeptBaselineComputes _keptComputes;
+
+    /* #9972: true on the async flow of a pass whose detectors read under a detector deadline (KeepComputesForThisFlow). */
+    private readonly AsyncLocal<bool> _keepsComputesForThisFlow = new();
+
+    /// <summary>#9972: the computes running on a provider's own token, for a test to wait on.</summary>
+    internal KeptBaselineComputes KeptComputes => _keptComputes;
+
+    /// <summary>#9972 test seam: awaited by every compute (an unkeyed series, or one chunk of a keyed set) before it reads the
+    /// store, with the metric and the token the compute runs on. Tests set it to hold a compute. The service never does.</summary>
+    internal Func<string, CancellationToken, Task>? BeforeCompute { get; set; }
+
     /* #3691 lane 33: the keyed-cardinality note's once-per-cache-period gate (NoteKeyedCardinality). */
     private readonly object _keyedWarnGate = new();
     private DateTime? _keyedCardinalityWarnedAt;
@@ -164,6 +178,7 @@ public class PgBaselineProvider
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _shared = sharedCache;
+        _keptComputes = sharedCache?.KeptComputes ?? new KeptBaselineComputes();
         _time = timeProvider ?? TimeProvider.System;
         /* Information, not Warning: "this host cannot resolve that zone id" is a statement about the host's
            configuration, made once per zone per process by the resolver itself — see BaselineLocalClock. */
@@ -369,8 +384,83 @@ public class PgBaselineProvider
     {
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
+        if (_keepsComputesForThisFlow.Value)
+        {
+            return await GetOrComputeKeptAsync(
+                serverId, cacheKey, roundedHour, ownToken => BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, ownToken),
+                SharedComputeTimeout, cancellationToken);
+        }
+
         return await GetOrComputeUnsharedAsync(
             serverId, cacheKey, roundedHour, () => BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken));
+    }
+
+    /// <summary>
+    /// #9972: makes every baseline compute the current async flow starts run on the provider's own token
+    /// (<see cref="GetOrComputeKeptAsync"/> for an unkeyed series, <see cref="GetKeyedChunkKeptAsync"/> for a keyed set), or
+    /// on the caller's token again when false. The anomaly detectors set it for a
+    /// pass that has a detector deadline, so the deadline stops a detector's wait and the compute is stored for the next
+    /// pass. A pass with no deadline (the scheduled pass) leaves it false, so its token still cancels its computes.
+    /// </summary>
+    internal void KeepComputesForThisFlow(bool keep) => _keepsComputesForThisFlow.Value = keep;
+
+    /// <summary>
+    /// #9972: the cache half of an unkeyed read on a pass with a detector deadline, with the compute passed in. A fresh entry
+    /// is returned as it is, a faulted one included, as <see cref="GetOrComputeUnsharedAsync"/> returns it. Otherwise the
+    /// caller joins the compute already running for the key on this store, or starts it. The compute runs on a token the
+    /// caller cannot cancel, for at most <paramref name="timeout"/>, and stores its entry before it completes unless it
+    /// faulted. The caller's own cancellation (the detector deadline, or the pass's token) throws from the wait and leaves
+    /// the compute running, so the next pass finds the entry.
+    ///
+    /// <para>A caller still waiting when the compute ends files the answer in its own cache as its own compute would have:
+    /// a faulted one for <see cref="FaultedEntryTtl"/>, so the detector's second read of the key in the pass is a hit. A
+    /// compute that timed out or threw is such a faulted answer.</para>
+    ///
+    /// <para>At most <see cref="KeptBaselineComputes.MaxInFlight"/> of these computes run at once over the process's
+    /// store, because each holds one pooled connection after its pass has returned. A compute past that limit runs on the
+    /// caller's token through <see cref="GetOrComputeUnsharedAsync"/>: the deadline stops it and it stores nothing.</para>
+    /// </summary>
+    internal async Task<CachedBaseline> GetOrComputeKeptAsync(
+        int serverId, string cacheKey, DateTime roundedKey,
+        Func<CancellationToken, Task<CachedBaseline>> compute, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (TryGetFresh(serverId, cacheKey, roundedKey, out var cached))
+        {
+            return cached;
+        }
+
+        var flightKey = new KeptBaselineComputes.FlightKey(_postgres, SharedKind, cacheKey, roundedKey);
+        var flight = _keptComputes.JoinOrStart(flightKey, async () =>
+        {
+            try
+            {
+                using var own = new CancellationTokenSource(timeout);
+                var entry = await compute(own.Token);
+                /* A faulted compute is answered to the callers still waiting and not kept past them: the next pass
+                   starts a compute again. */
+                if (!entry.Faulted)
+                {
+                    Store(serverId, cacheKey, entry);
+                }
+
+                return (IReadOnlyList<CachedBaseline>?)new[] { entry };
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("[PgBaselineProvider] Baseline compute for {CacheKey} did not finish: {Message}", cacheKey, ex.Message);
+                return null;
+            }
+        });
+
+        if (flight is null)
+        {
+            return await GetOrComputeUnsharedAsync(serverId, cacheKey, roundedKey, () => compute(cancellationToken));
+        }
+
+        var answer = (await flight.WaitAsync(cancellationToken))?[0]
+                     ?? new CachedBaseline { ComputedAt = roundedKey, RealTime = DateTime.UtcNow, Faulted = true };
+        Store(serverId, cacheKey, answer);
+        return answer;
     }
 
     /// <summary>The cache half of <see cref="GetOrComputeBaselinesAsync"/>, with the compute passed in. A faulted entry is kept
@@ -396,6 +486,11 @@ public class PgBaselineProvider
     private async Task<CachedBaseline> BuildEntryAsync(
         int serverId, string metricName, DateTime analysisTime, DateTime roundedHour, CancellationToken cancellationToken)
     {
+        if (BeforeCompute is { } beforeCompute)
+        {
+            await beforeCompute(metricName, cancellationToken);
+        }
+
         var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var buckets = BucketsOf(byMember, UnkeyedMember);
@@ -567,15 +662,37 @@ public class PgBaselineProvider
         int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken)
         => GetOrComputeKeyedBaselinesAsync(
             serverId, metricName, keys, analysisTime,
-            set => ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken));
+            async (set, token) =>
+            {
+                if (BeforeCompute is { } beforeCompute)
+                {
+                    await beforeCompute(metricName, token);
+                }
+
+                return await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, token);
+            },
+            _keepsComputesForThisFlow.Value, SharedComputeTimeout, cancellationToken);
 
     /// <summary>One chunk's compute result, the shape <see cref="ComputeBaselinesAsync"/> returns.</summary>
     internal delegate Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> KeyedChunkCompute(string[] set);
 
-    /// <summary>The keyed read with the chunk compute passed in. A member of a faulted chunk is answered and not stored (#7644), so the
-    /// next call computes it again; a member of a chunk that answered with no rows is stored.</summary>
-    internal async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+    /// <summary>One chunk's compute with the token it runs on: the caller's, or the provider's own for a kept compute (#9972).</summary>
+    internal delegate Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> KeyedChunkComputeOn(string[] set, CancellationToken token);
+
+    /// <summary>The keyed read with the chunk compute passed in, every chunk computed by the caller.</summary>
+    internal Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
         int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, KeyedChunkCompute computeChunk)
+        => GetOrComputeKeyedBaselinesAsync(
+            serverId, metricName, keys, analysisTime, (set, _) => computeChunk(set), keep: false, SharedComputeTimeout, CancellationToken.None);
+
+    /// <summary>The keyed read with the chunk compute passed in. A member of a faulted chunk is answered and not stored (#7644), so the
+    /// next call computes it again; a member of a chunk that answered with no rows is stored. With <paramref name="keep"/> (a
+    /// pass with a detector deadline, #9972) each chunk of misses is a kept compute (<see cref="GetKeyedChunkKeptAsync"/>):
+    /// <paramref name="cancellationToken"/> stops the caller's wait and the chunk is stored when it finishes. Without it the
+    /// chunk computes on <paramref name="cancellationToken"/>.</summary>
+    internal async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+        int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime,
+        KeyedChunkComputeOn computeChunk, bool keep, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
         var entries = new Dictionary<string, CachedBaseline>(StringComparer.Ordinal);
@@ -609,25 +726,14 @@ public class PgBaselineProvider
 
         foreach (var set in misses.Chunk(KeyedSetWidth))
         {
-            var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await computeChunk(set);
+            var members = keep
+                ? await GetKeyedChunkKeptAsync(serverId, metricName, set, roundedHour, computeChunk, timeout, cancellationToken)
+                : await BuildKeyedChunkAsync(metricName, set, roundedHour, computeChunk, cancellationToken);
 
-            var computedAt = DateTime.UtcNow;
             for (var member = 1; member <= set.Length; member++)
             {
                 var key = set[member - 1];
-                var memberBuckets = BucketsOf(byMember, member);
-                var entry = new CachedBaseline
-                {
-                    ComputedAt = roundedHour,
-                    RealTime = computedAt,
-                    Buckets = memberBuckets,
-                    FreshUntilUtc = memberBuckets is not null && IsDailyCacheArm(metricName) ? computedAt.AddDays(1) : null,
-                    Clock = clock,
-                    UtcOffsetMinutes = utcOffsetMinutes,
-                    TimeZoneId = timeZoneId,
-                    Key = key,
-                    Faulted = faulted
-                };
+                var entry = members[member - 1];
                 /* A faulted chunk is kept for FaultedEntryTtl only (see IsFresh): the second read of the key in this pass is a hit. */
                 Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
                 entries[key] = entry;
@@ -638,6 +744,92 @@ public class PgBaselineProvider
 
         return entries;
     }
+
+    /// <summary>One chunk's compute on <paramref name="token"/> and its members' entries in the set's order, each with its
+    /// compute's clock and time, built and not yet stored.</summary>
+    internal async Task<CachedBaseline[]> BuildKeyedChunkAsync(
+        string metricName, string[] set, DateTime roundedHour, KeyedChunkComputeOn computeChunk, CancellationToken token)
+    {
+        var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await computeChunk(set, token);
+
+        var computedAt = DateTime.UtcNow;
+        var members = new CachedBaseline[set.Length];
+        for (var member = 1; member <= set.Length; member++)
+        {
+            var memberBuckets = BucketsOf(byMember, member);
+            members[member - 1] = new CachedBaseline
+            {
+                ComputedAt = roundedHour,
+                RealTime = computedAt,
+                Buckets = memberBuckets,
+                FreshUntilUtc = memberBuckets is not null && IsDailyCacheArm(metricName) ? computedAt.AddDays(1) : null,
+                Clock = clock,
+                UtcOffsetMinutes = utcOffsetMinutes,
+                TimeZoneId = timeZoneId,
+                Key = set[member - 1],
+                Faulted = faulted
+            };
+        }
+
+        return members;
+    }
+
+    /// <summary>
+    /// #9972: one chunk of keyed misses on a pass with a detector deadline, the keyed twin of
+    /// <see cref="GetOrComputeKeptAsync"/>. The caller joins the compute already running on this store for the same keys in
+    /// the same order (<see cref="KeyedFlightKeyFor"/>), or starts it. The compute runs on a token the caller cannot cancel,
+    /// for at most <paramref name="timeout"/>, and stores every member's entry before it completes unless the chunk
+    /// faulted. The caller's own cancellation (the detector deadline, or the pass's token) throws from the wait and leaves
+    /// the compute running, so the next pass that asks for these keys finds their entries. A compute that threw or timed
+    /// out answers a faulted entry for each member, which the caller files as its own compute's. Past
+    /// <see cref="KeptBaselineComputes.MaxInFlight"/> the chunk computes on the caller's token: the deadline stops it and
+    /// it stores nothing.
+    /// </summary>
+    internal async Task<IReadOnlyList<CachedBaseline>> GetKeyedChunkKeptAsync(
+        int serverId, string metricName, string[] set, DateTime roundedHour, KeyedChunkComputeOn computeChunk,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var flightKey = new KeptBaselineComputes.FlightKey(_postgres, SharedKind, KeyedFlightKeyFor(serverId, metricName, set), roundedHour);
+        var flight = _keptComputes.JoinOrStart(flightKey, async () =>
+        {
+            try
+            {
+                using var own = new CancellationTokenSource(timeout);
+                var members = await BuildKeyedChunkAsync(metricName, set, roundedHour, computeChunk, own.Token);
+                foreach (var entry in members)
+                {
+                    /* A faulted chunk is answered to the callers still waiting and not kept past them. */
+                    if (!entry.Faulted)
+                    {
+                        Store(serverId, CacheKeyFor(serverId, metricName, entry.Key), entry);
+                    }
+                }
+
+                return (IReadOnlyList<CachedBaseline>?)members;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(
+                    "[PgBaselineProvider] Keyed baseline compute for {MetricName} on server {ServerId} did not finish: {Message}",
+                    metricName, serverId, ex.Message);
+                return null;
+            }
+        });
+
+        if (flight is null)
+        {
+            return await BuildKeyedChunkAsync(metricName, set, roundedHour, computeChunk, cancellationToken);
+        }
+
+        return await flight.WaitAsync(cancellationToken)
+               ?? Array.ConvertAll(set, key => new CachedBaseline { ComputedAt = roundedHour, RealTime = DateTime.UtcNow, Key = key, Faulted = true });
+    }
+
+    /// <summary>#9972: a keyed chunk's identity among the kept computes: the series and its keys in the order asked, each
+    /// with its length ahead of it so two sets never spell one string. The same pass again asks for the same keys in the
+    /// same order and joins.</summary>
+    internal static string KeyedFlightKeyFor(int serverId, string metricName, IReadOnlyList<string> set)
+        => $"{serverId}:{metricName}:[{string.Join(",", set.Select(key => $"{key.Length}:{key}"))}]";
 
     /// <summary>The analysis hour: the cache key's time AND, since #3941, the end of the compute's window
     /// (<see cref="ComputeBucketsAsync"/>), so the key names the rows its entry was computed from.</summary>

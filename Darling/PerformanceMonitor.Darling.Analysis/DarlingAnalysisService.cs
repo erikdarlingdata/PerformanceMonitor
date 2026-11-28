@@ -140,6 +140,10 @@ public sealed class DarlingAnalysisService
     /// </summary>
     internal BaselineCache? SharedBaselineCache { get; }
 
+    /// <summary>#9972 test seam: the baseline provider the PostgreSQL-target detectors read through, so a test can hold and
+    /// count its computes.</summary>
+    internal PgBaselineProvider PgTargetBaselines => _pgTargetEngine.Baselines;
+
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —

@@ -385,10 +385,17 @@ LIMIT 6";
     /// <para>#9966: the detectors run one after another through <see cref="StageDeadline.RunDetectorsInTurnAsync"/>,
     /// the loop the SQL Server detector runs one at a time. When the context carries a
     /// <see cref="AnalysisContext.DetectorDeadline"/> (an on-demand pass), a detector that has not finished when it
-    /// fires, with the baseline read it was in, is stopped, adds no fact and no failure line, and is named in
+    /// fires is stopped, adds no fact and no failure line, and is named in
     /// <see cref="AnalysisContext.DetectorsLeftOutForTime"/>. One not started by then is not started and is named the
     /// same way. The gate read stays on the pass's token: it is one count, and it decides whether any detector runs.
     /// With no deadline (the scheduled pass) every detector runs to its end.</para>
+    ///
+    /// <para>#9972: a baseline compute the stopped detector was waiting for, an unkeyed series or a keyed set, goes on, on
+    /// the provider's own token, and is stored when it finishes, so the same call again finds it
+    /// (<see cref="PgBaselineProvider.KeepComputesForThisFlow"/>). The detectors run one after another, so one pass
+    /// leaves at most one such compute behind, and it counts toward <see cref="KeptBaselineComputes.MaxInFlight"/> with
+    /// the SQL Server detectors' computes: one past that limit runs on the detector's token, stops with it and stores
+    /// nothing. With no deadline the pass's token cancels its baseline computes.</para>
     /// </summary>
     public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context)
     {
@@ -397,6 +404,10 @@ LIMIT 6";
 
         if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
+
+        /* Under a deadline the baseline computes this flow's detectors start belong to the provider, not to the detector
+           the deadline stops. */
+        _baselineProvider.KeepComputesForThisFlow(context.DetectorDeadline.CanBeCanceled);
 
         await StageDeadline.RunDetectorsInTurnAsync(context, anomalies, Detectors());
         return anomalies;
