@@ -81,8 +81,8 @@ internal static class DarlingHostBinding
         /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback.</summary>
         AllowFromInvalid,
 
-        /// <summary>#9894: the surface's own login passed the name check, but the probe found it a superuser or a member of the store owner role
-        /// - fail-closed to loopback (Critical). Only <see cref="ApplyLoginProbe"/> sets it.</summary>
+        /// <summary>#9894: the surface's own login passed the name check, but the probe found it holds something the probe refuses (a superuser, a member of the store owner role, and so on:
+        /// see <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/>) - fail-closed to loopback (Critical). Only <see cref="ApplyLoginProbe"/> sets it.</summary>
         LoginPrivileged,
 
         /// <summary>#9894: the probe of the surface's own login could not run (no connection, or its query failed) - fail-closed to loopback
@@ -201,8 +201,8 @@ internal static class DarlingHostBinding
     /// <summary>
     /// PURE (#9894): the probe of a surface's own login applied to a bind that would expose it. A decision that is not an exposure is
     /// returned as it is, and so is an exposure whose login the probe found unprivileged. Only an explicit
-    /// <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/> passes: a privileged login (a superuser, or a member of the store owner
-    /// role), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Failed, the enum's first member, so a result that was
+    /// <see cref="DarlingStoreLogins.LoginProbeVerdict.Unprivileged"/> passes: a privileged login (one that holds anything the probe refuses: a superuser, a member of the store owner
+    /// role, and so on), a probe that could not run, and any value the probe does not name (the zero value of a probe result is Failed, the enum's first member, so a result that was
     /// never filled in refuses too, and is still told apart from a real answer by its verdict, never by default) turn the
     /// exposure into loopback-only. A privileged login gets the reason that says so, every other refusal the probe-failed reason.
     /// </summary>
@@ -233,7 +233,7 @@ internal static class DarlingHostBinding
     /// <summary>
     /// #9894: the bind a host start takes for one surface, with the probe of its login. Outside a container on a store the service does not
     /// manage, a surface that would listen on the network connects once with its own login before the listener starts, and is exposed only if
-    /// that login is neither a superuser nor a member of the store owner role. The names decide first: no login of its own is refused without a
+    /// that login holds nothing the probe refuses (a superuser, a member of the store owner role, and so on). The names decide first: no login of its own is refused without a
     /// connection (<see cref="BindReason.DedicatedLoginRequired"/>), and so is an owner string that names no user
     /// (<see cref="BindReason.OwnerUserUnknown"/>, through <see cref="RefuseUnknownOwner"/>), because the names then cannot prove the two
     /// logins differ. The only difference left between this answer and the name-level answer of the <see cref="PostgresConfig"/> overloads is the

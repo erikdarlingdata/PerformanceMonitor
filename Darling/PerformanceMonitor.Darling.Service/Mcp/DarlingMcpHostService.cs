@@ -2451,7 +2451,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback (LogCritical).</summary>
         AllowFromInvalid,
 
-        /// <summary>#9894: the MCP login passed the name check, but the probe found it a superuser or a member of the store owner role — fail-closed to loopback (LogCritical).</summary>
+        /// <summary>#9894: the MCP login passed the name check, but the probe found it holds something that outranks the surface's grants (a superuser, a member of the store owner role, and so on) — fail-closed to loopback (LogCritical).</summary>
         LoginPrivileged,
 
         /// <summary>#9894: the probe of the MCP login could not run — fail-closed to loopback (LogCritical).</summary>

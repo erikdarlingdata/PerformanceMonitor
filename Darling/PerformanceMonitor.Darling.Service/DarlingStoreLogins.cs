@@ -537,8 +537,8 @@ internal static class DarlingStoreLogins
         if (exposed && !inContainer && !postgres.Managed && (configured is null || probed is not { Verdict: LoginProbeVerdict.Unprivileged }))
         {
             logger.LogCritical(
-                "{What}: the login in {Setting} was not confirmed as a least-privilege login before the network listener, so it is not started this attempt, and the next start checks the login again",
-                notThisAttempt, setting);
+                "{What}: the login in {Setting} was not confirmed before the network listener as one that holds none of what the exposure check refuses ({Refused}), so it is not started this attempt, and the next start checks the login again",
+                notThisAttempt, setting, LoginProbeRefusesText);
             return null;
         }
 
@@ -892,12 +892,13 @@ internal static class DarlingStoreLogins
         /// refused until a start can run it. First, so the zero value of a <see cref="LoginProbeResult"/> that was never filled in refuses too.</summary>
         Failed,
 
-        /// <summary>Neither the connected login nor its session login is a superuser or a member of a role that owns the store's <c>config</c>
-        /// schema or the table the migrations create there: the login a network-facing surface may use.</summary>
+        /// <summary>Neither the connected login nor its session login holds anything <see cref="LoginProbeSql"/> refuses: not a superuser, not a member
+        /// of a role that outranks the surface's grants (see <see cref="LoginProbeOutrankingRoles"/>), no REPLICATION, and before PostgreSQL 16 no
+        /// CREATEROLE: the login a network-facing surface may use.</summary>
         Unprivileged,
 
-        /// <summary>A superuser, or a member of the store owner role (under whatever name), by the connected login or by the session login that
-        /// could switch back to it, or a session that runs as a different user than the login it connected with, so exposure is refused.</summary>
+        /// <summary>A login that holds one of those, by the connected login or by the session login that could switch back to it, or a session that
+        /// runs as a different user than the login it connected with, so exposure is refused.</summary>
         Privileged,
     }
 
@@ -923,24 +924,61 @@ internal static class DarlingStoreLogins
     /// another role created first the schema's owner is not the role the service runs as, but the tables are.</summary>
     private const string LoginProbeOwnedTable = "config_monitored_servers";
 
-    /// <summary>The query the probe runs, with the store's schema as <c>$1</c> and a table it holds as <c>$2</c>. First column: whether the
-    /// connected login (<c>current_user</c>) or the login the session started as (<c>session_user</c>) is a superuser. A login whose role is switched
-    /// at connect (<c>ALTER ROLE ... SET role</c>, or <c>Options=-c role=...</c>) shows a limited <c>current_user</c> and can <c>SET ROLE</c> back to
-    /// what <c>session_user</c> is. Second column: whether either is a member of the role that owns the schema or of the one that owns the table.
-    /// Third column: whether <c>session_user</c> is not the user name the probe connected with (<c>$3</c>): a superuser login started with
-    /// <c>Options=-c session_authorization=&lt;low role&gt;</c> shows the low role as both <c>current_user</c> and <c>session_user</c> and can
-    /// <c>SET SESSION AUTHORIZATION</c> back, so a session that is not the login it connected as is refused. Every catalog name is qualified with
-    /// <c>pg_catalog.</c>, so a role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
+    /// <summary>The first PostgreSQL version where a <c>CREATEROLE</c> role needs <c>ADMIN OPTION</c> on a role to grant it (16.0, as
+    /// <c>server_version_num</c>). Before it a <c>CREATEROLE</c> role can grant itself membership in any role that is not a superuser, so the
+    /// probe refuses the attribute there and not from 16 on (#9894).</summary>
+    internal const int LoginProbeCreateRoleScopedFromVersionNum = 160000;
+
+    /// <summary>The predefined roles whose members outrank the grants a surface's login holds it to (#9894): the two that read and write every
+    /// table (<c>pg_read_all_data</c> undoes the secret-column carve) and the three that reach the server's files and programs. The same five
+    /// <c>tools/provision-roles.sql</c> refuses a membership in, in its owner guard and its revoke step. The probe looks each up by name in
+    /// <c>pg_catalog.pg_roles</c>, so one a server does not have (they came in 11 and 14) is no match and never an error.</summary>
+    internal static readonly string[] LoginProbeOutrankingRoles =
+    [
+        "pg_read_all_data",
+        "pg_write_all_data",
+        "pg_read_server_files",
+        "pg_write_server_files",
+        "pg_execute_server_program",
+    ];
+
+    /// <summary>The query the probe runs, with the store's schema as <c>$1</c>, a table it holds as <c>$2</c>, the user name the probe connected with
+    /// as <c>$3</c> and <see cref="LoginProbeOutrankingRoles"/> as <c>$4</c>. A login whose role is switched at connect
+    /// (<c>ALTER ROLE ... SET role</c>, or <c>Options=-c role=...</c>) shows a limited <c>current_user</c> and can <c>SET ROLE</c> back to what
+    /// <c>session_user</c> is, so every membership test asks about both. First column: whether either is a superuser. Second column: whether either
+    /// is a member of a role that outranks the surface's grants, which are the roles <c>tools/provision-roles.sql</c> refuses a membership in:
+    /// the owner of the schema or of the table (the schemas are created <c>IF NOT EXISTS ... AUTHORIZATION CURRENT_USER</c>, so on a store whose
+    /// schemas another role created first the schema's owner is not the role the service runs as, but the tables are), the database owner, any role
+    /// that is a superuser or has <c>BYPASSRLS</c>, or one of the predefined roles. Third column: whether <c>session_user</c> is not the user name the
+    /// probe connected with: a superuser login started with <c>Options=-c session_authorization=&lt;low role&gt;</c> shows the low role as both
+    /// <c>current_user</c> and <c>session_user</c> and can <c>SET SESSION AUTHORIZATION</c> back, so a session that is not the login it connected as
+    /// is refused. Fourth and fifth: whether either login itself has <c>CREATEROLE</c> or <c>REPLICATION</c>. Attributes are not inherited through
+    /// a membership, so these look at the login only (a role does not become a replication login by joining one). Sixth: <c>server_version_num</c>,
+    /// for <see cref="ClassifyLoginProbe"/>'s version rule on <c>CREATEROLE</c>. Every catalog name is qualified with <c>pg_catalog.</c>, so a
+    /// role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
     private const string LoginProbeSql =
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
-        + "pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER') OR pg_catalog.pg_has_role(session_user, n.nspowner, 'MEMBER') "
-        + "OR pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER') OR pg_catalog.pg_has_role(session_user, c.relowner, 'MEMBER'), "
-        + "session_user::pg_catalog.text <> $3::pg_catalog.text "
+        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE (r.rolsuper OR r.rolbypassrls OR r.oid IN (n.nspowner, c.relowner, "
+        + "(SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) "
+        + "OR r.rolname = ANY($4::pg_catalog.text[])) "
+        + "AND (pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') OR pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER'))), "
+        + "session_user::pg_catalog.text <> $3::pg_catalog.text, "
+        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolcreaterole AND rolname IN (current_user, session_user)), "
+        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolreplication AND rolname IN (current_user, session_user)), "
+        + "pg_catalog.current_setting('server_version_num')::pg_catalog.int4 "
         + "FROM pg_catalog.pg_namespace AS n JOIN pg_catalog.pg_class AS c ON c.relnamespace = n.oid WHERE n.nspname = $1 AND c.relname = $2";
 
-    /// <summary>PURE: the probe's three answers as a verdict. Any one true is <see cref="LoginProbeVerdict.Privileged"/>.</summary>
-    internal static LoginProbeResult ClassifyLoginProbe(bool isSuperuser, bool isOwnerMember, bool sessionUserDiffers) =>
-        new(isSuperuser || isOwnerMember || sessionUserDiffers ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
+    /// <summary>PURE: the probe's answers as a verdict. Any one refused is <see cref="LoginProbeVerdict.Privileged"/>. <paramref name="loginCanCreateRoles"/>
+    /// refuses only before PostgreSQL 16 (<see cref="LoginProbeCreateRoleScopedFromVersionNum"/>): there a <c>CREATEROLE</c> role can grant itself
+    /// <c>pg_read_all_data</c> or any other role that is not a superuser, and from 16 it cannot without <c>ADMIN OPTION</c> on the role, which a plain
+    /// login made by <c>tools/provision-roles.sql</c> does not hold. <paramref name="loginReplicates"/> refuses on any version: a replication connection can
+    /// copy every table, whatever the login's grants say, and the script does not look for it, so this goes beyond the script on purpose.</summary>
+    internal static LoginProbeResult ClassifyLoginProbe(
+        bool isSuperuser, bool isOwnerMember, bool sessionUserDiffers,
+        bool loginCanCreateRoles = false, bool loginReplicates = false, int serverVersionNum = LoginProbeCreateRoleScopedFromVersionNum) =>
+        new(isSuperuser || isOwnerMember || sessionUserDiffers || loginReplicates
+            || (loginCanCreateRoles && serverVersionNum < LoginProbeCreateRoleScopedFromVersionNum)
+            ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
 
     /// <summary>PURE: the error class a failed probe reports: the exception type, plus the SQLSTATE when the store refused it.</summary>
     internal static string DescribeProbeFailure(Exception failure)
@@ -997,6 +1035,7 @@ internal static class DarlingStoreLogins
                     new NpgsqlParameter { Value = PgSchemaGenerator.ConfigSchema },
                     new NpgsqlParameter { Value = LoginProbeOwnedTable },
                     new NpgsqlParameter { Value = builder.Username },
+                    new NpgsqlParameter { Value = LoginProbeOutrankingRoles },
                 },
             };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1005,7 +1044,8 @@ internal static class DarlingStoreLogins
                 return new LoginProbeResult(LoginProbeVerdict.Failed, "the config schema or its tables were not found");
             }
 
-            return ClassifyLoginProbe(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2)) with { LoginSha256 = LoginSha256(resolved) };
+            return ClassifyLoginProbe(
+                reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetInt32(5)) with { LoginSha256 = LoginSha256(resolved) };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1108,21 +1148,30 @@ internal static class DarlingStoreLogins
             + "provision-roles.sql creates (described in docs/darling/linux.md), then restart the service.";
     }
 
+    /// <summary>What the probe refuses, in plain words, for the lines below (#9894). The same list <see cref="LoginProbeSql"/> asks the store, and
+    /// the roles <c>tools/provision-roles.sql</c> refuses a membership in, plus a login with REPLICATION and, before PostgreSQL 16, CREATEROLE.
+    /// Constant text: it carries no connection string.</summary>
+    private const string LoginProbeRefusesText =
+        "a superuser, a member of a role that is a superuser or has BYPASSRLS, a member of the database owner or the store owner role, "
+        + "a member of a role that reads or writes every table or the server's files (pg_read_all_data, pg_write_all_data, pg_read_server_files, "
+        + "pg_write_server_files or pg_execute_server_program), a login with REPLICATION, a login whose session runs as a different user than the one it "
+        + "connected with (for example a session switched at connect, or a connection pooler that maps the user name), and, before PostgreSQL 16, "
+        + "a login with CREATEROLE";
+
     /// <summary>
-    /// #9894: the line for a surface whose own login the probe found to be a superuser, a member of the store owner role, or a session that is not the login it connected with. Outside a
-    /// container the surface then stays on loopback. Critical.
+    /// #9894: the line for a surface whose own login the probe refused: it holds something <see cref="LoginProbeRefusesText"/> lists, which outranks
+    /// the grants the surface is held to. Outside a container the surface then stays on loopback. Critical.
     /// </summary>
     internal static string PrivilegedLoginText(Surface surface)
     {
         var (what, setting, role) = Describe(surface);
         var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
-        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} is a superuser, "
-            + "a member of the role that owns the store, or a login whose session runs as a different user than the one it connected with (for example "
-            + "a session switched at connect, or a connection pooler that maps the user name), so the service cannot tell what the surface really runs as. "
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} is one the service "
+            + $"does not expose a surface with: it is {LoginProbeRefusesText}, any of which outranks the grants the surface is held to. "
             + "Network exposure is refused and it binds loopback-only. "
             + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
             + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
-            + "and make sure that login is not a superuser, not a member of the store owner role, and connects as the user it names.";
+            + "and make sure that login holds none of those and connects as the user it names.";
     }
 
     /// <summary>
@@ -1136,8 +1185,8 @@ internal static class DarlingStoreLogins
         var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
         return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} could not be "
             + $"checked first ({errorClass ?? "no error class"}), so network exposure is refused and it binds loopback-only. "
-            + "Before a network-facing surface is exposed the service connects with that login and confirms it is not a superuser and not a member of the "
-            + $"store owner role. Make sure {setting} connects (the {role} role provision-roles.sql creates), then restart the service.";
+            + "Before a network-facing surface is exposed the service connects with that login and confirms it is none of these: "
+            + $"{LoginProbeRefusesText}. Make sure {setting} connects (the {role} role provision-roles.sql creates), then restart the service.";
     }
 
     /// <summary>

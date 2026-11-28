@@ -880,6 +880,187 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         }
     }
 
+    /// <summary>The attributes and memberships that outrank the grants a surface's login is held to, and how the probe's answers combine: every one
+    /// refuses on its own, CREATEROLE refuses only before PostgreSQL 16, and a plain login passes on any version.</summary>
+    [Theory]
+    [InlineData(false, false, false, false, false, 150000, false)]
+    [InlineData(false, false, false, false, false, 170000, false)]
+    [InlineData(false, true, false, false, false, 170000, true)]
+    [InlineData(false, false, false, false, true, 150000, true)]
+    [InlineData(false, false, false, false, true, 170000, true)]
+    [InlineData(false, false, false, true, false, 150000, true)]
+    [InlineData(false, false, false, true, false, 159999, true)]
+    [InlineData(false, false, false, true, false, 160000, false)]
+    [InlineData(false, false, false, true, false, 170000, false)]
+    [InlineData(false, false, false, true, true, 170000, true)]
+    public void ReplicationAlwaysRefuses_AndCreateRoleRefusesOnlyBeforePostgres16(
+        bool superuser, bool outrankingMember, bool sessionUserDiffers, bool createsRoles, bool replicates, int serverVersionNum, bool expectedPrivileged) =>
+        Assert.Equal(
+            expectedPrivileged,
+            DarlingStoreLogins.ClassifyLoginProbe(superuser, outrankingMember, sessionUserDiffers, createsRoles, replicates, serverVersionNum).Verdict
+                == DarlingStoreLogins.LoginProbeVerdict.Privileged);
+
+    /// <summary>The kinds the live case below runs: each predefined role the probe names, a group role that has BYPASSRLS, one that is a superuser,
+    /// a group that owns the database, and a login with REPLICATION.</summary>
+    public static IEnumerable<object[]> OutrankingKinds() =>
+        DarlingStoreLogins.LoginProbeOutrankingRoles
+            .Concat(new[] { "bypassrls_group", "superuser_group", "database_owner", "replication_login" })
+            .Select(kind => new object[] { kind });
+
+    /// <summary>Each kind of login the repo's roles script defines as outranking the surface's grants, plus REPLICATION: a login holding it is
+    /// refused, whatever its name, and each case first proves on the login's own connection that the grant took hold, so a refusal cannot be a
+    /// grant that never landed. The login is otherwise a plain NOSUPERUSER one that the first live test shows is passed.</summary>
+    [Theory]
+    [MemberData(nameof(OutrankingKinds))]
+    public async Task TheProbe_RefusesALoginThatHoldsWhatOutranksTheGrants_InEachKind(string kind)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var loginName = "probe_k_login_" + suffix;
+        var groupName = "probe_k_group_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            var database = new NpgsqlConnectionStringBuilder(scratch.ConnectionString).Database!;
+            var (setup, proof) = kind switch
+            {
+                "bypassrls_group" => (
+                    $"CREATE ROLE {groupName} NOLOGIN BYPASSRLS; GRANT {groupName} TO {loginName}",
+                    $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER') AND (SELECT rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = '{groupName}')"),
+                "superuser_group" => (
+                    $"CREATE ROLE {groupName} NOLOGIN SUPERUSER; GRANT {groupName} TO {loginName}",
+                    $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER') AND (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = '{groupName}')"),
+                "database_owner" => (
+                    $"CREATE ROLE {groupName} NOLOGIN; ALTER DATABASE \"{database}\" OWNER TO {groupName}; GRANT {groupName} TO {loginName}",
+                    "SELECT pg_catalog.pg_has_role(current_user, (SELECT datdba FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()), 'MEMBER')"),
+                "replication_login" => (
+                    $"ALTER ROLE {loginName} REPLICATION",
+                    "SELECT rolreplication FROM pg_catalog.pg_roles WHERE rolname = current_user"),
+                _ => (
+                    $"GRANT {kind} TO {loginName}",
+                    $"SELECT pg_catalog.pg_has_role(current_user, '{kind}', 'MEMBER')"),
+            };
+
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {loginName} LOGIN NOSUPERUSER NOREPLICATION PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = loginName,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+            var postgres = OwnStore(Owner, webConnectionString: connectionString);
+
+            /* The control: before the grant the same login passes, so the refusal below is the grant. */
+            var before = await DarlingStoreLogins.ProbeSurfaceLoginAsync(DarlingStoreLogins.Surface.Web, postgres, ct);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, before.Verdict);
+
+            await using (var grant = owner.CreateCommand(setup))
+            {
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var login = NpgsqlDataSource.Create(connectionString))
+            await using (var proveCommand = login.CreateCommand(proof))
+            {
+                Assert.True((bool)(await proveCommand.ExecuteScalarAsync(ct))!, $"the {kind} grant did not take hold on the login's own connection, so a verdict proves nothing.");
+            }
+
+            var start = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+                DarlingStoreLogins.Surface.Web, postgres, inContainer: false,
+                ResolveFor(DarlingStoreLogins.Surface.Web, postgres, inContainer: false), ct);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, start.Probe?.Verdict);
+            Assert.Equal(DarlingHostBinding.BindReason.LoginPrivileged, start.Bind.Reason);
+            Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, start.Bind.Mode);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                /* The database-owner kind hands the database to the group role, and a role that owns one cannot be dropped: reassign it first. */
+                var hasGroup = kind is "bypassrls_group" or "superuser_group" or "database_owner";
+                await using var drop = new NpgsqlCommand(
+                    (hasGroup ? $"REASSIGN OWNED BY {groupName} TO CURRENT_USER; DROP OWNED BY {groupName}; DROP ROLE IF EXISTS {groupName}; " : "")
+                    + $"DROP ROLE IF EXISTS {loginName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>A login with CREATEROLE: refused before PostgreSQL 16, where it can grant itself pg_read_all_data or any role that is not a
+    /// superuser, and passed from 16 on, where it needs ADMIN OPTION on a role to grant it. The expected verdict follows the server's own version,
+    /// so the split is proved on whichever server the suite runs against.</summary>
+    [Fact]
+    public async Task TheProbe_RefusesACreateRoleLoginOnlyBeforePostgres16()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var loginName = "probe_cr_login_" + Guid.NewGuid().ToString("N")[..8];
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var create = owner.CreateCommand($"CREATE ROLE {loginName} LOGIN NOSUPERUSER CREATEROLE PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = loginName,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+            await using (var login = NpgsqlDataSource.Create(connectionString))
+            await using (var proveCommand = login.CreateCommand("SELECT rolcreaterole FROM pg_catalog.pg_roles WHERE rolname = current_user"))
+            {
+                Assert.True((bool)(await proveCommand.ExecuteScalarAsync(ct))!, "the login does not hold CREATEROLE, so a verdict proves nothing.");
+            }
+
+            int serverVersionNum;
+            await using (var versionCommand = owner.CreateCommand("SELECT current_setting('server_version_num')::int"))
+            {
+                serverVersionNum = (int)(await versionCommand.ExecuteScalarAsync(ct))!;
+            }
+
+            var result = await DarlingStoreLogins.ProbeSurfaceLoginAsync(
+                DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: connectionString), ct);
+            Assert.Equal(
+                serverVersionNum < DarlingStoreLogins.LoginProbeCreateRoleScopedFromVersionNum
+                    ? DarlingStoreLogins.LoginProbeVerdict.Privileged
+                    : DarlingStoreLogins.LoginProbeVerdict.Unprivileged,
+                result.Verdict);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {loginName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     /// <summary>A login whose session is switched to a low role at connect, in each of the three forms: <c>Options=-c role=...</c> on a superuser
     /// (the session user is a superuser), the same on a member of the owner role (the session user is a member while the connected role is not),
     /// and <c>Options=-c session_authorization=...</c> on a superuser (both names show the low role, and the session can switch back). Each is

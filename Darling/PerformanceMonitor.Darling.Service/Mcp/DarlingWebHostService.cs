@@ -850,7 +850,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* Decide the effective bind PURELY (shared ladder), then map the reason -> severity here. */
         /* #9894: on a store the service does not manage, outside a container, a surface that would listen on the network connects once with its own
-           login before the listener starts, and is exposed only if that login is neither a superuser nor a member of the store owner role. */
+           login before the listener starts, and is exposed only if that login holds nothing the probe refuses (a superuser, a member of the store owner role, and so on). */
         var (bind, loginProbe) = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
             DarlingStoreLogins.Surface.Web, config.Postgres, DarlingHostBinding.IsRunningInContainer,
             dedicatedLogin => ResolveWebBind(web, config.Postgres.Managed, DarlingHostBinding.IsRunningInContainer, dedicatedLogin),
