@@ -9,12 +9,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -491,14 +493,48 @@ public sealed class PgTargetStageBudgetLiveTests
         return (long)(await count.ExecuteScalarAsync(ct))!;
     }
 
+    /// <summary>Reads the newest batch time the store holds for the target, or null when it holds none.</summary>
+    private static async Task<DateTime?> LatestStoredBatchAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var latest = new NpgsqlCommand("SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1", connection);
+        latest.Parameters.AddWithValue(ServerId);
+        return await latest.ExecuteScalarAsync(ct) is DateTime at ? at : null;
+    }
+
+    /// <summary>Finds the reply's first <c>persisted</c> value, at any depth, or null when the reply has none.</summary>
+    private static bool? PersistedIn(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals("persisted") && property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    return property.Value.GetBoolean();
+                if (PersistedIn(property.Value) is { } inside)
+                    return inside;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (PersistedIn(item) is { } inside)
+                    return inside;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
-    /// A current on-demand pass that left a family out for time stores no findings, so the findings table keeps what the
-    /// last whole pass wrote. The service decides that from the left-out records on the pass's context, and the
-    /// PostgreSQL-target cuts fill the same records. The pass still returns its findings to the caller. The same pass with
-    /// no budget leaves nothing out and stores them.
+    /// A current on-demand pass that left a family out for time stores no findings, so the newest batch in the findings
+    /// table stays the last whole pass's. The service decides that from the left-out records on the pass's context
+    /// (<see cref="AnalysisContext.StoresFindings"/>), and the PostgreSQL-target cuts fill the same records. The pass
+    /// still returns its findings to the caller, and its reply says they were not stored. The same pass with no budget
+    /// leaves nothing out and stores them.
     /// </summary>
     [Fact]
-    public async Task ACurrentPassThatLeftAFamilyOutForTime_StoresNoFindings_AndTheSamePassWithNoBudgetStoresThem()
+    public async Task ACurrentPassThatLeftAFamilyOutForTime_StoresNoFindings_AndTheLastWholePassStaysTheLatestBatch()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -564,6 +600,18 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, NULL, FALSE, TRUE)", connection);
         Assert.Empty(whole.LastFamiliesLeftOutForTime);
         Assert.False(whole.LastPassLeftOutForTime);
         Assert.Contains(wholeFindings, finding => finding.RootFactKey == PgTargetFactKeys.DatabaseGrowth);
-        Assert.True(await StoredFindingsAsync(connection, ct) > 0, "A whole pass stores its findings.");
+        var storedByTheWholePass = await StoredFindingsAsync(connection, ct);
+        var wholeBatch = await LatestStoredBatchAsync(connection, ct);
+        Assert.True(storedByTheWholePass > 0, "A whole pass stores its findings.");
+        Assert.NotNull(wholeBatch);
+
+        /* A cut pass after it, through the tool: the reply says its findings were not stored, and the store holds what
+           the whole pass wrote and nothing newer. */
+        var reply = await DarlingMcpTools.AnalyzeServer(cut, postgres, ServerName, 4).WaitAsync(Limit, ct);
+        Assert.True(cut.LastPassLeftOutForTime);
+        using (var document = JsonDocument.Parse(reply))
+            Assert.False(PersistedIn(document.RootElement), reply);
+        Assert.Equal(storedByTheWholePass, await StoredFindingsAsync(connection, ct));
+        Assert.Equal(wholeBatch, await LatestStoredBatchAsync(connection, ct));
     }
 }
