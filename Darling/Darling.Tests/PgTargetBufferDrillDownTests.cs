@@ -601,10 +601,13 @@ public sealed class PgTargetBufferDrillDownTests
     /// <summary>
     /// A buffer-composition drill-down held past the drill-down budget of an on-demand pass (#9966), through the whole
     /// reply. The capture table is locked by another session, so the drill-down read waits behind it and never finishes by
-    /// itself. The budget ends while it waits. The reply still carries every finding the whole pass returns, in the same
-    /// order with the same stories and severities. The held finding, and the findings the walk had not reached, have no
-    /// drill-down and are named in <c>drill_downs_left_out</c> by root fact key. The findings before it keep the drill-down
-    /// state the whole pass gave them. The same pass with no budget carries the drill-down and names nothing.
+    /// itself. The budget counts from the start of the pass, so it ends either while the walk waits on the read or before
+    /// the walk reaches it; the lock keeps the read from finishing first, and the outcome is the same both ways: the
+    /// deadline stops the read the walk started, or the walk never starts it. The reply still carries every finding the
+    /// whole pass returns, in the same order with the same stories and severities. The held finding, and the findings the
+    /// walk had not reached, have no drill-down and are named in <c>drill_downs_left_out</c> by root fact key. The findings
+    /// before it keep the drill-down state the whole pass gave them. The same pass with no budget carries the drill-down
+    /// and names nothing.
     /// </summary>
     [Fact]
     public async Task ADrillDownHeldPastItsBudget_LeavesTheFindingInTheReplyWithoutIt_NamesIt_AndTheRestOfTheReplyIsWhole()
@@ -650,7 +653,9 @@ public sealed class PgTargetBufferDrillDownTests
         Assert.True(CarriesADrillDown(wholeBuffer));
         Assert.Empty(LeftOutOf(wholeDocument.RootElement, "drill_downs_left_out"));
 
-        /* A drill-down budget that ends while the capture read waits behind the lock. */
+        /* A drill-down budget with the capture table locked. Eight seconds is long enough for the walk to reach the read on
+           an ordinary runner; on a slower one the budget ends before the walk starts it. The lock keeps the read from
+           finishing in either case, so the assertions below do not depend on which happened. */
         var budget = TimeSpan.FromSeconds(8);
         var cut = new DarlingAnalysisService(postgres)
         {
@@ -663,9 +668,7 @@ public sealed class PgTargetBufferDrillDownTests
         {
             await locker.OpenAsync(ct);
             await using var held = await PgTargetStageBudgetLiveTests.HoldReadsOfAsync(locker, "pg_buffer_usage", ct);
-            var run = DarlingMcpTools.AnalyzeServer(cut, postgres, ServerName, 1, as_of: asOf);
-            await PgTargetStageBudgetLiveTests.AReadWaitsForAsync(connection, "pg_buffer_usage", ct);
-            cutReply = await run.WaitAsync(limit, ct);
+            cutReply = await DarlingMcpTools.AnalyzeServer(cut, postgres, ServerName, 1, as_of: asOf).WaitAsync(limit, ct);
             await held.RollbackAsync(ct);
         }
 

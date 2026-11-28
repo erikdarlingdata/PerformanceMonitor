@@ -261,7 +261,7 @@ public sealed class PgTargetStageBudgetLiveTests
     }
 
     /// <summary>Returns once a session waits for a lock on <paramref name="table"/>: the held read has reached the store.</summary>
-    internal static async Task AReadWaitsForAsync(NpgsqlConnection watcher, string table, CancellationToken ct)
+    private static async Task AReadWaitsForAsync(NpgsqlConnection watcher, string table, CancellationToken ct)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(Limit);
