@@ -586,11 +586,12 @@ The uninstall does not touch the monitored servers. To remove this install's Ext
 ```bash
 sudo systemctl disable --now darling
 sudo rm -f /etc/systemd/system/darling.service /etc/systemd/system/darling.service.previous
+sudo rm -rf /etc/systemd/system/darling.service.d
 sudo systemctl daemon-reload
 sudo rm -rf /opt/darling /opt/darling.previous /opt/darling.failed /opt/darling-new
 ```
 
-`/opt/darling.failed`, `/opt/darling-new` and `darling.service.previous` exist only after an upgrade, a `--rollback` or `--replace-unit`, and the block runs without an error on an install that never did any of those. It leaves the store, the config, the keys and the logs. To remove them too:
+`/opt/darling.failed`, `/opt/darling-new`, `darling.service.previous` and the `darling.service.d` drop-in folder exist only after an upgrade, a `--rollback`, `--replace-unit` or `sudo systemctl edit darling`, and the block runs without an error on an install that never did any of those. It leaves the store, the config, the keys and the logs. To remove them too:
 
 ```bash
 sudo rm -rf /etc/darling /usr/share/PerformanceMonitorDarling
@@ -617,6 +618,7 @@ sudo -u postgres dropuser darling
 | Set-aside build | `/opt/darling.failed`, after a failed upgrade or a `--rollback`. Nothing uses it |
 | Extract folder | `/opt/darling-new`, where you extract each tarball and run the scripts from. `--rollback` runs from it |
 | Kept unit | `/etc/systemd/system/darling.service.previous`, after `--replace-unit` replaces a unit that differs from the tarball's |
+| Unit drop-in | `/etc/systemd/system/darling.service.d/override.conf`, after `sudo systemctl edit darling` |
 
 Back up `/etc/darling`, with its keys, and the store.
 
