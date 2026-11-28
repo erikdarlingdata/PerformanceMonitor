@@ -101,7 +101,8 @@ public sealed class DarlingMcpQueryHeatmapTools
         string? as_of,
         bool full_text,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool boundTheRead = true)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -143,11 +144,13 @@ public sealed class DarlingMcpQueryHeatmapTools
             */
             var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
 
+            /* #9965: the cap keeps the newest cells, so the read covers the newest limit + 1 bins first and reads the whole window only when those answer
+               fewer cells than that. The cells, the over-fetch and the trim below are the same as a whole-window read. boundTheRead false reads the whole window. */
             /* #8570: a bin of 60 minutes or more reads whole hours from the hourly rollup (duration and cpu only), and the hours it has not built yet, and the
                partial hours at the window's edges, from the raw rows. The store's measured coverage decides; a store with no rollup reads raw as before. */
             var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var read = await DarlingQueryHeatmapReader.GetQueryHeatmapRoutedAsync(
-                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken);
+                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken, boundTheRead);
             var rows = read.Rows;
 
             /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid
