@@ -5093,7 +5093,7 @@ WHERE u.rolname = current_user";
 
     private static string DescribeForeignRoleMarker(string? marker) => marker switch
     {
-        RoleMarker => "created by tools/provision-roles.sql",
+        RoleMarker => "created by provision-roles.sql",
         null => "not created by Darling",
         _ => $"comment '{marker}'",
     };

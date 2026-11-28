@@ -97,6 +97,8 @@ On every start the service reconciles this against the live cluster: it adds the
 
 Add a `network` block to `mcp` (`mcp.enabled` must be `true`). This works with the bundled store and in the compose container. With your own PostgreSQL outside a container, the MCP server also needs its own store login. Set `postgres.mcpConnectionString` to the `mcp` role that `provision-roles.sql` creates, as [Linux install](linux.md#the-web-dashboard-and-mcp) describes. It must name a login other than the one in `postgres.connectionString`, and `postgres.connectionString` must name its own user (`Username=...`): with no user there, the service cannot tell the two logins apart and keeps the surface on loopback. The service connects with the surface's login once before it binds the network. It keeps the surface on loopback if that login, or the login the session started as when a role is switched at connect, is a superuser, a member of a role that is a superuser or has `BYPASSRLS`, a member of the database owner or the store owner role (the role that owns the `config` schema or any table in it, or the user that `postgres.connectionString` names), a member of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_write_server_files` or `pg_execute_server_program` (the roles that read or write every table or the server's files), a login that can read the stored connection secrets (the `admin` role can, and so can any login with SELECT on a secret column of the `config` tables), a login with `REPLICATION`, or, before PostgreSQL 16, a login with `CREATEROLE`. It also keeps the surface on loopback if the session runs as a different user than the login it connected with, for example a session switched at connect or a connection pooler that maps the user name, because the service then cannot tell what the surface really runs as. Without it, the MCP server stays on loopback and the service logs a critical line that names the setting. In the compose container the endpoint is exposed without it, and the service logs the same critical line at start when the MCP server has no login of its own. The service runs this check once, at start, so a grant made after the start (for example `GRANT pg_read_all_data TO web`) is not seen until the next start. Do not set `DOTNET_RUNNING_IN_CONTAINER=true` outside a container, for example in an `Environment=` line of a systemd unit: the service then takes the container rules, which skip this check.
 
+On Windows, the token is an `encryptedToken`:
+
 ```json
 "mcp": {
   "enabled": true,
@@ -108,6 +110,31 @@ Add a `network` block to `mcp` (`mcp.enabled` must be `true`). This works with t
   }
 }
 ```
+
+On Linux, `--encrypt-password` does not exist, so give the token as a `file:` reference:
+
+```json
+"mcp": {
+  "enabled": true,
+  "port": 5152,
+  "network": {
+    "listen": "192.168.1.205",
+    "allowFrom": "192.168.1.0/24",
+    "token": "file:/etc/darling/mcp_token"
+  }
+}
+```
+
+Make the token file before you restart the service. The `darling` user owns it, and only that user can read it, the same way [the install steps](linux.md#the-web-dashboard-and-mcp) make the other secret files. Then write the token into it:
+
+```bash
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/mcp_token
+openssl rand -hex 24 | sudo tee /etc/darling/mcp_token > /dev/null
+```
+
+The service trims the end of the file, so a final newline does no harm. On a Linux box, open the port with the host's firewall. For `ufw`, [the Linux page](linux.md#open-the-port-with-ufw) has the rule.
+
+`mcp.enabled` in `darling.json` is read only at the first start. After that the store holds the switch, so a file that says `true` does not turn MCP on if the store says `false`. On Linux, set it as [the Linux page](linux.md#the-web-dashboard-and-mcp) shows, with `UPDATE config.config_service SET mcp_enabled = true WHERE id = 1`. On Windows, run `--enable-mcp`.
 
 When `listen` is a network address **and** a token is present **and** `allowFrom` is a valid CIDR list, the MCP host binds that interface behind two gates: an **in-app CIDR check** on the remote address (checked first; loopback is always allowed, so local clients keep working) and a **required bearer token** (constant-time, no loopback exemption). An address outside `allowFrom` gets a 403 whatever token it sends. Any missing precondition keeps MCP loopback-only. A token configured with no network `listen` also keeps MCP loopback-only and gates the loopback listener: every local client sends `Authorization: Bearer <token>`, and a token that cannot be decrypted stops the MCP server from starting rather than serving it open. With no token configured, an enabled MCP server does not start unless `mcp.allowTokenlessLoopback` is true, which serves local clients with no token and with the write and investigation tools off. A POST to MCP whose Content-Type is not `application/json` is refused with 415. Prefer `encryptedToken` (a DPAPI blob from `--encrypt-password`); a plaintext `token` works for dev but is warned. `env:NAME` and `file:PATH` references are for the compose and Linux setups. A Windows service uses `encryptedToken`. Set the same scoped firewall rule for the MCP port:
 
@@ -178,6 +205,29 @@ Add a `network` block to `web` (`web.enabled` must be `true`). This works with t
   }
 }
 ```
+
+That block is the Windows form. On Linux, `--encrypt-password` does not exist, so give the token as a `file:` reference:
+
+```json
+"web": {
+  "enabled": true,
+  "port": 5153,
+  "network": {
+    "listen": "192.168.1.205",
+    "allowFrom": "192.168.1.0/24",
+    "token": "file:/etc/darling/web_token"
+  }
+}
+```
+
+Make the token file before you restart the service. The `darling` user owns it, and only that user can read it. Then write the token into it:
+
+```bash
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/web_token
+openssl rand -hex 24 | sudo tee /etc/darling/web_token > /dev/null
+```
+
+On a Linux box, open the port with the host's firewall. For `ufw`, [the Linux page](linux.md#open-the-port-with-ufw) has the rule.
 
 When `listen` is a network address **and** a token is present **and** `allowFrom` is a valid CIDR list, the web host binds that interface behind two gates: an **in-app CIDR check** on the remote address and an **access token**. A browser presents the token ONCE through the login form (open `http://192.168.1.205:5153/` and paste it); the form POSTs it to `/auth/login`, the host validates it constant-time, sets an **HMAC-signed, HttpOnly, SameSite=Strict session cookie**, and 302-redirects to the page you were opening. Subsequent requests ride the cookie. A token in the address (`?token=`) signs no one in, whatever its value, because an address lands in history, bookmarks, proxy logs and Referer headers: a bookmark or link that carries one opens the login form, and the service log says why. The dashboard takes no bearer header either (that is the MCP endpoint). A script signs in the way the form does, by posting the token to `/auth/login` and then presenting the session cookie it gets back: `curl -c jar -d "token=<token>" http://192.168.1.205:5153/auth/login`, then `curl -b jar .../api/fleet`. The sign-in works only where `web.network.oidc.tokenSignIn` allows it: under `loopback` it works from the host and answers 403 from the network, and under `off` it answers 403 everywhere (see [Token sign-in mode](configuration-web.md#token-sign-in-mode)). A wrong token shows the login form again and keeps the page you were opening, so a right token on the next try lands there. Failed sign-ins are throttled per source address: three wrong tokens go without delay, the fourth starts a wait of 2 seconds, and each further wrong token doubles it, up to 5 minutes. During the wait every attempt from that address answers **429** with `Retry-After`, right token or wrong, and no token is compared. Each attempt is counted before its token is compared, so attempts that arrive together are counted one by one, and a sign-in that is held up only by attempts from the same address that are still being compared waits for them (at most 5 seconds) instead of being refused. A success gives back only its own attempt: other clients behind the same address keep their count. IPv6 addresses are counted by their /64, and every loopback address (`127.0.0.0/8`, `::1`) is one address. One total budget of 60 attempts an hour holds across all addresses that have not signed in during the last hour; an address that signed in during the last hour is not held by it, though its own wait still applies. When the total budget holds, the `429` says so: the wrong tokens came from other addresses, and restarting the service clears the hold. The wait is kept in memory, so restarting the service clears it. The sign-in POST must come from the dashboard's own page: a POST whose `Origin` (or `Referer`, when there is no `Origin`) names another host is refused with **403** and does not count. The body is read up to 4 KB whatever its framing, and only as `application/x-www-form-urlencoded`. The token itself must be at least **16 characters**, at least 6 of them different — `--configure-network` generates 32 random ones — or the service refuses to expose the dashboard at start (Critical line, loopback-only) rather than gate a network on a short one. On loopback a shorter token still signs a browser in, and the dashboard serves reads only until a longer one is set. **Loopback is exempt from the CIDR check only** — while the dashboard is exposed, a request from the box itself still has to present the token or a valid cookie. It used to pass tokenless on the grounds that the surface was read-only; the Custom Views composer's create / update / delete and `/api/compose/run` ended that, so in exposed mode the token *is* the loopback guard for any local process and sandboxed local sockets ([#1649](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1649)). A dashboard with **no** token configured does not start unless `web.allowTokenlessLoopback` is true, which serves local browsers with no token for reads only (a change gets **403** and a message naming the token setting); a `token` / `encryptedToken` with no network `listen` keeps it loopback-only and puts the same token gate on it, and a token that cannot be decrypted stops the dashboard from starting rather than serving it open. An out-of-CIDR request is refused with **403**, cookie or no cookie; an in-CIDR request with no credential gets the login form back as a **200**, not a 401. The cookie signing key is per-process, so a service restart invalidates open sessions (just re-present the token). Prefer `encryptedToken` (a DPAPI blob from `--encrypt-password`); a plaintext `token` works for dev but is warned. `env:NAME` and `file:PATH` references are for the compose and Linux setups. A Windows service uses `encryptedToken`. Set the same scoped firewall rule for the web port:
 

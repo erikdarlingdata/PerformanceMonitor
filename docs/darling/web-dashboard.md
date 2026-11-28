@@ -12,7 +12,7 @@ The dashboard reads the monitoring store. A sign-in that can edit also changes m
 
 ## Turn it on
 
-First, give it a token. An enabled dashboard with no token does not start. The service log says so and names the settings. Add a `network` block with only a token to `web` in `darling.json`. Do not add `listen`, so the dashboard stays loopback-only. Then restart the service.
+First, give it a token. An enabled dashboard with no token does not start. The service log says so and names the settings. Add a `network` block with only a token to `web` in `darling.json`. Do not add `listen`, so the dashboard stays loopback-only. Then restart the service. On Windows, the block looks like this:
 
 ```json
 "web": {
@@ -22,7 +22,17 @@ First, give it a token. An enabled dashboard with no token does not start. The s
 }
 ```
 
-To make a token, use [the PowerShell one-liner on the network endpoints page](network-endpoints.md#mcp-endpoint-assistant-over-the-lan). On Windows, keep the token in `encryptedToken`. `web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the compose and Linux setups.
+On Linux, the token is a `file:` reference. [The Linux page](linux.md#open-the-port-with-ufw) shows how to make the token file:
+
+```json
+"web": {
+  "network": {
+    "token": "file:/etc/darling/web_token"
+  }
+}
+```
+
+To make a token on Windows, use [the PowerShell one-liner on the network endpoints page](network-endpoints.md#mcp-endpoint-assistant-over-the-lan). Keep the token in `encryptedToken`. `web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the compose and Linux setups.
 
 To serve local browsers with no token instead, set `"allowTokenlessLoopback": true` in the `web` block. The dashboard then serves reads only, and every start logs a line that says so.
 
@@ -231,7 +241,28 @@ Add a `network` block to `web` in `darling.json`, or let `--configure-network` w
 }
 ```
 
-`--configure-network` generates a 32-character token and prints the plaintext once. You can bring your own token instead. Encrypt it with `--encrypt-password`. A plaintext `"token"` works, and the service logs a warning about it.
+That block is the Windows form. On Linux, give the token as a `file:` reference. The `darling` user owns the token file and only that user can read it:
+
+```json
+"web": {
+  "enabled": true,
+  "port": 5153,
+  "network": {
+    "listen": "192.168.1.205",
+    "allowFrom": "192.168.1.0/24",
+    "token": "file:/etc/darling/web_token"
+  }
+}
+```
+
+```bash
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/web_token
+openssl rand -hex 24 | sudo tee /etc/darling/web_token > /dev/null
+```
+
+Open port 5153 with the host's firewall. For `ufw`, see [the Linux page](linux.md#open-the-port-with-ufw).
+
+On Windows, `--configure-network` generates a 32-character token and prints the plaintext once. You can bring your own token instead. Encrypt it with `--encrypt-password`. A plaintext `"token"` works, and the service logs a warning about it.
 
 You can print the token again. Losing the plaintext does not mean that you must regenerate it and onboard every client again. Run:
 
