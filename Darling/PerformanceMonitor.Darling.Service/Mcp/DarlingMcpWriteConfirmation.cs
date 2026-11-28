@@ -106,14 +106,19 @@ internal static class DarlingMcpWriteConfirmation
     internal static IReadOnlyCollection<string> ToolNames { get; } =
         Describers.Keys.Append("purge_now").OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
-    /// <summary>The call-tool filter: the shared core (<see cref="McpWriteConfirmation"/>) with this host's tools, questions and agent rule.</summary>
-    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> Filter { get; } = McpWriteConfirmation.Create(
+    /// <summary>
+    /// The call-tool filter: the shared core (<see cref="McpWriteConfirmation"/>) with this host's tools, questions and agent rule.
+    /// <paramref name="frontDoor"/> is true on a front door, which holds no store: <c>purge_now</c> there has no plan to read, so it asks
+    /// the generic question, and only on the call that carries <c>confirm</c> (the call that acts, as for the tools with their own
+    /// confirm step), because the store the front door forwards to answers a call without it with its own preview.
+    /// </summary>
+    internal static McpRequestFilter<CallToolRequestParams, CallToolResult> FilterFor(bool frontDoor) => McpWriteConfirmation.Create(
         ToolNames,
         (request, arguments, cancellationToken) => request.Params!.Name == "purge_now"
-            ? PurgeQuestionAsync(request, arguments, cancellationToken)
+            ? PurgeQuestionAsync(request, arguments, frontDoor, cancellationToken)
             : Task.FromResult(Describers[request.Params.Name](arguments)),
         IsAgentCall,
-        (request, name, arguments, cancellationToken) => name == "purge_now"
+        (request, name, arguments, cancellationToken) => name == "purge_now" && !frontDoor
             ? SeatPurgeConfirmAsync(request, arguments, cancellationToken)
             : Task.CompletedTask);
 
@@ -131,10 +136,16 @@ internal static class DarlingMcpWriteConfirmation
     }
 
     private static async Task<string?> PurgeQuestionAsync(
-        RequestContext<CallToolRequestParams> request, IDictionary<string, JsonElement> arguments, CancellationToken cancellationToken)
+        RequestContext<CallToolRequestParams> request, IDictionary<string, JsonElement> arguments, bool frontDoor, CancellationToken cancellationToken)
     {
         var retention = IntOf(arguments, "retention_days");
-        var postgres = request.Services?.GetService<NpgsqlDataSource>();
+        if (frontDoor && !Has(arguments, "confirm"))
+        {
+            return null;
+        }
+
+        /* A front door registers a data source that is never opened (its host does not exist), so the plan cannot be read there. */
+        var postgres = frontDoor ? null : request.Services?.GetService<NpgsqlDataSource>();
         if (postgres is null)
         {
             return retention is int days

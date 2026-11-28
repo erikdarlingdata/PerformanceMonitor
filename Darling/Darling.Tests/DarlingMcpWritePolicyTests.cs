@@ -21,6 +21,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -541,7 +542,8 @@ public sealed class DarlingMcpWritePolicyTests
     /// so no value here is computed a second way.</summary>
     internal static async Task<TestServer> BuildServer(
         McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling",
-        DarlingMcpTokenSet? tokens = null, bool? requireToken = null, StoreOwnerSource? owner = null, bool registerStore = true)
+        DarlingMcpTokenSet? tokens = null, bool? requireToken = null, StoreOwnerSource? owner = null,
+        DarlingPersonalTokenSeat? personalSeat = null, DarlingFrontDoorRouter? frontDoor = null)
     {
         var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
@@ -549,9 +551,9 @@ public sealed class DarlingMcpWritePolicyTests
 
         // A pool no test here opens: every case stops at the gate, at tools/list or at the refusal, before any tool body runs.
         var postgres = NpgsqlDataSource.Create(postgresConnection);
-        /* registerStore false leaves the host with no data source in its services, as a front door has none (#9562). */
-        if (registerStore)
-            builder.Services.AddSingleton(postgres);
+        builder.Services.AddSingleton(postgres);
+        if (personalSeat is not null)
+            builder.Services.AddSingleton(personalSeat);
         if (owner is not null)
             builder.Services.AddSingleton(owner);
         builder.Services.AddSingleton(new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(
@@ -573,7 +575,7 @@ public sealed class DarlingMcpWritePolicyTests
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: writes,
             addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls), tokens: tokens,
-            agentMuteRules: mcp.AllowAgentMuteRules);
+            agentMuteRules: mcp.AllowAgentMuteRules, frontDoor: frontDoor);
 
         var app = builder.Build();
 

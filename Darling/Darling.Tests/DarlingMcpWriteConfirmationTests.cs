@@ -71,7 +71,7 @@ public sealed class DarlingMcpWriteConfirmationTests
     [InlineData("rotate_web_access_group_token", "{\"group\":\"ops-readers\"}")]
     public async Task AToolsOwnPreviewCall_AsksNothing(string tool, string arguments)
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await Build();
 
         var answer = await CallAsync(server, tool, arguments, negotiate: true);
 
@@ -79,15 +79,16 @@ public sealed class DarlingMcpWriteConfirmationTests
     }
 
     /// <summary>
-    /// <c>purge_now</c> through the path with no store to read (the host here registers no data source, as a front door has none): the
-    /// generic question, which still names the retention the call carries, and a call without one says each collector's configured retention.
+    /// <c>purge_now</c> through a front door, which holds no store (its data source is never opened, so the plan cannot be read): the
+    /// call that acts (it carries <c>confirm</c>) asks the generic question, which still names the retention the call carries, and a call
+    /// without one says each collector's configured retention.
     /// </summary>
     [Theory]
-    [InlineData("{\"retention_days\":7}", "to 7 days now")]
-    [InlineData("{}", "configured retention")]
-    public async Task PurgeNowWithNoStore_AsksTheGenericQuestion(string arguments, string named)
+    [InlineData("{\"retention_days\":7,\"confirm\":\"abc\"}", "to 7 days now")]
+    [InlineData("{\"confirm\":\"abc\"}", "configured retention")]
+    public async Task PurgeNowThroughAFrontDoor_AsksTheGenericQuestion_OnTheCallThatActs(string arguments, string named)
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token, registerStore: false);
+        using var server = await Build(frontDoor: true);
 
         var answer = await CallAsync(server, "purge_now", arguments, negotiate: true);
 
@@ -96,11 +97,34 @@ public sealed class DarlingMcpWriteConfirmationTests
         Assert.Contains(named, question, StringComparison.Ordinal);
     }
 
+    /// <summary>A front door's <c>purge_now</c> without <c>confirm</c> is the store's own preview, so the front door asks nothing and reads no plan.</summary>
+    [Fact]
+    public async Task PurgeNowThroughAFrontDoor_WithoutConfirm_AsksNothing()
+    {
+        using var server = await Build(frontDoor: true);
+
+        var answer = await CallAsync(server, "purge_now", "{\"retention_days\":7}", negotiate: true);
+
+        Assert.Null(QuestionOf(answer));
+    }
+
+    /// <summary>The host the production start builds, with the services the tools that need a store owner or a personal token seat ask for
+    /// (the argument guard refuses a call whose tool lacks one), or a front door over a directory with no stores when <paramref name="frontDoor"/>.</summary>
+    private static Task<TestServer> Build(McpConfig? config = null, bool frontDoor = false)
+    {
+        var owner = new StoreOwnerSource();
+        var router = frontDoor
+            ? new DarlingFrontDoorRouter(new Darling.Tests.FrontDoor.FakeFrontDoorDirectory("use1"), new Darling.Tests.FrontDoor.FakeFrontDoorPeers(), TimeSpan.FromSeconds(30))
+            : null;
+        return DarlingMcpWritePolicyTests.BuildServer(
+            config ?? Config, Token, owner: owner, personalSeat: new DarlingPersonalTokenSeat(null, null, owner), frontDoor: router);
+    }
+
     [Theory]
     [MemberData(nameof(ListedTools))]
     public async Task ANegotiatingClient_IsAskedOneQuestion_ThatNamesWhatWillChange(string tool, string arguments, string named)
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await Build();
 
         var answer = await CallAsync(server, tool, arguments, negotiate: true);
 
@@ -113,7 +137,7 @@ public sealed class DarlingMcpWriteConfirmationTests
     [Fact]
     public async Task EveryListedTool_IsAToolTheHostServes()
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await Build();
         var list = await DarlingMcpWritePolicyTests.ToolsListAsync(server, Token);
         var served = DarlingMcpWritePolicyTests.ToolsOf(list.Body).Keys.ToHashSet(StringComparer.Ordinal);
 
@@ -127,7 +151,7 @@ public sealed class DarlingMcpWriteConfirmationTests
     [InlineData("cancel")]
     public async Task ADeclinedOrDismissedQuestion_AnswersDeclined_AsANormalResult(string action)
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await Build();
 
         var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: $"{{\"action\":\"{action}\"}}");
 
@@ -141,7 +165,7 @@ public sealed class DarlingMcpWriteConfirmationTests
     [Fact]
     public async Task AnAcceptWithTheBoxCleared_IsNo()
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await Build();
 
         var answer = await CallAsync(
             server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"accept\",\"content\":{\"confirm\":false}}");
@@ -154,7 +178,7 @@ public sealed class DarlingMcpWriteConfirmationTests
     public async Task AToolThatIsNotServed_IsNeverAskedAbout()
     {
         /* Writes off: the tool is unknown to the caller, so the call ends in the SDK's unknown-tool error and no question is sent. */
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(new McpConfig(), Token);
+        using var server = await Build(new McpConfig());
 
         var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true);
 
