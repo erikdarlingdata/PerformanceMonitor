@@ -16,12 +16,12 @@ namespace PerformanceMonitorLite.Services;
 /// <summary>
 /// The log line for a collector a target's gate turns off, and the memory that writes it at INFO once.
 /// <see cref="CollectorCatalog.AppliesTo(string, CollectorTargetInfo)"/> decides whether the collector runs; this type only
-/// describes the target that decision was made on (#9938). The line names every fact on the target that a gate can read
-/// (hosting platform, RDS edition class, msdb access), then the engine edition and major version, so a skip on an RDS
+/// describes the target that decision was made on (#9938). The line names every fact on the target that a gate reads
+/// (hosting platform, RDS edition class), then the engine edition and major version, so a skip on an RDS
 /// instance reads as RDS rather than as a statement about SQL Server 2022 Enterprise.
 /// <para>The skip repeats on every cycle for as long as the target stays the same. <see cref="ShouldLogAtInfo"/> is true for
 /// the first line of a server and collector, and again only when the line's text, which carries every fact, changes (a
-/// reconnect that finds a different platform, a GRANT that gives msdb access). The caller writes every other repeat at DEBUG.</para>
+/// reconnect that finds a different platform). The caller writes every other repeat at DEBUG.</para>
 /// <para>State is in memory, keyed by server id and collector name, so it is bounded by servers times collectors. A restart
 /// writes each line once more at INFO. <see cref="Forget"/> and <see cref="ForgetExcept"/> drop a removed server's entries.</para>
 /// </summary>
@@ -38,7 +38,7 @@ internal sealed class CollectorSkipNotice
     /// </summary>
     internal static string Describe(string collectorName, CollectorTargetInfo target, int engineEdition)
     {
-        var facts = new List<string>(5);
+        var facts = new List<string>(6);
 
         if (target.IsAzureSqlDb)
         {
@@ -58,11 +58,6 @@ internal sealed class CollectorSkipNotice
         if (target.IsAwsRdsWebOrExpress)
         {
             facts.Add("RDS Web or Express edition");
-        }
-
-        if (!target.HasMsdbAccess)
-        {
-            facts.Add("no msdb access");
         }
 
         facts.Add(string.Create(CultureInfo.InvariantCulture, $"engine edition {engineEdition}"));

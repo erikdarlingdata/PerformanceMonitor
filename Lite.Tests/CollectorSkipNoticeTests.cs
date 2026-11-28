@@ -85,20 +85,16 @@ public sealed class CollectorSkipNoticeTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal("trace_analysis not collected on this target (Azure SQL Managed Instance, engine edition 8, version 12)", line);
     }
 
+    /// <summary>No gate reads msdb access, so it is not a fact the line names: the text is the same with it and without it.</summary>
     [Fact]
-    public void Describe_ATargetWithNoMsdbAccess_SaysSo()
+    public void Describe_MsdbAccess_DoesNotChangeTheLine()
     {
-        var line = CollectorSkipNotice.Describe("running_jobs", new CollectorTargetInfo { HasMsdbAccess = false, SqlMajorVersion = 16 }, engineEdition: 3);
+        var withAccess = CollectorSkipNotice.Describe("running_jobs", new CollectorTargetInfo { IsAwsRds = true, HasMsdbAccess = true, SqlMajorVersion = 16 }, engineEdition: 3);
+        var withoutAccess = CollectorSkipNotice.Describe("running_jobs", new CollectorTargetInfo { IsAwsRds = true, HasMsdbAccess = false, SqlMajorVersion = 16 }, engineEdition: 3);
 
-        Assert.Equal("running_jobs not collected on this target (no msdb access, engine edition 3, version 16)", line);
-    }
-
-    [Fact]
-    public void Describe_ATargetWithMsdbAccess_DoesNotMentionMsdb()
-    {
-        var line = CollectorSkipNotice.Describe("agent_status", new CollectorTargetInfo { IsAwsRds = true, HasMsdbAccess = true, SqlMajorVersion = 16 }, engineEdition: 3);
-
-        Assert.DoesNotContain("msdb", line, StringComparison.Ordinal);
+        Assert.Equal("running_jobs not collected on this target (AWS RDS, engine edition 3, version 16)", withAccess);
+        Assert.Equal(withAccess, withoutAccess);
+        Assert.DoesNotContain("msdb", withoutAccess, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,10 +108,10 @@ public sealed class CollectorSkipNoticeTests : IClassFixture<SharedDuckDbFixture
     [Fact]
     public void Describe_SeveralFacts_ListsThemInAFixedOrder()
     {
-        var target = new CollectorTargetInfo { IsAwsRds = true, IsAwsRdsWebOrExpress = true, HasMsdbAccess = false, SqlMajorVersion = 14 };
+        var target = new CollectorTargetInfo { IsAzureSqlDb = true, IsAwsRds = true, IsAwsRdsWebOrExpress = true, SqlMajorVersion = 14 };
 
         Assert.Equal(
-            "agent_status not collected on this target (AWS RDS, RDS Web or Express edition, no msdb access, engine edition 2, version 14)",
+            "agent_status not collected on this target (Azure SQL Database, AWS RDS, RDS Web or Express edition, engine edition 2, version 14)",
             CollectorSkipNotice.Describe("agent_status", target, engineEdition: 2));
     }
 
@@ -135,12 +131,12 @@ public sealed class CollectorSkipNoticeTests : IClassFixture<SharedDuckDbFixture
     {
         var notice = new CollectorSkipNotice();
         var rds = CollectorSkipNotice.Describe("agent_status", new CollectorTargetInfo { IsAwsRds = true, SqlMajorVersion = 16 }, 3);
-        var rdsNoMsdb = CollectorSkipNotice.Describe("agent_status", new CollectorTargetInfo { IsAwsRds = true, HasMsdbAccess = false, SqlMajorVersion = 16 }, 3);
+        var rdsWebOrExpress = CollectorSkipNotice.Describe("agent_status", new CollectorTargetInfo { IsAwsRds = true, IsAwsRdsWebOrExpress = true, SqlMajorVersion = 16 }, 2);
 
         Assert.True(notice.ShouldLogAtInfo(1, "agent_status", rds));
         Assert.False(notice.ShouldLogAtInfo(1, "agent_status", rds));
-        Assert.True(notice.ShouldLogAtInfo(1, "agent_status", rdsNoMsdb));
-        Assert.False(notice.ShouldLogAtInfo(1, "agent_status", rdsNoMsdb));
+        Assert.True(notice.ShouldLogAtInfo(1, "agent_status", rdsWebOrExpress));
+        Assert.False(notice.ShouldLogAtInfo(1, "agent_status", rdsWebOrExpress));
         Assert.True(notice.ShouldLogAtInfo(1, "agent_status", rds));
     }
 
@@ -274,17 +270,41 @@ public sealed class CollectorSkipNoticeTests : IClassFixture<SharedDuckDbFixture
         AppLogger.DrainBufferedLines();
         await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
         await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
-        status.HasMsdbAccess = false;
+        status.SqlEngineEdition = 5;
         await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
         await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
         var lines = SkipLines(name, "agent_status");
 
         Assert.Equal(4, lines.Count);
         Assert.Contains("[INFO ]", lines[0], StringComparison.Ordinal);
+        Assert.Contains("(AWS RDS, engine edition 3, version 16)", lines[0], StringComparison.Ordinal);
         Assert.Contains("[DEBUG]", lines[1], StringComparison.Ordinal);
         Assert.Contains("[INFO ]", lines[2], StringComparison.Ordinal);
-        Assert.Contains("(AWS RDS, no msdb access, engine edition 3, version 16)", lines[2], StringComparison.Ordinal);
+        Assert.Contains("(Azure SQL Database, AWS RDS, engine edition 5, version 16)", lines[2], StringComparison.Ordinal);
         Assert.Contains("[DEBUG]", lines[3], StringComparison.Ordinal);
+    }
+
+    /// <summary>No gate reads msdb access, so a change in it alone is not a change in the target's facts: no second INFO.</summary>
+    [Fact]
+    public async Task AChangeInMsdbAccessAlone_WritesNoSecondInfoLine()
+    {
+        AppLogger.SetMinimumLevel(LogLevel.Debug);
+        const string name = "skip-msdb-9938";
+        var (service, server, status) = RdsServer(name);
+
+        AppLogger.DrainBufferedLines();
+        await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
+        status.HasMsdbAccess = false;
+        await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
+        status.HasMsdbAccess = true;
+        await service.RunCollectorAsync(server, "agent_status", TestContext.Current.CancellationToken);
+        var lines = SkipLines(name, "agent_status");
+
+        Assert.Equal(3, lines.Count);
+        var info = Assert.Single(lines, l => l.Contains("[INFO ]", StringComparison.Ordinal));
+        Assert.Contains("agent_status not collected on this target (AWS RDS, engine edition 3, version 16)", info, StringComparison.Ordinal);
+        Assert.All(lines, l => Assert.DoesNotContain("msdb", l, StringComparison.Ordinal));
+        Assert.Equal(2, lines.Count(l => l.Contains("[DEBUG]", StringComparison.Ordinal)));
     }
 
     [Fact]
