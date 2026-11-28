@@ -1000,6 +1000,231 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         }
     }
 
+    /// <summary>The kinds the live case below runs (#9894): each way a login can reach the stored connection secrets or a role the owner guard names
+    /// that the five predefined roles and the owner arm of the first probe tests do not cover.</summary>
+    public static IEnumerable<object[]> SecretReaderKinds() =>
+        new[]
+        {
+            "admin_grants", "table_select", "column_select", "noinherit_member_of_admin_grants", "two_hop_predefined_role",
+            "second_table_owner_member", "owner_string_role_member",
+        }.Select(kind => new object[] { kind });
+
+    /// <summary>A login that can read the carve's secret columns is refused whatever its name, whichever way it got the right, and each case first
+    /// proves on the login's own connection that the grant took hold, so a refusal cannot be a grant that never landed. The cases are a role holding
+    /// exactly what the managed <c>admin</c> role holds (replayed from the shipped provisioning SQL, so a login named <c>admin</c> is this case), a table
+    /// grant, a column grant, a member that does not inherit, a chain of two memberships, the owner of a second <c>config</c> table, and the role the
+    /// owner's connection string names.
+    /// <para>The two-hop case is the one that fails if <c>'MEMBER'</c> is changed to <c>'USAGE'</c> in the probe's SQL: the login does not inherit
+    /// from the middle role, so only a MEMBER test (the login can <c>SET ROLE</c> down the chain) sees the predefined role at the end. The control
+    /// before each grant is the same login passing, and the owner-string case runs it while no role of that name exists, which is no match.</para></summary>
+    [Theory]
+    [MemberData(nameof(SecretReaderKinds))]
+    public async Task TheProbe_RefusesALoginThatCanReadTheStoredSecrets_InEachKind(string kind)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var loginName = "probe_r_login_" + suffix;
+        var midName = "probe_r_mid_" + suffix;
+        var groupName = "probe_r_group_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            var doesNotInherit = kind is "noinherit_member_of_admin_grants" or "two_hop_predefined_role";
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {loginName} LOGIN NOSUPERUSER NOREPLICATION {(doesNotInherit ? "NOINHERIT" : "INHERIT")} PASSWORD '{password}'"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = loginName,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+            var ownerString = kind == "owner_string_role_member"
+                ? $"Host=pg.example;Database=darling;Username={groupName};Password=owner-secret"
+                : Owner;
+            var postgres = OwnStore(ownerString, webConnectionString: connectionString);
+
+            var before = await DarlingStoreLogins.ProbeSurfaceLoginAsync(DarlingStoreLogins.Surface.Web, postgres, ct);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, before.Verdict);
+
+            var setup = new List<string>();
+            string proof;
+            switch (kind)
+            {
+                case "admin_grants":
+                    setup.AddRange(ViewerGrantReplay.StatementsFor(loginName, scratch.DatabaseName, "admin"));
+                    proof = "SELECT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT') "
+                        + "AND pg_catalog.has_column_privilege(current_user, 'config.config_notification', 'slack_url', 'SELECT')";
+                    break;
+                case "table_select":
+                    setup.Add($"GRANT SELECT ON config.config_monitored_servers TO {loginName}");
+                    proof = "SELECT pg_catalog.has_table_privilege(current_user, 'config.config_monitored_servers', 'SELECT')";
+                    break;
+                case "column_select":
+                    setup.Add($"GRANT SELECT (signing_key) ON config.config_notification TO {loginName}");
+                    proof = "SELECT pg_catalog.has_column_privilege(current_user, 'config.config_notification', 'signing_key', 'SELECT') "
+                        + "AND NOT pg_catalog.has_table_privilege(current_user, 'config.config_notification', 'SELECT')";
+                    break;
+                case "noinherit_member_of_admin_grants":
+                    setup.Add($"CREATE ROLE {groupName} NOLOGIN");
+                    setup.AddRange(ViewerGrantReplay.StatementsFor(groupName, scratch.DatabaseName, "admin"));
+                    setup.Add($"GRANT {groupName} TO {loginName}");
+                    proof = $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER') AND NOT pg_catalog.pg_has_role(current_user, '{groupName}', 'USAGE') "
+                        + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT') "
+                        + $"AND pg_catalog.has_column_privilege('{groupName}', 'config.config_monitored_servers', 'encrypted_password', 'SELECT')";
+                    break;
+                case "two_hop_predefined_role":
+                    setup.Add($"CREATE ROLE {midName} NOLOGIN");
+                    setup.Add($"GRANT {midName} TO {loginName}");
+                    setup.Add($"GRANT pg_read_all_data TO {midName}");
+                    proof = "SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'MEMBER') AND NOT pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'USAGE')";
+                    break;
+                case "second_table_owner_member":
+                    /* server_tags holds no secret column, so only the owner arm can refuse this login. */
+                    setup.Add($"CREATE ROLE {groupName} NOLOGIN");
+                    setup.Add($"GRANT {groupName} TO CURRENT_USER");
+                    setup.Add($"ALTER TABLE config.server_tags OWNER TO {groupName}");
+                    setup.Add($"GRANT {groupName} TO {loginName}");
+                    proof = $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER') "
+                        + $"AND (SELECT pg_catalog.pg_get_userbyid(relowner) = '{groupName}' FROM pg_catalog.pg_class WHERE oid = 'config.server_tags'::pg_catalog.regclass) "
+                        + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT')";
+                    break;
+                default:
+                    /* The owner string's role owns nothing and holds nothing: only the name arm can refuse this login. */
+                    setup.Add($"CREATE ROLE {groupName} NOLOGIN");
+                    setup.Add($"GRANT {groupName} TO {loginName}");
+                    proof = $"SELECT pg_catalog.pg_has_role(current_user, '{groupName}', 'MEMBER')";
+                    break;
+            }
+
+            foreach (var statement in setup)
+            {
+                await using var grant = owner.CreateCommand(statement);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var login = NpgsqlDataSource.Create(connectionString))
+            await using (var proveCommand = login.CreateCommand(proof))
+            {
+                Assert.True((bool)(await proveCommand.ExecuteScalarAsync(ct))!, $"the {kind} grant did not take hold on the login's own connection, so a verdict proves nothing.");
+            }
+
+            var start = await DarlingHostBinding.ResolveBindWithLoginProbeAsync(
+                DarlingStoreLogins.Surface.Web, postgres, inContainer: false,
+                ResolveFor(DarlingStoreLogins.Surface.Web, postgres, inContainer: false), ct);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, start.Probe?.Verdict);
+            Assert.Equal(DarlingHostBinding.BindReason.LoginPrivileged, start.Bind.Reason);
+            Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, start.Bind.Mode);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                /* The second-table kind hands a table to the group role, and a role that owns one cannot be dropped: reassign it first. */
+                var drops = string.Concat(new[] { loginName, midName, groupName }.Select(role =>
+                    $"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{role}') THEN "
+                    + $"REASSIGN OWNED BY {role} TO CURRENT_USER; DROP OWNED BY {role}; DROP ROLE {role}; END IF; END $$; "));
+                await using var drop = new NpgsqlCommand(drops, cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>The roles <c>tools/provision-roles.sql</c> creates for the two network-facing surfaces still pass: the carve gives <c>web</c> and
+    /// <c>mcp</c> column SELECT on the non-secret columns only, so neither can read a secret column and the probe has nothing to refuse. Each role's
+    /// grants are replayed from the shipped provisioning SQL, and the case first proves on the login's own connection that the carve landed (it reads a
+    /// non-secret column, and not a secret one), so a pass is not a role that holds nothing at all. The probe also passes a store that lacks one of the
+    /// carve's tables and one of its columns (a missing one is no match, never an error), and still refuses a login that reads a secret column there.</summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public async Task TheProbe_PassesTheWebAndMcpRolesAsProvisioned_EvenOnAStoreThatLacksACarvedTableOrColumn(string managedRole)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live login probe test (it mints its own scratch database and logins).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var provisionedName = "probe_p_" + managedRole + "_" + suffix;
+        var readerName = "probe_p_reader_" + suffix;
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var create = owner.CreateCommand(
+                $"CREATE ROLE {provisionedName} LOGIN NOSUPERUSER PASSWORD '{password}'; CREATE ROLE {readerName} LOGIN NOSUPERUSER PASSWORD '{password}'; "
+                + $"GRANT SELECT (encrypted_password) ON config.config_monitored_servers TO {readerName}"))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            foreach (var statement in ViewerGrantReplay.StatementsFor(provisionedName, scratch.DatabaseName, managedRole))
+            {
+                await using var grant = owner.CreateCommand(statement);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            string As(string user) => new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = user,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString;
+
+            await using (var login = NpgsqlDataSource.Create(As(provisionedName)))
+            await using (var proveCommand = login.CreateCommand(
+                "SELECT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'name', 'SELECT') "
+                + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT') "
+                + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_command', 'args_json', 'SELECT') "
+                + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_notification', 'slack_url', 'SELECT')"))
+            {
+                Assert.True((bool)(await proveCommand.ExecuteScalarAsync(ct))!, $"the {managedRole} carve did not land on the login's own connection, so a pass proves nothing.");
+            }
+
+            Task<DarlingStoreLogins.LoginProbeResult> ProbeAsync(string user) =>
+                DarlingStoreLogins.ProbeSurfaceLoginAsync(DarlingStoreLogins.Surface.Web, OwnStore(Owner, webConnectionString: As(user)), ct);
+
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(provisionedName)).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(readerName)).Verdict);
+
+            /* A store without one of the carve's tables and without one of its columns: the lookup finds no row for them, and the rest still decides. */
+            await using (var lack = owner.CreateCommand(
+                "DROP TABLE config.config_command CASCADE; ALTER TABLE config.config_notification DROP COLUMN previous_signing_key CASCADE"))
+            {
+                await lack.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, (await ProbeAsync(provisionedName)).Verdict);
+            Assert.Equal(DarlingStoreLogins.LoginProbeVerdict.Privileged, (await ProbeAsync(readerName)).Verdict);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand(
+                    $"DROP OWNED BY {provisionedName}; DROP ROLE IF EXISTS {provisionedName}; DROP OWNED BY {readerName}; DROP ROLE IF EXISTS {readerName}", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     /// <summary>A login with CREATEROLE: refused before PostgreSQL 16, where it can grant itself pg_read_all_data or any role that is not a
     /// superuser, and passed from 16 on, where it needs ADMIN OPTION on a role to grant it. The expected verdict follows the server's own version,
     /// so the split is proved on whichever server the suite runs against.</summary>
@@ -1261,6 +1486,22 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                 await create.ExecuteNonQueryAsync(ct);
             }
 
+            /* The least-privilege login holds what the surface's managed role holds (#9894): column SELECT on the non-secret columns of the carved tables, so the
+               secret-column check has to pass it, and the listener this test looks for is the real login's. */
+            foreach (var statement in ViewerGrantReplay.StatementsFor(plainName, scratch.DatabaseName, web ? "web" : "mcp"))
+            {
+                await using var grant = owner.CreateCommand(statement);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var login = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = plainName, Password = password, Pooling = false }.ConnectionString))
+            await using (var proveCommand = login.CreateCommand(
+                "SELECT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'name', 'SELECT') "
+                + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT')"))
+            {
+                Assert.True((bool)(await proveCommand.ExecuteScalarAsync(ct))!, "the managed role's carve did not land on the login's own connection.");
+            }
+
             PostgresConfig Store(string user)
             {
                 var login = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = user, Password = password, Pooling = false }.ConnectionString;
@@ -1288,7 +1529,7 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {superName}; DROP ROLE IF EXISTS {plainName}", cleanup);
+                await using var drop = new NpgsqlCommand($"DROP ROLE IF EXISTS {superName}; DROP OWNED BY {plainName}; DROP ROLE IF EXISTS {plainName}", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }

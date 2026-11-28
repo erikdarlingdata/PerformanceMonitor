@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -893,8 +894,9 @@ internal static class DarlingStoreLogins
         Failed,
 
         /// <summary>Neither the connected login nor its session login holds anything <see cref="LoginProbeSql"/> refuses: not a superuser, not a member
-        /// of a role that outranks the surface's grants (see <see cref="LoginProbeOutrankingRoles"/>), no REPLICATION, and before PostgreSQL 16 no
-        /// CREATEROLE: the login a network-facing surface may use.</summary>
+        /// of a role that outranks the surface's grants (see <see cref="LoginProbeOutrankingRoles"/>), not a member of a role that can read the carve's
+        /// secret columns (see <see cref="LoginProbeSecretColumns"/>), no REPLICATION, and before PostgreSQL 16 no CREATEROLE: the login a
+        /// network-facing surface may use. The probe runs once, at the start, so a grant made after it is not seen until the next start.</summary>
         Unprivileged,
 
         /// <summary>A login that holds one of those, by the connected login or by the session login that could switch back to it, or a session that
@@ -942,41 +944,63 @@ internal static class DarlingStoreLogins
         "pg_execute_server_program",
     ];
 
+    /// <summary>The secret columns of the carve (<see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/>), as the table and column arrays the probe
+    /// reads them from (<c>$5</c> and <c>$6</c>, paired by position). Taken from the list the carve itself uses, so the probe and the carve share one:
+    /// a column added to the carve is a column a login is refused for reading (#9894).</summary>
+    internal static readonly (string[] Tables, string[] Columns) LoginProbeSecretColumns = (
+        DarlingManagedRoles.ViewerRestrictedConfigTables.SelectMany(acl => acl.SecretColumns.Select(_ => acl.Table)).ToArray(),
+        DarlingManagedRoles.ViewerRestrictedConfigTables.SelectMany(acl => acl.SecretColumns).ToArray());
+
     /// <summary>The query the probe runs, with the store's schema as <c>$1</c>, a table it holds as <c>$2</c>, the user name the probe connected with
-    /// as <c>$3</c> and <see cref="LoginProbeOutrankingRoles"/> as <c>$4</c>. A login whose role is switched at connect
+    /// as <c>$3</c>, <see cref="LoginProbeOutrankingRoles"/> as <c>$4</c>, the tables and columns of <see cref="LoginProbeSecretColumns"/> as <c>$5</c> and
+    /// <c>$6</c>, and the store owner's user name as <c>$7</c>. A login whose role is switched at connect
     /// (<c>ALTER ROLE ... SET role</c>, or <c>Options=-c role=...</c>) shows a limited <c>current_user</c> and can <c>SET ROLE</c> back to what
     /// <c>session_user</c> is, so every membership test asks about both. First column: whether either is a superuser. Second column: whether either
     /// is a member of a role that outranks the surface's grants, which are the roles <c>tools/provision-roles.sql</c> refuses a membership in:
-    /// the owner of the schema or of the table (the schemas are created <c>IF NOT EXISTS ... AUTHORIZATION CURRENT_USER</c>, so on a store whose
-    /// schemas another role created first the schema's owner is not the role the service runs as, but the tables are), the database owner, any role
+    /// the owner of the schema or of any table in it (the schemas are created <c>IF NOT EXISTS ... AUTHORIZATION CURRENT_USER</c>, so on a store whose
+    /// schemas another role created first the schema's owner is not the role the service runs as, but the tables are), the role the owner's connection
+    /// string names (the script refuses a membership in the role running it), the database owner, any role
     /// that is a superuser or has <c>BYPASSRLS</c>, or one of the predefined roles. Third column: whether <c>session_user</c> is not the user name the
     /// probe connected with: a superuser login started with <c>Options=-c session_authorization=&lt;low role&gt;</c> shows the low role as both
     /// <c>current_user</c> and <c>session_user</c> and can <c>SET SESSION AUTHORIZATION</c> back, so a session that is not the login it connected as
     /// is refused. Fourth and fifth: whether either login itself has <c>CREATEROLE</c> or <c>REPLICATION</c>. Attributes are not inherited through
     /// a membership, so these look at the login only (a role does not become a replication login by joining one). Sixth: <c>server_version_num</c>,
-    /// for <see cref="ClassifyLoginProbe"/>'s version rule on <c>CREATEROLE</c>. Every catalog name is qualified with <c>pg_catalog.</c>, so a
-    /// role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
+    /// for <see cref="ClassifyLoginProbe"/>'s version rule on <c>CREATEROLE</c>. Seventh: whether either is a member of any role (itself included)
+    /// that can read one of the carve's secret columns, however it got the right (a table grant, a column grant, a role it inherits from, or
+    /// ownership), so the <c>admin</c> role and a hand-made login with SELECT on <c>config.config_monitored_servers</c> are refused with the rest.
+    /// A table or column the store does not have is looked up through the catalog and is no match, never an error. Every catalog name is
+    /// qualified with <c>pg_catalog.</c>, so a role's <c>search_path</c> cannot put look-alikes ahead of them. No row (no such schema or table) is a failed probe.</summary>
     private const string LoginProbeSql =
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolsuper AND rolname IN (current_user, session_user)), "
-        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE (r.rolsuper OR r.rolbypassrls OR r.oid IN (n.nspowner, c.relowner, "
-        + "(SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) "
-        + "OR r.rolname = ANY($4::pg_catalog.text[])) "
+        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE (r.rolsuper OR r.rolbypassrls OR r.oid = n.nspowner "
+        + "OR r.oid IN (SELECT o.relowner FROM pg_catalog.pg_class AS o WHERE o.relnamespace = n.oid AND o.relkind IN ('r', 'p')) "
+        + "OR r.oid IN (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()) "
+        + "OR r.rolname = ANY($4::pg_catalog.text[]) OR r.rolname = $7::pg_catalog.text) "
         + "AND (pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') OR pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER'))), "
         + "session_user::pg_catalog.text <> $3::pg_catalog.text, "
         + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolcreaterole AND rolname IN (current_user, session_user)), "
         + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolreplication AND rolname IN (current_user, session_user)), "
-        + "pg_catalog.current_setting('server_version_num')::pg_catalog.int4 "
+        + "pg_catalog.current_setting('server_version_num')::pg_catalog.int4, "
+        + "EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r "
+        + "JOIN pg_catalog.unnest($5::pg_catalog.text[], $6::pg_catalog.text[]) AS s(table_name, column_name) ON true "
+        + "JOIN pg_catalog.pg_class AS t ON t.relnamespace = n.oid AND t.relname = s.table_name "
+        + "JOIN pg_catalog.pg_attribute AS a ON a.attrelid = t.oid AND a.attname = s.column_name AND a.attnum > 0 AND NOT a.attisdropped "
+        + "WHERE (pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') OR pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER')) "
+        + "AND pg_catalog.has_column_privilege(r.oid, t.oid, a.attnum, 'SELECT')) "
         + "FROM pg_catalog.pg_namespace AS n JOIN pg_catalog.pg_class AS c ON c.relnamespace = n.oid WHERE n.nspname = $1 AND c.relname = $2";
 
     /// <summary>PURE: the probe's answers as a verdict. Any one refused is <see cref="LoginProbeVerdict.Privileged"/>. <paramref name="loginCanCreateRoles"/>
     /// refuses only before PostgreSQL 16 (<see cref="LoginProbeCreateRoleScopedFromVersionNum"/>): there a <c>CREATEROLE</c> role can grant itself
     /// <c>pg_read_all_data</c> or any other role that is not a superuser, and from 16 it cannot without <c>ADMIN OPTION</c> on the role, which a plain
     /// login made by <c>tools/provision-roles.sql</c> does not hold. <paramref name="loginReplicates"/> refuses on any version: a replication connection can
-    /// copy every table, whatever the login's grants say, and the script does not look for it, so this goes beyond the script on purpose.</summary>
+    /// copy every table, whatever the login's grants say, and the script does not look for it, so this goes beyond the script on purpose.
+    /// <paramref name="loginReadsSecrets"/> refuses on any version: a login that can read the stored connection secrets (the <c>admin</c> role, or a
+    /// hand-made login with SELECT on one of the carve's columns) is no least-privilege login, whatever its name.</summary>
     internal static LoginProbeResult ClassifyLoginProbe(
         bool isSuperuser, bool isOwnerMember, bool sessionUserDiffers,
-        bool loginCanCreateRoles = false, bool loginReplicates = false, int serverVersionNum = LoginProbeCreateRoleScopedFromVersionNum) =>
-        new(isSuperuser || isOwnerMember || sessionUserDiffers || loginReplicates
+        bool loginCanCreateRoles = false, bool loginReplicates = false, int serverVersionNum = LoginProbeCreateRoleScopedFromVersionNum,
+        bool loginReadsSecrets = false) =>
+        new(isSuperuser || isOwnerMember || sessionUserDiffers || loginReplicates || loginReadsSecrets
             || (loginCanCreateRoles && serverVersionNum < LoginProbeCreateRoleScopedFromVersionNum)
             ? LoginProbeVerdict.Privileged : LoginProbeVerdict.Unprivileged);
 
@@ -1026,6 +1050,10 @@ internal static class DarlingStoreLogins
                 return new LoginProbeResult(LoginProbeVerdict.Failed, "the connection string names no user, so the session user cannot be compared with it");
             }
 
+            /* The owner's user name, as the name check reads it: a role of that name is one the roles script refuses a membership in (it refuses the
+               role running it). A string that names none or cannot be read passes "", which no role is named, so it is no match. */
+            TryReadLoginUsers(resolved, postgres.ConnectionString, out _, out var ownerUser);
+
             await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             await (openConnection is null ? connection.OpenAsync(cancellationToken) : openConnection(connection, cancellationToken));
             await using var command = new NpgsqlCommand(LoginProbeSql, connection)
@@ -1036,6 +1064,9 @@ internal static class DarlingStoreLogins
                     new NpgsqlParameter { Value = LoginProbeOwnedTable },
                     new NpgsqlParameter { Value = builder.Username },
                     new NpgsqlParameter { Value = LoginProbeOutrankingRoles },
+                    new NpgsqlParameter { Value = LoginProbeSecretColumns.Tables },
+                    new NpgsqlParameter { Value = LoginProbeSecretColumns.Columns },
+                    new NpgsqlParameter { Value = ownerUser ?? "" },
                 },
             };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1045,7 +1076,8 @@ internal static class DarlingStoreLogins
             }
 
             return ClassifyLoginProbe(
-                reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetInt32(5)) with { LoginSha256 = LoginSha256(resolved) };
+                reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetInt32(5),
+                reader.GetBoolean(6)) with { LoginSha256 = LoginSha256(resolved) };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1149,12 +1181,12 @@ internal static class DarlingStoreLogins
     }
 
     /// <summary>What the probe refuses, in plain words, for the lines below (#9894). The same list <see cref="LoginProbeSql"/> asks the store, and
-    /// the roles <c>tools/provision-roles.sql</c> refuses a membership in, plus a login with REPLICATION and, before PostgreSQL 16, CREATEROLE.
+    /// the roles <c>tools/provision-roles.sql</c> refuses a membership in, plus a login that can read the carve's secret columns, a login with REPLICATION and, before PostgreSQL 16, CREATEROLE.
     /// Constant text: it carries no connection string.</summary>
     private const string LoginProbeRefusesText =
         "a superuser, a member of a role that is a superuser or has BYPASSRLS, a member of the database owner or the store owner role, "
         + "a member of a role that reads or writes every table or the server's files (pg_read_all_data, pg_write_all_data, pg_read_server_files, "
-        + "pg_write_server_files or pg_execute_server_program), a login with REPLICATION, a login whose session runs as a different user than the one it "
+        + "pg_write_server_files or pg_execute_server_program), a login that can read the stored connection secrets (such as the admin role), a login with REPLICATION, a login whose session runs as a different user than the one it "
         + "connected with (for example a session switched at connect, or a connection pooler that maps the user name), and, before PostgreSQL 16, "
         + "a login with CREATEROLE";
 
