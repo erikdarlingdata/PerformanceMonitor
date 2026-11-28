@@ -204,6 +204,10 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
             Assert.Contains(rows, r => r.StartsWith("usp_OrderEdge|14", StringComparison.Ordinal));
             Assert.DoesNotContain(rows, r => r.StartsWith("usp_OrderOutside|", StringComparison.Ordinal));
 
+            Console.WriteLine("DIAG9943 Fleet server_version=" + connection.PostgreSqlVersion + " chunks=" + chunks
+                + " windowRows=" + await ScalarAsync(connection, $"SELECT count(*) FROM collect.procedure_stats WHERE collection_time >= '{end.AddHours(-4):yyyy-MM-dd HH:mm:ss}' AND collection_time <= '{end:yyyy-MM-dd HH:mm:ss}'", ct)
+                + " allRows=" + await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct)
+                + " heapPages=" + await ScalarAsync(connection, "SELECT sum(pg_relation_size(ch)/8192) FROM show_chunks('collect.procedure_stats', newer_than => now() - interval '1 year') ch", ct));
             var pages = await DataPagesAsync(connection, compiled.Sql, compiled, ct);
             var devPages = await DataPagesAsync(connection, devSql, compiled, ct);
             Assert.True(pages < devPages, $"the panel with the bounded server list read {pages} pages, the statement without the list read {devPages}");

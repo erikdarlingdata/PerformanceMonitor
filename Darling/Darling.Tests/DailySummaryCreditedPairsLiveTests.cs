@@ -97,6 +97,18 @@ public sealed class DailySummaryCreditedPairsLiveTests
             while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
             Console.WriteLine("DIAG9943 Daily text\n" + sql + "\n" + lines);
         }
+        await ExecuteAsync(connection, "SET enable_indexscan = off", ct);
+        await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
+        await ExecuteAsync(connection, $"PREPARE cp_plan_u(int, timestamp, timestamp, timestamp) AS {sql}", ct);
+        await using (var dc2 = new NpgsqlCommand($"EXPLAIN (ANALYZE, BUFFERS) EXECUTE cp_plan_u({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", connection))
+        {
+            var lines2 = new System.Text.StringBuilder();
+            await using var dr2 = await dc2.ExecuteReaderAsync(ct);
+            while (await dr2.ReadAsync(ct)) { lines2.AppendLine(dr2.GetString(0)); }
+            Console.WriteLine("DIAG9943 Daily noindexscan server_version=" + connection.PostgreSqlVersion + "
+" + lines2);
+        }
+        await ExecuteAsync(connection, "RESET enable_indexscan", ct);
         var nodes = new List<(string Type, string Index, double Loops, double Rows)>();
         Collect(plan.RootElement[0].GetProperty("Plan"), nodes);
         Assert.Contains(nodes, n => n.Type == "Index Only Scan" && n.Index.EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)
