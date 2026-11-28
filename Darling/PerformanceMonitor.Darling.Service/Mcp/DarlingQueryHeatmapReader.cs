@@ -312,7 +312,37 @@ internal static class DarlingQueryHeatmapReader
 
     /// <summary>What one heat map read answered: the cells, and the source that served them (<see cref="SourceRaw"/> or
     /// <see cref="SourceHourlyRollup"/>) with the span the rollup served.</summary>
-    internal sealed record HeatmapRead(List<HeatmapCellRow> Rows, string Source, HeatmapRollupPlan? Rollup);
+    internal sealed record HeatmapRead(List<HeatmapCellRow> Rows, string Source, HeatmapRollupPlan? Rollup, DateTime ReadFromUtc = default, int Statements = 1);
+
+    private static readonly DateTime Epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// #9965: the start of the newest <paramref name="cap"/> bins, on the same <c>date_bin</c> origin the read bins on, or null when the window
+    /// starts inside them (then the read is the whole window). The cap keeps the newest cells and every cell is built from the rows of its own bin,
+    /// so the cells of bins at or after this boundary are the same whether the read starts here or at the window start. The read's start is
+    /// then <c>boundary - 1 microsecond</c>, which makes <c>collection_time &gt; start</c> mean <c>collection_time &gt;= boundary</c>.
+    /// </summary>
+    internal static DateTime? NewestBinsFloor(DateTime startUtc, DateTime endUtc, int bucketMinutes, int cap)
+    {
+        if (cap < 1 || bucketMinutes < 1 || endUtc < Epoch)
+        {
+            return null;
+        }
+
+        var width = TimeSpan.FromMinutes(bucketMinutes).Ticks;
+        var newestBin = (endUtc - Epoch).Ticks / width;
+        var firstBin = newestBin - (cap - 1);
+        if (firstBin <= 0)
+        {
+            return null;
+        }
+
+        var floor = DateTime.SpecifyKind(Epoch.AddTicks(firstBin * width), DateTimeKind.Unspecified);
+        return floor > startUtc ? floor : null;
+    }
+
+    /// <summary>One microsecond, the resolution of a PostgreSQL timestamp.</summary>
+    private const long MicrosecondTicks = 10;
 
     /// <summary>
     /// #8570: the plan for a read, or null (read raw, as before) unless every condition holds. A bin of 60 minutes or more, a metric the rollup
@@ -522,24 +552,57 @@ internal static class DarlingQueryHeatmapReader
     /// <summary>
     /// #8570: <see cref="GetQueryHeatmapAsync"/> with the rollup route. Reads whole hours from the hourly rollup when <see cref="PlanRollup"/> allows
     /// it (a bin of 60 minutes or more, a metric the rollup carries, a store whose rollup has measured coverage) and raw otherwise, and says which.
+    /// <para>#9965: the cap keeps the newest cells, so the read first covers only the newest <paramref name="limit"/> bins (<see cref="NewestBinsFloor"/>).
+    /// A slice that answers <paramref name="limit"/> cells holds exactly the first <paramref name="limit"/> cells of the whole-window read. A shorter
+    /// slice (empty bins, a database filter, a metric that is null on some rows, a quiet server) is read again over the whole window.
+    /// <paramref name="boundTheRead"/> false reads the whole window at once.</para>
     /// </summary>
-    internal static async Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
+    internal static Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
         DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
+        => GetQueryHeatmapRoutedAsync(postgres, coverage, serverId, metric, startUtc, endUtc, databases, bucketMinutes, limit, previewLength, boundTheRead: true, cancellationToken);
+
+    /// <summary><see cref="GetQueryHeatmapRoutedAsync(NpgsqlDataSource, RollupCoverage, int, HeatmapMetric, DateTime, DateTime, DatabaseFilter, int, int, int, CancellationToken)"/>
+    /// with the choice of reading the whole window at once (<paramref name="boundTheRead"/> false), which is the oracle the tests compare the bounded read to.</summary>
+    internal static async Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, bool boundTheRead, CancellationToken cancellationToken)
     {
         var plan = PlanRollup(coverage, metric, bucketMinutes, startUtc, endUtc);
+        var source = plan is null ? SourceRaw : SourceHourlyRollup;
+        var statements = 0;
+
+        var floor = boundTheRead ? NewestBinsFloor(startUtc, endUtc, bucketMinutes, limit) : null;
+        if (floor is DateTime boundary)
+        {
+            var sliceStart = boundary.AddTicks(-MicrosecondTicks);
+            var slicePlan = plan is not null && plan.FromUtc < boundary ? plan with { FromUtc = boundary } : plan;
+            var slice = await RunAsync(postgres, serverId, metric, sliceStart, endUtc, databases, bucketMinutes, limit, previewLength, slicePlan, cancellationToken);
+            statements++;
+            if (slice.Count >= limit)
+            {
+                return new HeatmapRead(slice, source, plan, boundary, statements);
+            }
+        }
+
+        var whole = await RunAsync(postgres, serverId, metric, startUtc, endUtc, databases, bucketMinutes, limit, previewLength, plan, cancellationToken);
+        return new HeatmapRead(whole, source, plan, startUtc, statements + 1);
+    }
+
+    /// <summary>Runs the raw statement, or the rollup statement when <paramref name="plan"/> is set, over (<paramref name="readFromUtc"/>, <paramref name="endUtc"/>].</summary>
+    private static async Task<List<HeatmapCellRow>> RunAsync(
+        NpgsqlDataSource postgres, int serverId, HeatmapMetric metric, DateTime readFromUtc, DateTime endUtc,
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, HeatmapRollupPlan? plan, CancellationToken cancellationToken)
+    {
         if (plan is null)
         {
-            return new HeatmapRead(
-                await GetQueryHeatmapAsync(postgres, serverId, metric, startUtc, endUtc, databases, bucketMinutes, limit, previewLength, cancellationToken),
-                SourceRaw,
-                null);
+            return await GetQueryHeatmapAsync(postgres, serverId, metric, readFromUtc, endUtc, databases, bucketMinutes, limit, previewLength, cancellationToken);
         }
 
         var rows = new List<HeatmapCellRow>();
         await using var command = postgres.CreateCommand(BuildQueryHeatmapRollupSql(metric, plan.HourlyRelation));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddWindow(command, serverId, readFromUtc, endUtc);
         command.Parameters.Add(databases.Parameter());
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
@@ -552,7 +615,7 @@ internal static class DarlingQueryHeatmapReader
             rows.Add(ReadCell(reader, previewLength));
         }
 
-        return new HeatmapRead(rows, SourceHourlyRollup, plan);
+        return rows;
     }
 
     /// <summary>One cell row, in the column order both statements return. The statement text comes back WHOLE and the statement filter judges

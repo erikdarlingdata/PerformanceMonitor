@@ -82,6 +82,10 @@ public sealed class AnalyzeServerFamilyBudgetLiveTests
                     FamilyTimeBudget.Describe(HeavyFamilies, TimeSpan.Zero)!,
                     doc.RootElement.GetProperty("message").GetString()!,
                     StringComparison.Ordinal);
+
+                /* A pass that left a family out stored no findings, and the reply says where the stored ones are. */
+                Assert.Contains(StageTimeBudget.NotStored, doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+                Assert.All(entries, e => Assert.Contains(StageTimeBudget.LastWholePass, e.GetProperty("read_it_with").GetString()!, StringComparison.Ordinal));
             }
             Assert.Equal(HeavyFamilies, service.LastFamiliesLeftOutForTime);
             Assert.Equal(TimeSpan.Zero, service.LastFamilyBudget);
@@ -98,6 +102,7 @@ public sealed class AnalyzeServerFamilyBudgetLiveTests
             {
                 Assert.Empty(FamiliesLeftOut(doc.RootElement));
                 Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+                Assert.DoesNotContain(StageTimeBudget.NotStored, whole, StringComparison.Ordinal);
             }
             Assert.Empty(service.LastFamiliesLeftOutForTime);
 

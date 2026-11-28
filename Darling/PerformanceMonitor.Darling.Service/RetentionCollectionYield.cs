@@ -250,6 +250,8 @@ internal sealed class RetentionCollectionYield
     private bool _loggedWaitCap;
     private bool _stopPending;
     private bool _firstStopWasEntrySkip;
+    private double? _shareEndSeconds;
+    private bool _shareStopPending;
 
     internal RetentionCollectionYield(
         ICollectionPressure pressure,
@@ -303,10 +305,46 @@ internal sealed class RetentionCollectionYield
 
     /// <summary>
     /// Tables that still have rows to drain because of the budget: the ones never started plus the ones stopped part-way
-    /// (#5592). Above zero exactly when <see cref="StoppedOnBudget"/> is, and it is what the worker reads to schedule the
-    /// continuation pass.
+    /// (#5592), and a table stopped at its share of the budget (#9956). Above zero when <see cref="StoppedOnBudget"/> is or
+    /// <see cref="TablesStoppedOnShare"/> is, and it is what the worker reads to schedule the continuation pass.
     /// </summary>
     internal int TablesLeft { get; private set; }
+
+    /// <summary>Tables whose drain stopped at its share of the budget (#9956), while the pass's own budget was left.</summary>
+    internal int TablesStoppedOnShare { get; private set; }
+
+    /// <summary>The first table that stopped at its share, or null.</summary>
+    internal string? FirstShareStoppedTable { get; private set; }
+
+    /// <summary>The seconds of the last share a table was given (<see cref="BeginTableShare"/>).</summary>
+    internal double ShareSeconds { get; private set; }
+
+    /// <summary>True between a drain's stop at its share and <see cref="FinishTable"/>: the table's drain stopped on its share.</summary>
+    internal bool ShareStopPending => _shareStopPending;
+
+    /// <summary>True between a drain's stop on the pass's budget and <see cref="FinishTable"/>.</summary>
+    internal bool BudgetStopPending => _stopPending;
+
+    /// <summary>
+    /// Gives the table whose drain starts now <paramref name="fraction"/> of the wall budget (#9956): once that has passed, the
+    /// drain stops at its next batch boundary (<see cref="BeforeBatchAsync"/>), and <see cref="FinishTable"/> counts it as a
+    /// table left without stopping the pass. <see cref="EndTableShare"/> ends it.
+    /// </summary>
+    internal void BeginTableShare(double fraction)
+    {
+        ShareSeconds = WallBudget.TotalSeconds * Math.Max(0, fraction);
+        _shareEndSeconds = _secondsClock() + ShareSeconds;
+        _shareStopPending = false;
+    }
+
+    /// <summary>
+    /// Ends the share <see cref="BeginTableShare"/> gave, whether or not the table's drain finished. A stop at the share stays
+    /// noted for <see cref="FinishTable"/>.
+    /// </summary>
+    internal void EndTableShare() => _shareEndSeconds = null;
+
+    /// <summary>True while a table has a share and it has passed.</summary>
+    internal bool ShareSpent => _shareEndSeconds is { } end && _secondsClock() >= end;
 
     /// <summary>The clock a batch's run time is measured on.</summary>
     internal double NowSeconds => _secondsClock();
@@ -316,8 +354,8 @@ internal sealed class RetentionCollectionYield
 
     /// <summary>
     /// Waits, in re-checks of <see cref="RecheckSeconds"/>, while collection is behind, then returns true so the batch
-    /// runs. Returns false, without running anything, when the pass's budget is spent (checked first, and again at
-    /// every re-check, because a wait counts against it). A wait that reaches <see cref="MaxWaitSeconds"/> returns true
+    /// runs. Returns false, without running anything, when the pass's budget is spent or the table's share of it is
+    /// (<see cref="BeginTableShare"/>), both checked first and again at every re-check, because a wait counts against them. A wait that reaches <see cref="MaxWaitSeconds"/> returns true
     /// too. Honors <paramref name="cancellationToken"/> before the read and during every delay.
     /// </summary>
     internal async Task<bool> BeforeBatchAsync(CancellationToken cancellationToken)
@@ -325,6 +363,12 @@ internal sealed class RetentionCollectionYield
         cancellationToken.ThrowIfCancellationRequested();
         if (BudgetSpent)
         {
+            return false;
+        }
+
+        if (ShareSpent)
+        {
+            _shareStopPending = true;
             return false;
         }
 
@@ -363,6 +407,12 @@ internal sealed class RetentionCollectionYield
             cancellationToken.ThrowIfCancellationRequested();
             if (BudgetSpent)
             {
+                return false;
+            }
+
+            if (ShareSpent)
+            {
+                _shareStopPending = true;
                 return false;
             }
 
@@ -415,9 +465,15 @@ internal sealed class RetentionCollectionYield
 
     /// <summary>
     /// Called by the drain loop when <see cref="BeforeBatchAsync"/> said stop. The table is recorded by
-    /// <see cref="FinishTable"/>, which knows its name.
+    /// <see cref="FinishTable"/>, which knows its name. A stop at the table's share is already noted and is not the pass's.
     /// </summary>
-    internal void NoteBudgetStop() => _stopPending = true;
+    internal void NoteBudgetStop()
+    {
+        if (!_shareStopPending)
+        {
+            _stopPending = true;
+        }
+    }
 
     /// <summary>
     /// Entry check for a table's purge: true when the budget is already spent, so the table is not started (no
@@ -444,10 +500,20 @@ internal sealed class RetentionCollectionYield
 
     /// <summary>
     /// Called after a table's drain returned. When the drain stopped on the budget, records the table as the place the
-    /// pass stopped (the first one is kept); a stop that deleted nothing counts the table as not reached.
+    /// pass stopped (the first one is kept); a stop that deleted nothing counts the table as not reached. A drain that stopped
+    /// at its share (#9956) counts as a table left, and the pass goes on.
     /// </summary>
     internal void FinishTable(string tableName, int rowsDeleted)
     {
+        if (_shareStopPending)
+        {
+            _shareStopPending = false;
+            TablesStoppedOnShare++;
+            FirstShareStoppedTable ??= tableName;
+            TablesLeft++;
+            return;
+        }
+
         if (!_stopPending)
         {
             return;
@@ -464,15 +530,15 @@ internal sealed class RetentionCollectionYield
     }
 
     /// <summary>
-    /// The sentence the run record and the log carry when the pass waited for collection or stopped on its budget; null
-    /// when it did neither, so a pass that had no pressure reads exactly as before. The ordinary pause between batches
+    /// The sentence the run record and the log carry when the pass waited for collection, stopped on its budget or stopped a
+    /// drain at its share (#9956). Null when it did none of these, so a pass that had no pressure reads exactly as before. The ordinary pause between batches
     /// happens on every paced pass and is not pressure, so on its own it adds nothing; it is named only when the sentence
     /// is written for another reason.
     /// </summary>
     internal string? Describe()
     {
         var inv = CultureInfo.InvariantCulture;
-        if (!StoppedOnBudget && TotalWaitSeconds <= 0)
+        if (!StoppedOnBudget && TotalWaitSeconds <= 0 && TablesStoppedOnShare == 0)
         {
             return null;
         }
@@ -487,6 +553,13 @@ internal sealed class RetentionCollectionYield
             text += string.Create(
                 inv,
                 $"; stopped waiting at {WaitCapSeconds / 60:F0} minutes, half the time budget, and kept only the pauses");
+        }
+
+        if (TablesStoppedOnShare > 0)
+        {
+            text += string.Create(
+                inv,
+                $"; the drain of {FirstShareStoppedTable} stopped at its {ShareSeconds / 60:F0}-minute share of the time budget - the next pass continues from the rows left");
         }
 
         if (StoppedOnBudget)

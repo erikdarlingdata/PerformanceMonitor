@@ -100,8 +100,13 @@ public sealed class DarlingMcpTools
                an anchored run returns a complete, correct set of findings that simply does not exist in
                analysis_findings, and an agent that assumed otherwise would tell someone to "check the
                persisted findings" for a run that never wrote any. */
+            /* #9879: a current pass that left anything out for time (a family, an anomaly detector or a finding's
+               drill-down) stored no findings either, so the stored latest batch is still the last whole pass. The reply
+               says so in persisted and persistence_note, and once more after the sentences that name what was left out. */
+            var leftOutForTime = analysisService.LastPassLeftOutForTime;
+            var storedFindings = anchor is null && !leftOutForTime;
             var persistenceNote = anchor is null
-                ? null
+                ? leftOutForTime ? StageTimeBudget.NotStored : null
                 : "as_of was supplied, so this analysis ran over a PAST window and is exploratory: the findings below are complete but were NOT written to the store. A finding row carries the time the analysis RAN, and the reads that consume those rows (get_analysis_findings, the viewer's Recommendations tab) treat the newest analysis_time as this server's CURRENT state, so persisting a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Re-run without as_of to analyze and persist the present.";
 
             /* #9879: a family the pass's time budget stopped is not a failed read, so it is said beside the collection
@@ -110,6 +115,14 @@ public sealed class DarlingMcpTools
                Null and absent when every read finished, so such a reply keeps its bytes. */
             var familiesLeftOut = analysisService.LastFamiliesLeftOutForTime;
             var familyBudget = analysisService.LastFamilyBudget;
+
+            /* #9879: the same for an anomaly detector or a finding's drill-down the pass's time budget stopped. A detector
+               left out is a missing finding and is said like a family. A drill-down left out leaves its finding in the
+               answer without its detail. Each list is its own field after families_left_out, absent when empty. */
+            var stageCuts = analysisService.LastStageCuts;
+            var timeBudgetCaveat = CollectionCaveats.Compose(
+                CollectionCaveats.Compose(FamilyTimeBudget.Describe(familiesLeftOut, familyBudget), StageTimeBudget.Describe(stageCuts)),
+                leftOutForTime ? StageTimeBudget.NotStored : null);
 
             if (analysisService.WindowEmptyMessage != null)
             {
@@ -126,20 +139,20 @@ public sealed class DarlingMcpTools
                    too — a dead window AND a family that could not be read are two different holes. Clean
                    pass: same message, same object, same bytes. */
                 var unobservedCollection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-                var unobservedCaveat = CollectionCaveats.Compose(unobservedCollection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
+                var unobservedCaveat = CollectionCaveats.Compose(unobservedCollection.Describe(), timeBudgetCaveat);
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
                     /* #8910: a window retention removed has nothing for collection health to say. */
                     WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
-                    FamilyTimeBudget.Attach(unobservedCollection.Attach(new
+                    StageTimeBudget.Attach(FamilyTimeBudget.Attach(unobservedCollection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                        persisted = anchor is null,
+                        persisted = storedFindings,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote
-                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions));
             }
 
             /* #3538 A2: how much of the window the collector actually observed. Every rate in this pass
@@ -158,7 +171,7 @@ public sealed class DarlingMcpTools
                the sentence joins the caveat and the structured block is appended to the payload, because
                "no finding from the write family" and "the write family was not read" must not look alike. */
             var collection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
+            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), timeBudgetCaveat);
 
             if (findings.Count == 0)
             {
@@ -182,16 +195,16 @@ public sealed class DarlingMcpTools
                     "empty",
                     (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
                         + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
-                    FamilyTimeBudget.Attach(collection.Attach(new
+                    StageTimeBudget.Attach(FamilyTimeBudget.Attach(collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                        persisted = anchor is null,
+                        persisted = storedFindings,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote,
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
-                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions));
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -305,17 +318,17 @@ public sealed class DarlingMcpTools
                order. A finding that does not fit the room left is trimmed to it and flagged (left out and listed only when even
                the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
                truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
-               unanchored run persisted them all before this cut. */
-            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(FamilyTimeBudget.Attach(collection.Attach(new
+               unanchored run that left nothing out for time persisted them all before this cut. */
+            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(StageTimeBudget.Attach(FamilyTimeBudget.Attach(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 status = "findings",
                 finding_count = findings.Count,
                 findings_returned = packed.KeptCount,
                 truncated = packed.LeftOut.Count > 0 || packed.TrimmedCount > 0,
-                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, packed, persisted: anchor is null),
+                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, packed, persisted: storedFindings, leftOutForTime: anchor is null && leftOutForTime),
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                persisted = anchor is null,
+                persisted = storedFindings,
                 /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
                    one every caller already assumed. */
                 persistence_note = persistenceNote,
@@ -330,7 +343,7 @@ public sealed class DarlingMcpTools
                     end = findings[0].TimeRangeEnd?.ToString("o")
                 },
                 findings = packed.FindingsArray()
-            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
+            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {

@@ -122,116 +122,153 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
     /// <summary>
     /// Enriches each finding's DrillDown dictionary based on its story path.
     /// </summary>
-    public async Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context)
+    public Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context) =>
+        EnrichEachAsync(findings, context, EnrichFindingAsync);
+
+    /// <summary>
+    /// Runs the drill-down of each finding, one finding after another, and stops at the pass's
+    /// <see cref="AnalysisContext.DrillDownDeadline"/> when it carries one (#9879). Over a long window one finding's
+    /// drill-down reads can take longer than every stage before them.
+    ///
+    /// <para>With a deadline (an on-demand pass), each drill-down reads through a token that also ends at the deadline.
+    /// One that has not finished when it fires is stopped and its finding keeps no drill-down: a drill-down stopped half
+    /// way would build a remediation from half the rows. A finding not reached by then is not drilled. Either one is named
+    /// in <see cref="AnalysisContext.DrillDownsLeftOutForTime"/> by its root fact key, and the finding itself stays in the
+    /// pass's answer. With no deadline (the scheduled pass) every drill-down runs to its end on the pass's token.</para>
+    /// </summary>
+    internal static async Task EnrichEachAsync(
+        List<AnalysisFinding> findings, AnalysisContext context, Func<AnalysisFinding, AnalysisContext, Task> enrichOne)
     {
+        var deadline = context.DrillDownDeadline;
         foreach (var finding in findings)
         {
-            /* #2299: between findings is the natural abandon point — the per-finding catch below
-               deliberately does NOT swallow shutdown residue, so this throw (and any residue from
-               a drill-down mid-read) unwinds the pass to the service's single Information line. */
+            /* #2299: between findings is the natural abandon point. The per-finding catch deliberately does NOT swallow
+               shutdown residue, so this throw (and any residue from a drill-down mid-read) unwinds the pass to the
+               service's single Information line. */
             context.CancellationToken.ThrowIfCancellationRequested();
 
-            try
+            if (!deadline.CanBeCanceled)
             {
-                finding.DrillDown = new Dictionary<string, object>();
-                /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
-                   DrillDownCollector's twin of this line and AnalysisFinding.PathKeys for the six-site
-                   corruption surface this retired. Same keys, same order. */
-                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
+                await enrichOne(finding, context);
+                continue;
+            }
 
-                /* D7: the config drill-down is a single cheap config-table read and is
-                   required to build config/RCSI/db-config advice, which legitimately scores
-                   below 0.5 (RCSI-off base severity is 0.3). Collect it regardless of the
-                   0.5 display gate. */
-                if (pathKeys.Contains("DB_CONFIG"))
-                    await CollectConfigIssues(finding, context);
+            if (!await StageDeadline.RunAsync(context, () => enrichOne(finding, context), deadline))
+            {
+                /* The one writer of the left-out record. The reply's drill_downs_left_out is built from it, in finding
+                   order. */
+                finding.DrillDown = null;
+                context.DrillDownsLeftOutForTime.Add(finding.RootFactKey);
+            }
+        }
+    }
 
-                /* WS3: the percent-autogrowth drill-down is a single cheap config-table read
-                   and is required to render the copy-paste MODIFY FILE fix for a
-                   FILE_AUTOGROWTH_PERCENT finding, which scores 0.3 (advisory). Collect it
-                   regardless of the 0.5 display gate, like the config drill-down above. */
-                if (pathKeys.Contains("FILE_AUTOGROWTH_PERCENT"))
-                    await CollectAutogrowthPercentFiles(finding, context);
+    /// <summary>
+    /// The drill-down of one finding. Its catch does not swallow a stop from the token the flow reads, so a stop of the
+    /// pass or of the drill-down deadline (#9879) reaches <see cref="EnrichEachAsync"/>.
+    /// </summary>
+    private async Task EnrichFindingAsync(AnalysisFinding finding, AnalysisContext context)
+    {
+        try
+        {
+            finding.DrillDown = new Dictionary<string, object>();
+            /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
+               DrillDownCollector's twin of this line and AnalysisFinding.PathKeys for the six-site
+               corruption surface this retired. Same keys, same order. */
+            var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
-                /* #8883: the tempdb file list is one cheap read of the newest collection and renders the TEMPDB_FILE_SETUP
-                   finding, which scores 0.3 (advisory). Collect it regardless of the 0.5 display gate. */
-                if (pathKeys.Contains("TEMPDB_FILE_SETUP"))
-                    await CollectTempDbSetupFiles(finding, context);
+            /* D7: the config drill-down is a single cheap config-table read and is
+               required to build config/RCSI/db-config advice, which legitimately scores
+               below 0.5 (RCSI-off base severity is 0.3). Collect it regardless of the
+               0.5 display gate. */
+            if (pathKeys.Contains("DB_CONFIG"))
+                await CollectConfigIssues(finding, context);
 
-                /* WS4: re-parse the top collected query plans to render the specific missing
-                   indexes / warnings for a MISSING_INDEX or PLAN_WARNING finding, which scores 0.4
-                   (advisory). Run regardless of the 0.5 display gate, like the config drill-downs
-                   above — the fact carries only counts, so the strings live here. */
-                if (pathKeys.Contains("MISSING_INDEX") || pathKeys.Contains("PLAN_WARNING"))
-                    await CollectPlanAdvisoryDetail(finding, context, pathKeys);
+            /* WS3: the percent-autogrowth drill-down is a single cheap config-table read
+               and is required to render the copy-paste MODIFY FILE fix for a
+               FILE_AUTOGROWTH_PERCENT finding, which scores 0.3 (advisory). Collect it
+               regardless of the 0.5 display gate, like the config drill-down above. */
+            if (pathKeys.Contains("FILE_AUTOGROWTH_PERCENT"))
+                await CollectAutogrowthPercentFiles(finding, context);
 
-                // Below the 0.5 display gate, only the cheap config drill-down above runs;
-                // the expensive collectors (plan fetches, multi-row reads) are skipped.
-                if (finding.Severity < 0.5)
-                {
-                    if (finding.DrillDown.Count == 0)
-                        finding.DrillDown = null;
-                    continue;
-                }
+            /* #8883: the tempdb file list is one cheap read of the newest collection and renders the TEMPDB_FILE_SETUP
+               finding, which scores 0.3 (advisory). Collect it regardless of the 0.5 display gate. */
+            if (pathKeys.Contains("TEMPDB_FILE_SETUP"))
+                await CollectTempDbSetupFiles(finding, context);
 
-                if (pathKeys.Contains("DEADLOCKS"))
-                    await CollectTopDeadlocks(finding, context);
+            /* WS4: re-parse the top collected query plans to render the specific missing
+               indexes / warnings for a MISSING_INDEX or PLAN_WARNING finding, which scores 0.4
+               (advisory). Run regardless of the 0.5 display gate, like the config drill-downs
+               above — the fact carries only counts, so the strings live here. */
+            if (pathKeys.Contains("MISSING_INDEX") || pathKeys.Contains("PLAN_WARNING"))
+                await CollectPlanAdvisoryDetail(finding, context, pathKeys);
 
-                if (pathKeys.Contains("BLOCKING_EVENTS"))
-                    await CollectTopBlockingChains(finding, context);
-
-                if (pathKeys.Contains("BLOCKING_CHAIN"))
-                    await CollectReconstructedBlockingChains(finding, context);
-
-                if (pathKeys.Contains("CPU_SPIKE"))
-                    await CollectQueriesAtSpike(finding, context);
-
-                if (pathKeys.Contains("CPU_SQL_PERCENT") || pathKeys.Contains("CPU_SPIKE"))
-                    await CollectTopCpuQueries(finding, context);
-
-                if (pathKeys.Contains("QUERY_SPILLS"))
-                    await CollectTopSpillingQueries(finding, context);
-
-                if (pathKeys.Contains("IO_READ_LATENCY_MS") || pathKeys.Contains("IO_WRITE_LATENCY_MS"))
-                    await CollectFileLatencyBreakdown(finding, context);
-
-                if (pathKeys.Contains("LCK") || pathKeys.Contains("LCK_M_S") || pathKeys.Contains("LCK_M_IS"))
-                    await CollectLockModeBreakdown(finding, context);
-
-                if (pathKeys.Contains("TEMPDB_USAGE"))
-                    await CollectTempDbBreakdown(finding, context);
-
-                if (pathKeys.Contains("MEMORY_GRANT_PENDING"))
-                    await CollectPendingGrants(finding, context);
-
-                if (pathKeys.Any(k => k.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase)))
-                    await CollectBadActorDetail(finding, context);
-
-                if (pathKeys.Contains("PARAMETER_SENSITIVITY"))
-                    await CollectParameterSensitiveQueries(finding, context);
-
-                if (pathKeys.Contains("PLAN_REGRESSION"))
-                {
-                    /* #6267: the queries whose timeouts or errors rose go in alongside the cost offenders; a fact raised by
-                       failures alone has no cost offender to list. */
-                    PlanRegressionFailureRule.AddDrillDown(finding.DrillDown!, context);
-                    if (!PlanRegressionFailureRule.RaisedByFailuresAlone(context))
-                        await CollectRegressedQueries(finding, context);
-                }
-
-                // Plan analysis: for findings with top queries, analyze their cached plans
-                await CollectPlanAnalysis(finding, context);
-
-                // Remove empty drill-down dictionaries
+            // Below the 0.5 display gate, only the cheap config drill-down above runs;
+            // the expensive collectors (plan fetches, multi-row reads) are skipped.
+            if (finding.Severity < 0.5)
+            {
                 if (finding.DrillDown.Count == 0)
                     finding.DrillDown = null;
+                return;
             }
-            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+
+            if (pathKeys.Contains("DEADLOCKS"))
+                await CollectTopDeadlocks(finding, context);
+
+            if (pathKeys.Contains("BLOCKING_EVENTS"))
+                await CollectTopBlockingChains(finding, context);
+
+            if (pathKeys.Contains("BLOCKING_CHAIN"))
+                await CollectReconstructedBlockingChains(finding, context);
+
+            if (pathKeys.Contains("CPU_SPIKE"))
+                await CollectQueriesAtSpike(finding, context);
+
+            if (pathKeys.Contains("CPU_SQL_PERCENT") || pathKeys.Contains("CPU_SPIKE"))
+                await CollectTopCpuQueries(finding, context);
+
+            if (pathKeys.Contains("QUERY_SPILLS"))
+                await CollectTopSpillingQueries(finding, context);
+
+            if (pathKeys.Contains("IO_READ_LATENCY_MS") || pathKeys.Contains("IO_WRITE_LATENCY_MS"))
+                await CollectFileLatencyBreakdown(finding, context);
+
+            if (pathKeys.Contains("LCK") || pathKeys.Contains("LCK_M_S") || pathKeys.Contains("LCK_M_IS"))
+                await CollectLockModeBreakdown(finding, context);
+
+            if (pathKeys.Contains("TEMPDB_USAGE"))
+                await CollectTempDbBreakdown(finding, context);
+
+            if (pathKeys.Contains("MEMORY_GRANT_PENDING"))
+                await CollectPendingGrants(finding, context);
+
+            if (pathKeys.Any(k => k.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase)))
+                await CollectBadActorDetail(finding, context);
+
+            if (pathKeys.Contains("PARAMETER_SENSITIVITY"))
+                await CollectParameterSensitiveQueries(finding, context);
+
+            if (pathKeys.Contains("PLAN_REGRESSION"))
             {
-                _logger?.LogError("[PgDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
-                    finding.StoryPath, ex.GetType().Name, ex.Message);
-                // Don't null out — keep whatever was collected before the error
+                /* #6267: the queries whose timeouts or errors rose go in alongside the cost offenders; a fact raised by
+                   failures alone has no cost offender to list. */
+                PlanRegressionFailureRule.AddDrillDown(finding.DrillDown!, context);
+                if (!PlanRegressionFailureRule.RaisedByFailuresAlone(context))
+                    await CollectRegressedQueries(finding, context);
             }
+
+            // Plan analysis: for findings with top queries, analyze their cached plans
+            await CollectPlanAnalysis(finding, context);
+
+            // Remove empty drill-down dictionaries
+            if (finding.DrillDown.Count == 0)
+                finding.DrillDown = null;
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            _logger?.LogError("[PgDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
+                finding.StoryPath, ex.GetType().Name, ex.Message);
+            // Don't null out — keep whatever was collected before the error
         }
     }
 
