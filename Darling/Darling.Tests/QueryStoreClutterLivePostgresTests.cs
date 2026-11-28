@@ -694,7 +694,7 @@ public sealed class QueryStoreClutterLivePostgresTests
 
             /* no seam fires this call's budget: it answers because the computation is older than a budget, not because it waited one out */
             DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = null;
-            clock.Advance(TimeSpan.FromSeconds(DarlingMcpQueryStoreClutterTools.FleetBudgetSeconds + 1));
+            clock.Advance(TimeSpan.FromSeconds(DarlingMcpQueryStoreClutterTools.ReadBarSeconds + 1));
             var atOnce = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
             Assert.False(release.Task.IsCompleted);
             Assert.Equal("null", atOnce.Median);
@@ -976,6 +976,163 @@ public sealed class QueryStoreClutterLivePostgresTests
         finally
         {
             ClearFleetSeams();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+        }
+    }
+
+    /* ─────────────────────────── #9958: the wait is what is left of the read bar ─────────────────────────── */
+
+    /// <summary>
+    /// #9958: the wait the call gives the fleet computation is what is left of the 5 s read bar after the time the call has used, and
+    /// never less than the 1 s floor. Whole milliseconds in and out, so no figure here is rounded.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 5000)]
+    [InlineData(1000, 4000)]
+    [InlineData(2500, 2500)]
+    [InlineData(3999, 1001)]
+    [InlineData(4000, 1000)]
+    [InlineData(4500, 1000)]
+    [InlineData(5000, 1000)]
+    [InlineData(30000, 1000)]
+    public void TheFleetWait_IsWhatIsLeftOfTheReadBar_AndNeverUnderTheFloor(int elapsedMs, int expectedWaitMs)
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(expectedWaitMs), DarlingMcpQueryStoreClutterTools.FleetWait(TimeSpan.FromMilliseconds(elapsedMs)));
+    }
+
+    /// <summary>The call's answer without its two fleet fields, as JSON text: the per-server figures, which the fleet arm must not change.</summary>
+    private static async Task<string> PerServerOfAsync(NpgsqlDataSource postgres, string asOf, bool includeFleetMedian)
+    {
+        var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, include_fleet_median: includeFleetMedian, as_of: asOf);
+        Assert.False(McpHelpers.IsErrorEnvelope(json), json);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        Assert.True(root["database_count"]!.GetValue<int>() > 0, json);
+        root.Remove("fleet_median");
+        root.Remove("fleet_median_note");
+        return root.ToJsonString();
+    }
+
+    /// <summary>Stands the per-server reads' time on the manual clock: the first of the call's three independent reads moves it by <paramref name="used"/>.</summary>
+    private static void PerServerReadsTake(ManualClock clock, TimeSpan used)
+    {
+        DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = (name, _) =>
+        {
+            if (name == "waits") clock.Advance(used);
+            return Task.CompletedTask;
+        };
+    }
+
+    private static void ClearWaitSeams()
+    {
+        ClearFleetSeams();
+        DarlingMcpQueryStoreClutterTools.FleetWaitSeam.Value = null;
+        DarlingMcpQueryStoreClutterTools.IndependentReadSeam.Value = null;
+    }
+
+    /// <summary>
+    /// #9958: a held fleet computation. The per-server reads use 3 s of the bar on the manual clock, so the call gives the computation
+    /// the 2 s that are left, and the seam that fires the bound stands for those 2 s being spent. The first call answers with the
+    /// overrun note and the same per-server figures as a call with the fleet arm off. The computation goes on. Once it ends, having
+    /// run over the read bar, a later call in the clock hour gets its reference with no second computation.
+    /// </summary>
+    [Fact]
+    public async Task AHeldFleetReference_AnswersTheFirstCallInsideTheBar_AndALaterCallInTheHourGetsTheKeptReference()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connectionString, asOf) = await PlantedStoreAsync(ct);
+        await using var dropScratch = scratch;
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+
+        var clock = new ManualClock(new DateTime(2026, 3, 10, 14, 10, 0, DateTimeKind.Utc));
+        var computations = 0;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waits = new System.Collections.Concurrent.ConcurrentQueue<TimeSpan>();
+        QueryStoreClutterFleetReference.Clock.Value = clock;
+        QueryStoreClutterFleetReference.ComputationSeam.Value = async cap =>
+        {
+            Interlocked.Increment(ref computations);
+            entered.TrySetResult();
+            await release.Task.WaitAsync(cap.Token);
+        };
+        PerServerReadsTake(clock, TimeSpan.FromSeconds(3));
+        DarlingMcpQueryStoreClutterTools.FleetWaitSeam.Value = waits.Enqueue;
+        try
+        {
+            var withoutFleet = await PerServerOfAsync(postgres, asOf, includeFleetMedian: false);
+            Assert.Empty(waits);
+
+            /* the 2 s that are left are spent: the bound fires with the computation still held */
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = fleetBudget =>
+            {
+                fleetBudget.Cancel();
+                return Task.CompletedTask;
+            };
+            var first = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
+            Assert.Equal("null", first.Median);
+            Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, first.Note);
+            Assert.Equal(TimeSpan.FromSeconds(2), Assert.Single(waits));
+            Assert.Equal(withoutFleet, await PerServerOfAsync(postgres, asOf, includeFleetMedian: true));
+            await entered.Task.WaitAsync(HeldCallGivesUp, ct);
+            Assert.False(release.Task.IsCompleted);
+
+            /* the computation ran longer than the read bar when it ends, so it is kept for the clock hour */
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = null;
+            clock.Advance(TimeSpan.FromSeconds(DarlingMcpQueryStoreClutterTools.ReadBarSeconds + 1));
+            release.SetResult();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+
+            var later = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
+            Assert.NotEqual("null", later.Median);
+            Assert.NotEqual(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, later.Note);
+            Assert.Contains("computed at", later.Note, StringComparison.Ordinal);
+            Assert.Equal(1, Volatile.Read(ref computations));
+            Assert.Equal(withoutFleet, await PerServerOfAsync(postgres, asOf, includeFleetMedian: true));
+        }
+        finally
+        {
+            release.TrySetResult();
+            ClearWaitSeams();
+            await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
+        }
+    }
+
+    /// <summary>
+    /// #9958: a fleet computation that ends inside what is left of the bar is in the first answer. The per-server reads use 1 s of the
+    /// bar on the manual clock, the call gives the computation the 4 s that are left, and nothing fires the bound or holds the
+    /// computation: the reference is there because the computation ended first. The per-server figures are the same with the fleet
+    /// arm off.
+    /// </summary>
+    [Fact]
+    public async Task AFleetReferenceThatEndsInsideWhatIsLeftOfTheBar_IsInTheFirstAnswer()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connectionString, asOf) = await PlantedStoreAsync(ct);
+        await using var dropScratch = scratch;
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+
+        var clock = new ManualClock(new DateTime(2026, 3, 10, 14, 10, 0, DateTimeKind.Utc));
+        var waits = new System.Collections.Concurrent.ConcurrentQueue<TimeSpan>();
+        QueryStoreClutterFleetReference.Clock.Value = clock;
+        PerServerReadsTake(clock, TimeSpan.FromSeconds(1));
+        DarlingMcpQueryStoreClutterTools.FleetWaitSeam.Value = waits.Enqueue;
+        try
+        {
+            var withoutFleet = await PerServerOfAsync(postgres, asOf, includeFleetMedian: false);
+            var first = await FleetOfAsync(postgres, asOf).WaitAsync(HeldCallGivesUp, ct);
+            Assert.NotEqual("null", first.Median);
+            Assert.NotEqual(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, first.Note);
+            Assert.StartsWith("Discrete medians", first.Note, StringComparison.Ordinal);
+            Assert.Equal(TimeSpan.FromSeconds(4), Assert.Single(waits));
+            Assert.Equal(withoutFleet, await PerServerOfAsync(postgres, asOf, includeFleetMedian: true));
+        }
+        finally
+        {
+            ClearWaitSeams();
             await QueryStoreClutterFleetReference.WhenIdleAsync(postgres);
         }
     }

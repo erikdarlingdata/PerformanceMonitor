@@ -36,7 +36,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// slot: one per store is its bound, and a slot of its own would make a call at a limit of one wait out its budget for a
 /// computation queued behind that same call.</para>
 ///
-/// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's budget. From then on a
+/// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's wait, which is what is
+/// left of the read bar after the call's own per-server reads (<c>DarlingMcpQueryStoreClutterTools.FleetWait</c>). From then on a
 /// call for the same key answers at once: still computing, the kept reference, or unfinished.</para>
 ///
 /// <para><b>What is kept.</b> A reference that took longer than <see cref="KeepAboveSeconds"/> stays until the clock hour it was
@@ -88,8 +89,9 @@ internal static class QueryStoreClutterFleetReference
     /// <summary>
     /// The fleet reference for (<paramref name="hoursBack"/>, the clock hour of <paramref name="windowEndUtc"/>, <paramref name="anchored"/>)
     /// on this store. <paramref name="compute"/> runs only when no computation for the key is in flight or kept. The wait ends when
-    /// <paramref name="budget"/> fires, with its <see cref="OperationCanceledException"/>. An anchored read is keyed apart because it
-    /// keeps databases dropped since its anchor.
+    /// <paramref name="budget"/> fires, with its <see cref="OperationCanceledException"/>: the caller arms it for <paramref name="budgetLength"/>,
+    /// the wait it gives the call, and a call that shares a computation already running has it re-armed to what is left of that
+    /// length at the computation's age. An anchored read is keyed apart because it keeps databases dropped since its anchor.
     /// </summary>
     internal static async Task<Answer> GetAsync(
         NpgsqlDataSource postgres, int hoursBack, DateTime windowEndUtc, bool anchored,
