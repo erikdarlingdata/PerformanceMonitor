@@ -164,12 +164,17 @@ public sealed class MigrationUpgradeLadderLiveTests : IClassFixture<MigrationUpg
 
         var root = FindRepoRoot();
         Assert.True(root is not null, "Could not locate the repository root.");
+        /* The newest release by version, not by file name: "v3.9.0" sorts after "v3.14.0" as text, and the newest
+           fixture is the shortest climb. */
         var newest = Directory
             .EnumerateFiles(
                 Path.Combine(root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar)),
                 "migration-ladder-v*.sql")
-            .OrderBy(p => p, StringComparer.Ordinal)
-            .Last();
+            .Select(path => (FilePath: path, Version: Regex.Match(Path.GetFileName(path), @"v(\d+\.\d+\.\d+)")))
+            .Where(f => f.Version.Success)
+            .OrderBy(f => System.Version.Parse(f.Version.Groups[1].Value))
+            .Last()
+            .FilePath;
         const string scratchDatabase = "darling_upgrade_ladder_test_cleanup_real";
 
         await ClimbAsync(baseConnectionString!, newest, scratchDatabase);
