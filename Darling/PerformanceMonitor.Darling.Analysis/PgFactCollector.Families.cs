@@ -17,9 +17,11 @@ namespace PerformanceMonitor.Darling.Analysis;
 public sealed partial class PgFactCollector
 {
     /// <summary>
-    /// The most family reads one pass runs at once (#9149). Each read opens its own pooled connection, so this is also
-    /// the most connections one on-demand pass holds. The service's pool is 24 wide and a pass that asks for more than
-    /// this gets this.
+    /// The most family reads one pass runs at once (#9149), and the slots of the gate they run under. Each read opens
+    /// its own pooled connection. #9879: the anomaly read an on-demand pass runs beside the families, and every detector
+    /// it runs at once, holds one of the same slots and one connection, and the I/O detector holds a second connection
+    /// while it computes its write-latency baseline on a cache miss. So one on-demand pass holds at most this many
+    /// connections and one more at once. The service's pool is 24 wide and a pass that asks for more than this gets this.
     /// </summary>
     internal const int MaxFamilyParallelism = 4;
 
@@ -45,8 +47,12 @@ public sealed partial class PgFactCollector
     ///
     /// <para>#9879: when the context carries an <see cref="AnalysisContext.AnomalyReadBesideFamilies"/>, the families
     /// overlap and the coverage stamp found observed time in the window, the anomaly read runs beside the families. It
-    /// starts ahead of the first family, so it holds one of the gate's slots from the start and the pass still opens no
-    /// more connections than the ceiling. It reads through the pass's token, never the deadline's, and records its
+    /// starts ahead of the first family, so it holds one of the gate's slots from the start. The stage hands it the gate
+    /// (<see cref="AnomalyReadBesideFamilies.FamilyGate"/>) for as long as it runs: the detector runs its first read on
+    /// the slot the anomaly read holds and takes a slot from the same gate, behind the families already waiting, for
+    /// each further read it runs at once (<c>PgAnomalyDetector.RunDetectorsAsync</c>). So the families and the detector's
+    /// reads together never hold more than the gate's slots, and no family waits on a detector. It reads through the
+    /// pass's token, never the deadline's, and records its
     /// failures to a list of its own. The stage waits for it to settle and leaves its facts, its failures and any
     /// exception with the pass, which places them after the families' as it does when the detector runs after
     /// collection. An unobserved window never starts it: the pass returns before the detector on one.</para>
@@ -174,17 +180,20 @@ public sealed partial class PgFactCollector
 
         /* #9879: the anomaly read on a gate slot of its own. Its failures go to its own list, so the pass's list holds only
            family failures until the pass has counted the families it could not read. The flow it starts on is the stage's
-           own, which no family's deadline token reaches. */
+           own, which no family's deadline token reaches. The read carries the gate while it runs, so a detector that runs
+           several of its reads at once takes their slots from this gate and not from one of its own. */
         async Task<List<Fact>> RunAnomalyRead(AnomalyReadBesideFamilies read)
         {
             await gate.WaitAsync(CancellationToken.None);
             try
             {
                 read.Failures = context.BufferCollectionFailuresForThisFlow();
+                read.FamilyGate = gate;
                 return await read.Read(context);
             }
             finally
             {
+                read.FamilyGate = null;
                 gate.Release();
             }
         }

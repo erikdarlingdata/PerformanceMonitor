@@ -1055,6 +1055,8 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS held_w
         new(320, "hasQueryTagSlimSightings", "DROP TABLE IF EXISTS collect.query_tag_sightings_slim;"),
         // V321 (#9923): the connection open count and time on the slow read record. The slow read column is the probe's newest sentinel. The rewind drops both columns, so a re-run of V321 adds them again, empty. Safe on a store that never had them.
         new(321, "hasSlowReadConnectionOpens", "ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS connection_opens, DROP COLUMN IF EXISTS connection_open_ms;"),
+        // V322 (#9863): the hash index of the hourly host rollup is gone. It is the probe's newest sentinel, and the sentinel is the index's absence. The rewind makes the index again, empty, so a re-run of V322 drops it. Safe on a store that never had the rollup: the statement does nothing.
+        new(322, "hasHostHourlyHashIndexDropped", "DO $$ BEGIN IF to_regclass('collect.query_stats_host_hourly') IS NOT NULL THEN CREATE INDEX IF NOT EXISTS idx_query_stats_host_hourly_hash ON collect.query_stats_host_hourly (server_id, query_hash, bucket); END IF; END $$;"),
     ];
 
     /// <summary>

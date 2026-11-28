@@ -49,6 +49,9 @@ public sealed class QueryStatsHostHourlyViewerLiveTests
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built", ct));
 
+        /* V287's DDL makes the hash index V322 (#9863) drops, so a store that ran V287 again reads one rung low until V322 runs again. */
+        await ExecuteAsync(connection, PgMigrations.Scripts.Single(s => s.Version == HostHourlyHashIndexDrop.Version).Sql, ct);
+
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
     }
