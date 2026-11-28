@@ -118,7 +118,8 @@ public sealed class DarlingMcpTools
 
             /* #9879: the same for an anomaly detector or a finding's drill-down the pass's time budget stopped. A detector
                left out is a missing finding and is said like a family. A drill-down left out leaves its finding in the
-               answer without its detail. Each list is its own field after families_left_out, absent when empty. */
+               answer without its detail, and a configuration change's compare left out leaves the CONFIG_CHANGED finding
+               with the change and no verdict. Each list is its own field after families_left_out, absent when empty. */
             var stageCuts = analysisService.LastStageCuts;
             var timeBudgetCaveat = CollectionCaveats.Compose(
                 CollectionCaveats.Compose(FamilyTimeBudget.Describe(familiesLeftOut, familyBudget), StageTimeBudget.Describe(stageCuts)),

@@ -994,7 +994,12 @@ public static class FactAdvice
         var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
 
         string verdict;
-        if (unavailable)
+        if (fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaCompareLeftOutForTime) > 0)
+        {
+            /* #9879: a compare the pass's time budget stopped is not a failed read, and the next call may stop it again. */
+            verdict = $"The before/after compare was left out of this answer for time: an on-demand analysis gives it a stated time and it had not finished, so this card records the change and nothing about its effect. Read the verdict with {StageTimeBudget.CompareReadItWith}.";
+        }
+        else if (unavailable)
         {
             verdict = "The before/after compare could not run this pass (the store read failed on both sides), so this card records the change and nothing about its effect; the next pass retries while the change stays inside the window.";
         }
