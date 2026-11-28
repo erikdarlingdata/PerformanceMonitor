@@ -90,6 +90,23 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// databases" for two or more, null for all) and the empty-grid text (<see cref="EmptyAsync"/>). For one name
     /// both read exactly as they did.
     /// </summary>
+    internal static Task<string> GetQueryHeatmap(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        string? metric,
+        DatabaseFilter databaseFilter,
+        int bucket_minutes,
+        int limit,
+        string? as_of,
+        bool full_text,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+        => GetQueryHeatmap(
+            postgres, server_name, hours_back, metric, databaseFilter, bucket_minutes, limit, as_of, full_text, logger, boundTheRead: true, cancellationToken);
+
+    /// <summary><see cref="GetQueryHeatmap(NpgsqlDataSource, string?, int, string?, DatabaseFilter, int, int, string?, bool, ILogger?, CancellationToken)"/> with the choice
+    /// of reading the whole window at once (<paramref name="boundTheRead"/> false), which is the oracle the tests compare the bounded read to (#9965).</summary>
     internal static async Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         string? server_name,
@@ -101,6 +118,7 @@ public sealed class DarlingMcpQueryHeatmapTools
         string? as_of,
         bool full_text,
         ILogger? logger,
+        bool boundTheRead,
         CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -143,11 +161,13 @@ public sealed class DarlingMcpQueryHeatmapTools
             */
             var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
 
+            /* #9965: the cap keeps the newest cells, so the read covers the newest limit + 1 bins first and reads the whole window only when those answer
+               fewer cells than that. The cells, the over-fetch and the trim below are the same as a whole-window read. boundTheRead false reads the whole window. */
             /* #8570: a bin of 60 minutes or more reads whole hours from the hourly rollup (duration and cpu only), and the hours it has not built yet, and the
                partial hours at the window's edges, from the raw rows. The store's measured coverage decides; a store with no rollup reads raw as before. */
             var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var read = await DarlingQueryHeatmapReader.GetQueryHeatmapRoutedAsync(
-                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken);
+                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, boundTheRead, cancellationToken);
             var rows = read.Rows;
 
             /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid
