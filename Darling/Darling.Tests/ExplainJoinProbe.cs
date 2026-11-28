@@ -25,8 +25,13 @@ internal static class ExplainJoinProbe
     /// join METHOD is the planner's call — a hash join over a small dimension reads all of it for five probe
     /// rows, and a nested loop over a large one reads one row per probe — while the probe side is the property
     /// the read shape decides. SubPlans are walked too, and their loops count.
+    ///
+    /// <para>#9943: before PostgreSQL 18, <c>Actual Rows</c> is the per-loop average rounded to a whole number, so a probe that
+    /// returned 8 rows over 5 loops reads <c>2 x 5 = 10</c>. With <paramref name="rowAveragesRounded"/> each probe node counts
+    /// <c>(rows - 0.5) x loops</c>, the lowest total the rounding allows, so an upper bound on the rows resolved holds on both
+    /// versions (it can be off by up to half a row per loop, never over-counts).</para>
     /// </summary>
-    public static double RowsResolvedAgainst(string explainJson, string relation)
+    public static double RowsResolvedAgainst(string explainJson, string relation, bool rowAveragesRounded = false)
     {
         using var document = JsonDocument.Parse(explainJson);
 
@@ -44,7 +49,8 @@ internal static class ExplainJoinProbe
             if (inputs.Count == 2 && inputs.Count(Reads) == 1)
             {
                 var probe = inputs.Single(c => !Reads(c));
-                resolved += probe.GetProperty("Actual Rows").GetDouble() * probe.GetProperty("Actual Loops").GetDouble();
+                var rows = probe.GetProperty("Actual Rows").GetDouble();
+                resolved += (rowAveragesRounded ? System.Math.Max(0, rows - 0.5) : rows) * probe.GetProperty("Actual Loops").GetDouble();
             }
 
             foreach (var child in Children(node))

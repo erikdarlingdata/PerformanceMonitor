@@ -89,8 +89,22 @@ public sealed class DailySummaryCreditedPairsLiveTests
         var plan = await PlanAsync(connection, sql, start, end, ct);
         var nodes = new List<(string Type, string Index, double Loops, double Rows)>();
         Collect(plan.RootElement[0].GetProperty("Plan"), nodes);
-        Assert.Contains(nodes, n => n.Type == "Index Only Scan" && n.Index.EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)
-            && n.Loops > 0 && n.Rows >= 30000);
+        /* #9943: the index-only pair read needs PostgreSQL 18's btree skip scan. The index is (server_id, query_hash, collection_time), and
+           the read has no query_hash bound, so before 18 an index-only scan has to walk the server's whole index range with the time test
+           inside it. The 17 planner costs that above the (server_id, collection_time) index scan and heap fetches for the same rows (the
+           plan on 17.12: Index Scan on idx_query_stats_time, 60,005 rows, with every heap path but that one switched off), so on 17 the
+           pair read is that scan and the shape the plan can show is the restart read's. */
+        if (connection.PostgreSqlVersion.Major >= 18)
+        {
+            Assert.Contains(nodes, n => n.Type == "Index Only Scan" && n.Index.EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)
+                && n.Loops > 0 && n.Rows >= 30000);
+        }
+        else
+        {
+            Assert.Contains(nodes, n => n.Type == "Index Scan" && n.Index.EndsWith("idx_query_stats_time", StringComparison.Ordinal)
+                && n.Loops > 0 && n.Rows >= 30000);
+        }
+
         Assert.Contains(nodes, n => n.Index.EndsWith(PgTableTuning.QueryStatsRestartRowIndexName, StringComparison.Ordinal) && n.Loops > 0);
         await ExecuteAsync(connection, "RESET enable_seqscan; RESET enable_bitmapscan", ct);
     }
