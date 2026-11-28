@@ -798,9 +798,9 @@ public static class ComposeCompiler
         if (moduleJoinPreAggregate && plan.UsesModuleJoin && !route.IsCagg && !singleScan && stampPlan is null)
         {
             var candidatePartials = new PartialColumns(FactAlias);
-            var primary = TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, candidatePartials, beforeModuleJoin: true);
+            var primary = TryBuildPartialValueExprOver(plan.Measure, plan.Aggregate, plan.Unit, candidatePartials, beforeModuleJoin: true);
             var second = plan.Overlay is ComposeOverlay moduleOverlay
-                ? TryBuildPartialValueExpr(moduleOverlay.Measure, moduleOverlay.Aggregate, moduleOverlay.Unit, candidatePartials, beforeModuleJoin: true)
+                ? TryBuildPartialValueExprOver(moduleOverlay.Measure, moduleOverlay.Aggregate, moduleOverlay.Unit, candidatePartials, beforeModuleJoin: true)
                 : null;
             if (primary is not null && (plan.Overlay is null || second is not null))
             {
@@ -2266,7 +2266,14 @@ public static class ComposeCompiler
     /// <item><c>COUNT(*)</c> is summed. <c>percentile_cont</c> has no partial: null.</item>
     /// </list>
     /// </summary>
-    private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials, bool beforeModuleJoin = false)
+    private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials) =>
+        TryBuildPartialValueExprOver(measure, aggregate, unit, partials, beforeModuleJoin: false);
+
+    /// <summary>The body of <see cref="TryBuildPartialValueExpr"/>. With <paramref name="beforeModuleJoin"/> the partials are
+    /// computed over the fact rows of one (server_name, sql_handle) and its kept group columns, before the module join
+    /// (#9960): the measured-delta filter rides on each partial, a Sum-mode ratio combines two SUM partials, and
+    /// <c>COUNT(*)</c> combines to 0, not NULL, over no rows.</summary>
+    private static string? TryBuildPartialValueExprOver(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials, bool beforeModuleJoin)
     {
         string P(string name) => $"{partials.Alias}.{name}";
 
