@@ -145,14 +145,14 @@ public sealed class DarlingMcpClientTimeoutTools
            their own small statement, and the planner then knows how many there are. */
         const int CallsAt = 4;
 
-        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, AttentionCallArrays? calls = null)
+        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, Action<NpgsqlCommand>? more = null)
         {
             await using var command = new NpgsqlCommand(sql, connection);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
-            calls?.AddTo(command);
+            more?.Invoke(command);
 
             var rows = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -181,7 +181,7 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetInt64(4),
                     r.GetInt64(5),
                     r.GetInt64(6),
-                    r.GetInt64(7)), windowCalls);
+                    r.GetInt64(7)), windowCalls.AddTo);
 
             /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
             var span = ClientTimeoutsRead.DetailSpan(runs);
@@ -218,8 +218,10 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetBoolean(9),
                     r.GetBoolean(10),
                     r.GetBoolean(11),
-                    r.GetBoolean(12)), spanCalls);
-            var matchedCalls = await Query(AttentionWindowSql.MatchedCalls(events, sampleLimit + 1, callsAt: CallsAt), spanFloor, spanCeiling,
+                    r.GetBoolean(12)), spanCalls.AddTo);
+            /* The matched calls in two steps: the ids of the calls a sample matches, then those calls by id, so no join has to guess how many match. */
+            var matchedIds = await Query(AttentionWindowSql.MatchedCallIds(events, CallsAt), spanFloor, spanCeiling, r => r.GetInt64(0), spanCalls.AddTo);
+            var matchedCalls = await Query(AttentionWindowSql.MatchedCallRows(events, sampleLimit + 1, idsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutMatchedCall(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
                     r.GetDateTime(1),
@@ -228,7 +230,7 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.IsDBNull(4) ? null : r.GetString(4),
                     r.IsDBNull(5) ? null : r.GetInt32(5),
                     r.IsDBNull(6) ? null : r.GetInt64(6),
-                    r.IsDBNull(7) ? null : r.GetString(7)), spanCalls);
+                    r.IsDBNull(7) ? null : r.GetString(7)), command => AttentionCallArrays.AddIds(command, matchedIds));
 
             return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts, MatchedCallList: matchedCalls), samples);
         }, cancellationToken);

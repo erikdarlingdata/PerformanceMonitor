@@ -277,8 +277,7 @@ calls AS MATERIALIZED (
     /// second a matching sample can sit in (<see cref="MatchSecondShifts"/>), and adds that second to the join key. A matching pair meets on
     /// exactly one shift, the sample's second minus the call's, so the rows are the same; the key lets the join hash on (session, second),
     /// where the session alone makes every sample meet every call of its session, and with no CTE scan in it the pass over the samples can
-    /// run in parallel workers. <c>OFFSET 0</c> keeps the shifted calls one relation: without it the planner joins the calls to the samples
-    /// on the session first and applies the second afterwards, which is the session-only join again.
+    /// run in parallel workers.
     /// </summary>
     private static string JoinCalls(string sample, int? callsAt) => callsAt is int at
         ? $"""
@@ -293,7 +292,6 @@ INNER JOIN (
             date_trunc('second', u.event_time) + o.shift AS matched_second
         FROM {CallsUnnest(at)}
         CROSS JOIN (VALUES {MatchSecondShifts}) AS o(shift)
-        OFFSET 0
     ) AS c
         ON c.matched_second = date_trunc('second', {sample}.event_time)
     AND   {MatchOn("c", sample)}
@@ -660,24 +658,6 @@ LEFT JOIN LATERAL (
 ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event_id DESC
 """;
 
-    /* How the matched ids reach the listed calls. Reading the calls itself, the statement joins the two. Given the arrays, it tests each call
-       against the ids as a set, IN wrapped in IS TRUE so the planner keeps it a subquery it runs once and hashes: joined, the planner
-       expects a single matched id and reads the calls of the whole window again for every id it finds. */
-    private static string HitJoin(int? callsAt) => callsAt is null
-        ? $"""
-
-INNER JOIN hit AS h
-    ON h.id = e.attention_event_id
-"""
-        : "";
-
-    private static string HitFilter(int? callsAt) => callsAt is null
-        ? ""
-        : $"""
-
-AND   (e.attention_event_id IN (SELECT h.id FROM hit AS h)) IS TRUE
-""";
-
     /// <summary>
     /// The captured calls that match an under-floor sample in the span, for the read surface only (#9507): one row per call, newest first, with
     /// what the call itself says about the timeout. Columns: event_time, collection_time, database_name, client_app_name, client_hostname,
@@ -685,13 +665,13 @@ AND   (e.attention_event_id IN (SELECT h.id FROM hit AS h)) IS TRUE
     /// A call that is Azure Data Studio or dbatools metadata work is left out, as its sample is not judged. Always bounded, the way <see cref="Samples"/>
     /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling.
     /// </summary>
-    /// <remarks><paramref name="callsAt"/> is for a caller that read the calls first with <see cref="Calls"/> (#9881, PostgreSQL): the number of the
-    /// first of the <see cref="CallArrayCount"/> array parameters that hold them. Left out, the statement reads the calls itself. The rows are the same either way.</remarks>
-    public static string MatchedCalls(string eventsRelation, int limit, int? callsAt = null) => $"""
-WITH {CallsLead(eventsRelation, "collection_time >= $2" + Ceiling(true), callsAt)}hit AS (
+    public static string MatchedCalls(string eventsRelation, int limit) => $"""
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
+hit AS (
     SELECT DISTINCT c.id
     FROM (SELECT * FROM {eventsRelation}) AS s
-    {JoinCalls("s", callsAt)}
+    INNER JOIN calls AS c
+        ON {MatchOn("c", "s")}
     WHERE s.server_id = $1
     AND   s.collection_time > $2
     AND   s.collection_time <= $3
@@ -709,11 +689,59 @@ SELECT
     e.session_id,
     e.interrupt_duration_us,
     e.statement_text
-FROM (SELECT * FROM {eventsRelation}) AS e{HitJoin(callsAt)}
+FROM (SELECT * FROM {eventsRelation}) AS e
+INNER JOIN hit AS h
+    ON h.id = e.attention_event_id
 WHERE e.server_id = $1
 AND   e.collection_time >= $2
 AND   e.collection_time <= $3
-AND   e.event_kind = '{KindAborted}'{HitFilter(callsAt)}
+AND   e.event_kind = '{KindAborted}'
+ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event_id DESC
+LIMIT {limit}
+""";
+
+    /// <summary>
+    /// The first half of <see cref="MatchedCalls"/> for a caller that read the calls first with <see cref="Calls"/> (#9881, PostgreSQL):
+    /// the ids of the calls that match an under-floor sample in the span and are not Azure Data Studio or dbatools metadata work, one row
+    /// per call. Column: id (bigint). <c>$2</c> is the EXCLUSIVE span boundary, <c>$3</c> the inclusive ceiling, and the
+    /// <see cref="CallArrayCount"/> array parameters start at <paramref name="callsAt"/>. The caller hands the ids to
+    /// <see cref="MatchedCallRows"/>. Two statements, because joined in one the planner must guess how many ids match: on a week with 70
+    /// calls it expected one and read the window's calls again for each of the 68 it found.
+    /// </summary>
+    public static string MatchedCallIds(string eventsRelation, int callsAt) => $"""
+SELECT DISTINCT c.id
+FROM (SELECT * FROM {eventsRelation}) AS s
+{JoinCalls("s", callsAt)}
+WHERE s.server_id = $1
+AND   s.collection_time > $2
+AND   s.collection_time <= $3
+AND   s.event_kind = '{KindSample}'
+AND   s.interrupt_duration_us < {MinInterruptDurationUs}
+AND   NOT c.azdata_metadata
+AND   NOT c.dbatools_metadata
+""";
+
+    /// <summary>
+    /// The second half of <see cref="MatchedCalls"/> (#9881, PostgreSQL): the calls whose id is in the bigint array parameter
+    /// <paramref name="idsAt"/>, the ids <see cref="MatchedCallIds"/> gave, with the columns, order and <paramref name="limit"/> of
+    /// <see cref="MatchedCalls"/>. <c>$2</c> and <c>$3</c> are the inclusive range of the calls, the one <see cref="Calls"/> reads.
+    /// </summary>
+    public static string MatchedCallRows(string eventsRelation, int limit, int idsAt) => $"""
+SELECT
+    e.event_time,
+    e.collection_time,
+    e.database_name,
+    e.client_app_name,
+    e.client_hostname,
+    e.session_id,
+    e.interrupt_duration_us,
+    e.statement_text
+FROM (SELECT * FROM {eventsRelation}) AS e
+WHERE e.server_id = $1
+AND   e.collection_time >= $2
+AND   e.collection_time <= $3
+AND   e.event_kind = '{KindAborted}'
+AND   e.attention_event_id = ANY (${idsAt}::bigint[])
 ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event_id DESC
 LIMIT {limit}
 """;

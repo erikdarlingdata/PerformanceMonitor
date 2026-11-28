@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -70,4 +71,9 @@ internal sealed class AttentionCallArrays
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean, Value = _azdataMetadata.ToArray() });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean, Value = _dbatoolsMetadata.ToArray() });
     }
+
+    /// <summary>Adds <paramref name="ids"/> as one <c>bigint[]</c> parameter after the ones <paramref name="command"/> already has: the
+    /// matched call ids <see cref="AttentionWindowSql.MatchedCallRows"/> lists.</summary>
+    public static void AddIds(NpgsqlCommand command, IReadOnlyCollection<long> ids) =>
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = ids.ToArray() });
 }
