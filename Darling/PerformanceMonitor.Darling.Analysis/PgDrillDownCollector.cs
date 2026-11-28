@@ -153,7 +153,7 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
                 continue;
             }
 
-            if (!await StageDeadline.RunAsync(context, deadline, () => enrichOne(finding, context)))
+            if (!await StageDeadline.RunAsync(context, () => enrichOne(finding, context), deadline))
             {
                 /* The one writer of the left-out record. The reply's drill_downs_left_out is built from it, in finding
                    order. */

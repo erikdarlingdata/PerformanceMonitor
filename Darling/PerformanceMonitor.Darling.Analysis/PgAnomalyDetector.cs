@@ -365,7 +365,7 @@ public class PgAnomalyDetector : IAnomalyDetector
            read: it is named in the left-out record and logs no failure line. */
         async Task RunUnderDeadline(int index, List<Fact> detectorFacts)
         {
-            if (!await StageDeadline.RunAsync(context, deadline, () => detectors[index](context, detectorFacts)))
+            if (!await StageDeadline.RunAsync(context, () => detectors[index](context, detectorFacts), deadline))
                 RecordBudgetCut(index);
         }
 

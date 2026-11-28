@@ -27,7 +27,7 @@ internal static class StageDeadline
     /// Only a stop the deadline caused is taken here: the pass's token is checked first, so an abandoned pass still
     /// unwinds, and any other failure of the read gets out as it does with no deadline.
     /// </summary>
-    internal static async Task<bool> RunAsync(AnalysisContext context, CancellationToken deadline, Func<Task> read)
+    internal static async Task<bool> RunAsync(AnalysisContext context, Func<Task> read, CancellationToken deadline)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(read);
