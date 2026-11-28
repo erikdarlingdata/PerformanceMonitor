@@ -87,7 +87,7 @@ public sealed class DailySummaryCreditedPairsLiveTests
            shape's. With them off, the pair read can only take the index-only scan if no column outside the index is named. */
         await ExecuteAsync(connection, "SET enable_seqscan = off; SET enable_bitmapscan = off", ct);
         var plan = await PlanAsync(connection, sql, start, end, ct);
-        Console.WriteLine("DIAG9943 Daily " + plan.RootElement[0].GetRawText());
+        Diag9943.W("DIAG9943 Daily " + plan.RootElement[0].GetRawText());
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
         await ExecuteAsync(connection, $"PREPARE cp_plan_t(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         await using (var dc = new NpgsqlCommand($"EXPLAIN (ANALYZE, BUFFERS) EXECUTE cp_plan_t({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", connection))
@@ -95,7 +95,7 @@ public sealed class DailySummaryCreditedPairsLiveTests
             var lines = new System.Text.StringBuilder();
             await using var dr = await dc.ExecuteReaderAsync(ct);
             while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
-            Console.WriteLine("DIAG9943 Daily text\n" + sql + "\n" + lines);
+            Diag9943.W("DIAG9943 Daily text\n" + sql + "\n" + lines);
         }
         await ExecuteAsync(connection, "SET enable_indexscan = off", ct);
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
@@ -105,7 +105,7 @@ public sealed class DailySummaryCreditedPairsLiveTests
             var lines2 = new System.Text.StringBuilder();
             await using var dr2 = await dc2.ExecuteReaderAsync(ct);
             while (await dr2.ReadAsync(ct)) { lines2.AppendLine(dr2.GetString(0)); }
-            Console.WriteLine("DIAG9943 Daily noindexscan server_version=" + connection.PostgreSqlVersion + "
+            Diag9943.W("DIAG9943 Daily noindexscan server_version=" + connection.PostgreSqlVersion + "
 " + lines2);
         }
         await ExecuteAsync(connection, "RESET enable_indexscan", ct);

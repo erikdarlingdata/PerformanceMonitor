@@ -204,7 +204,7 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
             Assert.Contains(rows, r => r.StartsWith("usp_OrderEdge|14", StringComparison.Ordinal));
             Assert.DoesNotContain(rows, r => r.StartsWith("usp_OrderOutside|", StringComparison.Ordinal));
 
-            Console.WriteLine("DIAG9943 Fleet server_version=" + connection.PostgreSqlVersion + " chunks=" + chunks
+            Diag9943.W("DIAG9943 Fleet server_version=" + connection.PostgreSqlVersion + " chunks=" + chunks
                 + " windowRows=" + await ScalarAsync(connection, $"SELECT count(*) FROM collect.procedure_stats WHERE collection_time >= '{end.AddHours(-4):yyyy-MM-dd HH:mm:ss}' AND collection_time <= '{end:yyyy-MM-dd HH:mm:ss}'", ct)
                 + " allRows=" + await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct)
                 + " heapPages=" + await ScalarAsync(connection, "SELECT sum(pg_relation_size(ch)/8192) FROM show_chunks('collect.procedure_stats', newer_than => now() - interval '1 year') ch", ct));
@@ -304,7 +304,7 @@ VALUES (-1, $2::timestamp, 13, 'srv13', 'DbOrderEdge', '0xE', '0xE', '0xE', '0xE
             var lines = new System.Text.StringBuilder();
             await using var dr = await diag.ExecuteReaderAsync(ct);
             while (await dr.ReadAsync(ct)) { lines.AppendLine(dr.GetString(0)); }
-            Console.WriteLine("DIAG9943 Fleet pages=" + pages + "\n" + sql + "\n" + lines);
+            Diag9943.W("DIAG9943 Fleet pages=" + pages + "\n" + sql + "\n" + lines);
         }
 
         return pages;
