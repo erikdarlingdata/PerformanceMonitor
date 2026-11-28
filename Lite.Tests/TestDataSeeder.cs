@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
@@ -927,6 +928,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     /// </summary>
     internal async Task ClearTestDataAsync()
     {
+        /* #9957: the store's keep of the plan regression cost rows answers for rows that were just cleared. */
+        PlanRegressionCostKeep.For(_duckDb).Clear();
         var tables = new[]
         {
             "wait_stats", "memory_stats", "server_config", "database_config",

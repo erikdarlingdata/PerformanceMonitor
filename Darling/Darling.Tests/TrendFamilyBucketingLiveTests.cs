@@ -217,6 +217,8 @@ public sealed class TrendFamilyBucketingLiveTests
     /// the two, never their 4.0 average, which would weight the quieter interval as heavily as the busier one.
     /// first_mean_exec_ms and last_mean_exec_ms are this single bucket's own first and last ran interval, 2.0 and
     /// 6.0, because the tool reads its window ends from the served buckets' own carried fields, not recomputed.
+    /// The reply's note names both end fields and says each is one collection interval, not the first and last
+    /// point, and that the points' mean_exec_ms is the steadier comparison (#9963).
     /// </summary>
     [Fact]
     public async Task PgQueryDurationTrend_Bucketed_RecomputesTheMean_AndKeepsThePeakFirstAndLast()
@@ -240,6 +242,13 @@ public sealed class TrendFamilyBucketingLiveTests
             Assert.Equal(6.0, bucket.GetProperty("peak_mean_exec_ms").GetDouble(), precision: 6);
             Assert.Equal(2.0, root.GetProperty("first_mean_exec_ms").GetDouble(), precision: 6);
             Assert.Equal(6.0, root.GetProperty("last_mean_exec_ms").GetDouble(), precision: 6);
+
+            var note = root.GetProperty("note").GetString()!;
+            Assert.Contains("first_mean_exec_ms", note, StringComparison.Ordinal);
+            Assert.Contains("last_mean_exec_ms", note, StringComparison.Ordinal);
+            Assert.Contains("not the first and last point", note, StringComparison.Ordinal);
+            Assert.Contains("ONE collection interval", note, StringComparison.Ordinal);
+            Assert.Contains("steadier comparison", note, StringComparison.Ordinal);
         });
     }
 

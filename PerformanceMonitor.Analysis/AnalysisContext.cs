@@ -195,6 +195,13 @@ public class AnalysisContext
     public DateTime? AsOfUtc { get; set; }
 
     /// <summary>
+    /// #9957: true when the window's end is the clock at the read (no <c>as_of</c>), false when it is an instant the caller chose. Lite's plan
+    /// regression cost read ends such a window at the newest row the store holds, so the reads between two collections share one scan.
+    /// Darling ignores it. A separate flag from <see cref="AsOfUtc"/>, which also decides persistence and the anomaly baselines.
+    /// </summary>
+    public bool WindowEndsAtClock { get; set; }
+
+    /// <summary>
     /// Whether this pass's findings are WRITTEN to the store. False for exactly one reason: the window was
     /// anchored at a past instant, which makes the pass exploratory by definition.
     ///
