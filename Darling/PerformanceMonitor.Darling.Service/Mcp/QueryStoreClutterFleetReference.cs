@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// #9882: <c>get_query_store_clutter</c>'s fleet reference, computed once at a time per store, <c>hours_back</c> and clock hour of
-/// the window end, and kept for the rest of that clock hour when it was dear.
+/// the window end, and kept for the rest of that clock hour when it was dear or a call stopped waiting for it.
 ///
 /// <para><b>One computation per key, and one at a time per store.</b> The first call for a key starts the computation and every call
 /// that arrives while it runs shares it. A call for another key while it runs starts nothing and answers at once. It runs detached
@@ -36,12 +36,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// slot: one per store is its bound, and a slot of its own would make a call at a limit of one wait out its budget for a
 /// computation queued behind that same call.</para>
 ///
-/// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's budget. From then on a
+/// <para><b>Who waits.</b> A call waits for a computation only until the computation is as old as the call's wait, which is what is
+/// left of the read bar after the call's own per-server reads (<c>DarlingMcpQueryStoreClutterTools.FleetWait</c>). From then on a
 /// call for the same key answers at once: still computing, the kept reference, or unfinished.</para>
 ///
-/// <para><b>What is kept.</b> A reference that took longer than <see cref="KeepAboveSeconds"/> stays until the clock hour it was
-/// started in ends, and so does a computation that did not finish, so the hour does not pay for it twice. A cheaper one is dropped
-/// as it finishes and the next call reads the store again. Nothing is written to the store: a service restart starts empty.</para>
+/// <para><b>What is kept.</b> A reference stays until the clock hour it was started in ends when it took longer than
+/// <see cref="KeepAboveSeconds"/>, and also when any call that waited for it answered without it: its wait ended first, or the
+/// computation was already older than its wait when it arrived, and the overrun note it carried says the reference is kept once it
+/// is done. A computation that did not finish stays too, so the hour does not pay for it twice. A cheaper reference that every call
+/// that waited for it received is dropped as it finishes and the next call reads the store again. Without the second rule a store
+/// whose per-server reads leave a wait shorter than a computation that takes under <see cref="KeepAboveSeconds"/> would overrun on
+/// every call and never deliver the reference. Nothing is written to the store: a service restart starts empty.</para>
 /// </summary>
 internal static class QueryStoreClutterFleetReference
 {
@@ -80,6 +85,13 @@ internal static class QueryStoreClutterFleetReference
         public DateTime StartedUtc { get; } = startedUtc;
         public long StartedTimestamp { get; } = startedTimestamp;
         public Task<Outcome> Task { get; set; } = null!;
+
+        /// <summary>True when a call that waited for the computation answered without it. Guarded by the store's lock.</summary>
+        public bool Abandoned { get; set; }
+
+        /// <summary>True once the computation has made its keep decision, a moment before its task completes. Guarded by the
+        /// store's lock, so a call whose wait ends cannot mark the computation abandoned after the decision was made without it.</summary>
+        public bool Settled { get; set; }
     }
 
     /* Keyed by the data source object, so each store has its own references and a disposed data source takes its entries with it. */
@@ -88,8 +100,9 @@ internal static class QueryStoreClutterFleetReference
     /// <summary>
     /// The fleet reference for (<paramref name="hoursBack"/>, the clock hour of <paramref name="windowEndUtc"/>, <paramref name="anchored"/>)
     /// on this store. <paramref name="compute"/> runs only when no computation for the key is in flight or kept. The wait ends when
-    /// <paramref name="budget"/> fires, with its <see cref="OperationCanceledException"/>. An anchored read is keyed apart because it
-    /// keeps databases dropped since its anchor.
+    /// <paramref name="budget"/> fires, with its <see cref="OperationCanceledException"/>: the caller arms it for <paramref name="budgetLength"/>,
+    /// the wait it gives the call, and a call that shares a computation already running has it re-armed to what is left of that
+    /// length at the computation's age. An anchored read is keyed apart because it keeps databases dropped since its anchor.
     /// </summary>
     internal static async Task<Answer> GetAsync(
         NpgsqlDataSource postgres, int hoursBack, DateTime windowEndUtc, bool anchored,
@@ -141,7 +154,10 @@ internal static class QueryStoreClutterFleetReference
             var remaining = budgetLength - (now - flight.StartedUtc);
             if (remaining <= TimeSpan.Zero)
             {
-                return new Answer(null, Shared: true);
+                /* This call's wait is over before it starts, so it answers without the reference and the computation is kept when it ends. */
+                return Abandon(flights, flight)
+                    ? new Answer(await flight.Task, Shared: true)
+                    : new Answer(null, Shared: true);
             }
 
             if (!started)
@@ -150,7 +166,29 @@ internal static class QueryStoreClutterFleetReference
             }
         }
 
-        return new Answer(await flight.Task.WaitAsync(budget.Token), Shared: !started);
+        try
+        {
+            return new Answer(await flight.Task.WaitAsync(budget.Token), Shared: !started);
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            /* The wait ended first: this call answers without the reference, so the computation is kept when it ends, whatever it
+               cost. A computation that has just made its keep decision is a moment from done, and this call takes what it finds. */
+            if (!Abandon(flights, flight)) throw;
+            return new Answer(await flight.Task, Shared: !started);
+        }
+    }
+
+    /// <summary>Records that a call is answering without the computation, so it is kept when it ends, and returns false. Returns true
+    /// when the computation has already made its keep decision: the call takes the outcome, which is a moment away.</summary>
+    private static bool Abandon(Dictionary<Key, Flight> flights, Flight flight)
+    {
+        lock (flights)
+        {
+            if (flight.Settled) return true;
+            flight.Abandoned = true;
+            return false;
+        }
     }
 
     /// <summary>Completes when no computation for this store is running. For tests, which drop their store afterwards.</summary>
@@ -189,12 +227,8 @@ internal static class QueryStoreClutterFleetReference
             var reference = await compute(cap.Token);
             var elapsed = clock.GetElapsedTime(flight.StartedTimestamp);
             var seconds = elapsed.TotalSeconds;
-            if (seconds <= KeepAboveSeconds)
-            {
-                Remove(flights, key, flight);
-            }
-
             Offer(readScope.Scope, key, ReadScope.Resolve(ReadOutcome.Ok, readScope.Fallback), elapsed, errorClass: null);
+            Settle(flights, key, flight, dear: seconds > KeepAboveSeconds);
             return new Outcome(reference, clock.GetUtcNow().UtcDateTime, seconds);
         }
         catch (Exception ex) when (IsUnfinished(ex, cap.Token))
@@ -227,6 +261,25 @@ internal static class QueryStoreClutterFleetReference
     private static bool IsUnfinished(Exception ex, CancellationToken cap)
         => (ex is OperationCanceledException && cap.IsCancellationRequested)
            || (ex is PostgresException pg && pg.SqlState == PostgresErrorCodes.QueryCanceled);
+
+    /// <summary>The keep decision for a finished reference: it stays for the clock hour when it was <paramref name="dear"/> or when a
+    /// call that waited for it answered without it, and is dropped when every call that waited for it received it.</summary>
+    private static void Settle(Dictionary<Key, Flight> flights, Key key, Flight flight, bool dear)
+    {
+        lock (flights)
+        {
+            flight.Settled = true;
+            if (dear || flight.Abandoned)
+            {
+                return;
+            }
+
+            if (flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+            {
+                flights.Remove(key);
+            }
+        }
+    }
 
     private static void Remove(Dictionary<Key, Flight> flights, Key key, Flight flight)
     {
