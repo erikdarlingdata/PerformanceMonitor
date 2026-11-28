@@ -397,7 +397,7 @@ public sealed class PgTargetBufferDrillDownTests
             /* The no-capture server: pg_buffercache offered, not installed. */
             await PlantExtensionAvailabilityAsync(connection, NoCaptureServerId, NoCaptureServerName, windowEnd.AddMinutes(-20), "available", ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 1, as_of: asOf);

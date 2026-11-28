@@ -503,7 +503,7 @@ public sealed class PgTargetWriteTests
             await PlantWriteSeriesAsync(connection, AuroraServerId, AuroraServerName, windowStart.AddMinutes(-1), minutes: 4 * 60 + 1,
                 requestedPerMinute: 2, timedPerMinute: 1, walBytesPerMinuteBase: null, walBytesPerMinuteSpike: null, spikeFromMinute: int.MaxValue, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, AuroraServerName, 4, as_of: asOf);
@@ -821,7 +821,7 @@ public sealed class PgTargetWriteTests
             Assert.Equal(240.0, wal.Metadata["window_samples_total"]);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, StockServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))

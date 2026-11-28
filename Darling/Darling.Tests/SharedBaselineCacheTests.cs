@@ -337,11 +337,11 @@ public sealed class SharedBaselineCacheLiveTests
         var top = PgBaselineProvider.RoundedHour(store.End);
         var (firstEnd, secondEnd) = (top.AddMinutes(-50), top.AddMinutes(-10));
         var (_, firstPass) = await CommandCapture.CountBaselineReadsAsync(
-            () => new DarlingAnalysisService(store.Postgres, baselineCache: shared).AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: firstEnd));
+            () => new DarlingAnalysisService(store.Postgres, baselineCache: shared).WithNoStageBudgets().AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: firstEnd));
         var (_, secondPass) = await CommandCapture.CountBaselineReadsAsync(
-            () => new DarlingAnalysisService(store.Postgres, baselineCache: shared).AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: secondEnd));
+            () => new DarlingAnalysisService(store.Postgres, baselineCache: shared).WithNoStageBudgets().AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: secondEnd));
         var (_, privatePass) = await CommandCapture.CountBaselineReadsAsync(
-            () => new DarlingAnalysisService(store.Postgres).AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: secondEnd));
+            () => new DarlingAnalysisService(store.Postgres).WithNoStageBudgets().AnalyzeAsync(ServerId, ServerName, 4, ct, asOfUtc: secondEnd));
 
         Assert.True(firstPass >= 10, $"the first pass read {firstPass} baselines — the seed is not exercising the arms");
         Assert.Equal(0, secondPass);

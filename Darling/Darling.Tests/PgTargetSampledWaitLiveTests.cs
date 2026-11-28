@@ -314,7 +314,7 @@ CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 10
             /* ── THE EXIT CRITERION, through the real analyze_server on the stock server: Lock:relation (sampled, 1.5 on
                  the 0.15 → 1.0 ramp = 1.0) roots; the Lock rollup yields to it; the sampled profile anomaly folds onto
                  the relation card's incident and its advice speaks the sampled grade. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var stock = await DarlingMcpTools.AnalyzeServer(service, postgres, StockName, 4);
             using (var doc = JsonDocument.Parse(stock))
             {

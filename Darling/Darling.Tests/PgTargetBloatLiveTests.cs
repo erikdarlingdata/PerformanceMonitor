@@ -202,7 +202,7 @@ public sealed class PgTargetBloatLiveTests
             Assert.True(indexTrend.Severity > trend.Severity && trend.Severity > backlog.Severity, $"{indexTrend.Severity} {trend.Severity} {backlog.Severity}");
 
             /* ── THE EXIT CRITERION: the real analyze_server, ONE story for the three, index-led. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {

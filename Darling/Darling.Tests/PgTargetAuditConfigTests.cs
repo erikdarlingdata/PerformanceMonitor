@@ -89,7 +89,7 @@ public sealed class PgTargetAuditConfigTests
             await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, StockServerId, StockServerName, windowEnd.AddMinutes(-30), ct);
             await PgTargetKnobsTests.PlantConfigSnapshotAsync(connection, StockServerId, StockServerName, windowEnd.AddMinutes(-30), ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var json = await DarlingMcpTools.AuditConfig(service, postgres, StockServerName);
 
             using var doc = JsonDocument.Parse(json);
@@ -213,7 +213,7 @@ public sealed class PgTargetAuditConfigTests
             await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, AuroraServerId, AuroraServerName, windowEnd.AddMinutes(-30), ct);
             await PgTargetKnobsTests.PlantConfigSnapshotAsync(connection, AuroraServerId, AuroraServerName, windowEnd.AddMinutes(-30), ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var json = await DarlingMcpTools.AuditConfig(service, postgres, AuroraServerName);
 
             using var doc = JsonDocument.Parse(json);

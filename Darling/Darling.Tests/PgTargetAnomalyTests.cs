@@ -1257,7 +1257,7 @@ SELECT $1 + k, $2 + (k * interval '1 minute'), $3, $4, $2 + (k * interval '1 min
 FROM generate_series(5, $5, 5) AS k",
                 end, topUpMinutes, expectedRows: topUpMinutes / 5, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(json))
             {

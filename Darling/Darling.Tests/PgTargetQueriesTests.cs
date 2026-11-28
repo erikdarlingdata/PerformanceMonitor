@@ -1116,7 +1116,7 @@ public sealed class PgTargetQueriesTests
             Assert.Equal(0, light.Metadata["share_band"]);
 
             /* ── THE EXIT CRITERION: the real analyze_server tool. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {

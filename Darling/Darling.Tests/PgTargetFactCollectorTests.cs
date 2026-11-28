@@ -420,7 +420,7 @@ public sealed class PgTargetFactCollectorTests
             Assert.Equal(1, hostMemory.Metadata[PgTargetScorer.HostMemoryReasonNoSourceKey]);
 
             /* ── the service routes to the PostgreSQL set off the registry, for both PostgreSQL tokens. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var (engine, kind) = await service.ResolveEngineAsync(ServerId, ct);
             Assert.Equal("postgres", kind);
             Assert.IsType<PgTargetFactCollector>(engine.Collector);

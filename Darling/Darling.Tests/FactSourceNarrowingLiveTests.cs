@@ -169,7 +169,7 @@ CROSS JOIN generate_series(1, 20) AS s;";
         }
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 }.WithNoStageBudgets();
 
         var (whole, wholeCoverage, wholeCaveats) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, windowEnd, ct);
         Assert.NotNull(wholeCoverage);
@@ -228,7 +228,7 @@ CROSS JOIN generate_series(1, 20) AS s;";
         }
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 }.WithNoStageBudgets();
         var (facts, _, caveats) = await service.CollectAndScoreFactsAsync(
             ServerId, ServerName, 4, windowEnd, new HashSet<string>(["queries"], StringComparer.OrdinalIgnoreCase), ct);
 
@@ -277,7 +277,7 @@ FROM generate_series(0, 300) AS n", connection);
         }
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+        var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 }.WithNoStageBudgets();
 
         foreach (var (serverId, serverName, sources) in new[]
                  {

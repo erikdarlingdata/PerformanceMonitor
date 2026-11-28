@@ -150,7 +150,7 @@ public sealed class PgTargetGrowthLiveTests
             Assert.DoesNotContain(await detector.DetectAnomaliesAsync(context), a => a.Key == PgTargetFactKeys.AnomalyDatabaseGrowth);
 
             /* ── THE EXIT CRITERION: the real analyze_server returns PG_DATABASE_GROWTH naming appdb with the days-to-double estimate. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {

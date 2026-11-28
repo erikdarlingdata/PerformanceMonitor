@@ -579,7 +579,7 @@ public sealed class PgTargetTempTests
                ends at UtcNow, a minute or two past windowEnd, and its window start slides past the first planted
                minutes — each a 120 MiB step — so the exact totals below would drift by however long the planting
                took (27.8 GB on one CI run). The anchored run is exploratory (not persisted), which nothing here reads. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(analysis))
