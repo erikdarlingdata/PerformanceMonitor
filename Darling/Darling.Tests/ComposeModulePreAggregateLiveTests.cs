@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -214,6 +215,128 @@ public sealed class ComposeModulePreAggregateLiveTests
         });
     }
 
+    /// <summary>The hash limit guard of the custom alert evaluator. The alert sweep and the evaluate-now tool run a compiled Scalar
+    /// statement through <see cref="CustomAlertEvaluator.EvaluateScalarNowAsync"/>, not through the panel runner. A rule whose metric has
+    /// a module filter compiles the ad hoc fold, so the evaluator raises the hash limit the way the runner does. The pool here runs every
+    /// connection at a 64kB work_mem with <c>auto_explain</c> loaded (its plans come back as notices, which the data source's logger
+    /// collects), over a store whose window ranking holds more procedure_stats rows than that limit hashes. The statement the evaluator
+    /// ran must be a hashed SubPlan, and its value must equal the join-first statement's value.</summary>
+    [Fact]
+    public async Task TheAlertEvaluator_RunsTheAdHocFoldUnderTheHashLimit_AndReadsTheJoinFirstValue_AtASmallWorkMem()
+    {
+        const string definitionJson =
+            "{\"metric\":{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"hours\":4,\"filters\":[{\"dimension\":\"object_name\",\"op\":\"like\",\"value\":\"usp_Bulk%\"}]},"
+            + "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + ServerA + "\"]}}";
+        await RunLiveAsync(bulkModules: 6000, rowsPerModule: 60, body: async store =>
+        {
+            var (definition, definitionError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+            Assert.True(definitionError is null, definitionError);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(store.DataSource, store.Ct);
+
+            /* the context the evaluator builds for this rule, and the two statements it can compile */
+            var start = Anchor.AddHours(-definition!.WindowHours);
+            ComposeRunContext Context() => new(
+                new[] { ServerA }, start, Anchor, ComposeRunContext.NoVariables, rollups, Anchor, coverage!, UnregisteredServers: Array.Empty<string>());
+            var (folded, foldedError) = ComposeCompiler.Compile(definition.Plan, Context());
+            Assert.True(foldedError is null, foldedError);
+            Assert.True(folded!.FoldsAdHocHandles, folded.Sql);
+            Assert.Contains(AdHocFold, folded.Sql, StringComparison.Ordinal);
+            var (joinedFirst, joinedError) = ComposeCompiler.CompileCore(definition.Plan, Context(), singleScanRankedTimeSeries: true, moduleJoinPreAggregate: false);
+            Assert.True(joinedError is null, joinedError);
+            Assert.False(joinedFirst!.FoldsAdHocHandles);
+
+            double? expected;
+            await using (var command = store.DataSource.CreateCommand(joinedFirst.Sql))
+            {
+                foreach (var parameter in joinedFirst.Parameters)
+                {
+                    command.Parameters.Add(parameter);
+                }
+
+                var scalar = await command.ExecuteScalarAsync(store.Ct);
+                expected = scalar is null or DBNull ? null : Convert.ToDouble(scalar, System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            Assert.True(expected is > 0, "the join-first statement read no value");
+
+            var log = new PlanLogFactory();
+            var options = new NpgsqlConnectionStringBuilder(store.ConnectionString)
+            {
+                Options = "-c work_mem=64kB -c hash_mem_multiplier=1 -c session_preload_libraries=auto_explain"
+                    + " -c auto_explain.log_min_duration=0 -c auto_explain.log_level=notice -c auto_explain.log_verbose=on",
+            }.ConnectionString;
+            await using var pool = new NpgsqlDataSourceBuilder(options).UseLoggerFactory(log).Build();
+
+            /* the plant passes the 64kB hash limit: with no raise, the same connections plan the fold as a plain SubPlan */
+            await using (var connection = await pool.OpenConnectionAsync(store.Ct))
+            {
+                var unguarded = await ExplainAsync(connection, folded, store.Ct);
+                Assert.True(unguarded.Contains("SubPlan", StringComparison.Ordinal) && !unguarded.Contains("hashed SubPlan", StringComparison.Ordinal),
+                    $"the plant does not pass the 64kB hash limit, so the guard is not exercised:\n{unguarded}");
+            }
+
+            log.Clear();
+            var value = await CustomAlertEvaluator.EvaluateScalarNowAsync(
+                pool, definition, ServerA, Anchor, rollups, coverage!, 120, null, store.Ct, Array.Empty<string>());
+
+            Assert.Equal(expected, value);
+            var plans = log.Plans().Where(plan => plan.Contains(AdHocFold, StringComparison.Ordinal)).ToList();
+            Assert.True(plans.Count == 1, $"expected one auto_explain plan of the evaluator's statement, saw {plans.Count}\n{log.Joined()}");
+            Assert.True(plans[0].Contains("hashed SubPlan", StringComparison.Ordinal), $"the evaluator's fold is not a hashed SubPlan:\n{plans[0]}");
+        });
+    }
+
+    /// <summary>The data source's logger: keeps every message Npgsql logs for the pool's connections, in order. An <c>auto_explain</c>
+    /// plan arrives as the notice text <c>duration: ... plan: ...</c>.</summary>
+    private sealed class PlanLogFactory : ILoggerFactory
+    {
+        private readonly List<string> _lines = new();
+
+        public void AddProvider(ILoggerProvider provider) { }
+
+        public ILogger CreateLogger(string categoryName) => new PlanLog(this);
+
+        public void Dispose() { }
+
+        public void Clear()
+        {
+            lock (_lines)
+            {
+                _lines.Clear();
+            }
+        }
+
+        public List<string> Lines()
+        {
+            lock (_lines)
+            {
+                return _lines.ToList();
+            }
+        }
+
+        public IEnumerable<string> Plans() => Lines().Where(line => line.Contains("plan:", StringComparison.Ordinal) && line.Contains("Query Text:", StringComparison.Ordinal));
+
+        public string Joined() => string.Join("\n---\n", Lines());
+
+        private void Add(string line)
+        {
+            lock (_lines)
+            {
+                _lines.Add(line);
+            }
+        }
+
+        private sealed class PlanLog(PlanLogFactory owner) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+                owner.Add(formatter(state, exception));
+        }
+    }
+
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
@@ -395,9 +518,9 @@ public sealed class ComposeModulePreAggregateLiveTests
         return rows;
     }
 
-    private static async Task RunLiveAsync(Func<Store, Task> body, int bulkModules = 0)
+    private static async Task RunLiveAsync(Func<Store, Task> body, int bulkModules = 0, int rowsPerModule = 1)
     {
-        await using var store = await StoreAsync(bulkModules);
+        await using var store = await StoreAsync(bulkModules, rowsPerModule);
         var bodySucceeded = false;
         try
         {
@@ -410,7 +533,7 @@ public sealed class ComposeModulePreAggregateLiveTests
         }
     }
 
-    private static async Task<Store> StoreAsync(int bulkModules)
+    private static async Task<Store> StoreAsync(int bulkModules, int rowsPerModule)
     {
         var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9960 module pre-aggregate live test.");
@@ -437,7 +560,7 @@ public sealed class ComposeModulePreAggregateLiveTests
 
             dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
             var store = new Store(scratch, connection, dataSource, ct);
-            await store.PlantAsync(bulkModules);
+            await store.PlantAsync(bulkModules, rowsPerModule);
             return store;
         }
         catch
@@ -533,7 +656,7 @@ public sealed class ComposeModulePreAggregateLiveTests
                     && (r.Handle is not null && _modules.TryGetValue((r.Server, r.Handle), out var module) && module.At >= run.Start ? module.Name : "(ad hoc)") == objectName)
                 .Sum(r => (double)r.Worker!.Value);
 
-        public async Task PlantAsync(int bulkModules)
+        public async Task PlantAsync(int bulkModules, int rowsPerModule)
         {
             /* one measured row per whole hour, so the hourly rollup has a bucket at h1 and a measured ceiling at h2 */
             for (var h = H1; h < H2; h = h.AddHours(1))
@@ -601,7 +724,7 @@ public sealed class ComposeModulePreAggregateLiveTests
             /* the map's refresh, with the anchor as its clock; its watermark is the filler row's hour */
             if (bulkModules > 0)
             {
-                await PlantManyModulesAsync(bulkModules, known);
+                await PlantManyModulesAsync(bulkModules, rowsPerModule, known);
             }
 
             await DarlingModuleMap.RefreshRecentAsync(Connection, null, Anchor, Ct);
@@ -628,25 +751,30 @@ public sealed class ComposeModulePreAggregateLiveTests
         }
 
         /// <summary>Plants <paramref name="count"/> module handles on server A at <paramref name="known"/>, before the map's refresh (so
-        /// the map learns them and the planner estimates m's map arm from the map's statistics), each with a fact row half an hour later,
+        /// the map learns them and the planner estimates m's map arm from the map's statistics), each with <paramref name="rowsPerModule"/>
+        /// procedure_stats rows one second apart (the window ranking's estimate counts those rows) and a fact row half an hour later,
         /// plus as many ad hoc fact rows. The caller refreshes the statistics after the map refresh.</summary>
-        private async Task PlantManyModulesAsync(int count, DateTime known)
+        private async Task PlantManyModulesAsync(int count, int rowsPerModule, DateTime known)
         {
             var at = DateTime.SpecifyKind(known, DateTimeKind.Unspecified);
             var factAt = DateTime.SpecifyKind(known.AddMinutes(30), DateTimeKind.Unspecified);
-            var firstId = Interlocked.Add(ref s_collectionId, 3L * count) - (3L * count);
+            var procRows = (long)count * rowsPerModule;
+            var reserved = procRows + (3L * count) + rowsPerModule + 2;
+            var firstId = Interlocked.Add(ref s_collectionId, reserved) - reserved;
             await using (var procs = new NpgsqlCommand(@"
 INSERT INTO collect.procedure_stats
     (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-SELECT $1 + g, $2, $3, $4, 'BulkDb', 'dbo', 'usp_Bulk' || g, '0xB' || g, 1, 1, 1, 300
-FROM generate_series(1, $5) AS g", Connection))
+SELECT $1 + (g * $6) + r, $2 + (r * interval '1 second'), $3, $4, 'BulkDb', 'dbo', 'usp_Bulk' || g, '0xB' || g, 1, 1, 1, 300
+FROM generate_series(1, $5) AS g
+CROSS JOIN generate_series(0, $6 - 1) AS r", Connection))
             {
                 procs.Parameters.AddWithValue(firstId);
                 procs.Parameters.AddWithValue(at);
                 procs.Parameters.AddWithValue(s_serverIds[ServerA]);
                 procs.Parameters.AddWithValue(ServerA);
                 procs.Parameters.AddWithValue(count);
+                procs.Parameters.AddWithValue(rowsPerModule);
                 await procs.ExecuteNonQueryAsync(Ct);
             }
 
@@ -654,7 +782,7 @@ FROM generate_series(1, $5) AS g", Connection))
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-SELECT $1 + $5 + g, $2, $3, $4, 'BulkDb', 'HB' || (g % 40), CASE WHEN g <= $5 THEN '0xB' || g ELSE '0xBAd' || g END, 10 + g, (3 * g) + 1, 1, 300
+SELECT $1 + $6 + g, $2, $3, $4, 'BulkDb', 'HB' || (g % 40), CASE WHEN g <= $5 THEN '0xB' || g ELSE '0xBAd' || g END, 10 + g, (3 * g) + 1, 1, 300
 FROM generate_series(1, 2 * $5) AS g", Connection))
             {
                 facts.Parameters.AddWithValue(firstId);
@@ -662,6 +790,7 @@ FROM generate_series(1, 2 * $5) AS g", Connection))
                 facts.Parameters.AddWithValue(s_serverIds[ServerA]);
                 facts.Parameters.AddWithValue(ServerA);
                 facts.Parameters.AddWithValue(count);
+                facts.Parameters.AddWithValue(procRows + count + 1);
                 await facts.ExecuteNonQueryAsync(Ct);
             }
         }
