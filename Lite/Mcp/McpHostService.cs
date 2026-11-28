@@ -583,7 +583,7 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>
-    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the <c>database_name</c> resolution
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the write confirmation (#9562), the <c>database_name</c> resolution
     /// (#9065), the data-detail filter (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
     /// its order, from <c>PerformanceMonitor.Common</c>, so the two SKUs cannot answer differently. Lite's write and
     /// investigation gates are not filters: an unserved tool is absent from the served collection. Registered through this one method so a test can start a server with the REAL list.
@@ -601,6 +601,9 @@ public sealed class McpHostService : BackgroundService
         /* #9423: first, so it times the whole call, the other filters included. */
         .AddCallToolFilter(McpCallTimingFilter.Instance)
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        /* #9562: delete_mute_rule and remove_server ask the user first, when the client negotiated the multi round-trip flow. After the
+           argument guard (a call it refuses is never asked about), inside the timing filter (which does not count the question). */
+        .AddCallToolFilter(McpWriteConfirmationLite.Filter)
         .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync, lookupDeadline))
         .AddCallToolFilter(McpDataDetailFilter.Instance)
         .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);

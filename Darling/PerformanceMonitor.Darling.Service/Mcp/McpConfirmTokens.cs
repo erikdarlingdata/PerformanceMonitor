@@ -39,12 +39,16 @@ internal sealed class McpConfirmTokens
     private readonly Dictionary<string, Issued> _issued = new(StringComparer.Ordinal);
     private long _counter;
 
-    private readonly record struct Issued(string Scope, string Plan, DateTimeOffset IssuedAt, long Sequence);
+    private readonly record struct Issued(string Scope, string Plan, DateTimeOffset IssuedAt, long Sequence, bool Asked);
 
     internal McpConfirmTokens(TimeProvider? clock = null) => _clock = clock ?? TimeProvider.System;
 
-    /// <summary>Issues a value for <paramref name="scope"/> and <paramref name="plan"/>, valid for <see cref="Lifetime"/> and one use.</summary>
-    internal string Issue(string prefix, string scope, string plan)
+    /// <summary>
+    /// Issues a value for <paramref name="scope"/> and <paramref name="plan"/>, valid for <see cref="Lifetime"/> and one use.
+    /// <paramref name="asked"/> marks a value issued as the state of a confirmation question, which <see cref="IsAsked"/> then tells
+    /// apart from the value a by-hand preview hands out.
+    /// </summary>
+    internal string Issue(string prefix, string scope, string plan, bool asked = false)
     {
         lock (_gate)
         {
@@ -53,13 +57,36 @@ internal sealed class McpConfirmTokens
             var sequence = ++_counter;
             var input = string.Join('|', scope, plan, now.UtcTicks.ToString(CultureInfo.InvariantCulture), sequence.ToString(CultureInfo.InvariantCulture));
             var value = prefix + "-" + Convert.ToHexString(HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(input)), 0, 12).ToLowerInvariant();
-            _issued[value] = new Issued(scope, plan, now, sequence);
+            _issued[value] = new Issued(scope, plan, now, sequence, asked);
             while (_issued.Count > MaxHeld)
             {
                 _issued.Remove(_issued.MinBy(kv => kv.Value.Sequence).Key);
             }
 
             return value;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is held for <paramref name="scope"/> now as the state of a confirmation question: issued by this
+    /// process for that scope with <c>asked</c> set, not yet used and not expired. A value a by-hand preview issued is not one. It spends
+    /// nothing, and says nothing about the plan (<see cref="TryRedeem"/> checks that when the call acts).
+    /// </summary>
+    internal bool IsAsked(string value, string scope)
+    {
+        lock (_gate)
+        {
+            Prune(_clock.GetUtcNow());
+            return _issued.TryGetValue(value, out var held) && held.Asked && string.Equals(held.Scope, scope, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Spends <paramref name="value"/> without acting on it, for a question that was answered no. Unknown values are ignored.</summary>
+    internal void Revoke(string value)
+    {
+        lock (_gate)
+        {
+            _issued.Remove(value);
         }
     }
 

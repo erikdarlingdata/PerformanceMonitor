@@ -98,4 +98,21 @@ public sealed class McpConfirmTokensTests
 
         Assert.False(tokens.TryRedeem(oldest, "store", Plan));
     }
+
+    [Fact]
+    public void OnlyAValueIssuedAsAQuestionsState_IsAsked_AndARevokedOneIsGone()
+    {
+        var tokens = new McpConfirmTokens(new ManualTimeProvider());
+        var byHand = tokens.Issue("purge", "store", Plan);
+        var asked = tokens.Issue("purge", "store", Plan, asked: true);
+
+        Assert.False(tokens.IsAsked(byHand, "store"));
+        Assert.True(tokens.IsAsked(asked, "store"));
+        Assert.False(tokens.IsAsked(asked, "another"));
+
+        tokens.Revoke(asked);
+        Assert.False(tokens.IsAsked(asked, "store"));
+        Assert.False(tokens.TryRedeem(asked, "store", Plan));
+        Assert.True(tokens.TryRedeem(byHand, "store", Plan));
+    }
 }

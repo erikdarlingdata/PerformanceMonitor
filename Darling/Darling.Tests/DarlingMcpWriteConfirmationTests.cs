@@ -1,0 +1,362 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.TestHost;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.FrontDoor;
+using PerformanceMonitor.Darling.Service.Mcp;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: the live cases mint their own scratch database through ScratchPostgres and touch nothing on the shared one. */
+
+/// <summary>
+/// The destructive write tools ask the user to confirm before they run (#9562), through the real MCP host (the builder, the filter
+/// pipeline and the stateless endpoint production runs). A client that negotiated the 2026-07-28 multi round-trip flow gets one
+/// question and nothing changes until the call comes back with an answer. Every other client runs as before.
+/// </summary>
+public sealed class DarlingMcpWriteConfirmationTests
+{
+    private const string Token = DarlingMcpWritePolicyTests.Token;
+
+    private static readonly McpConfig Config = new() { AllowWrites = true, AllowServerAdmin = true };
+
+    /// <summary>One row per listed tool except <c>purge_now</c> (its question reads the store, so the live cases cover it):
+    /// the tool, a call that would change something, and what its question names.</summary>
+    public static IEnumerable<object[]> ListedTools() =>
+    [
+        ["remove_server", "{\"server_name\":\"sql-prod-7\"}", "sql-prod-7"],
+        ["remove_webhook_signing_key", "{\"route_id\":41}", "route 41"],
+        ["remove_webhook_signing_key", "{}", "default webhook destination"],
+        ["delete_custom_alert_rule", "{\"rule_id\":55}", "custom alert rule 55"],
+        ["delete_custom_view", "{\"view_id\":66}", "custom view 66"],
+        ["delete_known_pattern", "{\"id\":77}", "known pattern 77"],
+        ["delete_mute_rule", "{\"rule_id\":\"mute-88\"}", "mute-88"],
+        ["delete_notification_route", "{\"route_id\":99}", "notification route 99"],
+        ["delete_query_tag", "{\"tag_id\":12}", "query tag 12"],
+        ["delete_query_tag_rule", "{\"rule_id\":13}", "query tag rule 13"],
+        ["delete_server_tag", "{\"tag_id\":14}", "server tag 14"],
+        ["drop_plan_guide", "{\"database_name\":\"Sales\",\"name\":\"PG_orders\",\"server_name\":\"sql-prod-7\",\"dry_run\":false}", "PG_orders"],
+        ["purge_expired_mute_rules", "{}", "expired"],
+        ["reset_collector_schedules", "{\"server_name\":\"sql-prod-7\"}", "sql-prod-7"],
+        ["reset_collector_schedules", "{}", "fleet-wide"],
+        ["clear_change_window", "{\"window_id\":21,\"reason\":\"cancelled\"}", "change window 21"],
+        ["clear_quiet_window", "{\"rule_id\":\"quiet-31\"}", "quiet-31"],
+        ["delete_web_access_group", "{\"group\":\"ops-readers\",\"confirm\":true}", "ops-readers"],
+        ["remove_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}", "zabbix-east"],
+        ["reset_password_key", "{\"confirm\":true,\"confirm_fingerprint\":\"abc123\"}", "password key"],
+        ["revoke_personal_token", "{\"token_id\":\"tok-41\"}", "tok-41"],
+        ["rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}", "zabbix-east"],
+        ["rotate_web_access_group_token", "{\"group\":\"ops-readers\",\"confirm\":true}", "ops-readers"],
+    ];
+
+    /// <summary>The tools that carry their own confirm step: the call without <c>confirm: true</c> only says what it would do, so it asks nothing.</summary>
+    [Theory]
+    [InlineData("delete_web_access_group", "{\"group\":\"ops-readers\"}")]
+    [InlineData("remove_alert_source", "{\"name\":\"zabbix-east\"}")]
+    [InlineData("reset_password_key", "{}")]
+    [InlineData("rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":false}")]
+    [InlineData("rotate_web_access_group_token", "{\"group\":\"ops-readers\"}")]
+    public async Task AToolsOwnPreviewCall_AsksNothing(string tool, string arguments)
+    {
+        using var server = await Build();
+
+        var answer = await CallAsync(server, tool, arguments, negotiate: true);
+
+        Assert.Null(QuestionOf(answer));
+    }
+
+    /// <summary>
+    /// <c>purge_now</c> through a front door, which holds no store (its data source is never opened, so the plan cannot be read): the
+    /// call that acts (it carries <c>confirm</c>) asks the generic question, which still names the retention the call carries, and a call
+    /// without one says each collector's configured retention.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"retention_days\":7,\"confirm\":\"abc\"}", "to 7 days now")]
+    [InlineData("{\"confirm\":\"abc\"}", "configured retention")]
+    public async Task PurgeNowThroughAFrontDoor_AsksTheGenericQuestion_OnTheCallThatActs(string arguments, string named)
+    {
+        using var server = await Build(frontDoor: true);
+
+        var answer = await CallAsync(server, "purge_now", arguments, negotiate: true);
+
+        var question = QuestionOf(answer);
+        Assert.True(question is not null, answer);
+        Assert.Contains(named, question, StringComparison.Ordinal);
+    }
+
+    /// <summary>A front door's <c>purge_now</c> without <c>confirm</c> is the store's own preview, so the front door asks nothing and reads no plan.</summary>
+    [Fact]
+    public async Task PurgeNowThroughAFrontDoor_WithoutConfirm_AsksNothing()
+    {
+        using var server = await Build(frontDoor: true);
+
+        var answer = await CallAsync(server, "purge_now", "{\"retention_days\":7}", negotiate: true);
+
+        Assert.Null(QuestionOf(answer));
+    }
+
+    /// <summary>The host the production start builds, with the services the tools that need a store owner or a personal token seat ask for
+    /// (the argument guard refuses a call whose tool lacks one), or a front door over a directory with no stores when <paramref name="frontDoor"/>.</summary>
+    private static Task<TestServer> Build(McpConfig? config = null, bool frontDoor = false)
+    {
+        var owner = new StoreOwnerSource();
+        var router = frontDoor
+            ? new DarlingFrontDoorRouter(new Darling.Tests.FrontDoor.FakeFrontDoorDirectory("use1"), new Darling.Tests.FrontDoor.FakeFrontDoorPeers(), TimeSpan.FromSeconds(30))
+            : null;
+        return DarlingMcpWritePolicyTests.BuildServer(
+            config ?? Config, Token, owner: owner, personalSeat: new DarlingPersonalTokenSeat(null, null, owner), frontDoor: router, postgresConfig: new PostgresConfig());
+    }
+
+    [Theory]
+    [MemberData(nameof(ListedTools))]
+    public async Task ANegotiatingClient_IsAskedOneQuestion_ThatNamesWhatWillChange(string tool, string arguments, string named)
+    {
+        using var server = await Build();
+
+        var answer = await CallAsync(server, tool, arguments, negotiate: true);
+
+        var question = QuestionOf(answer);
+        Assert.True(question is not null, answer);
+        Assert.Contains(named, question, StringComparison.Ordinal);
+        Assert.Equal("elicitation/create", MethodOf(answer));
+    }
+
+    [Fact]
+    public async Task EveryListedTool_IsAToolTheHostServes()
+    {
+        using var server = await Build();
+        var list = await DarlingMcpWritePolicyTests.ToolsListAsync(server, Token);
+        var served = DarlingMcpWritePolicyTests.ToolsOf(list.Body).Keys.ToHashSet(StringComparer.Ordinal);
+
+        var missing = DarlingMcpWriteConfirmation.ToolNames.Where(n => !served.Contains(n)).ToList();
+
+        Assert.True(missing.Count == 0, "Listed for confirmation but not served: " + string.Join(", ", missing));
+    }
+
+    [Theory]
+    [InlineData("decline")]
+    [InlineData("cancel")]
+    public async Task ADeclinedOrDismissedQuestion_AnswersDeclined_AsANormalResult(string action)
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: $"{{\"action\":\"{action}\"}}", requestState: state);
+
+        var result = ResultOf(answer);
+        Assert.False(result.TryGetProperty("isError", out var isError) && isError.GetBoolean());
+        using var body = JsonDocument.Parse(result.GetProperty("content")[0].GetProperty("text").GetString()!);
+        Assert.Equal("declined", body.RootElement.GetProperty("status").GetString());
+        Assert.False(body.RootElement.GetProperty("changed").GetBoolean());
+    }
+
+    [Fact]
+    public async Task AnAcceptWithTheBoxCleared_IsNo()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(
+            server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"accept\",\"content\":{\"confirm\":false}}", requestState: state);
+
+        using var body = JsonDocument.Parse(ResultOf(answer).GetProperty("content")[0].GetProperty("text").GetString()!);
+        Assert.Equal("declined", body.RootElement.GetProperty("status").GetString());
+    }
+
+    private const string Yes = "{\"action\":\"accept\",\"content\":{\"confirm\":true}}";
+
+    /// <summary>A call that ran would answer the tool's own result. A question, with a new state, means it did not run.</summary>
+    private static void AssertAskedAgain(string answer, string why)
+    {
+        Assert.True(QuestionOf(answer) is not null, why + ": " + answer);
+        Assert.False(string.IsNullOrEmpty(StateOf(answer)), "the new question carried no state");
+    }
+
+    [Theory]
+    [InlineData("delete_known_pattern", "{\"id\":77}")]
+    [InlineData("remove_server", "{\"server_name\":\"sql-prod-7\"}")]
+    [InlineData("rotate_alert_source", "{\"name\":\"zabbix-east\",\"confirm\":true}")]
+    public async Task AFirstCallThatAlreadyCarriesAYes_IsAsked_AndRunsNothing(string tool, string arguments)
+    {
+        using var server = await Build();
+
+        var answer = await CallAsync(server, tool, arguments, negotiate: true, inputResponse: Yes);
+
+        AssertAskedAgain(answer, "an answer nobody asked for ran the tool");
+    }
+
+    [Fact]
+    public async Task AYesWithAStateAskedForOtherArguments_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":78}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(answer, "a state asked for pattern 77 let pattern 78 run");
+        Assert.Contains("known pattern 78", QuestionOf(answer), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AYesWithAStateAskedForAnotherTool_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+
+        var answer = await CallAsync(server, "delete_custom_view", "{\"view_id\":77}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(answer, "a state asked for another tool let this one run");
+    }
+
+    [Fact]
+    public async Task AYesWithATamperedState_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+        var tampered = (state[0] == 'A' ? 'B' : 'A') + state[1..];
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: tampered);
+
+        AssertAskedAgain(answer, "an altered state let the call run");
+    }
+
+    [Fact]
+    public async Task AYesWithNoState_OrJunkForAState_IsAskedAgain_AndRunsNothing()
+    {
+        using var server = await Build();
+
+        var none = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: null);
+        var junk = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: "not-a-state");
+
+        AssertAskedAgain(none, "an answer with no state ran the tool");
+        AssertAskedAgain(junk, "an answer with a junk state ran the tool");
+    }
+
+    [Fact]
+    public async Task ANoOnAState_SpendsIt_SoAYesOnTheSameStateIsAskedAgain()
+    {
+        using var server = await Build();
+        var state = await AskAsync(server, "delete_known_pattern", "{\"id\":77}");
+        var no = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: "{\"action\":\"decline\"}", requestState: state);
+        Assert.Null(QuestionOf(no));
+
+        var yes = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true, inputResponse: Yes, requestState: state);
+
+        AssertAskedAgain(yes, "a yes after a no on the same state ran the tool");
+    }
+
+    [Fact]
+    public async Task AToolThatIsNotServed_IsNeverAskedAbout()
+    {
+        /* Writes off: the tool is unknown to the caller, so the call ends in the SDK's unknown-tool error and no question is sent. */
+        using var server = await Build(new McpConfig());
+
+        var answer = await CallAsync(server, "delete_known_pattern", "{\"id\":77}", negotiate: true);
+
+        Assert.Null(QuestionOf(answer));
+    }
+
+    /// <summary>
+    /// A tools/call the way a 2026-07-28 client sends one: the protocol version and the client's capabilities travel in the request's own
+    /// <c>_meta</c> (the stateless endpoint has no session to hold them). <paramref name="negotiate"/> false sends a bare call, as an
+    /// older client does. <paramref name="inputResponse"/> is the answer a client sends back when it asks again, and
+    /// <paramref name="requestState"/> is the state the question carried, which the client echoes with it.
+    /// </summary>
+    internal static async Task<string> CallAsync(
+        TestServer server, string tool, string argumentsJson, bool negotiate, string? inputResponse = null, bool elicitation = true, string? requestState = null)
+    {
+        var meta = negotiate
+            ? "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
+              + "\"io.modelcontextprotocol/clientInfo\":{\"name\":\"confirm-test\",\"version\":\"1\"},"
+              + "\"io.modelcontextprotocol/clientCapabilities\":" + (elicitation ? "{\"elicitation\":{\"form\":{}}}" : "{}") + "},"
+            : string.Empty;
+        var responses = inputResponse is null ? string.Empty : "\"inputResponses\":{\"" + DarlingMcpWriteConfirmation.InputKey + "\":" + inputResponse + "},";
+        var state = requestState is null ? string.Empty : "\"requestState\":\"" + requestState + "\",";
+        var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{" + meta + responses + state
+            + "\"name\":\"" + tool + "\",\"arguments\":" + argumentsJson + "}}";
+
+        var context = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers.Accept = "application/json, text/event-stream";
+            c.Request.ContentType = "application/json";
+            if (negotiate)
+            {
+                c.Request.Headers["MCP-Protocol-Version"] = "2026-07-28";
+                c.Request.Headers["Mcp-Method"] = "tools/call";
+                c.Request.Headers["Mcp-Name"] = tool;
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(json);
+            c.Request.Body = new System.IO.MemoryStream(bytes);
+            c.Request.ContentLength = bytes.Length;
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            c.Request.Headers.Authorization = $"Bearer {Token}";
+        });
+
+        using var reader = new System.IO.StreamReader(context.Response.Body);
+        return await reader.ReadToEndAsync();
+    }
+
+    private static JsonElement ResultOf(string body)
+    {
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        var root = document.RootElement;
+        Assert.True(root.TryGetProperty("result", out var result), "No result in: " + body);
+        return result.Clone();
+    }
+
+    private static JsonElement? InputRequestOf(string body)
+    {
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        if (!document.RootElement.TryGetProperty("result", out var result)
+            || !result.TryGetProperty("inputRequests", out var requests)
+            || !requests.TryGetProperty(DarlingMcpWriteConfirmation.InputKey, out var request))
+        {
+            return null;
+        }
+
+        return request.Clone();
+    }
+
+    /// <summary>The <c>requestState</c> a question carries, which the client echoes with its answer; null when the call asked nothing.</summary>
+    internal static string? StateOf(string body)
+    {
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        return document.RootElement.TryGetProperty("result", out var result) && result.TryGetProperty("requestState", out var state)
+            ? state.GetString()
+            : null;
+    }
+
+    /// <summary>Asks the call and returns the state its question carried (the first call of a real client).</summary>
+    internal static async Task<string> AskAsync(TestServer server, string tool, string argumentsJson)
+    {
+        var asked = await CallAsync(server, tool, argumentsJson, negotiate: true);
+        return StateOf(asked) ?? throw new Xunit.Sdk.XunitException("The call was not asked, or its question carried no state: " + asked);
+    }
+
+    internal static string? QuestionOf(string body) =>
+        InputRequestOf(body) is { } request ? request.GetProperty("params").GetProperty("message").GetString() : null;
+
+    internal static string? MethodOf(string body) =>
+        InputRequestOf(body) is { } request ? request.GetProperty("method").GetString() : null;
+}

@@ -1839,6 +1839,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 if (frontDoor is null)
                 {
                     filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance);
+                }
+
+                /* #9562: a destructive write tool asks the user to confirm first, when the client negotiated the multi round-trip flow.
+                   After the argument guard (a call it refuses is never asked about) and outside the latency record (a question is not a
+                   failed read). A front door asks too: it is the endpoint the client talks to, and the store it forwards to never does. */
+                filters.AddCallToolFilter(DarlingMcpWriteConfirmation.FilterFor(frontDoor is not null));
+
+                if (frontDoor is null)
+                {
                     filters.AddCallToolFilter(toolLatency.AsFilter());
                     filters.AddCallToolFilter(GcfCallToolFilter.Instance);
                     filters.AddCallToolFilter(McpDatabaseNameFilter.Using(DarlingMcpDatabaseNames.CandidatesAsync));
