@@ -259,13 +259,14 @@ public sealed class DarlingAnalysisService
     public TimeSpan? OnDemandFamilyBudget { get; set; } = FamilyTimeBudget.OnDemand;
 
     /// <summary>
-    /// What the last pass left out because its anomaly detector budget or its drill-down budget ended (#9879). Both lists
-    /// are empty for a pass with no budget (the scheduled pass) and for one whose detectors and drill-downs all finished.
+    /// What the last pass left out because its anomaly detector budget, its configuration change compare budget or its
+    /// drill-down budget ended (#9879). Every list is empty for a pass with no budget (the scheduled pass) and for one
+    /// whose detectors, compare and drill-downs all finished.
     /// </summary>
     public StageTimeCuts LastStageCuts { get; private set; } = StageTimeCuts.None;
 
     /// <summary>
-    /// Whether the last pass left anything out for time, in any of its three budgeted stages (#9879,
+    /// Whether the last pass left anything out for time, in any of its budgeted stages (#9879,
     /// <see cref="AnalysisContext.LeftOutForTime"/>). Such a pass stored no findings, and the reply says so. False for a
     /// pass with no budget (the scheduled pass) and for one that finished everything.
     /// </summary>
@@ -282,6 +283,12 @@ public sealed class DarlingAnalysisService
     /// into every finding. The scheduled pass never has one, whatever this holds.
     /// </summary>
     public TimeSpan? OnDemandDrillDownBudget { get; set; } = StageTimeBudget.OnDemandDrillDowns;
+
+    /// <summary>
+    /// The time an on-demand pass has, from its start, before it stops the before and after compare of a configuration
+    /// change (#9879). Null runs the compare to its end. The scheduled pass never has one, whatever this holds.
+    /// </summary>
+    public TimeSpan? OnDemandConfigCompareBudget { get; set; } = StageTimeBudget.OnDemandConfigCompare;
 
     /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
@@ -460,6 +467,14 @@ public sealed class DarlingAnalysisService
         using var drillDownDeadline = new CancellationTokenSource();
         ArmStageDeadline(drillDownDeadline, drillDownBudget);
 
+        /* #9879: the before and after compare of a configuration change is two whole fact collections, and it runs
+           between the detectors and the drill-downs. Its instant is on the same clock, after the detectors' and ahead of
+           the drill-downs', so a compare that uses all its time leaves the drill-downs theirs. The scheduled pass has none
+           and runs the whole compare. */
+        var configCompareBudget = persistCollectionCaveats ? null : OnDemandConfigCompareBudget;
+        using var configCompareDeadline = new CancellationTokenSource();
+        ArmStageDeadline(configCompareDeadline, configCompareBudget);
+
         var context = new AnalysisContext
         {
             ServerId = serverId,
@@ -475,6 +490,8 @@ public sealed class DarlingAnalysisService
             DetectorBudget = detectorBudget,
             DrillDownDeadline = drillDownBudget is null ? CancellationToken.None : drillDownDeadline.Token,
             DrillDownBudget = drillDownBudget,
+            ConfigCompareDeadline = configCompareBudget is null ? CancellationToken.None : configCompareDeadline.Token,
+            ConfigCompareBudget = configCompareBudget,
             /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
@@ -536,9 +553,13 @@ public sealed class DarlingAnalysisService
         LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
         LastFamiliesLeftOutForTime = context.FamiliesLeftOutForTime; /* #9879: the pass's own list, filled by the family stage */
         LastFamilyBudget = context.FamilyBudget;
-        /* #9879: the pass's own lists, filled by the detector dispatch and the drill-down stage. */
+        /* #9879: the pass's own lists, filled by the detector dispatch, the configuration change compare and the drill-down stage. */
         LastStageCuts = new StageTimeCuts(
-            context.DetectorsLeftOutForTime, context.DetectorBudget, context.DrillDownsLeftOutForTime, context.DrillDownBudget);
+            context.DetectorsLeftOutForTime, context.DetectorBudget, context.DrillDownsLeftOutForTime, context.DrillDownBudget)
+        {
+            Compares = context.ComparesLeftOutForTime,
+            CompareBudget = context.ConfigCompareBudget
+        };
         LastPassLeftOutForTime = false;
 
         try
@@ -839,6 +860,10 @@ public sealed class DarlingAnalysisService
             //    absolution findings are dropped here and never enriched.
             var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
 
+            /* #9879: a compare left out for time is the pass's concern only while its finding is in the answer. A card
+               the mute filter dropped is neither shown nor stored, so its missing verdict leaves nothing out of the pass. */
+            context.ComparesLeftOutForTime.RemoveAll(key => findings.All(finding => finding.RootFactKey != key));
+
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built
             //    action; the cheap config drill-downs run below the 0.5 gate inside the collector).
             await engine.DrillDown.EnrichFindingsAsync(findings, context);
@@ -867,8 +892,8 @@ public sealed class DarlingAnalysisService
             //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
             //    reused read up to PlanRegressionCandidateCache.RefreshAfter old: the same band as
             //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
-            //    #9879: a current pass that left anything out for time (a family, an anomaly detector or a finding's
-            //    drill-down) writes nothing either. Its batch would be the newest, so get_analysis_findings and the
+            //    #9879: a current pass that left anything out for time (a family, an anomaly detector, a configuration
+            //    change's compare or a finding's drill-down) writes nothing either. Its batch would be the newest, so get_analysis_findings and the
             //    viewer's latest batch would serve findings that are missing, or that have no drill-down and no
             //    remediation, until the next scheduled pass. The stored latest batch stays the last whole pass.
             //    AnalysisContext.StoresFindings is both rules, read here once every stage that can leave something out
@@ -1183,17 +1208,22 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            var dispersion = await LookUpDispersionAsync(engine, serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
+            /* A caller that stops between the two collections and the baseline lookups reads no baseline. */
+            cancellationToken.ThrowIfCancellationRequested();
+            var dispersion = await LookUpDispersionAsync(engine, serverId, serverName, baselineFacts, comparisonFacts, comparisonStart, cancellationToken);
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion,
                 baselineContext.SecondaryReplicaDatabases, comparisonContext.SecondaryReplicaDatabases);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException && !AnalysisShutdown.IsExpectedAbandon(ex, comparisonContext.CancellationToken))
         {
             /* Cancellation (an abandoned web/MCP read) must reach the caller as OperationCanceledException,
                not be swallowed into an empty result and logged as a fault — this read has no per-pass budget
                of its own, so the only source of a cancelled comparisonContext.CancellationToken is the
-               caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
+               caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203).
+               #9879: a read the caller's token stopped can also surface as the store's own cancel error, so every
+               shape of that residue gets out once the token is signalled. The analysis pass hands its token here,
+               and its compare deadline with it, and names a compare stopped that way as left out for time. */
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
@@ -1227,18 +1257,20 @@ public sealed class DarlingAnalysisService
     /// <summary>
     /// The baseline buckets <see cref="ComparePeriodsAsync"/> hands to the comparison, one per metric some
     /// compared key is measured in. Its own try: see the summary above for why a failed baseline read
-    /// degrades to "no dispersion" rather than failing the comparison.
+    /// degrades to "no dispersion" rather than failing the comparison. A lookup the caller's token stopped is not a
+    /// failed one: it ends the comparison as the caller's cancellation.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(
-        AnalysisEngineSet engine, int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
+        AnalysisEngineSet engine, int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart,
+        CancellationToken cancellationToken)
     {
         var dispersion = new Dictionary<string, BaselineBucket>(StringComparer.Ordinal);
         try
         {
             foreach (var metric in ComparisonBanding.DispersionMetricsFor(baselineFacts, comparisonFacts))
-                dispersion[metric] = await engine.Baselines.GetBaselineAsync(serverId, metric, comparisonStart);
+                dispersion[metric] = await engine.Baselines.GetBaselineAsync(serverId, metric, comparisonStart, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException && !AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             _logger?.LogWarning("[DarlingAnalysisService] Baseline dispersion lookup failed for {Server}; compare_analysis bands every key by the absolute rule: {Message}",
                 serverName, ex.Message);
@@ -1677,9 +1709,11 @@ ORDER BY event_time_local";
     /// <para><b>Cost.</b> A compare is two full fact collections (the collector's thirty-one reads, twice) plus
     /// the baseline lookups, inside the pass's 120 s budget. It runs only when a change is in-window — the
     /// snapshot read alone is the steady-state cost, one small indexed query — and at most once per pass
-    /// (the most recent event). The compare's contexts are not wired to the pass token
-    /// (<see cref="ComparePeriodsAsync"/>'s public shape is <c>compare_analysis</c>'s); each of its commands
-    /// carries the 60 s per-command deadline, and the pass's boundary checks bracket the call.</para>
+    /// (the most recent event). The compare's contexts read under the pass token, so an abandoned pass stops
+    /// the compare, and each of its commands carries the 60 s per-command deadline. An on-demand pass also gives
+    /// the compare a stated time (#9879, <see cref="AnalysisContext.ConfigCompareDeadline"/>): a compare that has
+    /// not finished by then is stopped, the card keeps the change without a verdict, and the reply names the
+    /// compare as left out. The scheduled pass has no such time and keeps the whole compare.</para>
     ///
     /// <para><b>Its own catch.</b> Like every collector read: a store fault here degrades to "no card" with
     /// one Warning naming why, and shutdown residue propagates to the pass's single classified line (#2299).
@@ -1745,10 +1779,25 @@ ORDER BY event_time_local";
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
-            var (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
-                context.ServerId, context.ServerName,
-                windows.BeforeStart, windows.BeforeEnd,
-                windows.AfterStart, windows.AfterEnd);
+
+            /* #9879: the compare reads under the pass's token, so an abandoned pass stops it, and on an on-demand pass
+               under the compare's deadline too. The snapshot reads and the trace read above are short and run to their
+               end on every pass, because the card needs them to state the change. A compare the deadline stops, or one
+               not started because the deadline had fired, leaves the card with the change and no verdict, and the pass
+               names it as left out for time. The scheduled pass has no deadline and waits for the whole compare. */
+            List<Fact> before = [], after = [];
+            WindowCoverage? beforeCoverage = null, afterCoverage = null;
+            IReadOnlyDictionary<string, BaselineBucket> dispersion = new Dictionary<string, BaselineBucket>();
+            var compared = await StageDeadline.RunAsync(
+                context,
+                async () => (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
+                    context.ServerId, context.ServerName,
+                    windows.BeforeStart, windows.BeforeEnd,
+                    windows.AfterStart, windows.AfterEnd,
+                    context.CancellationToken),
+                context.ConfigCompareDeadline);
+            if (!compared)
+                context.ComparesLeftOutForTime.Add(ConfigChangeAttribution.FactKey);
 
             /* Both coverages null is ComparePeriodsAsync's own catch (collection threw); an empty compare
                over OBSERVED windows is the "nothing moved" answer and is banded like any other. */
@@ -1757,7 +1806,8 @@ ORDER BY event_time_local";
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
             var attributionFact = ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor);
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor,
+                compareLeftOutForTime: !compared);
             facts.Add(attributionFact);
 
             /* The log reports the CARD's counts, not the compare's raw ones: a pass whose card says "not yet
@@ -1773,7 +1823,7 @@ ORDER BY event_time_local";
                 anchor is null ? "configuration snapshot" : "default trace, msg 15457",
                 ConfigChangeAttribution.CompareWindowHours, windows.AfterHoursObserved,
                 worse, better, notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty, compare?.Stable ?? 0,
-                compare is null ? " (compare unavailable this pass)" : string.Empty);
+                !compared ? " (compare left out for time)" : compare is null ? " (compare unavailable this pass)" : string.Empty);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {

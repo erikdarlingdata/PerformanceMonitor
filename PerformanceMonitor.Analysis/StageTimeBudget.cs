@@ -26,14 +26,28 @@ public sealed record StageTimeCuts(
 {
     /// <summary>A pass with no cut.</summary>
     public static readonly StageTimeCuts None = new([], null, [], null);
+
+    /// <summary>
+    /// The root fact key of each finding whose before and after compare the pass left out because the compare's time
+    /// budget ended. The finding itself is in the reply and states the change. Empty when the compare finished and when
+    /// the pass ran none.
+    /// </summary>
+    public IReadOnlyList<string> Compares { get; init; } = [];
+
+    /// <summary>The length of the compare's budget, for the reply's note. Null with no budget.</summary>
+    public TimeSpan? CompareBudget { get; init; }
+
+    /// <summary>Whether the pass cut any of the three stages this record carries.</summary>
+    public bool Any => Detectors.Count > 0 || DrillDowns.Count > 0 || Compares.Count > 0;
 }
 
 /// <summary>
-/// #9879: the time an on-demand <c>analyze_server</c> pass gives the two stages the family budget
-/// (<see cref="FamilyTimeBudget"/>) does not reach, and what the reply says when one is cut. Both are counted from the
+/// #9879: the time an on-demand <c>analyze_server</c> pass gives the stages the family budget
+/// (<see cref="FamilyTimeBudget"/>) does not reach, and what the reply says when one is cut. Each is counted from the
 /// start of the pass, so each is an instant and the reads ahead of a stage come out of it. The anomaly detectors run
-/// beside the family reads and end with them. The drill-downs run after both and end 1.5 seconds later, so the stated
-/// budgets of one pass add up to <see cref="OnDemandDrillDowns"/>. The scheduled pass has neither.
+/// beside the family reads and end with them. The configuration change compare runs after both and ends 0.75 seconds
+/// later. The drill-downs run after the compare and end 0.75 seconds after it, so the stated budgets of one pass add up
+/// to <see cref="OnDemandDrillDowns"/>. The scheduled pass has none of them.
 /// </summary>
 public static class StageTimeBudget
 {
@@ -43,12 +57,25 @@ public static class StageTimeBudget
     /// <summary>The time an on-demand pass has, from its start, before it stops drilling into findings.</summary>
     public static readonly TimeSpan OnDemandDrillDowns = TimeSpan.FromSeconds(4.5);
 
+    /// <summary>
+    /// The time an on-demand pass has, from its start, before it stops the before and after compare of a configuration
+    /// change. The compare is two whole fact collections and runs ahead of the drill-downs, so its instant is earlier
+    /// than <see cref="OnDemandDrillDowns"/>: a compare that runs to its end of time still leaves every finding its
+    /// drill-down time.
+    /// </summary>
+    public static readonly TimeSpan OnDemandConfigCompare = TimeSpan.FromSeconds(3.75);
+
+    /// <summary>Where a left-out compare's <c>read_it_with</c> sends the reader for the verdict.</summary>
+    public const string CompareReadItWith =
+        "compare_analysis over the hours before and after the change, or the scheduled pass's finding in get_analysis_findings";
+
     /// <summary>The reason word every entry carries: the same one a <c>families_left_out</c> entry does.</summary>
     public const string Reason = FamilyTimeBudget.Reason;
 
     /// <summary>
-    /// What a reply says about the store when the pass left anything out for time, in any of the three stages: a
-    /// family, an anomaly detector or a drill-down (<see cref="AnalysisContext.LeftOutForTime"/>). Such a pass stores no
+    /// What a reply says about the store when the pass left anything out for time, in any of its budgeted stages: a
+    /// family, an anomaly detector, a configuration change's compare or a drill-down
+    /// (<see cref="AnalysisContext.LeftOutForTime"/>). Such a pass stores no
     /// findings, so the stored latest batch is the last pass that left nothing out. Said once per reply, after the
     /// sentences that name what was left out.
     /// </summary>
@@ -59,8 +86,8 @@ public static class StageTimeBudget
     public const string LastWholePass = "get_analysis_findings for the last whole pass (this pass stored no findings)";
 
     /// <summary>
-    /// The sentences for the reply's caveat, or null when the pass cut neither stage. They name what was left out. Where
-    /// the stored findings are is <see cref="NotStored"/>, which the reply adds once.
+    /// The sentences for the reply's caveat, or null when the pass cut none of the stages. They name what was left out.
+    /// Where the stored findings are is <see cref="NotStored"/>, which the reply adds once.
     /// </summary>
     public static string? Describe(StageTimeCuts cuts)
     {
@@ -71,20 +98,25 @@ public static class StageTimeBudget
         var drillDowns = cuts.DrillDowns.Count == 0
             ? null
             : $"{Count(cuts.DrillDowns.Count, "finding has", "findings have")} no drill-down detail ({string.Join(", ", Distinct(cuts.DrillDowns).Select(group => group.Count == 1 ? group.Key : $"{group.Key} x{group.Count}"))}): this call stops drilling into findings {Seconds(cuts.DrillDownBudget, OnDemandDrillDowns)} s from its start. Each finding itself is in this answer and is complete; only its supporting detail (top queries, plans, remediation) is missing. The scheduled pass drills into every finding.";
-        return detectors is null ? drillDowns : drillDowns is null ? detectors : $"{detectors} {drillDowns}";
+        var compares = cuts.Compares.Count == 0
+            ? null
+            : $"{Count(cuts.Compares.Count, "finding has", "findings have")} no before and after compare ({string.Join(", ", cuts.Compares)}): this call stops comparing the hours before a configuration change with the hours after it {CompareSeconds(cuts.CompareBudget)} s from its start. The finding is in this answer and states the change itself (the setting, its old and new value, and when), without the verdict on what moved. Read the verdict with {CompareReadItWith}: the scheduled pass runs the whole compare.";
+        var sentences = new[] { detectors, compares, drillDowns }.Where(sentence => sentence is not null).ToList();
+        return sentences.Count == 0 ? null : string.Join(" ", sentences);
     }
 
     /// <summary>
-    /// <paramref name="payload"/> itself when the pass cut neither stage, so such a reply keeps its bytes. Otherwise the
-    /// payload as a <see cref="JsonObject"/> with <c>detectors_left_out</c> and then <c>drill_downs_left_out</c> appended
-    /// last, each only when it has an entry: one per detector in detector order, and one per root fact key in finding
-    /// order with the number of findings it stands for.
+    /// <paramref name="payload"/> itself when the pass cut none of the stages, so such a reply keeps its bytes. Otherwise
+    /// the payload as a <see cref="JsonObject"/> with <c>detectors_left_out</c>, <c>compares_left_out</c> and then
+    /// <c>drill_downs_left_out</c> appended last, each only when it has an entry: one per detector in detector order, one
+    /// per finding whose compare was left out, and one per root fact key in finding order with the number of findings it
+    /// stands for.
     /// </summary>
     public static object Attach(object payload, StageTimeCuts cuts, JsonSerializerOptions options)
     {
         ArgumentNullException.ThrowIfNull(payload);
         ArgumentNullException.ThrowIfNull(cuts);
-        if (cuts.Detectors.Count == 0 && cuts.DrillDowns.Count == 0)
+        if (!cuts.Any)
             return payload;
 
         var reply = payload as JsonObject ?? JsonSerializer.SerializeToNode(payload, options)!.AsObject();
@@ -97,6 +129,19 @@ public static class StageTimeBudget
                 ["reason"] = Reason,
                 ["budget_seconds"] = seconds,
                 ["read_it_with"] = $"the same call again, or {LastWholePass}"
+            }).ToArray());
+        }
+
+        if (cuts.Compares.Count > 0)
+        {
+            var seconds = Math.Round((cuts.CompareBudget ?? OnDemandConfigCompare).TotalSeconds, 2);
+            reply["compares_left_out"] = new JsonArray(cuts.Compares.Select(finding => (JsonNode)new JsonObject
+            {
+                ["finding"] = finding,
+                ["compare"] = "before_and_after_the_change",
+                ["reason"] = Reason,
+                ["budget_seconds"] = seconds,
+                ["read_it_with"] = CompareReadItWith
             }).ToArray());
         }
 
@@ -134,6 +179,9 @@ public static class StageTimeBudget
 
     private static string Count(int count, string one, string many) =>
         count == 1 ? $"1 {one}" : $"{count.ToString(CultureInfo.InvariantCulture)} {many}";
+
+    private static string CompareSeconds(TimeSpan? budget) =>
+        (budget ?? OnDemandConfigCompare).TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture);
 
     private static string Seconds(TimeSpan? budget, TimeSpan standard) =>
         (budget ?? standard).TotalSeconds.ToString("0.#", CultureInfo.InvariantCulture);

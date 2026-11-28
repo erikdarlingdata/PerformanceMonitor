@@ -17,9 +17,11 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <summary>
 /// #9879: runs one read of an on-demand pass under a stage's time budget. The family stage
 /// (<see cref="AnalysisContext.FamilyDeadline"/>), the anomaly detector dispatch
-/// (<see cref="AnalysisContext.DetectorDeadline"/>) and the drill-down stage
+/// (<see cref="AnalysisContext.DetectorDeadline"/>), the configuration change compare
+/// (<see cref="AnalysisContext.ConfigCompareDeadline"/>) and the drill-down stage
 /// (<see cref="AnalysisContext.DrillDownDeadline"/>) each give every read they run under a deadline to this, for
-/// both engines: the PostgreSQL-target collector gives it its heavy families too (#9966).
+/// both engines: the PostgreSQL-target collector gives it its heavy families too (#9966). The compare is a SQL Server
+/// target's only.
 /// </summary>
 internal static class StageDeadline
 {

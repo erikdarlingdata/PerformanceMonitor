@@ -315,6 +315,9 @@ public static class ConfigChangeAttribution
     public const string MetaEarlierEventsInWindow = "earlier_change_events_in_window";
     /// <summary>1 when the compare could not run (both collections threw); the fact still records the change.</summary>
     public const string MetaCompareUnavailable = "compare_unavailable";
+    /// <summary>1 when the pass stopped the compare because its time budget ended (#9879), beside
+    /// <see cref="MetaCompareUnavailable"/>. Absent on every other fact.</summary>
+    public const string MetaCompareLeftOutForTime = "compare_left_out_for_time";
     /// <summary>Keys the compare banded (present on either side).</summary>
     public const string MetaComparedKeys = "compared_keys";
     public const string MetaWorse = "worse";
@@ -753,6 +756,8 @@ public static class ConfigChangeAttribution
     /// <paramref name="anchor"/> is the trace's answer to WHEN (#3740) or null for the observation anchor;
     /// <paramref name="windows"/> must have been computed over <see cref="AnchorTime"/> of the same pair,
     /// so the fact's change time and the compare's halves are one instant.
+    /// <paramref name="compareLeftOutForTime"/> says a null <paramref name="compare"/> is one the pass's time budget
+    /// stopped (#9879), not one that failed, and the card words it so.
     /// </summary>
     public static Fact BuildFact(
         int serverId,
@@ -762,7 +767,8 @@ public static class ConfigChangeAttribution
         ComparisonResult? compare,
         WindowCoverage? beforeCoverage,
         WindowCoverage? afterCoverage,
-        TraceAnchor? anchor = null)
+        TraceAnchor? anchor = null,
+        bool compareLeftOutForTime = false)
     {
         ArgumentNullException.ThrowIfNull(change);
         ArgumentNullException.ThrowIfNull(windows);
@@ -786,6 +792,8 @@ public static class ConfigChangeAttribution
             [MetaCompareUnavailable] = compare is null ? 1 : 0,
         };
 
+        if (compareLeftOutForTime && compare is null)
+            metadata[MetaCompareLeftOutForTime] = 1;
         if (beforeCoverage is not null)
             metadata[MetaBeforeCoverageFraction] = beforeCoverage.Fraction;
         if (afterCoverage is not null)

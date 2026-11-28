@@ -80,7 +80,7 @@ public sealed class ConfigChangeTraceAnchorLivePostgresTests
             await PlantServerConfigAsync(connection, now.AddHours(-3), Maxdop, 8, ct);
             await PlantReconfigureLineAsync(connection, changedAtUtc, Maxdop, 0, 8, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var findings = await service.AnalyzeAsync(ServerId, ServerName, 4, ct);
 
             Assert.Null(service.WindowEmptyMessage);
@@ -146,7 +146,7 @@ public sealed class ConfigChangeTraceAnchorLivePostgresTests
             await PlantServerConfigAsync(connection, now.AddHours(-3), Maxdop, 8, ct);
             await PlantReconfigureLineAsync(connection, now.AddHours(-5), Ctfp, 5, 50, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var findings = await service.AnalyzeAsync(ServerId, ServerName, 4, ct);
 
             var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);

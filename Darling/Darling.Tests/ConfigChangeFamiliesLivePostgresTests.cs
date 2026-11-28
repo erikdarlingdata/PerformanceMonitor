@@ -68,7 +68,7 @@ public sealed class ConfigChangeFamiliesLivePostgresTests
             await PlantDatabaseConfigAsync(connection, now.AddHours(-30), Db, "FULL", "NOTHING", ct);
             await PlantDatabaseConfigAsync(connection, now.AddHours(-3), Db, "SIMPLE", "LOG_BACKUP", ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var findings = await service.AnalyzeAsync(ServerId, ServerName, 4, ct);
 
             Assert.Null(service.WindowEmptyMessage);
@@ -132,7 +132,7 @@ public sealed class ConfigChangeFamiliesLivePostgresTests
             await PlantTraceFlagAsync(connection, now.AddHours(-3).AddSeconds(2), 3226, ct);
             await PlantTraceFlagAsync(connection, now.AddHours(-3).AddSeconds(2), 4199, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var findings = await service.AnalyzeAsync(ServerId, ServerName, 4, ct);
 
             var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);

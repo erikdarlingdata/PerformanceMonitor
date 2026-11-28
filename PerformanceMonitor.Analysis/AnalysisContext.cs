@@ -148,15 +148,35 @@ public class AnalysisContext
     public List<string> DrillDownsLeftOutForTime { get; } = [];
 
     /// <summary>
+    /// When the time the pass gives the before and after compare of a configuration change is over (#9879). Default
+    /// <see cref="CancellationToken.None"/>: no budget, which is the scheduled pass. An on-demand <c>analyze_server</c>
+    /// pass arms it for <see cref="ConfigCompareBudget"/>. A compare that has not finished when it fires is stopped, the
+    /// <c>CONFIG_CHANGED</c> finding keeps the change without a verdict, and it is named in
+    /// <see cref="ComparesLeftOutForTime"/>.
+    /// </summary>
+    public CancellationToken ConfigCompareDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="ConfigCompareDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? ConfigCompareBudget { get; set; }
+
+    /// <summary>
+    /// The root fact key of each finding whose before and after compare the pass left out because
+    /// <see cref="ConfigCompareDeadline"/> fired before it finished (#9879).
+    /// </summary>
+    public List<string> ComparesLeftOutForTime { get; } = [];
+
+    /// <summary>
     /// Whether the pass left anything out because a time budget ended (#9879): a family
-    /// (<see cref="FamiliesLeftOutForTime"/>), an anomaly detector (<see cref="DetectorsLeftOutForTime"/>) or a finding's
+    /// (<see cref="FamiliesLeftOutForTime"/>), an anomaly detector (<see cref="DetectorsLeftOutForTime"/>), a
+    /// configuration change's compare (<see cref="ComparesLeftOutForTime"/>) or a finding's
     /// drill-down (<see cref="DrillDownsLeftOutForTime"/>). Such a pass stores no findings
     /// (<see cref="StoresFindings"/>): its batch would be the newest one, and the reads that serve the newest batch as the
     /// server's current state would show findings missing or without their drill-down and remediation. Read it once the
     /// stages have run, since they fill the three lists. Always false with no budget, which is the scheduled pass.
     /// </summary>
     public bool LeftOutForTime =>
-        FamiliesLeftOutForTime.Count > 0 || DetectorsLeftOutForTime.Count > 0 || DrillDownsLeftOutForTime.Count > 0;
+        FamiliesLeftOutForTime.Count > 0 || DetectorsLeftOutForTime.Count > 0 || ComparesLeftOutForTime.Count > 0
+        || DrillDownsLeftOutForTime.Count > 0;
 
     /// <summary>
     /// The host's stopping token, and ONLY that (#2430). Default <see cref="CancellationToken.None"/>,
