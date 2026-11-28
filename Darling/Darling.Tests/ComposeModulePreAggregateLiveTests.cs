@@ -155,8 +155,8 @@ public sealed class ComposeModulePreAggregateLiveTests
         });
     }
 
-    /// <summary>The hash limit guard of the ad hoc fold. The store gets more module handles than a 64kB work_mem's hash limit holds by
-    /// the planner's own estimate, and the panel runs in a transaction at that work_mem. Without the runner's prelude the fold's IN is a
+    /// <summary>The hash limit guard of the ad hoc fold. The store's map gets more module handles than a 64kB work_mem's hash limit holds
+    /// by the planner's own estimate, and the panel runs in a transaction at that work_mem. Without the runner's prelude the fold's IN is a
     /// plain SubPlan (a scan of the keys per fact row); after it, on the same connection and transaction, the same EXPLAIN shows a
     /// hashed SubPlan, and the runner's rows on that connection equal the join-first statement's. The runner puts the multiplier back on a
     /// connection it shares, never lowers it, and leaves a statement without the fold alone.</summary>
@@ -164,9 +164,8 @@ public sealed class ComposeModulePreAggregateLiveTests
     public async Task TheAdHocFold_RunsUnderTheRunnersHashLimit_AndIsAHashedSubPlan_AtASmallWorkMem()
     {
         const string panel = "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":50,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
-        await RunLiveAsync(async store =>
+        await RunLiveAsync(bulkModules: 6000, body: async store =>
         {
-            await store.PlantManyModulesAsync(6000);
             var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
             Assert.True(parseError is null, parseError);
             foreach (var run in new[] { "fleet 4 h, raw, map first", "fleet 24 h, hourly edges, map first" }.Select(name => store.Runs().Single(r => r.Name == name)))
@@ -396,9 +395,9 @@ public sealed class ComposeModulePreAggregateLiveTests
         return rows;
     }
 
-    private static async Task RunLiveAsync(Func<Store, Task> body)
+    private static async Task RunLiveAsync(Func<Store, Task> body, int bulkModules = 0)
     {
-        await using var store = await StoreAsync();
+        await using var store = await StoreAsync(bulkModules);
         var bodySucceeded = false;
         try
         {
@@ -411,7 +410,7 @@ public sealed class ComposeModulePreAggregateLiveTests
         }
     }
 
-    private static async Task<Store> StoreAsync()
+    private static async Task<Store> StoreAsync(int bulkModules)
     {
         var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9960 module pre-aggregate live test.");
@@ -438,7 +437,7 @@ public sealed class ComposeModulePreAggregateLiveTests
 
             dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
             var store = new Store(scratch, connection, dataSource, ct);
-            await store.PlantAsync();
+            await store.PlantAsync(bulkModules);
             return store;
         }
         catch
@@ -534,7 +533,7 @@ public sealed class ComposeModulePreAggregateLiveTests
                     && (r.Handle is not null && _modules.TryGetValue((r.Server, r.Handle), out var module) && module.At >= run.Start ? module.Name : "(ad hoc)") == objectName)
                 .Sum(r => (double)r.Worker!.Value);
 
-        public async Task PlantAsync()
+        public async Task PlantAsync(int bulkModules)
         {
             /* one measured row per whole hour, so the hourly rollup has a bucket at h1 and a measured ceiling at h2 */
             for (var h = H1; h < H2; h = h.AddHours(1))
@@ -600,6 +599,11 @@ public sealed class ComposeModulePreAggregateLiveTests
             await QsAsync(ServerA, "TieDb", "HT2", "0xT2", H2.AddMinutes(14), 2500, 300);
 
             /* the map's refresh, with the anchor as its clock; its watermark is the filler row's hour */
+            if (bulkModules > 0)
+            {
+                await PlantManyModulesAsync(bulkModules, known);
+            }
+
             await DarlingModuleMap.RefreshRecentAsync(Connection, null, Anchor, Ct);
             _watermark = await DarlingModuleMap.ReadWatermarkAsync(Connection, Ct);
             Assert.Equal(H2.AddHours(-1), _watermark);
@@ -614,15 +618,22 @@ public sealed class ComposeModulePreAggregateLiveTests
                 await refresh.ExecuteNonQueryAsync(Ct);
             }
 
+            if (bulkModules > 0)
+            {
+                await using var analyze = new NpgsqlCommand("ANALYZE collect.procedure_stats; ANALYZE collect.query_stats; ANALYZE collect.module_map", Connection);
+                await analyze.ExecuteNonQueryAsync(Ct);
+            }
+
             (_rollups, _coverage) = await ComposeStoreAvailability.GetRollupsAsync(DataSource, Ct);
         }
 
-        /// <summary>Plants <paramref name="count"/> module handles on server A, newer than the map's watermark (so m reads them from its
-        /// overlay), each with a fact row, plus as many ad hoc fact rows, and refreshes the planner's statistics so its estimate of m
-        /// counts them.</summary>
-        public async Task PlantManyModulesAsync(int count)
+        /// <summary>Plants <paramref name="count"/> module handles on server A at <paramref name="known"/>, before the map's refresh (so
+        /// the map learns them and the planner estimates m's map arm from the map's statistics), each with a fact row half an hour later,
+        /// plus as many ad hoc fact rows. The caller refreshes the statistics after the map refresh.</summary>
+        private async Task PlantManyModulesAsync(int count, DateTime known)
         {
-            var at = DateTime.SpecifyKind(H2.AddMinutes(25), DateTimeKind.Unspecified);
+            var at = DateTime.SpecifyKind(known, DateTimeKind.Unspecified);
+            var factAt = DateTime.SpecifyKind(known.AddMinutes(30), DateTimeKind.Unspecified);
             var firstId = Interlocked.Add(ref s_collectionId, 3L * count) - (3L * count);
             await using (var procs = new NpgsqlCommand(@"
 INSERT INTO collect.procedure_stats
@@ -647,15 +658,12 @@ SELECT $1 + $5 + g, $2, $3, $4, 'BulkDb', 'HB' || (g % 40), CASE WHEN g <= $5 TH
 FROM generate_series(1, 2 * $5) AS g", Connection))
             {
                 facts.Parameters.AddWithValue(firstId);
-                facts.Parameters.AddWithValue(at);
+                facts.Parameters.AddWithValue(factAt);
                 facts.Parameters.AddWithValue(s_serverIds[ServerA]);
                 facts.Parameters.AddWithValue(ServerA);
                 facts.Parameters.AddWithValue(count);
                 await facts.ExecuteNonQueryAsync(Ct);
             }
-
-            await using var analyze = new NpgsqlCommand("ANALYZE collect.procedure_stats; ANALYZE collect.query_stats; ANALYZE collect.module_map", Connection);
-            await analyze.ExecuteNonQueryAsync(Ct);
         }
 
         private async Task QsAsync(string server, string database, string hash, string? handle, DateTime at, long? worker, int? interval)
