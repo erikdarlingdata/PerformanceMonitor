@@ -105,8 +105,7 @@ public sealed class DailySummaryCreditedPairsLiveTests
             var lines2 = new System.Text.StringBuilder();
             await using var dr2 = await dc2.ExecuteReaderAsync(ct);
             while (await dr2.ReadAsync(ct)) { lines2.AppendLine(dr2.GetString(0)); }
-            Diag9943.W("DIAG9943 Daily noindexscan server_version=" + connection.PostgreSqlVersion + "
-" + lines2);
+            Diag9943.W("DIAG9943 Daily noindexscan server_version=" + connection.PostgreSqlVersion + "\n" + lines2);
         }
         await ExecuteAsync(connection, "RESET enable_indexscan", ct);
         var nodes = new List<(string Type, string Index, double Loops, double Rows)>();
