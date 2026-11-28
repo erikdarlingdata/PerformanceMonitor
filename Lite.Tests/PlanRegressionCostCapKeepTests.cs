@@ -229,10 +229,12 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
         cmd.ExecuteNonQuery();
     }
 
-    private static void AssertSameFacts(Fact expected, Fact actual)
+    private static void AssertSameFacts(Fact expected, Fact actual, string? except = null)
     {
         Assert.Equal(expected.Value, actual.Value);
-        Assert.Equal(expected.Metadata.OrderBy(m => m.Key), actual.Metadata.OrderBy(m => m.Key));
+        Assert.Equal(
+            expected.Metadata.Where(m => m.Key != except).OrderBy(m => m.Key),
+            actual.Metadata.Where(m => m.Key != except).OrderBy(m => m.Key));
     }
 
     [Fact]
@@ -259,11 +261,11 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db1', {query}, {pl
         await new DuckDbFactCollector(_duckDb) { CostKeep = new PlanRegressionCostKeep() }.CollectPlanRegressionFactsAsync(At(Now.AddSeconds(11), clock: true), without);
         var exactWindow = new List<Fact>();
         await new DuckDbFactCollector(_duckDb) { CostKeep = new PlanRegressionCostKeep() }.CollectPlanRegressionFactsAsync(At(Now.AddSeconds(11), clock: false), exactWindow);
-        foreach (var fact in new[] { Assert.Single(first), Assert.Single(second) })
-        {
-            AssertSameFacts(Assert.Single(without), fact);
-            AssertSameFacts(Assert.Single(exactWindow), fact);
-        }
+        /* The read answered from the keep carries the facts of the read without it, for its own end, and the facts of the window the read had before it ended at the newest row. */
+        AssertSameFacts(Assert.Single(without), Assert.Single(second));
+        AssertSameFacts(Assert.Single(exactWindow), Assert.Single(second));
+        /* The first read ended a second earlier, and the age of the best plan is measured to the read's own end: that figure alone moves. */
+        AssertSameFacts(Assert.Single(without), Assert.Single(first), except: "best_plan_age_days");
     }
 
     [Fact]
