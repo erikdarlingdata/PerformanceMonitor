@@ -416,6 +416,37 @@ public sealed class DarlingStoreLoginsTests
             DarlingStoreLogins.Surface.Web, "this is not = a; connection string =", Owner, verdict: null));
     }
 
+    /// <summary>
+    /// #9937: the custom alert evaluator skips its login probe for a login the owner warning has already named, and the two decide that with
+    /// one comparison. A string that names no user is the default user, so both strings naming none, or the web string naming the default user
+    /// beside an owner string that names none, are the owner by name: the owner warning is the one Warning, with no probe Warning after it. A
+    /// different user, or a malformed string, is not the owner by name, and the owner warning says nothing for it.
+    /// </summary>
+    [Theory]
+    [InlineData("Host=db;Database=darling", "Host=db;Database=darling", true)]
+    [InlineData("Host=db;Username=darling;Database=darling", "Host=db;Username=darling;Database=darling", true)]
+    [InlineData("Host=db;Username=other;Database=darling", "Host=db;Username=darling;Database=darling", false)]
+    [InlineData("this is not = a; connection string =", "Host=db;Username=darling;Database=darling", false)]
+    public void TheProbeIsSkippedExactlyWhenTheOwnerWarningNamesTheLogin(string web, string owner, bool ownerByName)
+    {
+        Assert.Equal(ownerByName, DarlingStoreLogins.ConnectsAsTheSameUser(web, owner));
+        Assert.Equal(ownerByName, DarlingStoreLogins.ConfiguredLoginWarning(
+            DarlingStoreLogins.Surface.Web, web, owner, verdict: null, whatOverride: "The custom alert evaluator") is not null);
+    }
+
+    [Fact]
+    public void AWebStringNamingTheDefaultUser_BesideAnOwnerStringNamingNone_IsTheOwnerByName()
+    {
+        var defaultUser = DarlingStoreLogins.NpgsqlDefaultUser();
+        Assert.False(string.IsNullOrEmpty(defaultUser));
+        var web = new NpgsqlConnectionStringBuilder("Host=db;Database=darling") { Username = defaultUser }.ConnectionString;
+        const string owner = "Host=db;Database=darling";
+
+        Assert.True(DarlingStoreLogins.ConnectsAsTheSameUser(web, owner));
+        Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(
+            DarlingStoreLogins.Surface.Web, web, owner, verdict: null, whatOverride: "The custom alert evaluator"));
+    }
+
     /* ─────────────────────────── the derived role login ─────────────────────────── */
 
     [Fact]

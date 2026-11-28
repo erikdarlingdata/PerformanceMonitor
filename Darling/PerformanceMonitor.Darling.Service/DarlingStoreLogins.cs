@@ -460,10 +460,8 @@ internal static class DarlingStoreLogins
         /* #9937: the owner-by-name warning above is by name only, so the admin login, or any login that holds the admin role's grants, got
            none. Ask the store the question the web dashboard asks before it listens on the network. The evaluator still runs as this login
            either way, as it does for the owner login. A login that is the owner by name has been warned about already, so it is not
-           warned twice. */
-        if (!(TryReadLoginUsers(resolved, postgres.ConnectionString, out var configuredUser, out var ownerUser)
-                && !string.IsNullOrEmpty(configuredUser)
-                && string.Equals(configuredUser, ownerUser, StringComparison.Ordinal)))
+           warned twice: "by name" is the owner warning's own comparison, so a string that names no user counts as the default user. */
+        if (!ConnectsAsTheSameUser(resolved, postgres.ConnectionString))
         {
             var probe = await ProbeSurfaceLoginAsync(Surface.Web, postgres, cancellationToken);
             if (CustomAlertLoginProbeWarning(CustomAlertLoginName(resolved), probe) is { } warning)
@@ -1171,8 +1169,14 @@ internal static class DarlingStoreLogins
     private static bool RunsAsOwner(StoreLogin login, string ownerConnectionString) =>
         login.Source == LoginSource.Owner
         || (login.Source == LoginSource.Configured
-            && TryReadLoginUsers(login.ConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser)
-            && string.Equals(EffectiveLoginUser(configuredUser), EffectiveLoginUser(ownerUser), StringComparison.Ordinal));
+            && ConnectsAsTheSameUser(login.ConnectionString, ownerConnectionString));
+
+    /// <summary>Whether two connection strings log in as the same user, by the comparison <see cref="ConfiguredLoginWarning"/> makes of the
+    /// configured and owner strings (<see cref="EffectiveLoginUser"/> on both, so a string that names no user is the default user). False
+    /// when either is malformed. The custom alert evaluator's probe is skipped on true, because that warning has already named the login (#9937).</summary>
+    internal static bool ConnectsAsTheSameUser(string configuredConnectionString, string ownerConnectionString) =>
+        TryReadLoginUsers(configuredConnectionString, ownerConnectionString, out var configuredUser, out var ownerUser)
+        && string.Equals(EffectiveLoginUser(configuredUser), EffectiveLoginUser(ownerUser), StringComparison.Ordinal);
 
     /// <summary>The user Npgsql logs in as when a connection string names none (#9894): <c>PGUSER</c> when it is set and not empty, else the
     /// operating system user name. A test passes both sources.</summary>
