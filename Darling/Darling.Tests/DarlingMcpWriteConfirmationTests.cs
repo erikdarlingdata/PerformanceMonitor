@@ -79,15 +79,15 @@ public sealed class DarlingMcpWriteConfirmationTests
     }
 
     /// <summary>
-    /// <c>purge_now</c> through the path with no store to read (this host has none, as a front door has none): the generic question, which
-    /// still names the retention the call carries, and a call without one says each collector's configured retention.
+    /// <c>purge_now</c> through the path with no store to read (the host here registers no data source, as a front door has none): the
+    /// generic question, which still names the retention the call carries, and a call without one says each collector's configured retention.
     /// </summary>
     [Theory]
     [InlineData("{\"retention_days\":7}", "to 7 days now")]
     [InlineData("{}", "configured retention")]
     public async Task PurgeNowWithNoStore_AsksTheGenericQuestion(string arguments, string named)
     {
-        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token);
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(Config, Token, registerStore: false);
 
         var answer = await CallAsync(server, "purge_now", arguments, negotiate: true);
 
