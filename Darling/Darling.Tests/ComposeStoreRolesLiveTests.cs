@@ -1218,7 +1218,7 @@ public sealed class ComposeStoreRolesLiveTests
     /// <summary>
     /// #9894: the exposure probe (<see cref="DarlingStoreLogins.ProbeSurfaceLoginAsync"/>) and <c>tools/provision-roles.sql</c> both refuse a login
     /// that holds a role outranking the surface's grants, and the two lists must not drift. For every predefined role the server has, and for
-    /// each kind the script's guard names (a BYPASSRLS role, a superuser role, the owner and the database owner), the <c>viewer</c> login is put in
+    /// each kind the script's guard names that a login can join (a BYPASSRLS role, a superuser role and the database owner), the <c>viewer</c> login is put in
     /// the role, then the probe is asked about that login and the script is run by an owner that cannot revoke the membership. The script stops at its
     /// guard (exit 3) exactly where the probe says privileged, and the two agree on a harmless role too (<c>pg_monitor</c>, a plain role): both pass.
     /// Starting from the probe's own list, each name on it must also be one the script stops for, so a role added to one list only fails here.
@@ -1266,11 +1266,11 @@ public sealed class ComposeStoreRolesLiveTests
                 Assert.Contains(name, predefined);
             }
 
-            /* (role the login joins, whether either list should refuse it). The owner and the database owner are the same role (byo) in this
-               store, so the database owner is also tried as a role of its own. */
+            /* (role the login joins, whether either list should refuse it). The owner itself (byo) is not tried: it created the four roles, so it is a member of each, and a role cannot join one that is its own member.
+               The database owner is, as a group role that takes the database over for the case. */
             var cases = predefined
                 .Select(name => (Role: name, Outranks: DarlingStoreLogins.LoginProbeOutrankingRoles.Contains(name, StringComparer.Ordinal)))
-                .Concat(new (string Role, bool Outranks)[] { ("g_drift_bypassrls", true), ("g_drift_super", true), ("byo", true), ("g_drift_dbowner", true), ("g_drift_plain", false) })
+                .Concat(new (string Role, bool Outranks)[] { ("g_drift_bypassrls", true), ("g_drift_super", true), ("g_drift_dbowner", true), ("g_drift_plain", false) })
                 .ToList();
 
             var run = 0;
@@ -1344,7 +1344,6 @@ public sealed class ComposeStoreRolesLiveTests
 
             Assert.Contains("g_drift_bypassrls", refusedBoth);
             Assert.Contains("g_drift_super", refusedBoth);
-            Assert.Contains("byo", refusedBoth);
             Assert.Contains("g_drift_dbowner", refusedBoth);
             Assert.DoesNotContain("g_drift_plain", refusedBoth);
         }
