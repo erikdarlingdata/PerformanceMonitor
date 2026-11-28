@@ -227,8 +227,10 @@ public sealed class AnalysisPassTokenThreadingTests
            31 since #7675: the QUERY_STORE_ERROR read of the newest query_store_health capture is one more; it lets the
            abandonment through and reports any other fault as a collection failure, as the DB_CONFIG read beside it does.
            32 since #8883: the TEMPDB_FILE_SETUP read of the newest tempdb file list is one more; it lets the
-           abandonment through and reports any other fault as a collection failure. */
-        Assert.Equal(32, AnalysisSources()
+           abandonment through and reports any other fault as a collection failure.
+           33 since #9879: the family deadline's catch in RunUnderDeadline is one more; it opens with the same filter, so an
+           abandonment of the pass is never taken as a deadline cut, and it takes only a stop the deadline caused. */
+        Assert.Equal(33, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("PgFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));

@@ -23,7 +23,9 @@ public sealed partial class PgFactCollector
        #8403: every row of the window counts, including a row whose execution delta is 0 while its CPU and reads
        deltas are not. The store holds such rows, and the BAD_ACTOR drill-down and the totals already sum them, so
        the fact sums the same rows and the finding's headline average and the drill-down beside it describe the
-       same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor. */
+       same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor.
+       #9879: PostgreSQL sorts a NULL first under DESC. A group whose CPU deltas are all NULL (an unknowable counter,
+       #4394) scores NULL, so NULLS LAST keeps it behind every group with a known score instead of first in the five. */
     public const string BadActorSql = @"
 SELECT
     database_name,
@@ -49,7 +51,7 @@ AND   collection_time <= $3
 GROUP BY database_name, query_hash
 HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *
-         LN(GREATEST(SUM(delta_execution_count), 1)) DESC
+         LN(GREATEST(SUM(delta_execution_count), 1)) DESC NULLS LAST
 LIMIT 5";
 
     /// <summary>

@@ -57,8 +57,11 @@ public sealed class FactCollectorFailureReportingTests
         @"^\s*catch\s*\(Exception ex\)\s*when\s*\(!Analysis(?:Shutdown\.IsExpectedAbandon|Abandon\.IsExpected)\(ex,",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /* A swallowing catch reports through ReportCollectionFailure. The family deadline's catch in PgFactCollector.RunFamiliesAsync
+       reports through RecordBudgetCut instead (#9879): a family the analysis time budget cuts is named in the reply's
+       families_left_out and adds no collection failure, so RecordBudgetCut is its report. */
     private static readonly Regex s_reports = new(
-        @"ReportCollectionFailure\s*\(",
+        @"(?:ReportCollectionFailure|RecordBudgetCut)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
