@@ -1287,7 +1287,7 @@ public sealed class McpPageContractTests
         Assert.Contains("Never cuts the count or top lists", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
 
         var reader = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpClientTimeoutTools.cs"));
-        Assert.Contains("Samples(events, sampleLimit + 1)", reader, StringComparison.Ordinal);
+        Assert.Contains("Samples(events, sampleLimit + 1, callsAt: CallsAt)", reader, StringComparison.Ordinal);
 
         var shared = Strip(ReadRepoFileLf("PerformanceMonitor.Alerting", "ClientTimeoutsRead.cs"));
         Assert.Contains("sampled_events_truncated = samples.Count > limit", shared, StringComparison.Ordinal);

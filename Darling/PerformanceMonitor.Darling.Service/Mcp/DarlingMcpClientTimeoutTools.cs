@@ -121,7 +121,7 @@ public sealed class DarlingMcpClientTimeoutTools
     }
 
     /// <summary>
-    /// The seven reads on ONE connection, in two steps. Step one reads the runs, the counts and the sample groups with the ceiling on
+    /// The reads on ONE connection, in two steps. Step one reads the runs, the counts and the sample groups with the ceiling on
     /// ($3 = the window end plus the row skew) and the evaluator cuts them to the span. Step two reads the top lists and the newest
     /// <paramref name="sampleLimit"/> + 1 sampled events over exactly that span (<see cref="ClientTimeoutsRead.DetailSpan"/>: $2 = the
     /// exclusive span boundary, $3 = the newest run plus the skew), so they never hold the base run's samples from before the span or
@@ -141,31 +141,44 @@ public sealed class DarlingMcpClientTimeoutTools
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map)
-        {
-            await using var command = new NpgsqlCommand(sql, connection);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
+        /* The reads that match the captured calls take them as arrays after $1 to $3 (#9881): the calls of the range are read once, as
+           their own small statement, and the planner then knows how many there are. */
+        const int CallsAt = 4;
 
-            var rows = new List<T>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(map(reader));
-            }
-
-            return rows;
-        }
-
-        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
         /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
         return await AttentionReadRelation.ReadAsync<(AttentionWindow Window, List<ClientTimeoutSample> Samples)>(connection, async events =>
         {
+            /* One snapshot for every statement of the read: the calls are bound to later statements as arrays, and a collection that commits
+               between two statements must not bring samples whose calls the arrays do not hold. The transaction starts inside the relation
+               read, so the second attempt AttentionReadRelation makes after an undefined table runs in a transaction of its own: a failed
+               statement leaves its transaction aborted. */
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map, Action<NpgsqlCommand>? more = null)
+            {
+                await using var command = new NpgsqlCommand(sql, connection, transaction);
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
+                more?.Invoke(command);
+
+                var rows = new List<T>();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    rows.Add(map(reader));
+                }
+
+                return rows;
+            }
+
+            var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
             var counts = await Query(AttentionWindowSql.Counts(events, bounded: true), floor, rowCeiling,
                 r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-            var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true), floor, rowCeiling,
+            var windowCalls = new AttentionCallArrays();
+            await Query<long>(AttentionWindowSql.Calls(events, bounded: true), floor, rowCeiling, windowCalls.Add);
+            var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true, callsAt: CallsAt), floor, rowCeiling,
                 r => new AttentionSampleGroup(
                     r.GetDateTime(0),
                     r.IsDBNull(1) ? null : r.GetString(1),
@@ -174,12 +187,13 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetInt64(4),
                     r.GetInt64(5),
                     r.GetInt64(6),
-                    r.GetInt64(7)));
+                    r.GetInt64(7)), windowCalls.AddTo);
 
             /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
             var span = ClientTimeoutsRead.DetailSpan(runs);
             if (span is null)
             {
+                await transaction.CommitAsync(cancellationToken);
                 return (new AttentionWindow(runs, counts, groups, [], [], []), []);
             }
 
@@ -194,7 +208,10 @@ public sealed class DarlingMcpClientTimeoutTools
                 r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
             var hosts = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), spanFloor, spanCeiling,
                 r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-            var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1), spanFloor, spanCeiling,
+            /* The samples and the matched calls read the calls of the span, the range their own calls CTE reads. */
+            var spanCalls = new AttentionCallArrays();
+            await Query<long>(AttentionWindowSql.Calls(events, bounded: true), spanFloor, spanCeiling, spanCalls.Add);
+            var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1, callsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutSample(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
                     r.GetDateTime(1),
@@ -208,8 +225,10 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetBoolean(9),
                     r.GetBoolean(10),
                     r.GetBoolean(11),
-                    r.GetBoolean(12)));
-            var matchedCalls = await Query(AttentionWindowSql.MatchedCalls(events, sampleLimit + 1), spanFloor, spanCeiling,
+                    r.GetBoolean(12)), spanCalls.AddTo);
+            /* The matched calls in two steps: the ids of the calls a sample matches, then those calls by id, so no join has to guess how many match. */
+            var matchedIds = await Query(AttentionWindowSql.MatchedCallIds(events, CallsAt), spanFloor, spanCeiling, r => r.GetInt64(0), spanCalls.AddTo);
+            var matchedCalls = await Query(AttentionWindowSql.MatchedCallRows(events, sampleLimit + 1, idsAt: CallsAt), spanFloor, spanCeiling,
                 r => new ClientTimeoutMatchedCall(
                     r.IsDBNull(0) ? null : r.GetDateTime(0),
                     r.GetDateTime(1),
@@ -218,8 +237,9 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.IsDBNull(4) ? null : r.GetString(4),
                     r.IsDBNull(5) ? null : r.GetInt32(5),
                     r.IsDBNull(6) ? null : r.GetInt64(6),
-                    r.IsDBNull(7) ? null : r.GetString(7)));
+                    r.IsDBNull(7) ? null : r.GetString(7)), command => AttentionCallArrays.AddIds(command, matchedIds));
 
+            await transaction.CommitAsync(cancellationToken);
             return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts, MatchedCallList: matchedCalls), samples);
         }, cancellationToken);
     }
