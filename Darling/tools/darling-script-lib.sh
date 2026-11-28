@@ -439,6 +439,7 @@ print_next_checks() {
     note ""
     note "The start is healthy: the process is up and has reported no startup failure. That is not proof that it collects."
     note "In about 10 to 15 minutes, check the store for SUCCESS rows from every server (docs/darling/linux.md, step 9):"
-    note "  SELECT server_id, status, count(*) FROM collect.collection_log WHERE collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY server_id, status ORDER BY server_id, status"
+    note "  SELECT s.name AS server, l.server_id, l.status, count(*) AS runs FROM collect.collection_log l LEFT JOIN config.config_monitored_servers s ON s.server_id = l.server_id WHERE l.collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY s.name, l.server_id, l.status ORDER BY s.name, l.status"
+    note "A row with an empty server and a server_id of 0 is the (fleet) row, the fleet-wide work the service does for itself. It is normal, and so is an ANALYZED row for each server (step 9)."
     note "The file log is in ${LOG_DIR}, and 'sudo journalctl -u darling' has what systemd reports."
 }
