@@ -602,9 +602,9 @@ public sealed class PgTargetBufferDrillDownTests
     /// A buffer-composition drill-down held past the drill-down budget of an on-demand pass (#9966), through the whole
     /// reply. The capture table is locked by another session, so the drill-down read waits behind it and never finishes by
     /// itself. The budget ends while it waits. The reply still carries every finding the whole pass returns, in the same
-    /// order with the same stories and severities, the held finding has no drill-down and is named in
-    /// <c>drill_downs_left_out</c> by its root fact key, and the findings that had no drill-down keep none. The same pass
-    /// with no budget carries the drill-down and names nothing.
+    /// order with the same stories and severities. The held finding, and the findings the walk had not reached, have no
+    /// drill-down and are named in <c>drill_downs_left_out</c> by root fact key. The findings before it keep the drill-down
+    /// state the whole pass gave them. The same pass with no budget carries the drill-down and names nothing.
     /// </summary>
     [Fact]
     public async Task ADrillDownHeldPastItsBudget_LeavesTheFindingInTheReplyWithoutIt_NamesIt_AndTheRestOfTheReplyIsWhole()
@@ -674,18 +674,23 @@ public sealed class PgTargetBufferDrillDownTests
         Assert.Equal(wholeCards.Select(RootKeyOf), cutCards.Select(RootKeyOf));
         Assert.Equal(wholeCards.Select(card => card.GetProperty("story_path").GetString()), cutCards.Select(card => card.GetProperty("story_path").GetString()));
         Assert.Equal(wholeCards.Select(card => card.GetProperty("severity").GetDouble()), cutCards.Select(card => card.GetProperty("severity").GetDouble()));
+        /* The walk stops at the budget: the held finding and every finding after it are named, and each of them is in
+           the reply with no drill-down. The findings before the held one keep the drill-down state the whole pass gave them. */
+        var named = LeftOutOf(cutDocument.RootElement, "drill_downs_left_out");
+        Assert.Contains(named, entry => entry.GetProperty("finding").GetString() == PgTargetFactKeys.BufferCachePressure);
+        Assert.All(named, entry =>
+        {
+            Assert.Equal(StageTimeBudget.Reason, entry.GetProperty("reason").GetString());
+            Assert.Equal(budget.TotalSeconds, entry.GetProperty("budget_seconds").GetDouble());
+        });
+        var namedKeys = named.SelectMany(entry => Enumerable.Repeat(entry.GetProperty("finding").GetString()!, entry.GetProperty("findings").GetInt32())).ToList();
+        Assert.Equal(namedKeys.Order(StringComparer.Ordinal), cut.LastStageCuts.DrillDowns.Order(StringComparer.Ordinal));
         for (var i = 0; i < cutCards.Count; i++)
         {
-            var heldCard = RootKeyOf(cutCards[i]) == PgTargetFactKeys.BufferCachePressure;
-            Assert.Equal(!heldCard && CarriesADrillDown(wholeCards[i]), CarriesADrillDown(cutCards[i]));
+            var isNamed = namedKeys.Contains(RootKeyOf(cutCards[i]));
+            Assert.Equal(!isNamed && CarriesADrillDown(wholeCards[i]), CarriesADrillDown(cutCards[i]));
         }
 
-        var entry = Assert.Single(LeftOutOf(cutDocument.RootElement, "drill_downs_left_out"));
-        Assert.Equal(PgTargetFactKeys.BufferCachePressure, entry.GetProperty("finding").GetString());
-        Assert.Equal(1, entry.GetProperty("findings").GetInt32());
-        Assert.Equal(StageTimeBudget.Reason, entry.GetProperty("reason").GetString());
-        Assert.Equal(budget.TotalSeconds, entry.GetProperty("budget_seconds").GetDouble());
-        Assert.Equal(new[] { PgTargetFactKeys.BufferCachePressure }, cut.LastStageCuts.DrillDowns);
         Assert.Empty(cut.LastStageCuts.Detectors);
         Assert.Empty(cut.LastFamiliesLeftOutForTime);
     }
