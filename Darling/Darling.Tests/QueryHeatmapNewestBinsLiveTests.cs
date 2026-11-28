@@ -132,7 +132,7 @@ public sealed class QueryHeatmapNewestBinsLiveTests
     private static string AsOf(DateTime naive) => DateTime.SpecifyKind(naive, DateTimeKind.Utc).ToString("o");
 
     private static Task<string> ToolAsync(NpgsqlDataSource pg, DateTime end, int hours, int bin, int limit, DatabaseFilter databases, bool bound, CancellationToken ct)
-        => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, ServerName, hours, null, databases, bin, limit, AsOf(end), false, null, ct, bound);
+        => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, ServerName, hours, null, databases, bin, limit, AsOf(end), false, null, bound, ct);
 
     private static async Task<(DarlingQueryHeatmapReader.HeatmapRead Read, long Pages, long WholePages)> RoutedAsync(
         NpgsqlDataSource pg, RollupCoverage coverage, DateTime start, DateTime end, int bin, int cap, CancellationToken ct)

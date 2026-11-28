@@ -90,6 +90,23 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// databases" for two or more, null for all) and the empty-grid text (<see cref="EmptyAsync"/>). For one name
     /// both read exactly as they did.
     /// </summary>
+    internal static Task<string> GetQueryHeatmap(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        string? metric,
+        DatabaseFilter databaseFilter,
+        int bucket_minutes,
+        int limit,
+        string? as_of,
+        bool full_text,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+        => GetQueryHeatmap(
+            postgres, server_name, hours_back, metric, databaseFilter, bucket_minutes, limit, as_of, full_text, logger, boundTheRead: true, cancellationToken);
+
+    /// <summary><see cref="GetQueryHeatmap(NpgsqlDataSource, string?, int, string?, DatabaseFilter, int, int, string?, bool, ILogger?, CancellationToken)"/> with the choice
+    /// of reading the whole window at once (<paramref name="boundTheRead"/> false), which is the oracle the tests compare the bounded read to (#9965).</summary>
     internal static async Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         string? server_name,
@@ -101,8 +118,8 @@ public sealed class DarlingMcpQueryHeatmapTools
         string? as_of,
         bool full_text,
         ILogger? logger,
-        CancellationToken cancellationToken,
-        bool boundTheRead = true)
+        bool boundTheRead,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -150,7 +167,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                partial hours at the window's edges, from the raw rows. The store's measured coverage decides; a store with no rollup reads raw as before. */
             var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var read = await DarlingQueryHeatmapReader.GetQueryHeatmapRoutedAsync(
-                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken, boundTheRead);
+                postgres, coverage, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, boundTheRead, cancellationToken);
             var rows = read.Rows;
 
             /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid

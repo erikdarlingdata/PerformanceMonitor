@@ -557,9 +557,16 @@ internal static class DarlingQueryHeatmapReader
     /// slice (empty bins, a database filter, a metric that is null on some rows, a quiet server) is read again over the whole window.
     /// <paramref name="boundTheRead"/> false reads the whole window at once.</para>
     /// </summary>
+    internal static Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
+        => GetQueryHeatmapRoutedAsync(postgres, coverage, serverId, metric, startUtc, endUtc, databases, bucketMinutes, limit, previewLength, boundTheRead: true, cancellationToken);
+
+    /// <summary><see cref="GetQueryHeatmapRoutedAsync(NpgsqlDataSource, RollupCoverage, int, HeatmapMetric, DateTime, DateTime, DatabaseFilter, int, int, int, CancellationToken)"/>
+    /// with the choice of reading the whole window at once (<paramref name="boundTheRead"/> false), which is the oracle the tests compare the bounded read to.</summary>
     internal static async Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
-        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default, bool boundTheRead = true)
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, bool boundTheRead, CancellationToken cancellationToken)
     {
         var plan = PlanRollup(coverage, metric, bucketMinutes, startUtc, endUtc);
         var source = plan is null ? SourceRaw : SourceHourlyRollup;
