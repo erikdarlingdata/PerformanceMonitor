@@ -223,7 +223,9 @@ public sealed class AnalyzeServerFamilyBudgetLiveTests
         try
         {
             await RegisterServerAsync(connection, ct);
-            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddHours(-30)), ct);
+            /* Rows 40 and 6 hours back span more than the history gate asks for, and none falls in the pass's four-hour window. */
+            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddHours(-40)), ct);
+            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddHours(-6)), ct);
 
             await body(postgres, ct);
 
