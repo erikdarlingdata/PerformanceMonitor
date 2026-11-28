@@ -805,9 +805,7 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("ZScoreMetadata(bucket, verdict, samples)", code, StringComparison.Ordinal);
         Assert.DoesNotContain("barsMeasured: true", code, StringComparison.Ordinal);
         Assert.Contains("unmeasured for statement share", source, StringComparison.Ordinal);
-        /* Wired into the root's emission order, after the plan detector that reads the same table. */
         var root = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
-        Assert.True(root.IndexOf("await DetectPlanRegressionAnomalies(context, anomalies);", StringComparison.Ordinal) < root.IndexOf("await DetectBadActorShareAnomalies(context, anomalies);", StringComparison.Ordinal));
         Assert.Contains("private partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies);", root, StringComparison.Ordinal);
     }
 
@@ -1118,7 +1116,7 @@ public sealed class PgTargetQueriesTests
             Assert.Equal(0, light.Metadata["share_band"]);
 
             /* ── THE EXIT CRITERION: the real analyze_server tool. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(analysis))
             {

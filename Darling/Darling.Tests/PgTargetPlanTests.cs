@@ -738,7 +738,7 @@ public sealed class PgTargetPlanTests
             Assert.True(anomaly.Metadata["mean_sigma"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))

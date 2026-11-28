@@ -258,24 +258,7 @@ public class PgAnomalyDetector : IAnomalyDetector
 
         if (parallelism <= 1 || detectors.Count < 2)
         {
-            for (var i = 0; i < detectors.Count; i++)
-            {
-                if (!deadline.CanBeCanceled)
-                {
-                    await detectors[i](context, anomalies);
-                    continue;
-                }
-
-                /* A detector under the deadline keeps its facts aside until it finishes, so one the deadline stops leaves
-                   none behind. */
-                var own = new List<Fact>();
-                await RunUnderDeadline(i, own);
-                if (leftOut[i])
-                    context.DetectorsLeftOutForTime.Add(DetectorName(detectors[i]));
-                else
-                    anomalies.AddRange(own);
-            }
-
+            await StageDeadline.RunDetectorsInTurnAsync(context, anomalies, detectors);
             return;
         }
 

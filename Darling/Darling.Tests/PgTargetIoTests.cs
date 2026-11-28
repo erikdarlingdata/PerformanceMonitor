@@ -594,7 +594,7 @@ FROM generate_series(0, $5) AS n", windowStart, 240, UntimedServerId, UntimedSer
             Assert.True(anomaly.Metadata["peak_sample_ticks"] > 0);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(json))

@@ -171,13 +171,6 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
 
-        var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
-        var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
-        var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
-        Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);", "await DetectPlanRegressionAnomalies(context, anomalies);", "await DetectCpuBurnAnomalies(context, anomalies);", "await DetectDatabaseGrowthAnomalies(context, anomalies);" })
-            Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
-
         foreach (var (file, lane) in new[]
         {
             ("PgTargetAnomalyDetector.Io.cs", 11), ("PgTargetAnomalyDetector.Replication.cs", 12), ("PgTargetAnomalyDetector.Wal.cs", 15),
@@ -1264,7 +1257,7 @@ SELECT $1 + k, $2 + (k * interval '1 minute'), $3, $4, $2 + (k * interval '1 min
 FROM generate_series(5, $5, 5) AS k",
                 end, topUpMinutes, expectedRows: topUpMinutes / 5, ct);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(json))
             {

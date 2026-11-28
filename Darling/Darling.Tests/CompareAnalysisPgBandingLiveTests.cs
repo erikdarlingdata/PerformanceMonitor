@@ -139,7 +139,7 @@ FROM s", connection) { CommandTimeout = 120 })
             Assert.InRange(ioBucket.Median, 1.3, 1.7);
             Assert.True(ioBucket.EffectiveRobustSigma > 0);
 
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
             var json = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, hours_back: 4, baseline_hours_back: 28);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;

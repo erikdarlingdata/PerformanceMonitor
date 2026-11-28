@@ -155,6 +155,36 @@ public sealed partial class PgTargetFactCollector : IFactCollector
            it. Nothing may run ahead of it — and for a PostgreSQL target the witness is pg_database_stats,
            the one universal one-minute series every flavour writes (D3), not the wait table. */
         await CollectObservedCoverageAsync(context, facts);
+
+        /* #9966: an on-demand pass starts its anomaly read here, beside the families below, through the starter the SQL
+           Server collector uses (StageDeadline.StartAnomalyReadBeside). The families run one after another and the
+           detectors after them would start when the last family ended, which on a long window is past the detector
+           deadline: every detector would be named as left out and the pass would store nothing. Started here, the
+           detectors read while the families read. Nothing the detectors read is written by a family below: they read
+           the pass's identity and window, set before the pass starts, and the coverage stamp, set by the read above.
+           The two stages share no list: the detectors add to their own, their collection failures go to the read's own
+           buffer, and each stage writes only its own left-out record. Each read opens its own connection. The scheduled
+           pass carries no read to start, so its detectors run after this method returns, as they always have. The read
+           is waited for here, failed or not, and the pass takes its result and its failure where it runs the detector. */
+        var anomalyRead = StageDeadline.StartAnomalyReadBeside(context, gate: null);
+        try
+        {
+            await RunFamiliesAfterCoverageAsync(context, facts);
+        }
+        finally
+        {
+            await StageDeadline.SettleAsync(anomalyRead);
+        }
+
+        return facts;
+    }
+
+    /// <summary>
+    /// Every family after the coverage stamp, one after another against the pass's one fact list, in the order the
+    /// later ones need: a family reads the facts the ones ahead of it added.
+    /// </summary>
+    private async Task RunFamiliesAfterCoverageAsync(AnalysisContext context, List<Fact> facts)
+    {
         await CollectServerMetadataFactsAsync(context, facts);
         await CollectConfigFactsAsync(context, facts);
         await ReadStatementsEvictionFactAsync(context, facts);
@@ -165,12 +195,14 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectSessionFactsAsync(context, facts);
         await CollectVacuumFactsAsync(context, facts);
         await CollectWaitFactsAsync(context, facts);
-        await CollectQueryFactsAsync(context, facts);
+        /* #9966: the queries family here and the io family below are the two an on-demand pass runs under its family
+           deadline (RunUnderTheFamilyDeadlineAsync says why). Every other family always runs. */
+        await RunUnderTheFamilyDeadlineAsync(context, facts, CollectQueryFactsAsync, QueriesFamily);
         await CollectCpuFactsAsync(context, facts);
         /* v2 (#3691): the three new families, after every v1 family so a v2 fact composed at collect time can
            read a v1 context fact already in the list (the Config-first rule, extended). Stubs until lanes 11 /
            12 / 13 land. */
-        await CollectIoFactsAsync(context, facts);
+        await RunUnderTheFamilyDeadlineAsync(context, facts, CollectIoFactsAsync, IoFamily);
         await CollectReplicationFactsAsync(context, facts);
         await CollectBloatFactsAsync(context, facts);
         /* wave 3 (#3691, between waves): the blocking family, last — its chain fact reads the idle-in-transaction and
@@ -186,9 +218,68 @@ public sealed partial class PgTargetFactCollector : IFactCollector
            (a growing database whose bloat trend also grew) is decided in the scorer and the graph over the bloat family's
            fact already in the list; declared and filled by the content lane in one PR (P3 declared no stub). */
         await CollectGrowthFactsAsync(context, facts);
-
-        return facts;
     }
+
+    /// <summary>
+    /// Runs one heavy family of an on-demand pass under its time budget (#9966). The heavy families are the two whose
+    /// read takes every row of the window from a table that holds many rows per collection, at a one-minute cadence:
+    /// the queries family (<c>pg_statement_stats</c>, one row per statement series per collection) and the io family
+    /// (<c>pg_io_stats</c>, one row per backend type, object and context per collection). A long window on a busy target
+    /// makes those two slow. Every other family reads a latest snapshot, one row per collection or per database, or a
+    /// table collected hourly or daily, and is called directly.
+    ///
+    /// <para>When the context carries a <see cref="AnalysisContext.FamilyDeadline"/>, <paramref name="family"/> reads
+    /// through a token that also ends at the deadline (<see cref="StageDeadline.RunAsync"/>, the helper the detector and
+    /// drill-down stages use). The families of this collector run one after another against one list, and a family reads
+    /// the facts of the families before it from that list, so the family runs against <paramref name="facts"/> itself. If
+    /// the deadline stops it, or has fired before it starts, the facts it added are removed again, the failures it
+    /// recorded are dropped, and <paramref name="familyName"/> is added to
+    /// <see cref="AnalysisContext.FamiliesLeftOutForTime"/>: a family the budget stopped is not a failed read. A stop
+    /// from the pass's own token still unwinds the pass. With no deadline (the scheduled pass) the family is called
+    /// directly, as every other family is.</para>
+    /// </summary>
+    internal static async Task RunUnderTheFamilyDeadlineAsync(
+        AnalysisContext context, List<Fact> facts, Func<AnalysisContext, List<Fact>, Task> family, string familyName)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(family);
+
+        var deadline = context.FamilyDeadline;
+        if (!deadline.CanBeCanceled)
+        {
+            await family(context, facts);
+            return;
+        }
+
+        /* The family's failures are kept aside until it finishes, so one the deadline stops leaves none behind. */
+        var factsBefore = facts.Count;
+        var ownFailures = context.BufferCollectionFailuresForThisFlow();
+        bool finished;
+        try
+        {
+            finished = await StageDeadline.RunAsync(context, () => family(context, facts), deadline);
+        }
+        finally
+        {
+            context.StopBufferingCollectionFailuresForThisFlow();
+        }
+
+        if (!finished)
+        {
+            facts.RemoveRange(factsBefore, facts.Count - factsBefore);
+            context.FamiliesLeftOutForTime.Add(familyName);
+            return;
+        }
+
+        context.CollectionFailures.AddRange(ownFailures);
+    }
+
+    /// <summary>
+    /// The family label of the partial file the caller sits in: the label <see cref="ReportCollectionFailure"/> gives a
+    /// failure recorded in that file, so a family the time budget leaves out is named as its failures are.
+    /// </summary>
+    private static string FamilyOfThisFile([CallerFilePath] string file = "") => CollectionFailure.FamilyOfFile(file);
 
     /// <summary>
     /// audit_config's own collection (#4192): exactly the three families its CONFIG_PG_* facts and its

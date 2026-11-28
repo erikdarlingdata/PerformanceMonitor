@@ -204,7 +204,7 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         const string serverName = "analyze-budget-many";
         await SeedManyFindingsAsync(postgres, serverName, ct);
 
-        var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres), postgres, serverName, 4);
+        var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres).WithNoStageBudgets(), postgres, serverName, 4);
         Assert.StartsWith("{", json, StringComparison.Ordinal);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -247,7 +247,7 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         var windowEnd = await SeedManyFindingsAsync(postgres, serverName, ct);
 
         var asOf = DateTime.SpecifyKind(windowEnd, DateTimeKind.Utc).ToString("o");
-        var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres), postgres, serverName, 4, asOf);
+        var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres).WithNoStageBudgets(), postgres, serverName, 4, asOf);
         Assert.StartsWith("{", json, StringComparison.Ordinal);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;

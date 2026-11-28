@@ -65,7 +65,7 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
         try
         {
             await RegisterServerAsync(connection, ct);
-            var service = new DarlingAnalysisService(postgres);
+            var service = new DarlingAnalysisService(postgres).WithNoStageBudgets();
 
             /* ── the dead-collector shape: 25 hours of history (the real 24h gate PASSES) whose
                newest row is five hours old, so the tool's default 4h window holds nothing. */
