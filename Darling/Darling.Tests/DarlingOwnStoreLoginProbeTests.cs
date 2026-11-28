@@ -1014,9 +1014,11 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     /// exactly what the managed <c>admin</c> role holds (replayed from the shipped provisioning SQL, so a login named <c>admin</c> is this case), a table
     /// grant, a column grant, a member that does not inherit, a chain of two memberships, the owner of a second <c>config</c> table, and the role the
     /// owner's connection string names.
-    /// <para>The two-hop case is the one that fails if <c>'MEMBER'</c> is changed to <c>'USAGE'</c> in the probe's SQL: the login does not inherit
-    /// from the middle role, so only a MEMBER test (the login can <c>SET ROLE</c> down the chain) sees the predefined role at the end. The control
-    /// before each grant is the same login passing, and the owner-string case runs it while no role of that name exists, which is no match.</para></summary>
+    /// <para>The two-hop case is the one that fails if <c>'MEMBER'</c> is changed to <c>'USAGE'</c> in the membership column of the probe's SQL: the login
+    /// does not inherit from the middle role, so only a MEMBER test (the login can <c>SET ROLE</c> down the chain) sees the predefined role at the end.
+    /// The chain ends at <c>pg_execute_server_program</c>, which reads no table, and the proof shows that no role in it can read a carved column, so the
+    /// secret-column check cannot refuse it and only the membership column can. The control before each grant is the same login passing, and the
+    /// owner-string case runs it while no role of that name exists, which is no match.</para></summary>
     [Theory]
     [MemberData(nameof(SecretReaderKinds))]
     public async Task TheProbe_RefusesALoginThatCanReadTheStoredSecrets_InEachKind(string kind)
@@ -1088,9 +1090,13 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
                     break;
                 case "two_hop_predefined_role":
                     setup.Add($"CREATE ROLE {midName} NOLOGIN");
+                    setup.Add($"GRANT USAGE ON SCHEMA config TO {loginName}");
                     setup.Add($"GRANT {midName} TO {loginName}");
-                    setup.Add($"GRANT pg_read_all_data TO {midName}");
-                    proof = "SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'MEMBER') AND NOT pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'USAGE')";
+                    setup.Add($"GRANT pg_execute_server_program TO {midName}");
+                    proof = "SELECT pg_catalog.pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER') AND NOT pg_catalog.pg_has_role(current_user, 'pg_execute_server_program', 'USAGE') "
+                        + "AND NOT pg_catalog.has_column_privilege(current_user, 'config.config_monitored_servers', 'encrypted_password', 'SELECT') "
+                        + $"AND NOT pg_catalog.has_column_privilege('{midName}', 'config.config_monitored_servers', 'encrypted_password', 'SELECT') "
+                        + "AND NOT pg_catalog.has_column_privilege('pg_execute_server_program', 'config.config_monitored_servers', 'encrypted_password', 'SELECT')";
                     break;
                 case "second_table_owner_member":
                     /* server_tags holds no secret column, so only the owner arm can refuse this login. */
