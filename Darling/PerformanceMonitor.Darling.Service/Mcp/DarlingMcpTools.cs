@@ -111,6 +111,13 @@ public sealed class DarlingMcpTools
             var familiesLeftOut = analysisService.LastFamiliesLeftOutForTime;
             var familyBudget = analysisService.LastFamilyBudget;
 
+            /* #9879: the same for an anomaly detector or a finding's drill-down the pass's time budget stopped. A detector
+               left out is a missing finding and is said like a family. A drill-down left out leaves its finding in the
+               answer without its detail. Each list is its own field after families_left_out, absent when empty. */
+            var stageCuts = analysisService.LastStageCuts;
+            var timeBudgetCaveat = CollectionCaveats.Compose(
+                FamilyTimeBudget.Describe(familiesLeftOut, familyBudget), StageTimeBudget.Describe(stageCuts));
+
             if (analysisService.WindowEmptyMessage != null)
             {
                 /* #3524: an UNOBSERVED window is a DEAD-COLLECTOR shape, not a clean bill of
@@ -126,20 +133,20 @@ public sealed class DarlingMcpTools
                    too — a dead window AND a family that could not be read are two different holes. Clean
                    pass: same message, same object, same bytes. */
                 var unobservedCollection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-                var unobservedCaveat = CollectionCaveats.Compose(unobservedCollection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
+                var unobservedCaveat = CollectionCaveats.Compose(unobservedCollection.Describe(), timeBudgetCaveat);
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
                     /* #8910: a window retention removed has nothing for collection health to say. */
                     WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
-                    FamilyTimeBudget.Attach(unobservedCollection.Attach(new
+                    StageTimeBudget.Attach(FamilyTimeBudget.Attach(unobservedCollection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote
-                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions));
             }
 
             /* #3538 A2: how much of the window the collector actually observed. Every rate in this pass
@@ -158,7 +165,7 @@ public sealed class DarlingMcpTools
                the sentence joins the caveat and the structured block is appended to the payload, because
                "no finding from the write family" and "the write family was not read" must not look alike. */
             var collection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
+            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), timeBudgetCaveat);
 
             if (findings.Count == 0)
             {
@@ -182,7 +189,7 @@ public sealed class DarlingMcpTools
                     "empty",
                     (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
                         + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
-                    FamilyTimeBudget.Attach(collection.Attach(new
+                    StageTimeBudget.Attach(FamilyTimeBudget.Attach(collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
@@ -191,7 +198,7 @@ public sealed class DarlingMcpTools
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
-                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions));
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -306,7 +313,7 @@ public sealed class DarlingMcpTools
                the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
                truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
                unanchored run persisted them all before this cut. */
-            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(FamilyTimeBudget.Attach(collection.Attach(new
+            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(StageTimeBudget.Attach(FamilyTimeBudget.Attach(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 status = "findings",
@@ -330,7 +337,7 @@ public sealed class DarlingMcpTools
                     end = findings[0].TimeRangeEnd?.ToString("o")
                 },
                 findings = packed.FindingsArray()
-            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
+            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {

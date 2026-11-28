@@ -227,6 +227,13 @@ public class PgAnomalyDetector : IAnomalyDetector
     /// waiting, so the anomaly read ends when its detectors have and gives its own slot back to the families. Without a
     /// gate (the detectors after collection, when the family reads are finished) no worker waits for a slot, and the
     /// number of workers is the detectors' own limit.</para>
+    ///
+    /// <para>When the context carries a <see cref="AnalysisContext.DetectorDeadline"/> (an on-demand pass), each detector
+    /// reads through a token that also ends at the deadline. One that has not finished when it fires is stopped, adds no
+    /// fact and no failure line, and is named in <see cref="AnalysisContext.DetectorsLeftOutForTime"/>, in detector
+    /// order. One not yet started by then is not started and is named the same way. A baseline the detector was waiting
+    /// for goes on computing on the provider's own token, so the next pass finds it. With no deadline (the scheduled
+    /// pass) every detector runs to its end on the pass's token.</para>
     /// </summary>
     internal async Task RunDetectorsAsync(
         AnalysisContext context,
@@ -235,10 +242,29 @@ public class PgAnomalyDetector : IAnomalyDetector
         int parallelism,
         SemaphoreSlim? familyGate = null)
     {
+        var deadline = context.DetectorDeadline;
+        var leftOut = new bool[detectors.Count];
+
         if (parallelism <= 1 || detectors.Count < 2)
         {
-            foreach (var detector in detectors)
-                await detector(context, anomalies);
+            for (var i = 0; i < detectors.Count; i++)
+            {
+                if (!deadline.CanBeCanceled)
+                {
+                    await detectors[i](context, anomalies);
+                    continue;
+                }
+
+                /* A detector under the deadline keeps its facts aside until it finishes, so one the deadline stops leaves
+                   none behind. */
+                var own = new List<Fact>();
+                await RunUnderDeadline(i, own);
+                if (leftOut[i])
+                    context.DetectorsLeftOutForTime.Add(DetectorName(detectors[i]));
+                else
+                    anomalies.AddRange(own);
+            }
+
             return;
         }
 
@@ -265,7 +291,9 @@ public class PgAnomalyDetector : IAnomalyDetector
         {
             if (logs[i] is { } held && _passLogger is { } passLogger)
                 held.WriteTo(passLogger);
-            if (i != firstFailed && lists[i] is { } detectorFacts)
+            if (leftOut[i])
+                context.DetectorsLeftOutForTime.Add(DetectorName(detectors[i]));
+            else if (i != firstFailed && lists[i] is { } detectorFacts)
                 anomalies.AddRange(detectorFacts);
         }
 
@@ -326,8 +354,69 @@ public class PgAnomalyDetector : IAnomalyDetector
             lists[index] = [];
             if (_passLogger is { } passLogger)
                 _flowLogger.Value = logs[index] = new HeldLog(passLogger);
-            await detectors[index](context, lists[index]!);
+            if (deadline.CanBeCanceled)
+                await RunUnderDeadline(index, lists[index]!);
+            else
+                await detectors[index](context, lists[index]!);
         }
+
+        /* Runs one detector through a token that ends at the deadline as well as at the pass's own token. Only a stop the
+           deadline caused is taken here: the pass's token is checked first, so an abandoned pass still unwinds. */
+        async Task RunUnderDeadline(int index, List<Fact> detectorFacts)
+        {
+            if (deadline.IsCancellationRequested)
+            {
+                RecordBudgetCut(index);
+                return;
+            }
+
+            var passToken = context.PassToken;
+            using var both = CancellationTokenSource.CreateLinkedTokenSource(passToken, deadline);
+            context.UseTokenForThisFlow(both.Token);
+            try
+            {
+                await detectors[index](context, detectorFacts);
+            }
+            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, passToken) && deadline.IsCancellationRequested
+                                       && AnalysisShutdown.IsShutdownResidue(ex))
+            {
+                /* The shapes a detector's own catch lets through once the token it reads is signalled. A detector the
+                   budget stopped is not a failed read: it is named in the left-out record and logs no failure line. */
+                RecordBudgetCut(index);
+            }
+            finally
+            {
+                context.UseTokenForThisFlow(null);
+            }
+        }
+
+        /* The one writer of the left-out record. The reply's detectors_left_out is built from it, in detector order, once
+           the detectors settle. */
+        void RecordBudgetCut(int index) => leftOut[index] = true;
+    }
+
+    /// <summary>
+    /// The name a reply gives a detector the time budget left out (#9879): the words of its method between
+    /// <c>Detect</c> and <c>Anomalies</c>, in snake case (<c>query_duration</c> for <c>DetectQueryDurationAnomalies</c>).
+    /// </summary>
+    internal static string DetectorName(Func<AnalysisContext, List<Fact>, Task> detector)
+    {
+        ArgumentNullException.ThrowIfNull(detector);
+        var name = detector.Method.Name;
+        if (name.StartsWith("Detect", StringComparison.Ordinal))
+            name = name["Detect".Length..];
+        if (name.EndsWith("Anomalies", StringComparison.Ordinal))
+            name = name[..^"Anomalies".Length];
+
+        var words = new System.Text.StringBuilder(name.Length + 4);
+        for (var i = 0; i < name.Length; i++)
+        {
+            if (char.IsUpper(name[i]) && i > 0)
+                words.Append('_');
+            words.Append(char.ToLowerInvariant(name[i]));
+        }
+
+        return words.ToString();
     }
 
     /* #9879: holds the lines one detector logs while the detectors run side by side. One detector writes to it, on its own

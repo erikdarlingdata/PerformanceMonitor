@@ -255,6 +255,24 @@ public sealed class DarlingAnalysisService
     public TimeSpan? OnDemandFamilyBudget { get; set; } = FamilyTimeBudget.OnDemand;
 
     /// <summary>
+    /// What the last pass left out because its anomaly detector budget or its drill-down budget ended (#9879). Both lists
+    /// are empty for a pass with no budget (the scheduled pass) and for one whose detectors and drill-downs all finished.
+    /// </summary>
+    public StageTimeCuts LastStageCuts { get; private set; } = StageTimeCuts.None;
+
+    /// <summary>
+    /// The time an on-demand pass gives its anomaly detectors (#9879), from the start of the pass. Null runs them without
+    /// one. The scheduled pass never has one, whatever this holds.
+    /// </summary>
+    public TimeSpan? OnDemandDetectorBudget { get; set; } = StageTimeBudget.OnDemandDetectors;
+
+    /// <summary>
+    /// The time an on-demand pass has, from its start, before it stops drilling into its findings (#9879). Null drills
+    /// into every finding. The scheduled pass never has one, whatever this holds.
+    /// </summary>
+    public TimeSpan? OnDemandDrillDownBudget { get; set; } = StageTimeBudget.OnDemandDrillDowns;
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -420,6 +438,16 @@ public sealed class DarlingAnalysisService
                 familyDeadline.CancelAfter(budget);
         }
 
+        /* #9879: the anomaly detectors and the drill-downs each get a stated time too, counted from the same start, so
+           the three budgets are instants on one clock: the detectors run beside the family reads and end with them, and
+           the drill-downs end a moment later. The scheduled pass has neither. */
+        var detectorBudget = persistCollectionCaveats ? null : OnDemandDetectorBudget;
+        using var detectorDeadline = new CancellationTokenSource();
+        ArmStageDeadline(detectorDeadline, detectorBudget);
+        var drillDownBudget = persistCollectionCaveats ? null : OnDemandDrillDownBudget;
+        using var drillDownDeadline = new CancellationTokenSource();
+        ArmStageDeadline(drillDownDeadline, drillDownBudget);
+
         var context = new AnalysisContext
         {
             ServerId = serverId,
@@ -431,6 +459,10 @@ public sealed class DarlingAnalysisService
             AsOfUtc = asOfUtc,
             FamilyDeadline = familyBudget is null ? CancellationToken.None : familyDeadline.Token,
             FamilyBudget = familyBudget,
+            DetectorDeadline = detectorBudget is null ? CancellationToken.None : detectorDeadline.Token,
+            DetectorBudget = detectorBudget,
+            DrillDownDeadline = drillDownBudget is null ? CancellationToken.None : drillDownDeadline.Token,
+            DrillDownBudget = drillDownBudget,
             /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
@@ -457,6 +489,20 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
+    /// Starts a stage's budget (#9879). A budget of zero or less has ended before the pass starts, so it is fired here
+    /// and not left to a timer that fires a moment later. No budget leaves the source unfired.
+    /// </summary>
+    private static void ArmStageDeadline(CancellationTokenSource deadline, TimeSpan? budget)
+    {
+        if (budget is not { } time)
+            return;
+        if (time <= TimeSpan.Zero)
+            deadline.Cancel();
+        else
+            deadline.CancelAfter(time);
+    }
+
+    /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
     public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context, bool persistCollectionCaveats = false)
@@ -478,6 +524,9 @@ public sealed class DarlingAnalysisService
         LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
         LastFamiliesLeftOutForTime = context.FamiliesLeftOutForTime; /* #9879: the pass's own list, filled by the family stage */
         LastFamilyBudget = context.FamilyBudget;
+        /* #9879: the pass's own lists, filled by the detector dispatch and the drill-down stage. */
+        LastStageCuts = new StageTimeCuts(
+            context.DetectorsLeftOutForTime, context.DetectorBudget, context.DrillDownsLeftOutForTime, context.DrillDownBudget);
 
         try
         {

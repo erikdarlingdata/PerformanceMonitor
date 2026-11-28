@@ -114,6 +114,40 @@ public class AnalysisContext
     public List<string> FamiliesLeftOutForTime { get; } = [];
 
     /// <summary>
+    /// When the time the pass gives its anomaly detectors is over (#9879). Default <see cref="CancellationToken.None"/>:
+    /// no budget, which is the scheduled pass and every read that does not set one. An on-demand <c>analyze_server</c>
+    /// pass arms it for <see cref="DetectorBudget"/>. A detector that has not finished when it fires is stopped, adds no
+    /// fact, and is named in <see cref="DetectorsLeftOutForTime"/>.
+    /// </summary>
+    public CancellationToken DetectorDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="DetectorDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? DetectorBudget { get; set; }
+
+    /// <summary>
+    /// The anomaly detectors the pass left out because <see cref="DetectorDeadline"/> fired before they finished (#9879),
+    /// in detector order. Not a failure: the detector was reading and was stopped on purpose.
+    /// </summary>
+    public List<string> DetectorsLeftOutForTime { get; } = [];
+
+    /// <summary>
+    /// When the pass stops drilling into its findings (#9879). Default <see cref="CancellationToken.None"/>: no budget,
+    /// which is the scheduled pass and every read that does not set one. An on-demand <c>analyze_server</c> pass arms it
+    /// for <see cref="DrillDownBudget"/>. A finding whose drill-down has not finished when it fires keeps no drill-down
+    /// and is named in <see cref="DrillDownsLeftOutForTime"/>. The finding itself stays.
+    /// </summary>
+    public CancellationToken DrillDownDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="DrillDownDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? DrillDownBudget { get; set; }
+
+    /// <summary>
+    /// The root fact key of each finding the pass left without a drill-down because <see cref="DrillDownDeadline"/> fired
+    /// (#9879), once per finding, in finding order.
+    /// </summary>
+    public List<string> DrillDownsLeftOutForTime { get; } = [];
+
+    /// <summary>
     /// The host's stopping token, and ONLY that (#2430). Default <see cref="CancellationToken.None"/>,
     /// which reads as "this pass has no shutdown to distinguish" — correct for the on-demand callers,
     /// whose cancellation is never a service stop.
