@@ -1280,7 +1280,8 @@ public sealed class ComposeStoreRolesLiveTests
                 var isDatabaseOwnerCase = role == "g_drift_dbowner";
                 if (isDatabaseOwnerCase)
                 {
-                    await ExecAsync(owner, $"ALTER DATABASE \"{database}\" OWNER TO g_drift_dbowner", ct);
+                    /* byo held CONNECT as the database's owner: the store revokes it from PUBLIC, so it keeps it by a grant once it is not the owner. */
+                    await ExecAsync(owner, $"ALTER DATABASE \"{database}\" OWNER TO g_drift_dbowner; GRANT CONNECT ON DATABASE \"{database}\" TO byo", ct);
                 }
 
                 try
