@@ -150,12 +150,14 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
     /* ---- Item 2: the decision as a pure function of the probe result ---- */
 
     [Theory]
-    [InlineData(true, false, true)]
-    [InlineData(false, true, true)]
-    [InlineData(true, true, true)]
-    [InlineData(false, false, false)]
-    public void ASuperuserOrAnOwnerRoleMember_IsPrivileged(bool superuser, bool ownerMember, bool expectedPrivileged) =>
-        Assert.Equal(expectedPrivileged, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember, sessionUserDiffers: false).Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged);
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(true, true, false, true)]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, false, true, true)]
+    [InlineData(false, false, false, false)]
+    public void ASuperuserAnOwnerRoleMemberOrASessionThatIsNotTheLogin_IsPrivileged(bool superuser, bool ownerMember, bool sessionUserDiffers, bool expectedPrivileged) =>
+        Assert.Equal(expectedPrivileged, DarlingStoreLogins.ClassifyLoginProbe(superuser, ownerMember, sessionUserDiffers).Verdict == DarlingStoreLogins.LoginProbeVerdict.Privileged);
 
     [Theory]
     [InlineData("Unprivileged", "NetworkAndLoopback", "NetworkExposed")]
@@ -578,6 +580,53 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
             Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
             File.Delete(path);
         }
+    }
+
+    /// <summary>An exposed surface outside a container is served only a login the probe found Unprivileged: no result, a Privileged one that carries
+    /// a matching hash, and a Failed one each leave the surface without a listener, so a host that drops the argument cannot expose an unchecked login.
+    /// A surface that is not exposed (the metrics port passes neither) is unchanged.</summary>
+    [Theory]
+    [MemberData(nameof(Surfaces))]
+    public async Task AnExposedSurfaceOutsideAContainer_IsNotServedUnlessTheProbeFoundTheLoginUnprivileged(bool web)
+    {
+        var surface = web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp;
+        var postgres = OwnStore(Owner, webConnectionString: web ? Dedicated : null, mcpConnectionString: web ? null : Dedicated);
+        var hash = DarlingStoreLogins.LoginSha256(Dedicated);
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+        try
+        {
+            async Task<(string? Login, int Critical)> ResolveAsync(bool exposed, DarlingStoreLogins.LoginProbeResult? probed)
+            {
+                var logger = new CapturingTestLogger();
+                var login = await DarlingStoreLogins.ResolveUnmanagedAsync(surface, postgres, logger, CancellationToken.None, exposed, probed);
+                return (login, logger.CountAtLevel(LogLevel.Critical));
+            }
+
+            Assert.Equal((null, 1), await ResolveAsync(exposed: true, probed: null));
+            Assert.Equal((null, 1), await ResolveAsync(exposed: true, new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Privileged, LoginSha256: hash)));
+            Assert.Equal((null, 1), await ResolveAsync(exposed: true, new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Failed, "x", hash)));
+
+            /* The controls: the probe found it Unprivileged and it is the login the pool resolved, or the surface is not exposed. */
+            Assert.Equal((Dedicated, 0), await ResolveAsync(exposed: true, new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Unprivileged, LoginSha256: hash)));
+            Assert.Equal((Dedicated, 0), await ResolveAsync(exposed: false, probed: null));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
+    }
+
+    /// <summary>A probe result that is printed (a log line, an exception message) shows the verdict and the error class, never the hash of the login's string.</summary>
+    [Fact]
+    public void AProbeResult_PrintsItsVerdictAndErrorClass_NeverTheLoginHash()
+    {
+        var hash = DarlingStoreLogins.LoginSha256(Dedicated);
+        var printed = new DarlingStoreLogins.LoginProbeResult(DarlingStoreLogins.LoginProbeVerdict.Privileged, "NpgsqlException", hash).ToString();
+
+        Assert.DoesNotContain(hash, printed, StringComparison.Ordinal);
+        Assert.Contains("Privileged", printed, StringComparison.Ordinal);
+        Assert.Contains("NpgsqlException", printed, StringComparison.Ordinal);
     }
 
     /* ---- A probe that does not answer, and a stop that interrupts it ---- */

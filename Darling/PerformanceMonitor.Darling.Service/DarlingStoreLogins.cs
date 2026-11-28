@@ -493,6 +493,7 @@ internal static class DarlingStoreLogins
 
         var (what, setting, role) = Describe(surface);
         var notThisAttempt = NotThisAttempt(surface, what);
+        var inContainer = DarlingHostBinding.IsRunningInContainer;
         var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
         string? configured = null;
         if (!string.IsNullOrWhiteSpace(raw))
@@ -529,7 +530,18 @@ internal static class DarlingStoreLogins
             }
         }
 
-        var inContainer = DarlingHostBinding.IsRunningInContainer;
+        /* #9894: the probe runs for a surface that listens on the network on a store the service does not manage, outside a container. There the pool
+           connects only with a login the probe found Unprivileged, so a host that dropped the probe's result, or was handed a Privileged one that carries
+           a hash, gets no listener rather than a login nobody checked. A container and a managed store never probe, and the metrics port passes neither
+           exposed nor a result. */
+        if (exposed && !inContainer && !postgres.Managed && (configured is null || probed is not { Verdict: LoginProbeVerdict.Unprivileged }))
+        {
+            logger.LogCritical(
+                "{What}: the login in {Setting} was not confirmed as a least-privilege login before the network listener, so it is not started this attempt, and the next start checks the login again",
+                notThisAttempt, setting);
+            return null;
+        }
+
         var verdict = ReadComposeStoreVerdict();
         if (configured is null && inContainer && verdict is null)
         {
@@ -885,13 +897,18 @@ internal static class DarlingStoreLogins
         Unprivileged,
 
         /// <summary>A superuser, or a member of the store owner role (under whatever name), by the connected login or by the session login that
-        /// could switch back to it, so exposure is refused.</summary>
+        /// could switch back to it, or a session that runs as a different user than the login it connected with, so exposure is refused.</summary>
         Privileged,
     }
 
     /// <summary>The probe's answer. <see cref="ErrorClass"/> is set for <see cref="LoginProbeVerdict.Failed"/> only, and holds a type name and
     /// SQLSTATE, never the connection string or a password.</summary>
-    internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null, string? LoginSha256 = null);
+    internal readonly record struct LoginProbeResult(LoginProbeVerdict Verdict, string? ErrorClass = null, string? LoginSha256 = null)
+    {
+        /// <summary>The verdict and the error class only: the record's own text would print <see cref="LoginSha256"/> too, and a hash of the login's
+        /// connection string belongs in no log line or exception message.</summary>
+        public override string ToString() => $"{nameof(LoginProbeResult)} {{ {nameof(Verdict)} = {Verdict}, {nameof(ErrorClass)} = {ErrorClass} }}";
+    }
 
     /// <summary>The SHA-256 of a resolved connection string, in hex: what the probe carries so the pool can tell it resolved the same login the probe
     /// checked. Never logged, and never the string itself.</summary>
@@ -960,6 +977,9 @@ internal static class DarlingStoreLogins
                 Pooling = false,
                 Timeout = timeoutSeconds,
                 CommandTimeout = timeoutSeconds,
+                /* The probe's own connection resolves operators as well as names in pg_catalog, so no schema a login's role settings put on the search
+                   path can stand in for one. The hash below is of the string as the pool will resolve it (`resolved`), not of this builder. */
+                SearchPath = "pg_catalog",
             };
             /* A dedicated login always names its user (CheckLoginNames refuses one that does not), so a string with none reaches here only from a
                caller that skipped the names. Without the name there is nothing to compare session_user with: refuse it as failed. */
@@ -1089,18 +1109,20 @@ internal static class DarlingStoreLogins
     }
 
     /// <summary>
-    /// #9894: the line for a surface whose own login the probe found to be a superuser or a member of the store owner role. Outside a
+    /// #9894: the line for a surface whose own login the probe found to be a superuser, a member of the store owner role, or a session that is not the login it connected with. Outside a
     /// container the surface then stays on loopback. Critical.
     /// </summary>
     internal static string PrivilegedLoginText(Surface surface)
     {
         var (what, setting, role) = Describe(surface);
         var block = UsesWebLogin(surface) ? "web.network.listen" : "mcp.network.listen";
-        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} is a superuser "
-            + "or a member of the role that owns the store, so network exposure is refused and it binds loopback-only. "
+        return $"{what} is set to listen on the network ({block} is non-loopback) with your own PostgreSQL store, but the login in {setting} is a superuser, "
+            + "a member of the role that owns the store, or a login whose session runs as a different user than the one it connected with (for example "
+            + "a session switched at connect, or a connection pooler that maps the user name), so the service cannot tell what the surface really runs as. "
+            + "Network exposure is refused and it binds loopback-only. "
             + $"With your own PostgreSQL a network-facing surface needs its own least-privilege login. Set {setting} to the {role} role that "
             + "provision-roles.sql creates (the script that ships with the install, described in docs/darling/linux.md), "
-            + "and make sure that login is not a superuser and not a member of the store owner role.";
+            + "and make sure that login is not a superuser, not a member of the store owner role, and connects as the user it names.";
     }
 
     /// <summary>
