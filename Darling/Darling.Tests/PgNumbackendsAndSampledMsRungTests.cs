@@ -278,6 +278,12 @@ public sealed class PgNumbackendsAndSampledMsLivePostgresTests
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
 
+        /* The climb below replays every rung from 133, V255 among them, and V255 creates the cadence wait baseline when the store lacks it.
+           Another live class that cleans up its own baseline views removes the fixture's copy of that relation from the shared store, so
+           whether it is present here depends on what ran before this class. A relation the climb creates on a store that did not hold it
+           is this test's to remove; one the store already held stays. */
+        var cadenceBaselineHeld = await BaselineRelationExistsAsync(connection, TimescaleSupport.WaitStatsCadenceBaselineView, ct);
+
         var bodySucceeded = false;
         try
         {
@@ -390,8 +396,24 @@ public sealed class PgNumbackendsAndSampledMsLivePostgresTests
                 using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
                 servers.Parameters.AddWithValue(ServerId);
                 await servers.ExecuteNonQueryAsync(cleanupCt);
+
+                if (!cadenceBaselineHeld)
+                {
+                    var view = TimescaleSupport.WaitStatsCadenceBaselineView;
+                    await new LiveCleanupBatch(cleanup).RemoveAsync(
+                        $"baseline relation collect.{view}",
+                        TimescaleSupport.DropRetiredBaselineRelationSql(view),
+                        $"SELECT to_regclass('collect.{view}') IS NOT NULL",
+                        cleanupCt);
+                }
             });
         }
+    }
+
+    private static async Task<bool> BaselineRelationExistsAsync(NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
+    {
+        using var probe = new NpgsqlCommand($"SELECT to_regclass('collect.{view}') IS NOT NULL", connection);
+        return await probe.ExecuteScalarAsync(ct) is true;
     }
 
     private static async Task AssertColumnAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, string table, string column)
