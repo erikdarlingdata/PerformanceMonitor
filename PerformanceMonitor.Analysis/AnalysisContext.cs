@@ -114,6 +114,51 @@ public class AnalysisContext
     public List<string> FamiliesLeftOutForTime { get; } = [];
 
     /// <summary>
+    /// When the time the pass gives its anomaly detectors is over (#9879). Default <see cref="CancellationToken.None"/>:
+    /// no budget, which is the scheduled pass and every read that does not set one. An on-demand <c>analyze_server</c>
+    /// pass arms it for <see cref="DetectorBudget"/>. A detector that has not finished when it fires is stopped, adds no
+    /// fact, and is named in <see cref="DetectorsLeftOutForTime"/>.
+    /// </summary>
+    public CancellationToken DetectorDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="DetectorDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? DetectorBudget { get; set; }
+
+    /// <summary>
+    /// The anomaly detectors the pass left out because <see cref="DetectorDeadline"/> fired before they finished (#9879),
+    /// in detector order. Not a failure: the detector was reading and was stopped on purpose.
+    /// </summary>
+    public List<string> DetectorsLeftOutForTime { get; } = [];
+
+    /// <summary>
+    /// When the pass stops drilling into its findings (#9879). Default <see cref="CancellationToken.None"/>: no budget,
+    /// which is the scheduled pass and every read that does not set one. An on-demand <c>analyze_server</c> pass arms it
+    /// for <see cref="DrillDownBudget"/>. A finding whose drill-down has not finished when it fires keeps no drill-down
+    /// and is named in <see cref="DrillDownsLeftOutForTime"/>. The finding itself stays.
+    /// </summary>
+    public CancellationToken DrillDownDeadline { get; set; }
+
+    /// <summary>The length of the budget behind <see cref="DrillDownDeadline"/>, for the reply's note (#9879). Null with no budget.</summary>
+    public TimeSpan? DrillDownBudget { get; set; }
+
+    /// <summary>
+    /// The root fact key of each finding the pass left without a drill-down because <see cref="DrillDownDeadline"/> fired
+    /// (#9879), once per finding, in finding order.
+    /// </summary>
+    public List<string> DrillDownsLeftOutForTime { get; } = [];
+
+    /// <summary>
+    /// Whether the pass left anything out because a time budget ended (#9879): a family
+    /// (<see cref="FamiliesLeftOutForTime"/>), an anomaly detector (<see cref="DetectorsLeftOutForTime"/>) or a finding's
+    /// drill-down (<see cref="DrillDownsLeftOutForTime"/>). Such a pass stores no findings
+    /// (<see cref="StoresFindings"/>): its batch would be the newest one, and the reads that serve the newest batch as the
+    /// server's current state would show findings missing or without their drill-down and remediation. Read it once the
+    /// stages have run, since they fill the three lists. Always false with no budget, which is the scheduled pass.
+    /// </summary>
+    public bool LeftOutForTime =>
+        FamiliesLeftOutForTime.Count > 0 || DetectorsLeftOutForTime.Count > 0 || DrillDownsLeftOutForTime.Count > 0;
+
+    /// <summary>
     /// The host's stopping token, and ONLY that (#2430). Default <see cref="CancellationToken.None"/>,
     /// which reads as "this pass has no shutdown to distinguish" — correct for the on-demand callers,
     /// whose cancellation is never a service stop.
@@ -176,6 +221,13 @@ public class AnalysisContext
     /// caller, who will not have read this comment.</para></para>
     /// </summary>
     public bool PersistFindings => AsOfUtc is null;
+
+    /// <summary>
+    /// Whether this pass writes its findings and notifies listeners of them: a current pass
+    /// (<see cref="PersistFindings"/>) that left nothing out for time (<see cref="LeftOutForTime"/>). The stored latest
+    /// batch is therefore always a whole pass. Read it after the drill-down stage, the last one that can leave something out.
+    /// </summary>
+    public bool StoresFindings => PersistFindings && !LeftOutForTime;
 
     /// <summary>
     /// The NOMINAL length of the examined window in milliseconds — <see cref="TimeRangeEnd"/> minus
