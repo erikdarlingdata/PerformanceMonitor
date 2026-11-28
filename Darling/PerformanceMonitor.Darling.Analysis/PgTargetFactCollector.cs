@@ -169,7 +169,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         var anomalyRead = StageDeadline.StartAnomalyReadBeside(context, gate: null);
         try
         {
-            await CollectFamiliesAfterCoverageAsync(context, facts);
+            await RunFamiliesAfterCoverageAsync(context, facts);
         }
         finally
         {
@@ -183,7 +183,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     /// Every family after the coverage stamp, one after another against the pass's one fact list, in the order the
     /// later ones need: a family reads the facts the ones ahead of it added.
     /// </summary>
-    private async Task CollectFamiliesAfterCoverageAsync(AnalysisContext context, List<Fact> facts)
+    private async Task RunFamiliesAfterCoverageAsync(AnalysisContext context, List<Fact> facts)
     {
         await CollectServerMetadataFactsAsync(context, facts);
         await CollectConfigFactsAsync(context, facts);

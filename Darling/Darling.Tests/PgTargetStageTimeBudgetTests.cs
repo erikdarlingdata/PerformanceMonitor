@@ -616,9 +616,9 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, NULL, FALSE, TRUE)", connection);
     }
 
     /// <summary>
-    /// An on-demand pass starts its detectors beside the families (#9966). With the queries family held on its store
-    /// read, every detector reads to its end before the deadline, so none is named when the deadline then fires for
-    /// both stages at once, and the held family is. With the detectors after the families they would start past their
+    /// An on-demand pass starts its detectors beside the families (#9966). With a family held on its store read, every
+    /// detector reads to its end before the deadline, so none is named when the deadline then fires for both stages at
+    /// once with the family stage still reading. With the detectors after the families they would start past their
     /// deadline and all fourteen would be named. With no deadline the pass holds the same facts in the same order
     /// whether the detectors run after the families (the scheduled pass) or beside them.
     /// </summary>
@@ -662,42 +662,36 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, NULL, FALSE, TRUE)", connection);
         Assert.Empty(beside.DetectorsLeftOutForTime);
         Assert.Equal(after.CollectionFailures.Count, beside.CollectionFailures.Count + besideRead.Failures.Count);
 
-        /* One deadline for both stages, as the service arms them. The queries family is held on the statement text
-           table, which no detector reads. */
+        /* One deadline for both stages, as the service arms them. The family stage is held on the index bloat table,
+           which the bloat family reads and no detector does. The detectors read the statement and io tables the two
+           heavy families read, so a lock on one of those holds both stages. */
         using var deadline = new CancellationTokenSource();
-        var detector = Detector();
-        var detectorsRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cut = Pass(windowEnd, ct);
         cut.FamilyDeadline = deadline.Token;
         cut.DetectorDeadline = deadline.Token;
-        var cutRead = new AnomalyReadBesideFamilies(async context =>
-        {
-            var found = await detector.DetectAnomaliesAsync(context);
-            detectorsRead.TrySetResult();
-            return found;
-        });
+        var cutRead = new AnomalyReadBesideFamilies(Detector().DetectAnomaliesAsync);
         cut.AnomalyReadBesideFamilies = cutRead;
         await using (var locker = new NpgsqlConnection(scratch.ConnectionString))
         {
             await locker.OpenAsync(ct);
-            await using var held = await HoldReadsOfAsync(locker, "pg_statement_text", ct);
+            await using var held = await HoldReadsOfAsync(locker, "pg_index_bloat", ct);
             var families = collector.CollectFactsAsync(cut);
-            await AReadWaitsForAsync(connection, "pg_statement_text", ct);
+            await AReadWaitsForAsync(connection, "pg_index_bloat", ct);
 
-            /* The family is held and the deadline has not fired: the detectors read to their end beside it. */
-            await detectorsRead.Task.WaitAsync(Limit, ct);
+            /* The family stage is held and the deadline has not fired: the detectors read to their end beside it. */
+            var cutRun = cutRead.Run;
+            Assert.NotNull(cutRun);
+            await cutRun.WaitAsync(Limit, ct);
             Assert.False(families.IsCompleted);
-            Assert.Empty(cut.DetectorsLeftOutForTime);
 
+            /* The deadline fires with the family stage still reading: detectors that start after it are all named. */
             deadline.Cancel();
-            await families.WaitAsync(Limit, ct);
+            Assert.False(families.IsCompleted);
             await held.RollbackAsync(ct);
+            await families.WaitAsync(Limit, ct);
         }
 
-        Assert.Equal(new[] { "queries", "io" }, cut.FamiliesLeftOutForTime);
-        var cutRun = cutRead.Run;
-        Assert.NotNull(cutRun);
-        await cutRun.WaitAsync(Limit, ct);
         Assert.Empty(cut.DetectorsLeftOutForTime);
+        Assert.Empty(cut.FamiliesLeftOutForTime);
     }
 }
