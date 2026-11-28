@@ -104,7 +104,7 @@ public sealed class DarlingMcpTools
                drill-down) stored no findings either, so the stored latest batch is still the last whole pass. The reply
                says so in persisted and persistence_note, and once more after the sentences that name what was left out. */
             var leftOutForTime = analysisService.LastPassLeftOutForTime;
-            var persisted = anchor is null && !leftOutForTime;
+            var storedFindings = anchor is null && !leftOutForTime;
             var persistenceNote = anchor is null
                 ? leftOutForTime ? StageTimeBudget.NotStored : null
                 : "as_of was supplied, so this analysis ran over a PAST window and is exploratory: the findings below are complete but were NOT written to the store. A finding row carries the time the analysis RAN, and the reads that consume those rows (get_analysis_findings, the viewer's Recommendations tab) treat the newest analysis_time as this server's CURRENT state, so persisting a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Re-run without as_of to analyze and persist the present.";
@@ -149,7 +149,7 @@ public sealed class DarlingMcpTools
                     StageTimeBudget.Attach(FamilyTimeBudget.Attach(unobservedCollection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                        persisted,
+                        persisted = storedFindings,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote
                     }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), stageCuts, McpHelpers.JsonOptions));
@@ -198,7 +198,7 @@ public sealed class DarlingMcpTools
                     StageTimeBudget.Attach(FamilyTimeBudget.Attach(collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                        persisted,
+                        persisted = storedFindings,
                         persistence_note = persistenceNote,
                         secondary_replica_note = secondaryReplicaNote,
                         coverage = coverage?.ToPayload(),
@@ -326,9 +326,9 @@ public sealed class DarlingMcpTools
                 finding_count = findings.Count,
                 findings_returned = packed.KeptCount,
                 truncated = packed.LeftOut.Count > 0 || packed.TrimmedCount > 0,
-                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, packed, persisted, leftOutForTime: anchor is null && leftOutForTime),
+                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, packed, persisted: storedFindings, leftOutForTime: anchor is null && leftOutForTime),
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                persisted,
+                persisted = storedFindings,
                 /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
                    one every caller already assumed. */
                 persistence_note = persistenceNote,
