@@ -15,10 +15,11 @@ using PerformanceMonitor.Analysis;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// #9879: runs one read of an on-demand pass under a stage's time budget. The anomaly detector dispatch
+/// #9879: runs one read of an on-demand pass under a stage's time budget. The family stage
+/// (<see cref="AnalysisContext.FamilyDeadline"/>), the anomaly detector dispatch
 /// (<see cref="AnalysisContext.DetectorDeadline"/>) and the drill-down stage
-/// (<see cref="AnalysisContext.DrillDownDeadline"/>) of both engines each give every read they start to this, and so
-/// does the PostgreSQL-target collector for its heavy families (<see cref="AnalysisContext.FamilyDeadline"/>, #9966).
+/// (<see cref="AnalysisContext.DrillDownDeadline"/>) each give every read they run under a deadline to this, for
+/// both engines: the PostgreSQL-target collector gives it its heavy families too (#9966).
 /// </summary>
 internal static class StageDeadline
 {

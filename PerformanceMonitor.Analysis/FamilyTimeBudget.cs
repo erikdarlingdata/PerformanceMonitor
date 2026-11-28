@@ -33,7 +33,10 @@ public static class FamilyTimeBudget
     /// <summary>The reason word every <c>families_left_out</c> entry carries.</summary>
     public const string Reason = "time_budget";
 
-    /// <summary>The sentence for the reply's caveat, or null when no family was left out.</summary>
+    /// <summary>
+    /// The sentence for the reply's caveat, or null when no family was left out. It names what was left out. Where the
+    /// stored findings are is <see cref="StageTimeBudget.NotStored"/>, which the reply adds once.
+    /// </summary>
     public static string? Describe(IReadOnlyList<string> leftOut, TimeSpan? budget)
     {
         if (leftOut is null || leftOut.Count == 0)
@@ -42,8 +45,8 @@ public static class FamilyTimeBudget
         var seconds = (budget ?? OnDemand).TotalSeconds.ToString("0.#", CultureInfo.InvariantCulture);
         var names = string.Join(", ", leftOut);
         return leftOut.Count == 1
-            ? $"1 family was left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and that read had not finished, so no finding from it is in this answer and its absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings)."
-            : $"{leftOut.Count} families were left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and those reads had not finished, so no finding from them is in this answer and their absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one (get_analysis_findings).";
+            ? $"1 family was left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and that read had not finished, so no finding from it is in this answer and its absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one."
+            : $"{leftOut.Count} families were left out for time ({names}): this call gives its heavy history reads {seconds} s from its start and those reads had not finished, so no finding from them is in this answer and their absence is not an all-clear. A shorter hours_back finishes inside the budget, and the scheduled pass reads every family without one.";
     }
 
     /// <summary>
@@ -63,7 +66,7 @@ public static class FamilyTimeBudget
             ["family"] = family,
             ["reason"] = Reason,
             ["budget_seconds"] = seconds,
-            ["read_it_with"] = "a shorter hours_back, or get_analysis_findings for the scheduled pass"
+            ["read_it_with"] = $"a shorter hours_back, or {StageTimeBudget.LastWholePass}"
         }).ToArray());
         return reply;
     }

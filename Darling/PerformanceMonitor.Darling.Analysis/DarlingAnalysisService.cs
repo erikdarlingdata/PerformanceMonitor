@@ -261,6 +261,13 @@ public sealed class DarlingAnalysisService
     public StageTimeCuts LastStageCuts { get; private set; } = StageTimeCuts.None;
 
     /// <summary>
+    /// Whether the last pass left anything out for time, in any of its three budgeted stages (#9879,
+    /// <see cref="AnalysisContext.LeftOutForTime"/>). Such a pass stored no findings, and the reply says so. False for a
+    /// pass with no budget (the scheduled pass) and for one that finished everything.
+    /// </summary>
+    public bool LastPassLeftOutForTime { get; private set; }
+
+    /// <summary>
     /// The time an on-demand pass gives its anomaly detectors (#9879), from the start of the pass. Null runs them without
     /// one. The scheduled pass never has one, whatever this holds.
     /// </summary>
@@ -425,8 +432,9 @@ public sealed class DarlingAnalysisService
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         /* #9879: an on-demand pass gives its heavy family reads a stated time, counted from here so the reads ahead of the
-           family stage come out of it too. The scheduled pass (the one caller that persists caveats) has no budget: its
-           findings are what a reply points to for a family this one left out. A budget of zero or less has ended before
+           family stage come out of it too. The scheduled pass (the one caller that persists caveats) has no budget, so it
+           always stores a whole batch, and a pass that leaves a family out stores none: the stored findings a reply points
+           to are the last whole pass's. A budget of zero or less has ended before
            the pass starts, so it is fired here and now, not left to a timer that fires a moment later. */
         var familyBudget = persistCollectionCaveats ? null : OnDemandFamilyBudget;
         using var familyDeadline = new CancellationTokenSource();
@@ -527,6 +535,7 @@ public sealed class DarlingAnalysisService
         /* #9879: the pass's own lists, filled by the detector dispatch and the drill-down stage. */
         LastStageCuts = new StageTimeCuts(
             context.DetectorsLeftOutForTime, context.DetectorBudget, context.DrillDownsLeftOutForTime, context.DrillDownBudget);
+        LastPassLeftOutForTime = false;
 
         try
         {
@@ -854,7 +863,14 @@ public sealed class DarlingAnalysisService
             //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
             //    reused read up to PlanRegressionCandidateCache.RefreshAfter old: the same band as
             //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
-            if (context.PersistFindings)
+            //    #9879: a current pass that left anything out for time (a family, an anomaly detector or a finding's
+            //    drill-down) writes nothing either. Its batch would be the newest, so get_analysis_findings and the
+            //    viewer's latest batch would serve findings that are missing, or that have no drill-down and no
+            //    remediation, until the next scheduled pass. The stored latest batch stays the last whole pass.
+            //    AnalysisContext.StoresFindings is both rules, read here once every stage that can leave something out
+            //    has run.
+            var storesFindings = context.StoresFindings;
+            if (storesFindings)
             {
                 await _findingStore.InsertFindingsAsync(findings, context);
             }
@@ -865,8 +881,10 @@ public sealed class DarlingAnalysisService
             //    flow back to the caller (the worker), which routes them to the shared
             //    AnalysisNotificationService. Gated with the insert for the same reason and not a
             //    weaker one: this event is how findings reach notification, and an alert about last
-            //    Tuesday delivered today is the persistence problem with a shorter fuse.
-            if (context.PersistFindings)
+            //    Tuesday delivered today is the persistence problem with a shorter fuse. A pass that left
+            //    something out for time (#9879) raises none either: the event would announce a batch the
+            //    store does not hold.
+            if (storesFindings)
             {
                 AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
                 {
@@ -880,7 +898,11 @@ public sealed class DarlingAnalysisService
             _logger?.LogInformation(
                 "[DarlingAnalysisService] Analysis complete for {Server}: {Count} finding(s), highest severity {Severity:F2}{Exploratory}",
                 context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0,
-                context.PersistFindings ? string.Empty : " (anchored window, exploratory, not persisted)");
+                storesFindings
+                    ? string.Empty
+                    : context.PersistFindings
+                        ? " (left something out for time, not persisted)"
+                        : " (anchored window, exploratory, not persisted)");
 
             return findings;
         }
@@ -931,6 +953,8 @@ public sealed class DarlingAnalysisService
                still reports the read time. The worker reads it only once this pass's task has completed
                (DarlingWorker.PlanRegressionReadOfFinishedPass): a pass the sweep stopped waiting for has not reached this line. */
             LastPlanRegressionReadMs = context.PlanRegressionReadMs;
+            /* #9879: read here so every way out of the pass reports it, the early returns over an unobserved window included. */
+            LastPassLeftOutForTime = context.LeftOutForTime;
             IsAnalyzing = false;
         }
     }
